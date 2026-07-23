@@ -1,535 +1,217 @@
-"""Batching support for multi-invoke traces.
+"""Batch several invoke inputs into one forward and scope interventions to rows.
 
-This module provides the batching infrastructure that enables multiple invokes
-to share a single forward pass. Each invoke's input is combined into one batch,
-and during interleaving each invoke sees only its slice of the batch.
+``with model.trace() as tracer:`` may contain several ``with tracer.invoke(x):``
+blocks. Their inputs are combined into a single batched forward, and each block's
+interventions see only *its* rows of every activation.
 
-There are two types of invokes:
+A :class:`Batcher` (one per trace) collects each invoke's input and assigns it a
+``batch_group`` — a ``[start, size]`` row range in the combined batch. At run time
+:meth:`Batcher.narrow` slices a full batched activation down to a block's rows when
+it reads, and :meth:`Batcher.widen` splices an edit back into the full tensor. The row math
+is dim-0 only; the model's :meth:`_batch` equalizes everything else (e.g. sequence
+length) when it builds the combined input.
 
-- **Input invokes**: ``tracer.invoke(input)`` — provides input data that contributes
-  to the batch. Each input invoke gets a ``batch_group = [start, size]`` that
-  specifies its slice of the batch dimension.
-
-- **Empty invokes**: ``tracer.invoke()`` (no arguments) — operates on the **entire**
-  batch from all previous input invokes. Empty invokes get ``batch_group = None``,
-  so ``narrow()`` returns the full batch and ``swap()`` replaces the full batch.
-  This is useful for running different intervention logic on the combined batch,
-  or for breaking up interventions across multiple invokes to avoid
-  execution-order conflicts within a single invoke.
-
-To support multiple input invokes, model classes must subclass :class:`Batchable`
-and implement :meth:`_prepare_input` and :meth:`_batch`. See
-``nnsight.modeling.language.LanguageModel`` for a reference implementation.
-Without these methods, you can still use one input invoke and any number of
-empty invokes.
+Batching only actually narrows when there are two or more non-empty invokes — a
+lone invoke *is* the whole batch, so it sees every row untouched.
 """
 
-from functools import partial
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
-from ..util import apply, applyn
+from ..util import apply
+
+if TYPE_CHECKING:
+    from .envoy import Envoy
+
+# A row range in the combined batch, or None for an empty/whole-batch invoke.
+BatchGroup = Optional[list]
 
 
-class Batchable:
-    """Abstract mixin that defines how a model's inputs are prepared and batched.
+class SkipParts:
+    """Skip replacements collected across the invokes of one batched forward.
 
-    Subclasses should override :meth:`_prepare_input` and :meth:`_batch` to
-    enable multiple input invokes in a single trace. The base ``Envoy`` class
-    inherits from ``Batchable`` but does not override these methods, so only
-    a single input invoke is supported by default.
-
-    See ``LanguageModel`` for a full implementation that handles tokenization,
-    padding, and attention mask construction.
+    ``.skip()`` bypasses a module's body and substitutes a value for its output.
+    In a batched forward there is no body output to splice into — the body didn't
+    run — so the combined output is built from the invokes' replacements alone
+    (see :meth:`Batcher.gather_skip` / :meth:`Batcher.assemble_skip`). Each entry
+    is a ``(group, replacement)`` pair.
     """
 
-    @classmethod
-    def _batcher_class(cls) -> ClassVar[Type["Batcher"]]:
-        return Batcher
+    def __init__(self) -> None:
+        self.parts: list[tuple[list, Any]] = []
 
-    ### Abstract methods ###
 
-    def _prepare_input(
-        self, *inputs, **kwargs
-    ) -> tuple[tuple[Any], dict[str, Any], int]:
-        """Normalize raw user input into a consistent format for batching.
+def concat(structures: list) -> Any:
+    """Concatenate a list of like-shaped structures along dim 0, leaf by leaf.
 
-        Called once per invoke with whatever arguments the user passed to
-        ``tracer.invoke(*args, **kwargs)`` or ``model.trace(*args, **kwargs)``.
-
-        Args:
-            *inputs: Positional arguments from the invoke call.
-            **kwargs: Keyword arguments from the invoke call.
-
-        Returns:
-            A 3-tuple of ``(args, kwargs, batch_size)`` where:
-            - ``args``: Normalized positional arguments.
-            - ``kwargs``: Normalized keyword arguments.
-            - ``batch_size``: Number of samples in this invoke's input.
-              Return 0 for empty invokes (no real input data).
-        """
-
-        if inputs or kwargs:
-            return inputs, kwargs, 1
-
-        return inputs, kwargs, 0
-
-    def _batch(
-        self, batched_input, *args, **kwargs
-    ) -> tuple[tuple[Any], dict[str, Any]]:
-        """Combine a new invoke's prepared input with the already-batched inputs.
-
-        Called when a second (or subsequent) input invoke needs to be merged
-        into the existing batch. The first invoke's prepared input is stored
-        directly; this method is only called starting from the second invoke.
-
-        Args:
-            batched_input: A tuple of ``(batched_args, batched_kwargs)`` from
-                all previous invokes combined.
-            *args: The new invoke's prepared positional arguments
-                (output of :meth:`_prepare_input`).
-            **kwargs: The new invoke's prepared keyword arguments
-                (output of :meth:`_prepare_input`).
-
-        Returns:
-            A 2-tuple of ``(combined_args, combined_kwargs)`` representing
-            all invokes' inputs merged into one batch.
-
-        Raises:
-            NotImplementedError: If not overridden. The error message explains
-                how to implement batching and the empty-invoke alternative.
-        """
-
-        raise NotImplementedError(
-            "Batching is not implemented for this model. "
-            "Multiple invokers with inputs require `_prepare_input()` and `_batch()` methods "
-            "on your model class (see `LanguageModel` for a reference implementation). "
-            "Without these methods, you can still use one invoke with input and additional "
-            "empty invokes (no arguments) — empty invokes operate on the entire batch and "
-            "are useful for breaking up interventions to avoid execution-order conflicts."
-        )
+    Every structure is one invoke's skip replacement, so they share a shape:
+    tensors concatenate, containers recurse in parallel, and a non-tensor leaf
+    (a ``None`` in a layer's output tuple, say) is taken from the first — they
+    agree by construction.
+    """
+    first = structures[0]
+    if isinstance(first, torch.Tensor):
+        return torch.cat(structures, dim=0)
+    if isinstance(first, (list, tuple)):
+        combined = [concat([s[i] for s in structures]) for i in range(len(first))]
+        return type(first)(combined)
+    if isinstance(first, dict):
+        return {key: concat([s[key] for s in structures]) for key in first}
+    return first
 
 
 class Batcher:
-    """Manages input batching and per-invoke slicing for a single trace.
+    """Collects invoke inputs for one trace and builds the combined forward input.
 
-    One ``Batcher`` is created per trace. As invokes are defined, :meth:`batch`
-    accumulates their inputs into a single batch. During interleaving,
-    :meth:`narrow` extracts each invoke's slice and :meth:`swap` replaces it.
-
-    Attributes:
-        batched_args: Combined positional arguments from all input invokes.
-        batched_kwargs: Combined keyword arguments from all input invokes.
-        last_batch_group: The ``[start, size]`` for the most recent input invoke.
-        needs_batching: True once there are 2+ input invokes (narrowing needed).
-        current_value: The current activation value being narrowed/swapped.
+    Each :meth:`add` records an invoke's input and returns its ``batch_group``.
+    :meth:`assemble` hands the collected invokes to the model's :meth:`_batch` to
+    produce the actual ``(args, kwargs)`` for the run. :meth:`narrow`/:meth:`widen`
+    scope a batched activation to a group's rows and splice an edit back; a model
+    whose batch layout isn't a plain dim-0 stack overrides the per-tensor
+    :meth:`_narrow_tensor`/:meth:`_widen_tensor` (e.g. diffusion's
+    classifier-free-guidance doubling) and picks its subclass via
+    :meth:`~nnsight.intervention.envoy.Envoy._batcher_class`.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, envoy: "Envoy", kwargs: Optional[dict] = None) -> None:
+        self.envoy = envoy
+        # The trace's forward kwargs (num_images_per_prompt, ...), for subclasses
+        # whose row math depends on them; the base layout ignores them.
+        self.kwargs = kwargs or {}
+        # Per invoke: its raw (inputs, kwargs), and its [start, size] group (or
+        # None for an empty invoke that contributes no rows).
+        self.invokes: list[tuple] = []
+        self.groups: list[BatchGroup] = []
+        self.total = 0
 
-        self.batched_args = None
-        self.batched_kwargs = None
+    def narrow(self, value: Any, group: BatchGroup) -> Any:
+        """Slice every batched tensor in ``value`` down to ``group``'s rows.
 
-        self.last_batch_group: Optional[List[int]] = None
-        self.needs_batching = False
+        A tensor is batched only when its leading dim equals :attr:`total` (the
+        combined batch size), so non-batched tensors pass through untouched. Returns
+        the whole value when not actually batching or for a groupless (empty) invoke.
+        """
+        if not self.batching or group is None:
+            return value
+        return apply(value, lambda tensor: self._narrow_tensor(tensor, group), torch.Tensor)
 
-        self.current_value: Optional[Any] = None
-        self.current_provider: Optional[str] = None
+    def _narrow_tensor(self, tensor: torch.Tensor, group: list) -> torch.Tensor:
+        """Slice one batched tensor down to ``group``'s rows.
+
+        Base layout: a tensor whose leading dim is :attr:`total` is a dim-0 stack of
+        every invoke's rows, so narrow it to ``[start, start + size)``; anything else
+        isn't batched and passes through. Overridden for non-stacked layouts.
+        """
+        start, size = group
+        if tensor.shape[0] == self.total:
+            return tensor.narrow(0, start, size)
+        return tensor
+
+    def widen(self, full: Any, group: BatchGroup, edited: Any) -> Any:
+        """Splice ``edited`` (a block's rows) back into ``full`` (the whole batch).
+
+        Walks ``full`` and ``edited`` in parallel; for each batched tensor in
+        ``full`` writes the corresponding ``edited`` tensor into the group's rows via
+        :meth:`_widen_tensor`. Returns ``edited`` unchanged when not batching or for
+        a groupless invoke.
+        """
+        if not self.batching or group is None:
+            return edited
+
+        def merge(full_value: Any, edited_value: Any) -> Any:
+            if isinstance(full_value, torch.Tensor):
+                return self._widen_tensor(full_value, group, edited_value)
+            if isinstance(full_value, (list, tuple)):
+                merged = [merge(f, e) for f, e in zip(full_value, edited_value)]
+                # namedtuples take positional fields, not a single iterable.
+                if isinstance(full_value, tuple) and hasattr(full_value, "_fields"):
+                    return type(full_value)(*merged)
+                return type(full_value)(merged)
+            if isinstance(full_value, dict):
+                # Copy first to preserve the exact type (OrderedDict, a HF
+                # ModelOutput, ...) rather than rebuilding a plain dict, matching
+                # how apply/narrow keep the container type.
+                merged = full_value.copy()
+                for key in full_value:
+                    merged[key] = merge(full_value[key], edited_value[key])
+                return merged
+            return edited_value
+
+        return merge(full, edited)
+
+    def _widen_tensor(self, full: torch.Tensor, group: list, edited: torch.Tensor) -> torch.Tensor:
+        """Write ``edited`` into ``full``'s ``group`` rows (base dim-0-stack layout).
+
+        A tensor is batched only when its leading dim is :attr:`total`; otherwise it
+        passes through. Overridden for non-stacked layouts.
+        """
+        if full.shape[0] != self.total:
+            return full
+        start, size = group
+        # cat (not in-place) keeps autograd correct for leaves/views and avoids
+        # aliasing when `edited` is a narrowed view of `full`.
+        pre = full.narrow(0, 0, start)
+        post = full.narrow(0, start + size, self.total - start - size)
+        return torch.cat([pre, edited, post], dim=0)
+
+    def gather_skip(self, running: Any, group: BatchGroup, replacement: Any) -> Any:
+        """Collect one invoke's skip ``replacement`` for its ``group``'s rows.
+
+        A lone invoke *is* the whole batch, so its replacement is the output
+        outright. With two or more, there's no body output to splice into — the
+        skip fires before the body runs — so accumulate the replacements and let
+        :meth:`assemble_skip` build the combined output once every invoke's is in.
+        """
+        if not self.batching or group is None:
+            return replacement
+        if not isinstance(running, SkipParts):
+            running = SkipParts()
+        running.parts.append((group, replacement))
+        return running
+
+    def assemble_skip(self, running: Any) -> Any:
+        """Concatenate collected skip replacements into the full-batch output.
+
+        A no-op unless ``running`` is the :class:`SkipParts` a batched skip built.
+        The replacements must tile the whole batch: every invoke has to skip the
+        module, since a shared forward can't run for only the rows that didn't.
+        """
+        if not isinstance(running, SkipParts):
+            return running
+        parts = sorted(running.parts, key=lambda part: part[0][0])
+        covered = 0
+        for (start, size), _ in parts:
+            if start != covered:
+                break
+            covered += size
+        if covered != self.total:
+            raise ValueError(
+                "A batched `.skip()` has to cover every row: skip the module in "
+                "every invoke, or none — a shared forward can't run for only the "
+                "rows an invoke left unskipped."
+            )
+        return concat([replacement for _, replacement in parts])
+
+    def add(self, *inputs: Any, **kwargs: Any) -> BatchGroup:
+        """Record one invoke's input; return its ``[start, size]`` group (or None)."""
+        size = self.envoy._batch_size(*inputs, **kwargs)
+        if not size:
+            self.groups.append(None)
+            return None
+        group = [self.total, size]
+        self.total += size
+        self.invokes.append((inputs, kwargs))
+        self.groups.append(group)
+        return group
 
     @property
-    def total_batch_size(self):
-        """Total number of samples across all input invokes."""
-
-        return sum(self.last_batch_group)
-
-    def batch(
-        self, batchable: Batchable, *args, **kwargs
-    ) -> Tuple[Tuple[Any, Any], Optional[List[int]]]:
-        """Register an invoke's input and return its batch group.
-
-        For input invokes (args/kwargs provided), this calls
-        ``batchable._prepare_input()`` and optionally ``batchable._batch()``
-        to merge with previous inputs. For empty invokes (no args), returns
-        ``batch_group=None`` which tells :meth:`narrow` to return the full batch.
-
-        Args:
-            batchable: The model instance (implements :class:`Batchable`).
-            *args: Positional arguments from the invoke.
-            **kwargs: Keyword arguments from the invoke.
-
-        Returns:
-            A 2-tuple of ``((args, kwargs), batch_group)`` where
-            ``batch_group`` is ``[start_idx, batch_size]`` for input invokes
-            or ``None`` for empty invokes.
-        """
-
-        if args or kwargs:
-
-            args, kwargs, batch_size = batchable._prepare_input(*args, **kwargs)
-
-            batch_group = [0, batch_size] if batch_size else None
-
-            if self.batched_args is None:
-                self.batched_args = args
-                self.batched_kwargs = kwargs
-
-                self.last_batch_group = batch_group
-
-                return (args, kwargs), batch_group
-
-            self.batched_args, self.batched_kwargs = batchable._batch(
-                (self.batched_args, self.batched_kwargs), *args, **kwargs
-            )
-
-            if batch_group is None:
-                return (args, kwargs), None
-
-            if self.last_batch_group is None:
-                self.last_batch_group = batch_group
-            else:
-                self.last_batch_group = [sum(self.last_batch_group), batch_size]
-                self.needs_batching = True
-
-            return (args, kwargs), self.last_batch_group
-
-        return (args, kwargs), None
-
-    def narrow(self, batch_group: Optional[List[int]]) -> Any:
-        """Extract an invoke's slice from the current activation value.
-
-        For input invokes, narrows each tensor along dimension 0 using the
-        invoke's ``batch_group = [start, size]``. For empty invokes
-        (``batch_group=None``), returns the entire batch unmodified.
-
-        Args:
-            batch_group: ``[start_idx, batch_size]`` for input invokes,
-                or ``None`` for empty invokes (returns full batch).
-
-        Returns:
-            The narrowed (or full) activation data.
-        """
-        data = self.current_value
-
-        if not self.needs_batching or batch_group is None:
-            return data
-
-        if batch_group[0] == -1:
-            return data
-
-        return apply(
-            data,
-            partial(self._narrow, batch_group),
-            torch.Tensor,
-        )
-
-    def swap(self, batch_group: Optional[List[int]], swap_value: Any) -> None:
-        """Replace an invoke's slice in the current activation value.
-
-        For input invokes, splices ``swap_value`` into the correct batch
-        slice. For empty invokes (``batch_group=None``), replaces the
-        entire ``current_value``.
-
-        Handles two cases for tensor replacement:
-        - If the tensor is a leaf with ``requires_grad`` or has a base tensor
-          (view), uses ``torch.cat`` to avoid in-place modification issues.
-        - Otherwise, uses direct index assignment for efficiency.
-
-        Args:
-            batch_group: ``[start_idx, batch_size]`` for input invokes,
-                or ``None`` for empty invokes (replaces full batch).
-            swap_value: The new value to splice in.
-        """
-
-        if not self.needs_batching or batch_group is None:
-            self.current_value = swap_value
-            return
-
-        if batch_group[0] == -1:
-            self.current_value = swap_value
-            return
-
-        self.current_value = applyn(
-            [self.current_value, swap_value],
-            partial(self._swap, batch_group),
-            torch.Tensor,
-        )
-
-    def _narrow(
-        self, batch_group: Optional[List[int]], acts: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Narrow a tensor to a specific batch group.
-
-        Args:
-            batch_group (List[int]): The [start_idx, batch_size] of the batch group to extract.
-            acts (torch.Tensor): The input tensor to narrow. The first dimension should
-                correspond to the batch dimension.
-
-        Returns:
-            torch.Tensor: The narrowed tensor containing only the specified batch group.
-        """
-        batch_start, batch_size = batch_group
-
-        if acts.shape[0] == self.total_batch_size:
-            return acts.narrow(0, batch_start, batch_size)
-
-        return acts
-
-    def _swap(
-        self,
-        batch_group: Optional[List[int]],
-        current_value: torch.Tensor,
-        swap_value: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Swap a tensor with a new value in a specific batch group.
-
-        Args:
-            batch_group (List[int]): The [start_idx, batch_size] of the batch group to modify.
-            current_value (torch.Tensor): The tensor containing current values to be modified.
-            swap_value (torch.Tensor): The new values to insert at the specified batch group.
-
-        Returns:
-            torch.Tensor: The modified tensor with swapped values. May be a new tensor
-                (concatenation) or the modified input tensor (in-place assignment).
-        """
-        batch_start, batch_size = batch_group
-
-        if current_value.shape[0] == self.total_batch_size:
-
-            needs_concat = (
-                current_value.requires_grad and current_value.is_leaf
-            ) or current_value._base is not None
-
-            # When ``swap_value`` is itself a view of ``current_value``
-            # (e.g. user read a narrow slice from the batcher and assigned
-            # it back), in-place assignment ``current_value[start:end] =
-            # swap_value`` creates a self-referential autograd graph and
-            # segfaults during backward.  Force the concat path instead.
-            if not needs_concat and swap_value._base is current_value:
-                needs_concat = True
-
-            if needs_concat:
-                pre = current_value.narrow(0, 0, batch_start)
-                post = (
-                    current_value.narrow(
-                        0,
-                        batch_start + batch_size,
-                        current_value.shape[0] - batch_start - batch_size,
-                    )
-                    if self.total_batch_size == current_value.shape[0]
-                    else current_value
-                )
-
-                return torch.cat([pre, swap_value, post], dim=0)
-
-            else:
-                current_value[batch_start : batch_start + batch_size] = swap_value
-
-        return current_value
-
-
-class DiffusionBatcher(Batcher):
-    """
-    A specialized batcher for diffusion models that handles multiple images per prompt and guided diffusion.
-
-    This class extends the base Batcher to support diffusion model-specific batching scenarios,
-    including multiple images per prompt and guided diffusion with conditional/unconditional
-    guidance.
-
-    The DiffusionBatcher handles three main tensor batch size scenarios:
-    1. Regular batch size (total_batch_size)
-    2. Image batch size (total_batch_size * num_images_per_prompt)
-    3. Guided diffusion batch size (total_batch_size * num_images_per_prompt * 2)
-
-    Attributes:
-        num_images_per_prompt (int): Number of images to generate per prompt. Defaults to 1.
-        image_batch_groups (List[Tuple[int, int]]): Batch groups scaled for multiple images
-            per prompt, where each tuple contains (batch_start, batch_size).
-    """
-
-    def __init__(self, *args, **kwargs):
-
-        self.num_images_per_prompt: int = kwargs.get("num_images_per_prompt", 1)
-        self._image_batch_groups: Dict[int, Tuple[int, int]] = dict()
-        self.last_image_batch_group: Optional[Tuple[int, int]] = None
-
-        super().__init__(*args, **kwargs)
-
-    @property
-    def image_batch_groups(self) -> Dict[int, Tuple[int, int]]:
-        return self._image_batch_groups
-
-    def batch(
-        self, batchable: Batchable, *args, **kwargs
-    ) -> Tuple[Tuple[Any, Any], Optional[List[int]]]:
-        """
-        Batch inputs for diffusion models, accounting for multiple images per prompt.
-
-        This method extends the base batcher functionality to handle diffusion models that can
-        generate multiple images per prompt. It creates image-specific batch groups by scaling
-        the regular batch groups by the number of images per prompt.
-
-        Args:
-            batchable (Batchable): The batchable object that implements the batching interface.
-            *args: Variable length argument list to be batched.
-            **kwargs: Arbitrary keyword arguments to be batched.
-
-        Returns:
-            Tuple[Tuple[Any, Any], Union[int, None]]: A tuple containing:
-                - A tuple of (batched_args, batched_kwargs)
-                - The batch group index (int) or None if no batching was needed
-        """
-        input_args, batch_group = super().batch(batchable, *args, **kwargs)
-
-        if batch_group is not None:
-            batch_start, batch_size = batch_group
-
-            if not self.needs_batching:
-                image_batch_group = (0, batch_size * self.num_images_per_prompt)
-            else:
-                image_batch_group = (
-                    sum(self.last_image_batch_group),
-                    batch_size * self.num_images_per_prompt,
-                )
-
-            self.image_batch_groups[batch_start] = image_batch_group
-            self.last_image_batch_group = image_batch_group
-
-        return input_args, batch_group
-
-    def _narrow(
-        self, batch_group: Optional[List[int]], acts: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Extract a specific batch group from a tensor, handling diffusion model batch scenarios.
-
-        Args:
-            batch_group (int): The index of the batch group to extract.
-            acts (torch.Tensor): The input tensor to narrow. The first dimension should
-                correspond to the batch dimension.
-
-        Returns:
-            torch.Tensor: The narrowed tensor containing only the specified batch group.
-                For guided diffusion (2x batch size), returns concatenated unconditional
-                and conditional parts. For other cases, returns the appropriate slice.
-        """
-        if acts.shape[0] == self.total_batch_size:
-            batch_start, batch_size = batch_group
-
-            return acts.narrow(0, batch_start, batch_size)
-
-        elif acts.shape[0] == self.total_batch_size * self.num_images_per_prompt:
-            batch_start, batch_size = self.image_batch_groups[batch_group[0]]
-
-            return acts.narrow(0, batch_start, batch_size)
-
-        elif (
-            acts.shape[0] == self.total_batch_size * self.num_images_per_prompt * 2
-        ):  # with guidance
-            batch_start, batch_size = self.image_batch_groups[batch_group[0]]
-
-            uncond_batch = acts.narrow(0, batch_start, batch_size)
-
-            cond_batch = acts.narrow(
-                0,
-                batch_start + self.total_batch_size * self.num_images_per_prompt,
-                batch_size,
-            )
-
-            return torch.cat([uncond_batch, cond_batch], dim=0)
-
-        return acts
-
-    def _swap(
-        self, batch_group: int, current_value: torch.Tensor, swap_value: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Replace values in a specific batch group with new values, handling diffusion model scenarios.
-
-        This method swaps values for a specific batch group in a tensor, supporting different
-        diffusion model batch configurations. It automatically determines whether to use
-        in-place assignment or concatenation based on tensor properties (gradient requirements).
-
-        Args:
-            batch_group (int): The index of the batch group to modify.
-            current_value (torch.Tensor): The tensor containing current values to be modified.
-            swap_value (torch.Tensor): The new values to insert at the specified batch group.
-
-        Returns:
-            torch.Tensor: The modified tensor with swapped values. May be a new tensor
-                (concatenation) or the modified input tensor (in-place assignment).
-        """
-        needs_concat = (
-            current_value.requires_grad and current_value.is_leaf
-        ) or current_value._base is not None
-
-        if (
-            current_value.shape[0] == self.total_batch_size
-            or current_value.shape[0]
-            == self.total_batch_size * self.num_images_per_prompt
-        ):
-            batch_start, batch_size = (
-                batch_group
-                if current_value.shape[0] == self.total_batch_size
-                else self.image_batch_groups[batch_group[0]]
-            )
-
-            if needs_concat:
-                pre = current_value.narrow(0, 0, batch_start)
-
-                post = (
-                    current_value.narrow(
-                        0,
-                        batch_start + batch_size,
-                        current_value.shape[0] - batch_start - batch_size,
-                    )
-                    if self.total_batch_size == current_value.shape[0]
-                    else current_value
-                )
-
-                return torch.cat([pre, swap_value, post], dim=0)
-
-            else:
-                current_value[batch_start : batch_start + batch_size] = swap_value
-
-        elif (
-            current_value.shape[0]
-            == self.total_batch_size * self.num_images_per_prompt * 2
-        ):  # with guidance
-            batch_start, batch_size = self.image_batch_groups[batch_group[0]]
-
-            uncond_swap, cond_swap = swap_value.chunk(2, dim=0)
-
-            if needs_concat:
-                pre_uncond = current_value.narrow(0, 0, batch_start)
-                pre_cond = current_value.narrow(
-                    0,
-                    batch_start + batch_size,
-                    self.total_batch_size * self.num_images_per_prompt
-                    - batch_start
-                    - batch_size,
-                )
-                post = current_value.narrow(
-                    0,
-                    batch_start
-                    + self.total_batch_size * self.num_images_per_prompt
-                    + batch_size,
-                    -1,
-                )
-
-                return torch.cat(
-                    [pre_uncond, uncond_swap, pre_cond, cond_swap, post], dim=0
-                )
-
-            else:
-                current_value[batch_start : batch_start + batch_size] = uncond_swap
-                current_value[
-                    batch_start
-                    + self.total_batch_size * self.num_images_per_prompt : batch_start
-                    + self.total_batch_size * self.num_images_per_prompt
-                    + batch_size
-                ] = cond_swap
-
-        return current_value
+    def batching(self) -> bool:
+        """Whether narrowing applies — true once two or more invokes contribute rows."""
+        return len(self.invokes) > 1
+
+    def assemble(self, fn: Any) -> tuple:
+        """Build the combined ``(args, kwargs)`` for ``fn`` from the collected invokes."""
+        return self.envoy._batch(self.invokes, fn)

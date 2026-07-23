@@ -1,120 +1,100 @@
 ---
 title: Interleaver and Hooks
-one_liner: Lazy one-shot PyTorch hooks registered per-access by each Mediator, anchored by a sentinel forward hook and inserted in mediator-index order.
+one_liner: One shared Interleaver installs a pre-forward and a forward hook on every wrapped module; they pass through when idle and route input/output through Interleaver.handle when interleaving, tagging each visit with an occurrence index.
 tags: [concept, mental-model, hooks]
-related: [docs/concepts/threading-and-mediators.md, docs/concepts/envoy-and-eproperty.md, docs/concepts/source-tracing.md]
-sources: [src/nnsight/intervention/interleaver.py:481, src/nnsight/intervention/hooks.py:92, src/nnsight/intervention/hooks.py:154, src/nnsight/intervention/hooks.py:271, src/nnsight/intervention/hooks.py:356, src/nnsight/intervention/hooks.py:495]
+related: [docs/concepts/threading-and-mediators.md, docs/concepts/envoy.md, docs/concepts/source-tracing.md]
+sources: [src/nnsight/intervention/interleaver.py:430, src/nnsight/intervention/interleaver.py:521, src/nnsight/intervention/interleaver.py:566, src/nnsight/intervention/interleaver.py:375, src/nnsight/intervention/interleaver.py:605]
 ---
 
 # Interleaver and Hooks
 
 ## What this is for
 
-How values get from the running model into the worker thread. nnsight's hook architecture as of `refactor/transform`:
+How values get from the running model into a parked worker. One `Interleaver` (`interleaver.py:430`) is shared across an entire `Envoy` tree, so every module reports into the same set of workers.
 
-- **Sentinel forward hook**: every wrapped module gets one no-op forward hook so PyTorch always takes the slow dispatch path.
-- **Lazy one-shot hooks**: when a worker accesses `.output` / `.input`, an `eproperty` decorator registers a single forward hook that fires once, delivers the value to the mediator, and self-removes.
-- **Persistent hooks**: caches and iteration trackers register permanent hooks that fire on every forward pass.
-- **Ordered insertion**: when multiple mediators hook the same module, hooks fire in definition order via `add_ordered_hook` and a `mediator_idx` attribute.
+The hook model in this rewrite:
 
-This replaces the older permanent-hook approach where every module had a forward + pre-forward hook installed for the lifetime of the wrapper.
+- **Two hooks per module, installed at wrap time.** When an `Envoy` is built it calls `interleaver.instrument(self)` (`interleaver.py:521`), registering a `register_forward_pre_hook` and a `register_forward_hook` on the module.
+- **Pass-through when idle.** Both hooks check `self.interleaving` first; outside a trace they return `None` and the module runs untouched. So an instrumented model runs at normal speed when you're not tracing.
+- **Routed when interleaving.** Inside a trace, the pre-hook routes the module's `(args, kwargs)` through `handle("{path}.input", ...)` and the forward hook routes the output through `handle("{path}.output", ...)`. Because both hooks *return* the handled value, an intervention can edit input or output in place.
+
+This is simpler than the older lazy one-shot hook design: there is **one** primitive — a location string plus `Interleaver.handle` — and modules, source operations, `.skip`, and `result` all ride on it.
 
 ## When to use / when not to use
 
-You don't call these directly — `eproperty` decorators (`requires_output`, `requires_input`) do it for you. Read this doc to:
+You never call these directly — `Envoy` properties do. Read this to:
 
-- Understand why an unhooked module has near-zero overhead.
-- Debug "missed provider" / `OutOfOrderError` issues.
-- Implement a custom backend (vLLM, sglang-style) where you need to plumb values into the interleaver.
+- Understand why an untraced module is cheap (its hooks short-circuit on `interleaving == False`).
+- Debug `OutOfOrderError`.
+- Plumb values into the interleaver from a custom driver (vLLM logits, generation results) via `Interleaver.handle`.
 
-## Module wrapping
+## Instrumenting a module
 
-`Interleaver.wrap_module(module)` (`interleaver.py:481`) does two things on first wrap:
+`Interleaver.instrument(envoy)` (`interleaver.py:521`):
 
-1. Replaces `module.forward` with `nnsight_forward`, a thin wrapper that:
-   - Pops `__nnsight_skip__` from kwargs and returns it directly if present (this is how `Envoy.skip(...)` works).
-   - Otherwise routes through the module's `__source_accessor__` if one exists (see [Source Tracing](source-tracing.md)), else through `__nnsight_forward__` (the saved original).
-2. Registers a sentinel `register_forward_hook(lambda _, __, output: output)`. This exists purely so PyTorch never takes the fast-path-with-no-hooks branch in `Module.__call__` — without it, hooks added *during* a forward pass would be silently ignored.
+1. Calls `install_skip(envoy)` (see [Source Tracing](source-tracing.md)) to install the per-module **controller** forward and register this interleaver on the module — so the module can be skipped or source-drilled, even when several envoys share it.
+2. Removes any hooks previously installed for this path (`remove`), then registers the pre-forward and forward hooks (both `with_kwargs=True`).
 
 ```python
-# What wrap_module produces, conceptually:
-module.__nnsight_forward__ = original_forward          # saved
-module.forward = nnsight_forward                        # skippable wrapper
-module.register_forward_hook(lambda _, __, o: o)        # sentinel
+def pre_forward(module, args, kwargs):
+    if not self.interleaving:
+        return None
+    return self.handle(f"{path}.input", (args, kwargs))   # editable input
+
+def forward(module, args, kwargs, output):
+    if not self.interleaving:
+        return None
+    return self.handle(f"{path}.output", output)          # editable output
 ```
 
-## One-shot hook registration
+`instrument` runs again on `Envoy._update` (dispatch swapping meta weights for real ones): it drops the old path's hooks and re-installs on the new module.
 
-When a worker accesses `model.transformer.h[0].output`:
+## Interleaver.handle: one call, every worker
 
-1. The `eproperty` for `output` runs its decorated stub, which is wrapped by `requires_output` (`hooks.py:271`).
-2. `requires_output` checks `interleaver.batcher.current_provider` — if the value for this `(path, iteration)` is already being served (e.g. nested eproperty access on the same key), hook registration is skipped.
-3. Otherwise, `output_hook(mediator, module, path)` (`hooks.py:224`) registers a one-shot forward hook via `add_ordered_hook`. The hook captures the target iteration at registration time.
-4. The eproperty then issues the blocking `request(...)` call.
-5. When the model fires that module's forward hook chain, the one-shot hook checks `iteration_tracker[path] == target_iter`. If matched, it self-removes (`handle.remove()`), then calls `mediator.handle(...)` to deliver the value.
+`Interleaver.handle(provider, value)` (`interleaver.py:566`) is the whole model→worker interface:
 
-`input_hook` (`hooks.py:154`) is the symmetric variant for forward pre-hooks. It uses `_forward_pre_hooks_with_kwargs=True` so the hook receives both args and kwargs.
+1. Offer `value` to every mediator in turn via `Mediator.handle` (`interleaver.py:375`). A read is served the value; a swap replaces it. The value threads through all workers, so each sees the previous one's edits.
+2. If batching, reassemble a batched `.skip` from its per-invoke parts (`Batcher.assemble_skip`).
+3. Offer the now post-intervention value to any active caches (`tracer.cache()`), narrowed to each cache's own batch rows.
+4. Return the possibly-edited value back to the hook, which substitutes it into the forward.
 
-## add_ordered_hook and mediator_idx
+Values that don't come from a module hook use the same call: `Envoy.interleave` does `handle("result", result)`; source operations do `handle("{op}.input"/".output"/".skip", ...)`.
 
-`add_ordered_hook(module, hook, type)` (`hooks.py:92`) inserts a hook into the module's hook dict at a position determined by `hook.mediator_idx`:
+## Occurrence tagging (iteration)
 
-- Lower `mediator_idx` fires first.
-- Intervention hooks use `mediator_idx = mediator.idx` (matches the order invokes were defined).
-- Cache hooks and iteration-tracker hooks use `mediator_idx = float('inf')` so they always fire **last** — this guarantees caches see post-intervention values, and iteration counters advance only after every intervention has matched against the current step.
+A location can be reached many times in one run — every step of a generation loop revisits every module. `Mediator.handle` tracks this per location in `iterations`: this visit is the `iterations[provider]`-th, so it serves requests tagged `"{provider}.i{n}"` for that `n`, then increments.
 
-PyTorch fires hooks in dict-insertion order. To preserve mediator order while inserting mid-flight, `add_ordered_hook` rebuilds the dict with the new hook spliced in.
+- With **no `tracer.iter`**, a worker always parks with tag `.i0`, so every request binds to the **first** visit — the original single-forward behavior.
+- Inside `tracer.iter[k]`, the worker pins its `iteration` to `k`; a request tagged `.i{k}` waits while earlier visits pass by, and binds on the k-th. After the first hit of a pinned non-zero step, the mediator *relaxes* (`iteration = None`) so the rest of that step's requests follow the model sequentially.
 
-## Persistent hooks
+Because a **source operation** goes through `handle` every time it fires, an op inside a loop (an MoE expert loop, say) advances its own occurrence counter per *fire*, while a module advances once per forward — see [Source Tracing](source-tracing.md). No separate counter hooks are needed; it falls out of the one `handle` primitive.
 
-Persistent hooks are registered once and **don't** self-remove:
+## Out-of-order and dangling workers
 
-- **Cache hooks** (`hooks.py:356`, `hooks.py:397`): `cache_output_hook` / `cache_input_hook` fire on every forward pass and append to a `Cache` object. Only fire when the owning mediator's `batch_group` is scheduled for this pass (`batch_group[0] != -1`).
-- **Iter-tracker hooks** (see [Source Tracing](source-tracing.md) and `intervention/tracing/iterator.py`): registered when `tracer.iter[...]` is entered, removed in the iter loop's `finally`. Bump `mediator.iteration_tracker` for both `.input` and `.output` paths after every forward pass.
+After the model returns, `check_dangling_mediators` (`interleaver.py:605`) inspects any worker still parked:
 
-All persistent hooks are registered through `add_ordered_hook` with `mediator_idx = float('inf')` so they fire after intervention hooks, and they're tracked on `mediator.hooks` so `Mediator.remove_hooks()` cleans them up at cancel.
+- **`iteration == 0`** (a plain request the model ran past or never made): throw `OutOfOrderError` into the worker so the traceback points at the waiting line.
+- **`iteration != 0`** (an open-ended `tracer.iter[:]` that outran the model's steps): throw to unwind the worker's `finally` blocks, but catch it and **warn** rather than raise — reached steps' saved values are kept.
+- **`Event.BARRIER`** still pending: a barrier fewer blocks reached than it was built for — raise a `ValueError` pointing at the waiting line.
 
-## Operation hooks (source tracing)
+## Caches are post-intervention observers
 
-For `.source` operation tracing, hooks live on plain Python lists on an `OperationAccessor`, not on a PyTorch module. `OperationHookHandle` (`hooks.py:61`) wraps these so they support the same `.remove()` interface as PyTorch handles.
+`tracer.cache()` needs no per-module hooks. It registers a `Cache` on the calling mediator; `Interleaver.handle` feeds every location to every active cache *after* interventions have run, so a cache records exactly the values interventions produced, narrowed to that worker's rows. See `intervention/cache.py`.
 
-Three operation hook types in `hooks.py`:
+## Skip is a gate, not a hook
 
-- `operation_input_hook` (`hooks.py:549`) — appended to `op_accessor.pre_hooks`.
-- `operation_output_hook` (`hooks.py:495`) — appended to `op_accessor.post_hooks`.
-- `operation_fn_hook` (`hooks.py:589`) — appended to `op_accessor.fn_hooks`. Used for recursive `.source` to substitute an injected function for the original on a single call.
-
-These have analogous `requires_operation_input` / `requires_operation_output` decorators (`hooks.py:438`, `hooks.py:464`) used by `OperationEnvoy` eproperties.
-
-## Mediator.hooks lifecycle
-
-Every handle returned by these registration functions is appended to `mediator.hooks`. `Mediator.remove_hooks()` (`interleaver.py:1354`) drains the list at cancel time. The cancel path runs in two places:
-
-1. After each intervention finishes (END event).
-2. In `Interleaver.cancel()` for any leftover mediators.
-
-`.remove()` is idempotent on every handle type used (PyTorch's `RemovableHandle` and the custom `OperationHookHandle`), so calling it twice — once via the hook's self-removal path and once via `remove_hooks` — is safe.
-
-## Why lazy hooks
-
-Permanent hooks pay a cost on every forward pass, even when no intervention is active. With lazy hooks:
-
-- A module that nobody traces has only the sentinel hook (constant time, no work).
-- A module that *is* traced has at most one extra hook per intervention, and it self-removes after firing.
-- The sentinel keeps PyTorch on the slow dispatch path so a hook added mid-forward is still seen.
-
-This was the headline performance win in 0.6.0 — empty traces dropped from ~1.2 ms to ~0.3 ms.
+`.skip(value)` parks on `Event.SKIP` at `"{path}.skip"`. The module's **controller** forward (installed by `install_skip`) queries that gate *before* running the body: if a replacement is pending, the body is skipped and the replacement returned. This is why a skip can even read the module's own `.input` first — the controller is bound before `nn.Module.__call__` runs its pre-hooks. See [Source Tracing](source-tracing.md) for the controller.
 
 ## Gotchas
 
-- **The sentinel hook is required.** Removing it (or any other hook) such that the module has zero hooks at the start of a forward call will cause PyTorch to fast-path past hook dispatch and silently skip any hooks added later in the same call.
-- **`mediator_idx` must be set on every hook.** `add_ordered_hook` defaults to `float('-inf')` if missing, but cache / iter-tracker hooks rely on `inf` for correctness — set it explicitly.
-- **One-shot hooks check the iteration tracker.** During multi-step generation, a one-shot hook registered at step 0 will refuse to fire on step 1 unless it was constructed with `iteration=1`. The `iteration_tracker[path]` is the source of truth.
-- **`current_provider` skips registration.** When two eproperties share a key (e.g. `Envoy.input` and `Envoy.inputs`), accessing one back-to-back inside the same hook chain re-uses the same value without a second hook registration. See `requires_output` (`hooks.py:271`) for the check.
+- **Hooks are always installed, not lazy.** Overhead when idle is a single `if not self.interleaving: return None` per hook. Don't remove the module's hooks by hand — reassign the module through the envoy so `instrument` re-runs.
+- **`with_kwargs=True` on both hooks.** The pre-hook sees `(args, kwargs)` and can rewrite either; `.inputs` exposes the full pair, `.input` the first positional-or-keyword argument.
+- **One interleaver per tree, reused across runs.** `cancel()` clears mediators and the batcher after each run; the hooks stay installed. A server keeps the same interleaver across requests.
+- **Occurrence tags are strings.** A request pinned to a later step simply doesn't string-match earlier visits and waits — there is no numeric comparison in the hot path.
 
 ## Related
 
-- [Threading and Mediators](threading-and-mediators.md) — what fires the hooks (the mediator event loop).
-- [Envoy and eproperty](envoy-and-eproperty.md) — the descriptor that ties hook registration to user-facing properties.
-- [Source Tracing](source-tracing.md) — operation hooks for `.source`.
-- Source: `src/nnsight/intervention/interleaver.py` (`wrap_module`, `Mediator.remove_hooks`), `src/nnsight/intervention/hooks.py`.
+- [Threading and Mediators](threading-and-mediators.md) — the worker side that parks and is served here.
+- [Envoy](envoy.md) — the properties that call `Mediator.value`/`swap`, which the hooks fulfil.
+- [Source Tracing](source-tracing.md) — the same `handle` primitive applied to intra-forward operations, and the skip controller.
+- Source: `src/nnsight/intervention/interleaver.py` (`Interleaver.instrument`, `Interleaver.handle`, `check_dangling_mediators`), `src/nnsight/intervention/cache.py` (`Cache`).

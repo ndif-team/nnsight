@@ -1,57 +1,81 @@
 ---
 title: Errors Index
-one_liner: Map of nnsight exceptions to their cause-and-fix docs.
+one_liner: Map of the exceptions nnsight raises to their cause-and-fix docs.
 tags: [error, index]
-related: [docs/concepts/threading-and-mediators.md, docs/concepts/interleaver-and-hooks.md, docs/usage/trace.md, docs/remote/]
-sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/tracing/invoker.py, src/nnsight/intervention/tracing/base.py, src/nnsight/intervention/serialization.py, src/nnsight/modeling/language.py]
+related: [docs/concepts/threading-and-mediators.md, docs/concepts/interleaver-and-hooks.md, docs/usage/trace.md]
+sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/envoy.py, src/nnsight/tracing/util.py]
 ---
 
 # Errors Index
 
-When code inside a `with model.trace(...)` block raises, nnsight reconstructs the traceback so the top frame points to the user's source. The exception type is preserved (`isinstance(e, ValueError)` still works). To see internal nnsight frames, set `nnsight.CONFIG.APP.DEBUG = True` (see `docs/errors/debug-mode.md`).
+The exceptions nnsight raises, with the real class, the real message text, and the
+page that explains the cause and fix.
+
+When code inside a `with model.trace(...):` block raises, nnsight cleans the
+traceback (`clean_traceback`, `src/nnsight/tracing/util.py:139`) so the top frames
+point at your own source rather than nnsight's plumbing. The exception type is
+preserved — `except ValueError:` / `except IndexError:` still work. See
+[debug-mode.md](debug-mode.md) for what `CONFIG.APP.DEBUG` does (and no longer does).
 
 ## Execution-order errors
 
-Most often raised when an intervention asks for a value that the model never delivered, or asks in the wrong order.
+Raised when an intervention asks for a value the model never delivered, or asks in
+the wrong order. There is one class for both: `OutOfOrderError`
+(`src/nnsight/intervention/interleaver.py:83`).
 
-`MissedProviderError` is the **primary** post-`refactor/transform` failure mode for "I asked for a value the model never produced." `OutOfOrderError` is its subclass — same root cause, but detected eagerly when nnsight already knows the provider has fired and been consumed.
-
-| Exception | Symptom snippet | Doc |
+| Exception | Message | Doc |
 |---|---|---|
-| `Mediator.MissedProviderError` | ``Execution complete but `<requester>` was not provided. Did you call an Envoy out of order?`` | [missed-provider-error.md](missed-provider-error.md) |
-| `Mediator.OutOfOrderError` (subclass of `MissedProviderError`) | ``Value was missed for <requester>. Did you call an Envoy out of order?`` | [out-of-order-error.md](out-of-order-error.md) |
-| `ValueError` (raised via `MissedProviderError`) | ``Execution complete but `<requester>` was not provided. Did you call an Envoy out of order?`` | [value-was-not-provided.md](value-was-not-provided.md) |
+| `OutOfOrderError` | ``'<location>.i0' was requested but the model already ran past it`` | [out-of-order-error.md](out-of-order-error.md) |
+| `OutOfOrderError` (dangling worker) | ``'<location>.i0' was requested but the model already ran past it`` — raised at the end of the run for a worker still waiting on a location that never fired | [value-was-not-provided.md](value-was-not-provided.md) |
+| `UserWarning` (not an exception) | ``'<location>' was never reached: the model ran fewer iterations than the loop requested. Values from reached iterations are kept.`` — an `iter` loop that outran the model | [value-was-not-provided.md](value-was-not-provided.md) |
+
+> `MissedProviderError` (and its old `OutOfOrderError` subclass split) no longer
+> exists. Both the eager "asked out of order" case and the late "model finished, a
+> worker is still waiting" case now raise the single `OutOfOrderError`.
 
 ## Setup / context errors
 
-Raised when an Envoy property is accessed outside a live trace, when invokes are nested incorrectly, or when batching is unsupported.
+Raised when an Envoy value is accessed outside a live trace, `save()` is called
+outside a trace, a trace has nothing to run, invokes are nested, or batching is
+unsupported.
 
-| Exception | Symptom snippet | Doc |
+| Exception | Message | Doc |
 |---|---|---|
-| `ValueError` | ``Cannot access `<path>.output` outside of interleaving.`` / ``Cannot set `<path>.output` outside of interleaving.`` | [model-did-not-execute.md](model-did-not-execute.md) |
-| `ValueError` | ``Cannot invoke during an active model execution / interleaving.`` | [invoke-during-execution.md](invoke-during-execution.md) |
-| `NotImplementedError` | ``Batching is not implemented for this model.`` | [batching-not-implemented.md](batching-not-implemented.md) |
-| `WithBlockNotFoundError` | ``With block not found at line <N>`` | [with-block-not-found.md](with-block-not-found.md) |
+| `ValueError` | ``Cannot access `<location>` outside of interleaving`` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
+| `ValueError` | ``save() was called outside a trace. …`` | [save-outside-trace.md](save-outside-trace.md) |
+| `ValueError` | ``trace() needs an input, or at least one `with tracer.invoke(...)` block`` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
+| `ValueError` | ``Cannot invoke while the model is already running.`` | [invoke-during-execution.md](invoke-during-execution.md) |
+| `NotImplementedError` | ``<ModelClass> does not support batching multiple invokes`` | [batching-not-implemented.md](batching-not-implemented.md) |
+| `WithBlockNotFoundError` | *(no message)* | [with-block-not-found.md](with-block-not-found.md) |
 
-## Serialization errors (remote execution)
+## Tracing / capture errors
 
-Raised by `nnsight.intervention.serialization.make_function` when a function captured for remote execution can't be reconstructed on the receiving side. These almost always surface only on remote (NDIF) traces — local execution doesn't reserialize traced functions. See [`docs/remote/`](../remote/) for the remote-execution context and how submitted functions are pickled / re-compiled.
+Raised while capturing the `with` block's source.
 
-| Exception | Symptom | Source |
+| Exception | Message | Source / fix |
 |---|---|---|
-| `ValueError` | ``Failed to compile source for function '<name>'. This may indicate corrupted serialized data or version incompatibility.`` | `src/nnsight/intervention/serialization.py:552` (closure path), `:568` (no-closure path) |
-| `ValueError` | ``Could not find function '<name>' in compiled source`` | `src/nnsight/intervention/serialization.py:583` |
-| `pickle.PicklingError` | ``Cannot serialize function '<name>': source code unavailable. Attach source manually via func.__source__ = '...'.`` | `src/nnsight/intervention/serialization.py:789` |
+| `ValueError` | ``The body of a traced `with` must start on its own line; nnsight runs the body itself, and can only intercept it at the start of a line.`` | `src/nnsight/tracing/tracer.py:76`. Move the body off the `with` line: never write `with model.trace(x): out = ...`; put `out = ...` on the next, indented line. |
+| `WithBlockNotFoundError` | *(no message)* | `src/nnsight/tracing/tracer.py:306`. The tracer wasn't used as a `with` block. See [with-block-not-found.md](with-block-not-found.md). |
 
-These are caused by:
-- A Python version mismatch between client and server that breaks a syntax form.
-- Serialized payload corruption in transit.
-- Functions defined in a way that `inspect.getsource` can't recover (lambdas in a `-c` string, `exec()`'d functions).
+## Coordination errors
 
-The fix is usually to ensure the function comes from a real `.py` file (or has `func.__source__ = "..."` attached).
+Raised when trace blocks are wired together incorrectly (see
+[docs/usage/](../usage/) for `barrier` / `skip`).
+
+| Exception | Message | Source / fix |
+|---|---|---|
+| `ValueError` | ``A barrier was never reached by every block it waits for; check the count it was created with`` | `src/nnsight/intervention/interleaver.py:631`. `tracer.barrier(n)` was created for more blocks than actually call it. Pass the real number of blocks that hold the barrier. |
+| `ValueError` | ``A batched `.skip()` has to cover every row: skip the module in every invoke, or none — a shared forward can't run for only the rows an invoke left unskipped.`` | `src/nnsight/intervention/batching.py:164`. When batching multiple invokes, either `.skip()` a module in *every* invoke or in none. |
+
+## Remote execution
+
+`RemoteBackend` (`src/nnsight/intervention/backends/remote.py`) raises `RemoteError`
+on a failed submission or a server-side `ERROR` status. A deferred worker error from
+a driver like vLLM is re-raised at the client as a `RuntimeError` carrying the
+original type/message/traceback (`src/nnsight/intervention/errors.py:45`).
 
 ## Debugging
 
 | Topic | Doc |
 |---|---|
-| Enabling full tracebacks (internal frames) | [debug-mode.md](debug-mode.md) |
+| What `CONFIG.APP.DEBUG` does, and how tracebacks are cleaned | [debug-mode.md](debug-mode.md) |

@@ -1,148 +1,180 @@
 ---
 title: Adding a New Runtime
-one_liner: Recipe for integrating a new inference engine (vLLM-style) into NNsight.
+one_liner: How a new model type or inference engine plugs into NNsight via the modeling mixins.
 tags: [internals, dev]
-related: [docs/developing/vllm-integration.md, docs/developing/batching-internals.md, docs/developing/eproperty-deep-dive.md]
-sources: [src/nnsight/modeling/base.py, src/nnsight/modeling/language.py, src/nnsight/modeling/vllm/README.md, src/nnsight/modeling/vllm/vllm.py:1]
+related: [docs/developing/vllm-integration.md, docs/developing/extending-envoy.md, docs/developing/batching-internals.md]
+sources: [src/nnsight/modeling/base.py, src/nnsight/modeling/mixins/loadable.py, src/nnsight/modeling/mixins/meta.py, src/nnsight/modeling/mixins/remotable.py, src/nnsight/modeling/huggingface.py, src/nnsight/modeling/transformers.py, src/nnsight/modeling/vllm/vllm.py]
 ---
 
 # Adding a New Runtime
 
 ## What this covers
 
-vLLM was integrated as a new "runtime" — an inference backend with its own process model, tensor format, and batching scheme. Wrapping a similar engine (TGI, TensorRT-LLM, JAX/Flax, a custom training loop, etc.) follows the same template: subclass `NNsight` (or `LanguageModel` if your runtime hosts HuggingFace-style transformers), implement input prep / batching, expose runtime-specific values via eproperties, and provide a way to dispatch model loading.
+A "runtime" is a model type with its own loading, batching, or execution model —
+HuggingFace transformers, diffusers, vLLM, or a new engine you're integrating. They
+all sit on the same short mixin chain over `Envoy`. This page is which mixin to
+start from and which underscore-prefixed extension points to fill in. Extension
+points are methods with working defaults (no ABCs, no `Mixin` suffix — see
+`STYLE.md`); the docstring on each states the base default and points at the
+reference override.
 
-This page describes the parts you need to fill in. For a working reference, read the vLLM integration's README — it's the most thorough example of a non-PyTorch runtime under NNsight: [`src/nnsight/modeling/vllm/README.md`](../../src/nnsight/modeling/vllm/README.md). Don't reproduce that document — use it as the canonical example and link to it.
+## The class chain
 
-## Architecture / How it works
+```
+Envoy                      intervention/envoy.py   the tree; hooks; trace/interleave/__call__
+ └─ Loadable               mixins/loadable.py      _load(...): construct from a spec, not a module
+     └─ Meta               mixins/meta.py          meta-device build + dispatch(); scan()
+         └─ Remotable      mixins/remotable.py     remote key/env; remote & local backends
+             └─ HuggingFaceModel   huggingface.py  from_pretrained loading; model-key from repo id
+                 ├─ TransformersModel  transformers.py   PRIMARY HF class (pipeline-backed)
+                 │   └─ LanguageModel        (deprecated alias)
+                 │       └─ VisionLanguageModel (deprecated alias)
+                 └─ DiffusionModel     diffusers.py
+             └─ VLLM               vllm/vllm.py     a non-PyTorch engine, straight off Remotable
+```
 
-### When you actually need a new runtime
+`NNsight` (`base.py`) is a separate leaf: `class NNsight(Envoy)` with an empty body —
+a thin, named `Envoy`. It wraps an **already-instantiated** `nn.Module` and has no
+`_load`, no `dispatch`, no `scan` (those come from the mixins).
 
-If you're wrapping a stock PyTorch model that does standard `forward(...) -> tensor`, plain `NNsight(model)` already works. You only need a new runtime class when one of these is true:
+## Pick a base class
 
-- The model lives in a different process (vLLM, Ray actors, a remote service).
-- The activation tensor layout differs from `[batch, seq, hidden]` (vLLM's flat `[total_tokens, hidden]`, diffusion's `[batch * num_images_per_prompt * 2, ...]`).
-- The forward / generate path is split across multiple stages that you want to hook independently (vLLM: forward, logits, sampling).
-- Inputs need non-trivial batching (re-padding, attention mask merging, image batching).
-- You expose engine-internal values that aren't `nn.Module` outputs (`model.logits`, `model.samples`).
+- **`NNsight(module)`** — you already have the `nn.Module`. Nothing to add.
+- **`Loadable`** — you construct the model from a spec (`_load(*args)`), not a passed
+  module.
+- **`Meta`** — you want a meta-device tree built up front (so users build the Envoy
+  tree without weights) and real weights loaded lazily on first run via `dispatch()`.
+- **`Remotable`** — the model should be runnable on NDIF or via `remote="local"`.
+- **`HuggingFaceModel`** — it loads from the HF Hub by repo id.
+- **`VLLM`** shows the deepest case: a non-PyTorch engine off `Remotable` directly.
 
-### What you need to implement
+## Extension points
 
-| Piece | Required? | Reference |
-|-------|-----------|-----------|
-| Subclass of `NNsight` / `LanguageModel` / `RemoteableMixin` | Yes | `src/nnsight/modeling/vllm/vllm.py:43` |
-| `_load_meta(repo_id, **kwargs)` | Yes (for lazy loading) | `src/nnsight/modeling/vllm/vllm.py:135` |
-| `_load(repo_id, **kwargs)` | Yes (for real loading) | `src/nnsight/modeling/vllm/vllm.py:171` |
-| `_prepare_input(*inputs, **kwargs)` | Required if multi-input invokes are supported | `src/nnsight/modeling/vllm/vllm.py:220` |
-| `_batch(batched_input, *args, **kwargs)` | Required if `_prepare_input` returns `batch_size > 0` for multiple invokes | `src/nnsight/modeling/vllm/vllm.py:330` |
-| Custom `Batcher` subclass | Required if your tensor layout differs from `[batch, ...]` | `src/nnsight/modeling/vllm/batching.py:15`, `src/nnsight/intervention/batching.py:325` |
-| `_batcher_class()` classmethod | Required if you have a custom batcher | `src/nnsight/modeling/diffusion.py:282` |
-| `__call__(...)` | Yes — called by the interleaving tracer to actually run a forward pass | `src/nnsight/modeling/vllm/vllm.py:409` |
-| `__nnsight_generate__(...)` | Optional — separate generate path | `src/nnsight/modeling/language.py:140`, `src/nnsight/modeling/diffusion.py:474` |
-| `interleave(fn, *args, **kwargs)` | Optional — override if your runtime needs custom dispatch logic | `src/nnsight/modeling/vllm/vllm.py:456` |
-| eproperties for engine-internal values | As needed | `src/nnsight/modeling/vllm/vllm.py:102` (`logits`, `samples`) |
-| Custom tracer subclass | Only if you need async or non-standard tracing semantics | `src/nnsight/modeling/vllm/async_tracer.py` |
+### Loading — `_load_meta` and `_load`
 
-### Step-by-step
+- `_load(*args, **kwargs) -> nn.Module` (`loadable.py:19`, `NotImplementedError` by
+  default) constructs and returns the real model. `Loadable.__init__` calls it unless
+  the first arg is already an `nn.Module`.
+- `_load_meta(*args, **kwargs) -> nn.Module` (`meta.py:136`) builds a **meta-device**
+  version so the Envoy tree exists without GPU memory. `Meta.__init__` runs it inside
+  `with MetaDevice():` (which forces every tensor onto the meta device, `meta.py:31`)
+  unless `dispatch=True` or an `nn.Module` was passed. `MetaDevice.real()` suspends
+  the forcing for parts of a build that need real tensors.
+- `dispatch()` (`meta.py:139`) calls `_load(*self.args, **self.kwargs)` then
+  `_update(model)` to re-point the meta tree at real weights. It runs automatically on
+  the first `interleave` if not already dispatched and not under fake tensors
+  (`meta.py:177`). Override `_load`, not `dispatch`, if loading needs preconditions —
+  vLLM tears down its meta process group inside `_load` (`vllm.py:191`).
 
-#### 1. Pick a base class
+`HuggingFaceModel` implements both from a repo id: `_load_meta` (`huggingface.py:51`)
+via `AutoConfig` + `from_config`; `_load` (`:57`) via `from_pretrained`.
 
-- `NNsight` — base class for arbitrary `nn.Module` wrapping.
-- `LanguageModel` — adds tokenization and HuggingFace integration.
-- `HuggingFaceModel` / `TransformersModel` — useful as a halfway point if you load via `from_pretrained` but customize execution.
-- `RemoteableMixin` — adds `_remoteable_*` hooks for NDIF support. The vLLM class extends this so it can be sent over remote.
+### Input & batching — `_batch_size` and `_batch`
 
-vLLM extends `RemoteableMixin` directly (`src/nnsight/modeling/vllm/vllm.py:43`); diffusion extends `HuggingFaceModel` (`src/nnsight/modeling/diffusion.py:221`); LanguageModel extends `TransformersModel`.
+The standard tracer always uses `Batcher(self.envoy)` (`intervention/tracer.py:245`),
+which calls back into your model:
 
-#### 2. Implement `_load_meta` and `_load`
+- `_batch_size(*inputs, **kwargs) -> int` (`envoy.py:588`) — how many batch rows an
+  invoke contributes. **Base default:** `1` if there's any input else `0`. Override to
+  report the true row count (`TransformersModel._batch_size`, `transformers.py:570`,
+  counts a prompt/list/tensor).
+- `_batch(invokes, fn) -> (args, kwargs)` (`envoy.py:597`) — combine multiple invokes'
+  inputs into one call. **Base default:** pass a single invoke straight through; two or
+  more raise `NotImplementedError`. Override to merge (`TransformersModel._batch`,
+  `transformers.py:633`, dispatches by `fn.__name__` and pads/collates; `VLLM._batch`,
+  `vllm.py:245`, extends prompt/params/lora lists — one request per invoke).
 
-`_load_meta(repo_id, **kwargs)` should load a meta-tensor model so users can build the Envoy tree without GPU memory. `_load(repo_id, **kwargs)` should load real weights and connect the engine. Both return the wrapped `nn.Module` (or a wrapper — vLLM uses a meta vLLM config-only model in `_load_meta`; diffusion uses `init_empty_weights()` to create meta-tensor diffusion components).
+For an **exotic tensor layout** (a first dim that isn't the batch — vLLM's flat
+`[total_tokens, hidden]`, tensor-parallel shards), subclass `Batcher`
+(`intervention/batching.py:66`) and override `batching`/`narrow`/`widen`, then wire
+your subclass onto the tracer's `self.batcher` (handed to `interleave(batcher=...)`)
+inside your own execution path.
+`VLLMBatcher` (`vllm/batching.py:32`) is the reference — it's installed by the vLLM
+model runner, not by the generic tracer. See
+[batching-internals.md](./batching-internals.md).
 
-#### 3. Implement `_prepare_input`
+### Execution — the forward the tracer runs
 
-Normalize whatever the user can pass to `model.trace(...)` or `tracer.invoke(...)` into a `(args, kwargs, batch_size)` tuple consumed by your `__call__`. Return `batch_size = 0` for empty inputs.
+`trace(...)` runs `fn`, defaulting to `"__call__"`. A runtime usually points it at its
+own method:
 
-vLLM enforces one prompt per invoke and accepts strings, token ID lists, or HuggingFace tokenizer dicts (`src/nnsight/modeling/vllm/vllm.py:220`). `LanguageModel` accepts batched prompts in a single invoke and handles tokenization (`src/nnsight/modeling/language.py:241`).
+- Override `trace` to set `kwargs.setdefault("fn", self._call)` (and to inject a
+  custom backend/tracer — see below). `TransformersModel.trace` (`transformers.py:373`)
+  and `VLLM.trace` (`vllm.py:330`) both do this.
+- `_call(...)` runs the actual forward/engine request. `TransformersModel._call`
+  (`transformers.py:546`) preprocesses inputs and calls the module; `VLLM._call`
+  (`vllm.py:371`) serializes mediators onto the requests and drives the engine.
+- Separate `generate` / `pipe` paths are just more `@traceable` methods that set a
+  different `fn` (`TransformersModel.generate` runs the model and returns token ids;
+  `pipe` runs the whole pipeline).
+- Override `interleave` (`envoy.py:612`) only if your runtime doesn't run a local
+  forward. `VLLM.interleave` (`vllm.py:434`) starts no local workers — they're
+  serialized onto the engine's requests and started on the other side.
 
-#### 4. Implement `_batch`
+### Runtime-internal values — `eproperty`
 
-Called from the second input invoke onward. Combine `batched_input` (the running tuple from previous invokes) with the new invoke's prepared args/kwargs. Return the merged `(args, kwargs)`.
+To expose an engine value that isn't a module output (logits, samples, telemetry),
+add an `eproperty` to your model class. The decorated stub is the read-side
+preprocess — `def logits(self, value): return value` for an identity view — and its
+location is `"{self.path}.{key}"`. Serve it where the value is produced, inside an
+open interleaver context, with the eproperty's `.provide`:
+`type(model).logits.provide(model, value)` (which forwards to
+`self.interleaver.handle(location, value)` and returns it, edited if a worker wrote
+back). Give it a `description=` to surface it in the model's repr. vLLM's
+`logits`/`samples` (`vllm.py:144`, served in `GPUModelRunner.py:450`/`:472`) are the
+reference. Full recipe in [extending-envoy.md](./extending-envoy.md).
 
-vLLM extends prompt / params / lora_request lists (`src/nnsight/modeling/vllm/vllm.py:330`). `LanguageModel` re-pads `input_ids` and merges attention masks (`src/nnsight/modeling/language.py:309`). Diffusion extends a flat prompt list (`src/nnsight/modeling/diffusion.py:375`).
+### Remote support — `Remotable` hooks
 
-If multi-invoke isn't supported, leave `_batch` unimplemented — `Batchable._batch` raises `NotImplementedError` with a helpful message (`src/nnsight/intervention/batching.py:104`).
+If the runtime should run on NDIF, extend `Remotable` and implement:
 
-#### 5. Custom `Batcher` (only if tensor layout differs)
+- `_remoteable_model_key() -> str` (`remotable.py:108`) and classmethod
+  `_remoteable_from_model_key(cls, key, **kwargs)` (`:111`) — the server-side identity.
+  `to_model_key()` combines them with the class import path (`:125`).
+- `_remoteable_persistent_objects() -> dict` (`:97`) — the `{id: object}` map the
+  server resolves persistent IDs against (base: `{"Interleaver": ...}` plus a
+  `Module:<path>` per envoy). Add your tokenizer/preprocessors here and tag them with
+  `obj._persistent_id = name` in `__getstate__` so they're referenced, not pickled
+  (`TransformersModel`, `transformers.py:460`/`:533`; `VLLM`, `vllm.py:456`/`:461`).
+- `_remoteable_get_env()` / `_remoteable_set_env(env)` (`:79`/`:88`) — per-request
+  environment applied server-side (e.g. `TransformersModel` transports a PEFT adapter).
+- `_remoteable_class()` (`:115`) — return the canonical class if yours is a deprecated
+  alias, so it shares one server key (`LanguageModel` returns `TransformersModel`).
 
-If your runtime produces tensors with a non-`[batch, ...]` first dim — flat tokens, image batches, guidance-doubled batches — subclass `Batcher` and override `_narrow` / `_swap` (and possibly `narrow` / `swap` if you need pre-slice gather/scatter like `VLLMBatcher`). Return your subclass from `_batcher_class()` (a classmethod on the model).
+`__getstate__` on `Envoy` (`envoy.py:248`) already tags the interleaver and modules;
+runtimes with a live engine handle null it out (`VLLM.__getstate__` nulls
+`vllm_entrypoint`; `DiffusionModel.__getstate__` pops `pipeline`). See
+[serialization.md](./serialization.md).
 
-References: `DiffusionBatcher` (`src/nnsight/intervention/batching.py:325`) for guidance/image batching, `VLLMBatcher` (`src/nnsight/modeling/vllm/batching.py:15`) for flat tokens + tensor parallelism.
+### Custom backend / tracer
 
-See [batching-internals.md](./batching-internals.md) for the full Batcher contract.
-
-#### 6. Implement `__call__`
-
-This is what `model.interleave(fn, *args, **kwargs)` ends up calling. It runs the forward / generate path on the underlying engine and triggers value provision through your eproperties.
-
-vLLM's `__call__` (`src/nnsight/modeling/vllm/vllm.py:409`) calls `_serialize_mediators` to embed mediators in `SamplingParams.extra_args`, runs `vllm_entrypoint.generate(...)`, and pushes saves back to the user's frame. Diffusion's `__call__` runs the pipeline with `num_inference_steps=1` for fast tracing (`src/nnsight/modeling/diffusion.py:457`). LanguageModel-style models inherit a generic forward call.
-
-If you have a separate generate path, define `__nnsight_generate__` — see `LanguageModel.__nnsight_generate__` (`src/nnsight/modeling/language.py:140`) and `DiffusionModel.__nnsight_generate__` (`src/nnsight/modeling/diffusion.py:474`).
-
-#### 7. eproperties for engine-internal values
-
-Anything that is **not** an `nn.Module` output but should be accessible from intervention code goes through `eproperty`. vLLM exposes `logits` and `samples` this way (`src/nnsight/modeling/vllm/vllm.py:102,112`). On the runtime side, you call `type(self).<name>.provide(self, value)` to feed the value into the interleaver — see `NNsightGPUModelRunner.sample_tokens` (`src/nnsight/modeling/vllm/model_runners/GPUModelRunner.py:402`) for the pattern.
-
-See [eproperty-deep-dive.md](./eproperty-deep-dive.md) for the full eproperty mechanics.
-
-#### 8. Custom tracer (only for async or non-standard semantics)
-
-If your runtime is async or needs to defer execution past the trace context, subclass `RemoteInterleavingTracer` (or `InterleavingTracer`) and override `execute()`. vLLM's async path uses `AsyncInterleavingTracer` (see `src/nnsight/modeling/vllm/async_tracer.py`) which prepares mediators without running generation, then `AsyncVLLMBackend` reads the prepared state.
-
-Wire the tracer in by overriding `model.trace(...)` to inject `tracer_cls=YourTracer` (vLLM does this at `src/nnsight/modeling/vllm/vllm.py:445`).
-
-#### 9. Optional: `RemoteableMixin` hooks
-
-If your runtime should be runnable on NDIF, extend `RemoteableMixin` and override:
-
-- `_remoteable_model_key()` — returns the string used by NDIF to identify the model.
-- `_remoteable_persistent_objects()` — returns a `{name: object}` dict for persistent ID resolution. Tag the objects with `obj._persistent_id = name` in `__getstate__`. See `LanguageModel.__getstate__` (`src/nnsight/modeling/language.py:383`) and `VLLM.__getstate__` (`src/nnsight/modeling/vllm/vllm.py:474`).
-
-#### 10. `dispatch()` / `dispatched`
-
-Inherited from `MetaMixin`. By default, calling `model.dispatch()` calls your `_load(...)`. If your runtime needs preconditions before dispatch (vLLM destroys distributed environments first, see `src/nnsight/modeling/vllm/vllm.py:175`), override `_load` itself rather than `dispatch`.
-
-If your runtime needs late dispatch (load on first trace), override `interleave(self, fn, *args, **kwargs)` to call `self.dispatch()` if `not self.dispatched`. vLLM does this at `src/nnsight/modeling/vllm/vllm.py:456`.
-
-## Key files / classes (reference implementations)
-
-- `src/nnsight/modeling/vllm/vllm.py:43` — `VLLM` (most complete reference for a non-PyTorch runtime)
-- `src/nnsight/modeling/vllm/README.md` — extended narrative for vLLM
-- `src/nnsight/modeling/diffusion.py:221` — `DiffusionModel` (custom batcher, custom call/generate split)
-- `src/nnsight/modeling/language.py:21` — `LanguageModel` (tokenization + standard PyTorch forward)
-- `src/nnsight/modeling/vlm.py` — `VisionLanguageModel` (multimodal extension of `LanguageModel`)
-- `src/nnsight/intervention/batching.py:35` — `Batchable` mixin contract
-- `src/nnsight/intervention/envoy.py` — `Envoy` and `eproperty` definitions
+Inject a backend or `tracer_cls` from your `trace` override for non-standard
+execution (async streaming, HTTP serve). vLLM injects `AsyncVLLMBackend` +
+`VLLMTracer` for `mode="async"` and `LocalServeBackend` for `serve=url`
+(`vllm.py:330`). See [vllm-integration.md](./vllm-integration.md) and
+[adding-a-new-backend.md](./adding-a-new-backend.md).
 
 ## Lifecycle of a runtime trace
 
-1. User: `with model.trace(input)`.
-2. Tracer captures source.
-3. On `__exit__`, `Backend.__call__` compiles the function.
-4. `tracer.execute(fn)` runs `_setup_interleaver`, which calls `Batcher.batch(model, *args, **kwargs)` for each invoke. `_prepare_input` and `_batch` run here.
-5. `model.interleave(self.fn, *args, **kwargs)` is called. Your `__call__` runs the engine.
-6. Inside the engine's forward path, mediator hooks fire. `Batcher.narrow`/`swap` slice activations per invoke. eproperties surface engine-internal values via `<eproperty>.provide(model, value)`.
-7. Saved values are pushed back to the user's frame via `tracer.push`.
+1. `with model.trace(input)` — the tracer captures the block.
+2. On `__exit__`, the backend compiles the block; `Batcher(self.envoy)` runs each
+   invoke's `_batch_size`/`_batch` to build the call input and per-invoke groups.
+3. `model.interleave(fn, *args, **kwargs)` runs (dispatching first if needed). `fn`
+   (your `_call`/`generate`/pipeline) executes the forward; hooks + `handle` serve
+   parked interventions; the batcher narrows/widens per invoke.
+4. The run's return is served at `"result"`; saved values are pushed back into the
+   caller's frame.
 
-## Extension points (within your runtime)
+## Reference implementations
 
-- **Per-step hooks for multi-step engines.** Use `interleaver.default_all = num_steps` to set the default iteration count (`LanguageModel.__nnsight_generate__` does this at `src/nnsight/modeling/language.py:151`; `DiffusionModel._run_pipeline` does it at `src/nnsight/modeling/diffusion.py:431`).
-- **Cross-step variable sharing.** vLLM grafts globals across mediators in `process_new_reqs` (`src/nnsight/modeling/vllm/model_runners/GPUModelRunner.py:96`). Diffusion handles this through standard `Globals.saves`.
-- **Telemetry / profiling.** Hook your runtime's metrics into the eproperty mechanism so users can `.save()` them like any other value.
+- `src/nnsight/modeling/vllm/vllm.py` — the deepest case (non-PyTorch, two processes, async, serve)
+- `src/nnsight/modeling/transformers.py` — pipeline-backed HF, full custom batching
+- `src/nnsight/modeling/diffusion.py` — pipeline-as-module, custom loading
+- `src/nnsight/modeling/base.py` — the trivial `NNsight(Envoy)` leaf
 
 ## Related
 
-- [`src/nnsight/modeling/vllm/README.md`](../../src/nnsight/modeling/vllm/README.md) — canonical vLLM reference (don't reproduce, link)
-- [vllm-integration.md](./vllm-integration.md) — vLLM internals beyond the user surface
-- [batching-internals.md](./batching-internals.md) — `Batcher` / `Batchable` contract
-- [eproperty-deep-dive.md](./eproperty-deep-dive.md) — eproperty mechanics for engine-internal values
-- [serialization.md](./serialization.md) — needed if your runtime supports remote
+- [extending-envoy.md](./extending-envoy.md) — exposing runtime-internal values
+- [vllm-integration.md](./vllm-integration.md) — vLLM as the reference non-PyTorch runtime
+- [batching-internals.md](./batching-internals.md) — the `Batcher` contract
+- [serialization.md](./serialization.md) — the `Remotable` persistent-object protocol

@@ -1,150 +1,79 @@
+from __future__ import annotations
+
 import json
-import os
-from typing import Optional, Union
+from typing import Any, Optional
 
-from huggingface_hub import HfApi, constants
-from huggingface_hub.file_download import repo_folder_name
-from typing_extensions import Self
+import torch
 
-from .mixins import RemoteableMixin
+from .mixins.remotable import Remotable
 
-ID_CACHE = {}
+# Canonical repo ids, keyed by the user-supplied id (resolves casing/redirects
+# so different spellings of the same model produce the same remote key).
+_ID_CACHE: dict[str, str] = {}
 
 
-class HuggingFaceModel(RemoteableMixin):
-    """Base class for NNsight wrappers around HuggingFace Hub models.
+class HuggingFaceModel(Remotable):
+    """nnsight wrapper around a HuggingFace Hub model.
 
-    Adds HuggingFace repository handling (repo ID, revision) and
-    persistent edit export/import on top of :class:`RemoteableMixin`.
+    Builds the architecture on the meta device from the repo's config and loads
+    real weights on dispatch, both via transformers. The transformers auto class
+    is configurable through ``AUTO_CLASS`` so subclasses can target, e.g.,
+    ``AutoModelForCausalLM``.
 
     Args:
-        repo_id (str): HuggingFace repository ID (e.g. ``"openai-community/gpt2"``)
-            or a pre-loaded ``torch.nn.Module``.
-        *args: Forwarded to the parent mixin chain.
-        revision (Optional[str]): Git revision (branch, tag, or commit hash)
-            of the model repository. Defaults to ``None`` (latest).
-        import_edits (Union[bool, str]): If ``True``, import previously
-            exported edits using the default variant. If a string, use
-            it as the variant name. Defaults to ``False``.
-        **kwargs: Forwarded to the parent mixin chain and ultimately to
-            the model loading function.
-
-    Attributes:
-        repo_id (str): The HuggingFace repository ID.
-        revision (Optional[str]): The repository revision.
+        repo_id: A HuggingFace repo id (e.g. "openai-community/gpt2") or an
+            already-loaded torch.nn.Module.
+        revision: Optional git revision (branch/tag/commit) of the repo.
     """
+
+    AUTO_CLASS = "AutoModel"
 
     def __init__(
         self,
-        repo_id: str,
-        *args,
+        repo_id: Any,
+        *args: Any,
         revision: Optional[str] = None,
-        import_edits: Union[bool, str] = False,
-        **kwargs,
-    ):
-
+        **kwargs: Any,
+    ) -> None:
         self.repo_id = (
-            repo_id
-            if isinstance(repo_id, str)
-            else getattr(repo_id, "name_or_path", None)
+            repo_id if isinstance(repo_id, str) else getattr(repo_id, "name_or_path", None)
         )
         self.revision = revision
+        # revision is used by _load/_load_meta via self.revision, not threaded
+        # through super (it must not reach Envoy.__init__ on the passthrough).
+        super().__init__(repo_id, *args, **kwargs)
 
-        super().__init__(repo_id, *args, revision=revision, **kwargs)
+    def _auto(self) -> Any:
+        import transformers  # lazy: transformers is heavy and only needed to load
 
-        if import_edits:
+        return getattr(transformers, self.AUTO_CLASS)
 
-            if isinstance(import_edits, str):
+    def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        from transformers import AutoConfig
 
-                self.import_edits(variant=import_edits)
+        config = AutoConfig.from_pretrained(repo_id, revision=self.revision)
+        return self._auto().from_config(config)
 
-            else:
-
-                self.import_edits()
-
-    def export_edits(
-        self,
-        name: Optional[str] = None,
-        export_dir: Optional[str] = None,
-        variant: str = "__default__",
-    ):
-        """Export persistent model edits to disk.
-
-        Edits created via ``model.edit(inplace=True)`` are serialized
-        and saved so they can be reloaded later with :meth:`import_edits`.
-
-        Args:
-            name (Optional[str]): Export name. Defaults to a name
-                derived from the HuggingFace repo ID.
-            export_dir (Optional[str]): Directory to save exports.
-                Defaults to the HuggingFace cache under ``nnsight/exports``.
-            variant (str): Named variant for this set of edits.
-                Defaults to ``'__default__'``.
-        """
-
-        if name is None:
-            name = repo_folder_name(repo_id=self.repo_id, repo_type="model")
-
-            if export_dir is None:
-                export_dir = os.path.join(
-                    constants.HF_HUB_CACHE, name, "nnsight", "exports"
-                )
-                name = ""
-
-        super().export_edits(name, export_dir=export_dir, variant=variant)
-
-    def import_edits(
-        self,
-        name: Optional[str] = None,
-        export_dir: Optional[str] = None,
-        variant: str = "__default__",
-    ):
-        """Import previously exported model edits from disk.
-
-        Loads edits that were saved with :meth:`export_edits` and
-        applies them as persistent in-place edits on this model.
-
-        Args:
-            name (Optional[str]): Export name. Defaults to a name
-                derived from the HuggingFace repo ID.
-            export_dir (Optional[str]): Directory to load exports from.
-                Defaults to the HuggingFace cache under ``nnsight/exports``.
-            variant (str): Named variant to load.
-                Defaults to ``'__default__'``.
-        """
-
-        if name is None:
-            name = repo_folder_name(repo_id=self.repo_id, repo_type="model")
-
-            if export_dir is None:
-                export_dir = os.path.join(
-                    constants.HF_HUB_CACHE, name, "nnsight", "exports"
-                )
-                name = ""
-
-        super().import_edits(name, export_dir=export_dir, variant=variant)
+    def _load(self, repo_id: Any, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        if isinstance(repo_id, torch.nn.Module):
+            return repo_id
+        return self._auto().from_pretrained(repo_id, revision=self.revision, **kwargs)
 
     def _remoteable_model_key(self) -> str:
+        # Canonicalize the repo id via the Hub (cached) so the server resolves
+        # the same model regardless of how the id was spelled.
+        if self.repo_id not in _ID_CACHE:
+            from huggingface_hub import HfApi
 
-        if self.repo_id not in ID_CACHE:
-            ID_CACHE[self.repo_id] = HfApi().model_info(self.repo_id).id
-
-        repo_id = ID_CACHE[self.repo_id]
+            _ID_CACHE[self.repo_id] = HfApi().model_info(self.repo_id).id
 
         return json.dumps(
-            {
-                "repo_id": repo_id,
-                "revision": self.revision,
-            }  # , "torch_dtype": str(self._model.dtype)}
+            {"repo_id": _ID_CACHE[self.repo_id], "revision": self.revision}
         )
 
     @classmethod
-    def _remoteable_from_model_key(cls, model_key: str, **kwargs) -> Self:
-
-        kwargs = {**json.loads(model_key), **kwargs}
-
-        repo_id = kwargs.pop("repo_id")
-
-        revision = kwargs.pop("revision", "main")
-
-        return cls(repo_id, revision=revision, **kwargs)
+    def _remoteable_from_model_key(cls, model_key: str, **kwargs: Any) -> HuggingFaceModel:
+        data = {**json.loads(model_key), **kwargs}
+        repo_id = data.pop("repo_id")
+        revision = data.pop("revision", None)
+        return cls(repo_id, revision=revision, **data)

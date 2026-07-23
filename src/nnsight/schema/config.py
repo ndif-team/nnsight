@@ -1,105 +1,144 @@
+from __future__ import annotations
+
 import os
-import warnings
-from typing import Optional
 import sys
+from importlib.resources import files
+from pathlib import Path
+from typing import Any, Optional
+
 import yaml
 from pydantic import BaseModel
 
 
-class ApiConfigModel(BaseModel):
+class ApiConfig(BaseModel):
+    """Settings for talking to the NDIF service (``CONFIG.API``)."""
+
+    #: Base URL of the NDIF API. Overridden by the ``NDIF_HOST`` env var.
     HOST: str = "https://api.ndif.us"
-    COMPRESS: bool = True
+    #: NDIF API key for remote requests. Set via ``NDIF_API_KEY`` (or a Colab
+    #: secret of that name), or persisted with :meth:`Config.set_default_api_key`.
     APIKEY: Optional[str] = None
+    #: Whether to zstd-compress the request payload; also tells the server to
+    #: compress the result blob it returns.
+    COMPRESS: bool = True
 
 
-class AppConfigModel(BaseModel):
-    """
-    REMOTE_LOGGING: Whether to enable remote logging updates for remote NDIF.
-    PYMOUNT: Whether to enable pymount. This allows calling .save() on values in a trace.
-        If False, use nnsight.save() instead. Pymounting has some performance cost.
-    DEBUG: Whether to enable debug mode. Errors within a trace will include inner nnsight stack traces.
-    CACHE_DIR: The directory to cache the model.
-    CROSS_INVOKER: Whether to enable cross-invoker. This allows you to refernce variable directly from one invoker to another.
-        This has some performance cost.
-    """
+class AppConfig(BaseModel):
+    """Client-side behavior settings (``CONFIG.APP``)."""
 
-    REMOTE_LOGGING: bool = True
-    PYMOUNT: bool = True
+    #: Whether to run remote jobs verbosely (payload/result sizes, per-status
+    #: lines) and show full tracebacks. Also enabled by the ``NNSIGHT_DEBUG`` env
+    #: var.
     DEBUG: bool = False
-    CACHE_DIR: str = "~/.cache/nnsight/"
-    CROSS_INVOKER: bool = True
-    TRACE_CACHING: bool = False
-
-    def __setattr__(self, name, value):
-        if name == "TRACE_CACHING" and value is True:
-            warnings.warn(
-                "TRACE_CACHING is deprecated. Trace caching (source, AST, and code object caching) "
-                "is now always enabled. Setting TRACE_CACHING has no effect and will be "
-                "removed in a future version.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        super().__setattr__(name, value)
+    #: Whether to show the live status display while a remote job runs.
+    REMOTE_LOGGING: bool = True
+    #: Whether to mount ``.save()`` on every object so ``value.save()`` works in a
+    #: trace. When ``False`` (or if the C extension didn't build), use
+    #: ``nnsight.save(value)`` instead. Mounting adds ``.save`` to all objects
+    #: process-wide, so anything checking ``hasattr(x, "save")`` will see it.
+    PYMOUNT: bool = True
 
 
-class ConfigModel(BaseModel):
-    API: ApiConfigModel = ApiConfigModel()
-    APP: AppConfigModel = AppConfigModel()
+def _read_yaml(path: Any) -> dict:
+    # Works for both importlib.resources Traversables and pathlib Paths.
+    try:
+        text = path.read_text()
+    except (FileNotFoundError, OSError):
+        return {}
+    return yaml.safe_load(text) or {}
+
+
+def _user_config_path() -> Path:
+    override = os.environ.get("NNSIGHT_CONFIG")
+    if override:
+        return Path(override).expanduser()
+    base = os.environ.get("XDG_CONFIG_HOME", "~/.config")
+    return Path(base).expanduser() / "nnsight" / "config.yaml"
+
+
+def _colab_userdata(key: str) -> Optional[str]:
+    """Best-effort read of a Colab notebook secret; None outside Colab.
+
+    Swallows every error (not-in-Colab, secret missing, access not granted) so a
+    non-Colab environment falls through silently.
+    """
+    try:
+        from google.colab import userdata
+    except ImportError:
+        return None
+    try:
+        return userdata.get(key) or None
+    except Exception:
+        return None
+
+
+def _merge(base: dict, override: dict) -> dict:
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+class Config(BaseModel):
+    """The nnsight config, exposed as the module-level singleton :data:`CONFIG`.
+
+    Loaded once at import with the precedence shipped defaults < user config file
+    < environment. The user file lives at ``$XDG_CONFIG_HOME/nnsight/config.yaml``
+    (or ``NNSIGHT_CONFIG`` if set); :meth:`save` writes the current values back to
+    it. Environment overrides: ``NDIF_HOST``, ``NDIF_API_KEY``, ``NNSIGHT_DEBUG``.
+    """
+
+    API: ApiConfig = ApiConfig()
+    APP: AppConfig = AppConfig()
 
     @classmethod
-    def load(cls, path: str) -> "ConfigModel":
-        """Load config from YAML file, then apply environment overrides."""
-        with open(os.path.join(path, "config.yaml"), "r") as file:
-            config = cls(**yaml.safe_load(file))
+    def load(cls) -> Config:
+        # shipped defaults < user file < environment
+        data = _read_yaml(files("nnsight") / "config.yaml")
 
-        config.from_env()
-        config.from_cli()
+        user_path = _user_config_path()
+        if user_path is not None and user_path.exists():
+            _merge(data, _read_yaml(user_path))
 
+        config = cls(**data)
+        config._from_env()
+        config._from_cli()
         return config
 
-    def from_env(self) -> None:
-        """Override config values from environment variables or Colab userdata."""
-        # Check environment variable first
-        env_key = os.environ.get("NDIF_API_KEY", None)
-        if env_key:
-            self.API.APIKEY = env_key
-        else:
-            # Try Colab userdata
-            try:
-                from google.colab import userdata
+    def _from_env(self) -> None:
+        # NDIF_API_KEY wins; otherwise fall back to a Colab secret of the same
+        # name (leaving any key from the config files in place if neither is set).
+        api_key = os.environ.get("NDIF_API_KEY")
+        if api_key:
+            self.API.APIKEY = api_key
+        elif self.API.APIKEY is None:
+            self.API.APIKEY = _colab_userdata("NDIF_API_KEY")
 
-                key = userdata.get("NDIF_API_KEY")
-                if key:
-                    self.API.APIKEY = key
-            except (ImportError, ModuleNotFoundError, Exception):
-                pass
-
-        host = os.environ.get("NDIF_HOST", None)
+        host = os.environ.get("NDIF_HOST")
         if host:
             self.API.HOST = host
 
-    def from_cli(self) -> None:
-
-        args = sys.argv
-        if "-d" in args or "--debug" in args:
+        if os.environ.get("NNSIGHT_DEBUG"):
             self.APP.DEBUG = True
 
-    def set_default_api_key(self, apikey: str):
+    def _from_cli(self) -> None:
+        # `-v`/`--verbose` on the launching command turns on debug mode (verbose
+        # remote logging and full, unfiltered tracebacks).
+        if "-v" in sys.argv or "--verbose" in sys.argv:
+            self.APP.DEBUG = True
 
-        self.API.APIKEY = apikey
+    def save(self) -> None:
+        """Persist the current config to the user config file (created if needed)."""
+        path = _user_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(self.model_dump()))
 
+    def set_default_api_key(self, api_key: str) -> None:
+        """Set the NDIF API key and persist it to the user config file."""
+        self.API.APIKEY = api_key
         self.save()
 
-    def set_default_app_debug(self, debug: bool):
 
-        self.APP.DEBUG = debug
-
-        self.save()
-
-    def save(self):
-
-        from .. import PATH
-
-        with open(os.path.join(PATH, "config.yaml"), "w") as file:
-
-            yaml.dump(self.model_dump(), file)
+CONFIG = Config.load()

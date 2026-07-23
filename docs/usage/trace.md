@@ -2,30 +2,38 @@
 title: Trace
 one_liner: Single forward pass with interventions via `model.trace(input)`.
 tags: [usage, tracing, core]
-related: [docs/usage/invoke-and-batching.md, docs/usage/generate.md, docs/usage/scan.md, docs/usage/save.md, docs/usage/access-and-modify.md]
-sources: [src/nnsight/intervention/tracing/tracer.py:269, src/nnsight/intervention/envoy.py:248, src/nnsight/modeling/mixins/remoteable.py:31, src/nnsight/intervention/tracing/base.py:47]
+related: [docs/usage/invoke-and-batching.md, docs/usage/generate.md, docs/usage/pipe.md, docs/usage/scan.md, docs/usage/save.md, docs/usage/access-and-modify.md]
+sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/envoy.py, src/nnsight/tracing/tracer.py]
 ---
 
 # Trace
 
 ## What this is for
 
-`model.trace(...)` opens an `InterleavingTracer` context that runs a single forward pass of the wrapped model while letting your code read and modify intermediate activations. The body of the `with` block is captured, compiled into a function, and executed in a worker thread that synchronizes with the model's forward pass through hook events.
+`model.trace(...)` opens an `InterleavingTracer` context that runs a single forward pass of the wrapped model while letting your code read and modify intermediate activations. The body of the `with` block is captured (its source is parsed and compiled — see `src/nnsight/tracing/tracer.py`), then run in a **greenlet worker** (a `Mediator`) that synchronizes with the model's forward pass through hook events.
 
 ## When to use / when not to use
 
 - Use for a single forward call (no token-by-token generation).
-- Use `model.generate(...)` when you need multi-token autoregressive output. See `docs/usage/generate.md`.
-- Use `model.scan(...)` when you only need to validate shapes/operations. See `docs/usage/scan.md`.
-- Use `model.edit(...)` to make persistent interventions. See `docs/usage/edit.md`.
+- Use `model.generate(...)` for multi-token autoregressive output (returns token ids). See `docs/usage/generate.md`.
+- Use `model.pipe(...)` to run the whole task pipeline and get its decoded records. See `docs/usage/pipe.md`.
+- Use `model.scan(...)` to validate shapes/operations without real compute. See `docs/usage/scan.md`.
+- Use `model.edit(...)` for persistent interventions. See `docs/usage/edit.md`.
 
 ## Canonical pattern
 
 ```python
-with model.trace("Hello world"):
+from nnsight.modeling.transformers import TransformersModel
+
+model = TransformersModel("openai-community/gpt2", dispatch=True)
+
+with model.trace("The Eiffel Tower is in the city of"):
     hidden = model.transformer.h[-1].output.save()
-    model.transformer.h[0].output[:] = 0
-    logits = model.lm_head.output.save()
+    model.transformer.h[0].output[:] = 0        # zero the first block's output
+    logits = model.output.logits.save()
+
+print(hidden.shape, logits.shape)
+# torch.Size([1, 10, 768]) torch.Size([1, 10, 50257])
 ```
 
 ## Two equivalent forms
@@ -35,82 +43,88 @@ with model.trace("Hello world"):
 ```python
 # Implicit single invoke (input goes to .trace)
 with model.trace("Hello"):
-    out = model.lm_head.output.save()
+    out = model.output.logits.save()
 
 # Explicit invoke (no input on .trace)
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
-        out = model.lm_head.output.save()
+        out = model.output.logits.save()
 ```
 
-`model.trace()` with no input and no invoke raises a `ValueError` ("The model did not execute") — see `src/nnsight/intervention/tracing/tracer.py:351`.
+`model.trace()` with no input and no invoke block raises:
+
+```
+ValueError: trace() needs an input, or at least one `with tracer.invoke(...)` block
+```
 
 ## Multiple invokes (batched)
 
 ```python
 with model.trace() as tracer:
     with tracer.invoke("The Eiffel Tower is in"):
-        out_a = model.lm_head.output[:, -1].save()
+        out_a = model.transformer.h[0].output[0].save()
     with tracer.invoke("The Colosseum is in"):
-        out_b = model.lm_head.output[:, -1].save()
+        out_b = model.transformer.h[0].output[0].save()
 ```
 
-See `docs/usage/invoke-and-batching.md` for empty invokes, batching constraints, and barriers.
+Each invoke's body sees only its own rows of the batch. See `docs/usage/invoke-and-batching.md` for empty invokes, batching constraints, and barriers.
 
 ## Remote execution
 
-`RemoteableMixin.trace` adds `remote=` and `blocking=` kwargs (`src/nnsight/modeling/mixins/remoteable.py:31`):
+`RemoteableMixin.trace` adds `remote=` and `blocking=` kwargs:
 
 ```python
 with model.trace("Hello", remote=True):
-    out = model.lm_head.output.save()
+    out = model.output.logits.detach().cpu().save()
 
 # Non-blocking submission
 with model.trace("Hello", remote=True, blocking=False) as tracer:
-    out = model.lm_head.output.save()
+    out = model.output.logits.save()
 # tracer.backend.job_id, tracer.backend.job_status
 ```
 
-`remote='local'` runs against `LocalSimulationBackend` for client-side debugging of remote serialization paths.
+`remote='local'` runs against `LocalSimulationBackend` for offline debugging of the remote serialize/deserialize path.
 
-## Shape inspection
+## Input formats
 
-For shape-dependent validation (slicing, reshapes, intervention indexing), use the dedicated `model.scan(input)` context, not `.trace()`. See `docs/usage/scan.md`.
+`TransformersModel.trace` accepts every input a forward takes: a string, a list of strings (batched), token-id lists, a 1-D or 2-D tensor, a `BatchEncoding` (positional or unpacked with `**enc`), or `input_ids=`/`attention_mask=` keywords. Mixed formats and unequal lengths are left-padded together into one forward.
 
 ## Tracer object
 
 `with model.trace(...) as tracer:` exposes the `InterleavingTracer`. Useful members:
 
-| Member | Purpose | Source |
-|---|---|---|
-| `tracer.invoke(*args, **kwargs)` | Add another invoke to the batch | `tracing/tracer.py:433` |
-| `tracer.barrier(n)` | Synchronization across invokes | `tracing/tracer.py:551` |
-| `tracer.cache(...)` | Activation cache (returns `Cache.CacheDict`) | `tracing/tracer.py:465` |
-| `tracer.iter[...]` | Step iterator (generation) | `tracing/tracer.py:453` |
-| `tracer.stop()` | Early-exit current forward pass | `tracing/tracer.py:447` |
-| `tracer.result` | Forward return value (eproperty) | `tracing/tracer.py:581` |
-| `tracer.next(step=1)` | Manually advance the iteration cursor | `tracing/tracer.py:460` |
+| Member | Purpose |
+|---|---|
+| `tracer.invoke(*args, **kwargs)` | Add another invoke to the batch |
+| `tracer.barrier(n)` | Synchronize across invokes |
+| `tracer.cache(...)` | Bulk activation cache (returns a `CacheView`) |
+| `tracer.iter[...]` | Per-occurrence targeting (generation steps) |
+| `tracer.all()` | Shorthand for `tracer.iter[:]` |
+| `tracer.stop()` | Early-exit the current forward pass |
+| `tracer.result` | The value the traced call returned |
 
 ## Lifecycle
 
-1. `__enter__` → `Tracer.capture()` parses the with-block source via AST and caches it (`tracing/base.py:204`).
-2. The body never runs in-place — Python tracing raises `ExitTracingException` to skip it (`tracing/base.py:620`).
-3. `__exit__` invokes the configured backend (`ExecutionBackend` by default, `RemoteBackend` for `remote=True`).
-4. `InterleavingTracer.execute` calls `_setup_interleaver` (compiles + runs intervention code, collects batched args) then `model.interleave(fn, ...)` (`tracing/tracer.py:412`).
-5. Saved values are pulled back into the outer frame via `Tracer.push()` (`tracing/base.py:497`).
+1. `__enter__` parses the with-block source via AST and compiles the body (memoized per site).
+2. The body never runs in-place — an `ExitTracingException` skips it.
+3. `__exit__` invokes the backend (in-place by default, `RemoteBackend` for `remote=True`).
+4. `InterleavingTracer.execute` collects invokes/batched args, then `Envoy.interleave` runs the forward alongside the worker greenlets.
+5. Saved values are pushed back into the caller's frame with save-gating (`push_result`).
 
 ## Gotchas
 
-- Inside one invoke, modules **must** be accessed in forward-pass order — the worker thread blocks on a hook event for each request. Out-of-order access raises `OutOfOrderError`. See `docs/gotchas/out-of-order.md`.
-- Saved values must be marked with `.save()` or `nnsight.save(...)` to survive past `__exit__`. See `docs/usage/save.md`.
-- `with model.trace():` (no input, no invoke) is a `ValueError`. Always provide input via `.trace(...)` or `tracer.invoke(...)`.
-- Standard Python `if` / `for` works inside the body — the worker thread sees real tensors. See `docs/usage/conditionals-and-loops.md`.
-- Tracebacks from inside the trace are reconstructed by `ExceptionWrapper` to point at your source lines (`tracing/util.py:94`).
+- Inside one invoke, modules **must** be accessed in forward-pass order — the worker greenlet blocks on a hook event for each request. Out-of-order access raises `OutOfOrderError`. See `docs/gotchas/out-of-order.md`.
+- Values you want after the block **must** be marked with `.save()` / `nnsight.save(...)`. See `docs/usage/save.md`.
+- `with model.trace():` with no input and no invoke is a `ValueError`.
+- Standard Python `if` / `for` works inside the body — the greenlet worker sees real tensors. See `docs/usage/conditionals-and-loops.md`.
+- The traced body must start on its own line (not on the `with` line); combining context managers on one line — `with torch.no_grad(), model.trace(...):` — is fine.
+- Tracebacks from inside the trace are cleaned to point at your source lines.
 
 ## Related
 
 - `docs/usage/invoke-and-batching.md`
 - `docs/usage/generate.md`
+- `docs/usage/pipe.md`
 - `docs/usage/scan.md`
 - `docs/usage/save.md`
 - `docs/usage/access-and-modify.md`

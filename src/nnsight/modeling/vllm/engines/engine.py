@@ -1,47 +1,42 @@
-import pickle
+"""Carry saved values back out of the engine.
 
-import zstandard as _zstd
+A worker's saved values live in the worker process, and nothing in vLLM's own
+output carries them. The engine knows when a request finishes, which is when its
+worker has nothing left to run, so that is where they are fetched and attached to
+the output the request produced.
+"""
+
+from __future__ import annotations
+
+import pickle
+from typing import Any
 
 from vllm.v1.engine.llm_engine import LLMEngine
 
-_ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
-
 
 class NNsightLLMEngine(LLMEngine):
-    """Custom vLLM engine that collects saved intervention results from finished requests.
+    """An engine that attaches each finished request's saved values to its output."""
 
-    After each engine step, finished requests are forwarded to the
-    model runner's ``finish_nnsight()`` method to gather any variables
-    that were ``.save()``-ed during intervention execution.
-    """
+    def step(self) -> Any:
+        outputs = super().step()
 
-    def step(self):
+        finished = [output.request_id for output in outputs if output.finished]
+        if not finished:
+            return outputs
 
-        request_outputs = super().step()
+        results = self.engine_core.collective_rpc(
+            "collect_nnsight", args=(finished, finished)
+        )
+        # Ranks that hold no sampled output return nothing.
+        payload = next((result for result in results if result is not None), None)
+        if payload is None:
+            return outputs
 
-        finished_req_ids = [ro.request_id for ro in request_outputs if ro.finished]
+        collected = pickle.loads(payload)
+        for output in outputs:
+            entry = collected.get(output.request_id)
+            if entry is not None:
+                output.saves = entry["saves"]
+                output.nnsight_error = entry["error"]
 
-        if finished_req_ids:
-            results = self.engine_core.collective_rpc(
-                "collect_nnsight",
-                args=(finished_req_ids, finished_req_ids),
-            )
-            # results is a list (one per worker). Rank-0 returns pickled bytes, others None.
-            saves_bytes = next((r for r in results if r is not None), None)
-            if saves_bytes:
-                # Worker returns ``{base_id: {var_name: value}}`` so the
-                # step attaches each request's OWN saves sub-dict to its
-                # OWN RequestOutput.  The previous flat-dict shape bound
-                # the same dict to every finished output and entangled
-                # concurrent independent traces whose user code used
-                # overlapping variable names — one winner clobbered all.
-                saves_by_req = pickle.loads(
-                    _ZSTD_DECOMPRESSOR.decompress(saves_bytes)
-                )
-                for ro in request_outputs:
-                    if ro.finished:
-                        per_req = saves_by_req.get(ro.request_id)
-                        if per_req:
-                            ro.saves = per_req
-
-        return request_outputs
+        return outputs

@@ -1,13 +1,21 @@
+# Compiled C extension (built from src/nnsight/_c/*.c by setup.py; see build_ext)
+src/nnsight/_c/*.so
+
+# Python build / packaging artifacts
 build/
 dist/
-public/
 *.egg-info/
-.installed.cfg
-.vscode
+
+# Python bytecode / caches
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Editor / OS cruft
+.vscode/
 .DS_Store
 **/.DS_Store
-.nfs*
+
+# Runtime
 nnsight.log
-src/nnsight/_c/**.so
-src/nnsight/_version.py

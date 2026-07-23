@@ -1,73 +1,77 @@
 ---
 title: Access and Modify Module Values
 one_liner: Use `.output`, `.input`, `.inputs` to read activations; in-place slice or assign to modify.
-tags: [usage, intervention, eproperty]
+tags: [usage, intervention]
 related: [docs/usage/trace.md, docs/usage/save.md, docs/usage/skip.md, docs/usage/source.md]
-sources: [src/nnsight/intervention/envoy.py:168, src/nnsight/intervention/interleaver.py:60, src/nnsight/intervention/hooks.py]
+sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/interleaver.py]
 ---
 
 # Access and Modify Module Values
 
 ## What this is for
 
-Every wrapped module exposes three special properties that read or replace the module's runtime values during the forward pass:
+Every wrapped module (`Envoy`) exposes three properties that read or replace the module's runtime values during the forward pass:
 
-| Property | Returns | Source |
-|---|---|---|
-| `module.output` | The module's forward-pass return value | `envoy.py:168` |
-| `module.input` | The first positional input | `envoy.py:191` |
-| `module.inputs` | `(args, kwargs)` tuple of all inputs | `envoy.py:178` |
+| Property | Returns |
+|---|---|
+| `module.output` | The module's forward-pass return value |
+| `module.input` | The first positional input (or first kwarg value) |
+| `module.inputs` | `(args, kwargs)` tuple of all inputs |
 
-These are `eproperty` descriptors (`src/nnsight/intervention/interleaver.py:60`). Reading one issues a blocking request to the worker thread's mediator; the request unblocks when the corresponding one-shot PyTorch hook fires (`hooks.py: requires_output`, `requires_input`).
+These are ordinary Python properties on `Envoy` (`src/nnsight/intervention/envoy.py`). Reading one calls `Mediator.value(...)`, which blocks the trace's greenlet worker until the model's forward pass produces that value; assigning to one calls `Mediator.swap(...)`, which hands the model a new value to continue with.
 
 ## When to use / when not to use
 
-- Use any of these inside a `with model.trace(...)` / `model.generate(...)` body to read activations.
+- Use inside a `with model.trace(...)` / `model.generate(...)` / `model.pipe(...)` / `model.scan(...)` body to read activations.
 - Use slice assignment `[:] = value` for in-place modification.
 - Use direct assignment `module.output = value` for replacement.
-- Outside a tracing context, accessing `.output` raises `ValueError: Cannot access ... outside of interleaving.`
+- Outside a tracing context, accessing `.output` raises `ValueError: Cannot access `<path>` outside of interleaving`.
 
 ## Canonical pattern
 
 ```python
-with model.trace("Hello"):
-    # Read (in transformers 5+, transformer blocks return a tensor)
-    hidden = model.transformer.h[-1].output.save()
+from nnsight.modeling.transformers import TransformersModel
+import torch
 
-    # In-place modify (zero the residual)
-    model.transformer.h[0].output[:] = 0
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
-    # Replacement
-    model.transformer.h[0].output = torch.zeros_like(hidden)
+with model.trace("Hello world"):
+    hidden = model.transformer.h[-1].output.save()   # read
+
+    model.transformer.h[0].output[:] = 0             # in-place modify
+
+    model.transformer.wte.output = torch.zeros_like(  # replacement
+        model.transformer.wte.output
+    )
 ```
 
 ## In-place vs replacement
 
 ```python
-# IN-PLACE: mutates the tensor underlying the model's value.
-# All later references through the same descriptor see the mutation.
+# IN-PLACE: mutates the tensor the model is holding.
+# All later reads through the same location see the mutation.
 model.transformer.h[0].output[:] = 0
 
-# REPLACEMENT: triggers the eproperty's __set__, which calls
-# mediator.swap(...) — the model's downstream computation gets the new value.
+# REPLACEMENT: hands the model a new value (Mediator.swap);
+# downstream computation continues with my_new_tensor.
 model.transformer.h[0].output = my_new_tensor
 ```
 
-Replacement goes through `eproperty.__set__` (`interleaver.py:306`) which calls `self._postprocess` (if any), builds the requester string, registers the hook, and emits a SWAP event.
+Both are verified: after `output[:] = 0` a later read of the same output returns all-zeros; after `wte.output = wte.output * 0` a later read of `wte.output` is all-zeros.
 
 ## Tuple outputs
 
-Some modules return a tuple. The most common in HuggingFace LLMs is the **attention module**, which returns `(attn_out, attn_weights)`. In transformers <5, transformer blocks themselves also returned tuples; in transformers 5+ they return a plain tensor.
+Some modules return a tuple. In the HuggingFace LLMs, the **attention module** returns `(attn_out, ...)`. (In current `transformers`, GPT-2 transformer *blocks* return a plain tensor — `model.transformer.h[0].output` is a tensor, not a tuple — but attention still returns a tuple. Check with `isinstance(module.output, tuple)` when unsure.)
 
 ```python
-with model.trace("Hello"):
-    full = model.transformer.h[0].attn.output    # tuple (attn_out, weights)
-    attn_out = full[0]                            # tensor
+with model.trace("Hello world"):
+    full = model.transformer.h[0].attn.output   # tuple
+    attn_out = full[0].save()                    # first element (tensor)
 
     # In-place on the first element
     model.transformer.h[0].attn.output[0][:] = 0
 
-    # Replace the entire tuple (preserve other elements)
+    # Replace the whole tuple (keep the other elements)
     model.transformer.h[0].attn.output = (
         torch.zeros_like(attn_out),
     ) + model.transformer.h[0].attn.output[1:]
@@ -75,68 +79,71 @@ with model.trace("Hello"):
 
 ## `.input` vs `.inputs`
 
-`.inputs` returns the raw `(args, kwargs)` tuple as captured by the pre-forward hook. `.input` is a convenience that returns the first positional argument (or first kwarg value if no positional). It is built by chaining `.inputs` through a `preprocess`/`postprocess` pair:
+`.inputs` returns the raw `(args, kwargs)` tuple captured before the module runs. `.input` is a convenience returning the first positional argument (or the first kwarg value if there are none) — built on top of `.inputs`. Setting `.input` correctly repacks into `(args, kwargs)`:
 
 ```python
-@input.preprocess
-def input(self, value):
-    return [*value[0], *value[1].values()][0]
+with model.trace("Hello world"):
+    args, kwargs = model.transformer.h[0].inputs
+    first = model.transformer.h[0].input.save()
 
-@input.postprocess
-def input(self, value):
-    inputs = self.inputs
-    return (value, *inputs[0][1:]), inputs[1]
+    # Set: repacks into the full (args, kwargs) for the model
+    model.transformer.h[1].input = model.transformer.h[1].input * 0
 ```
-
-So `module.input = new_tensor` correctly repacks into `(args, kwargs)` for the model.
 
 ## Cloning before modification
 
-In-place modifications happen on the live tensor — **after** the modification, reading `.output` again returns the modified value:
+In-place modifications happen on the live tensor — reading `.output` again after a modification returns the modified value. Clone first to keep a pre-mod copy:
 
 ```python
-with model.trace("Hello"):
-    before = model.transformer.h[0].output.clone().save()  # capture pre-mod
-    model.transformer.h[0].output[:] = 0
-    after = model.transformer.h[0].output.save()           # post-mod
-# without the clone, before == after
+with model.trace("Hello world"):
+    before = model.transformer.h[0].output[0].clone().save()  # pre-mod
+    model.transformer.h[0].output[0][:] = 0
+    after = model.transformer.h[0].output[0].save()           # post-mod
+# before is not all-zeros; after is all-zeros
 ```
 
-The `.clone()` is a real `torch.Tensor.clone()` — the worker thread receives the actual tensor.
+The `.clone()` is a real `torch.Tensor.clone()` — the worker receives the actual tensor.
 
 ## Forward-pass-order rule
 
-Within a single invoke, you **must** request modules in the order they execute. The worker thread blocks on each request and the model's forward pass produces values in execution order. Asking for layer 5 then layer 1 in the same invoke deadlocks → `OutOfOrderError` is raised once the model finishes (`Mediator.handle_value_event` in `interleaver.py:1013`).
+Within a single invoke, request modules in the order they execute. Asking for a later module and then an earlier one deadlocks and raises `OutOfOrderError` once the model finishes:
 
-To access modules out of order, use additional invokes — see `docs/usage/invoke-and-batching.md`.
+```
+nnsight.intervention.interleaver.OutOfOrderError:
+'model.transformer.h.0.output.i0' was requested but the model already ran past it
+```
+
+To access modules out of order, use separate invokes — see `docs/usage/invoke-and-batching.md`.
 
 ## Calling modules directly inside a trace
 
 ```python
-with model.trace("Hello"):
-    hs = model.transformer.h[5].output
-    # Calling the envoy directly uses .forward() (no hook),
-    # so this re-runs ln_f + lm_head WITHOUT triggering interleaving.
-    logits = model.lm_head(model.transformer.ln_f(hs)).save()
+with model.trace("The Eiffel Tower is in the city of"):
+    hidden = model.transformer.h[-1].output
+    # Calling the envoy runs .forward() directly (no hooks), so this
+    # applies lm_head out of order WITHOUT re-triggering interleaving.
+    logits = model.lm_head(model.transformer.ln_f(hidden))
+    tok = logits[0, -1].argmax(dim=-1).save()
+# model.tokenizer.decode(tok) -> ' Paris'
 ```
 
-`Envoy.__call__` checks if the interleaver has a current mediator; if so it calls `module.forward(...)` directly instead of `module(...)`. Pass `hook=True` to opt back into the hook path (e.g. when you want to observe an injected SAE module's output) — see `Envoy.__call__` in `envoy.py:239`.
+While interleaving, `Envoy.__call__` calls `module.forward(...)` directly. Pass `hook=True` to opt back into the full `module(...)` path (its hooks fire, its submodules become observable) — used for a module attached to the tree that isn't part of the real forward pass (an adapter/LoRA/SAE applied in an edit). See `Envoy.__call__`.
 
-## Module skipping
+## Overloaded names
 
-`module.skip(value)` bypasses the module's computation entirely. See `docs/usage/skip.md`.
+If a module's class has a submodule named `input`, `output`, `inputs`, etc. (e.g. BERT's `output`), the submodule keeps that name and nnsight's property moves to `.nns_output` (with a warning). See `Envoy._mount_overloaded`.
 
-## Source-level access
+## Module skipping / source access
 
-For sub-module operations (e.g. `attention_interface_0`, `self_c_proj_0`), use `module.source.<op>.output`. See `docs/usage/source.md`.
+- `module.skip(replacement)` bypasses a module's compute — see `docs/usage/skip.md`.
+- `module.source.<op>.output` reaches operations inside a module's forward — see `docs/usage/source.md`.
 
 ## Gotchas
 
-- Within an invoke, modules **must** be accessed in forward-pass order. See `docs/gotchas/out-of-order.md`.
-- For tuple-returning modules (e.g. attention), `module.output[0] = x` is a `__setitem__` on the underlying tuple and raises `TypeError`. Use `module.output[0][:] = x` for in-place on the first tuple element, or build a new tuple `(x,) + module.output[1:]` and assign to `module.output`.
-- Reading `.output` returns the actual runtime tensor — `print`, `.shape`, `.mean()`, etc. all work. There is no proxy layer to unwrap.
-- Outside interleaving, accessing `.output` raises `ValueError: Cannot access ...`. Use `model.scan(...)` if you only need shapes without execution.
-- If a module's class defines an attribute named `input` or `output`, nnsight remounts its proxy to `.nns_input` / `.nns_output` (with a warning). See `Envoy._handle_overloaded_mount` in `envoy.py:733`.
+- Within an invoke, access modules in forward-pass order or hit `OutOfOrderError`. See `docs/gotchas/out-of-order.md`.
+- For tuple-returning modules, `module.output[0] = x` is a `__setitem__` on a tuple and fails. Use `module.output[0][:] = x` (in-place on the first element) or rebuild the tuple and assign to `module.output`.
+- Reading `.output` returns the real runtime tensor — `print`, `.shape`, `.mean()` all work; there is no proxy to unwrap.
+- Outside interleaving, `.output` raises `ValueError: Cannot access ... outside of interleaving`. Use `model.scan(...)` for shapes without execution.
 
 ## Related
 

@@ -1,61 +1,64 @@
 ---
 title: Version History
-one_liner: Pointer to release notes; brief summary of what each major version brought.
+one_liner: What the pipeline rewrite changed and how it maps to the old API.
 tags: [reference, history]
 ---
 
 # Version History
 
-For full release notes, see [`0.6.0.md`](https://github.com/ndif-team/nnsight/blob/main/0.6.0.md) in the repo root and the [GitHub Releases page](https://github.com/ndif-team/nnsight/releases).
+For release notes, see the [GitHub Releases page](https://github.com/ndif-team/nnsight/releases).
 
-## Upcoming: `refactor/transform` highlights
+## 0.8 — the pipeline rewrite
 
-Currently in development on the `refactor/transform` branch (pre-release). Major themes:
+Version 0.8 is a ground-up rewrite of nnsight's execution model. If you know the older API, here is what changed and where things moved.
 
-- **Lazy hook execution.** Modules no longer carry permanent input/output hooks. Each module gets a thin skippable forward + a sentinel output hook; actual interception is done by **one-shot hooks** registered on demand by each mediator and self-removed after firing. Untouched modules incur effectively zero hook overhead.
-- **`eproperty` extension API.** The `eproperty` descriptor formalizes how custom Envoy subclasses expose new hookable properties. Subclasses can now define `.heads`, `.logits`, etc. by stacking a pre-setup decorator (`@requires_output`, `@requires_operation_output`, …) on a stub method. Optional `preprocess` / `postprocess` / `transform` hooks let preprocessed views write back into the running model on in-place edit.
-- **Source split.** Source tracing internals split into `SourceAccessor` (global per-fn rewrite + cache) and `OperationAccessor` (per-call-site hook lists), separating the user-facing `SourceEnvoy` / `OperationEnvoy` from the global hook bookkeeping. Multiple Envoys / Interleavers / sessions touching the same operation now share one accessor cleanly.
-- **`envoys=` kwarg.** `NNsight(...)` (and any subclass) accepts `envoys=...` to control which `Envoy` class wraps descendants — either a single subclass for everything, or a `Dict[Type[nn.Module], Type[Envoy]]` matched via MRO. Subclasses can also set a class-level `envoys` attribute as a default.
-- **Backwards-compat for `SourceAccessor` across module replacement.** When a wrapped module is replaced (e.g. weights dispatched, edits applied, hot-swapped), the existing `SourceAccessor`'s injected forward keeps working — the accessor is keyed by the unwrapped fn, not the module instance.
+### Interleaving: greenlets, not threads
 
-## Released versions
+Intervention code and the model's forward pass now run in **greenlets** (cooperative, single-threaded coroutines), not OS worker threads. Each block runs in its own worker greenlet (`Mediator`) that switches control back to the model side whenever it parks on a location. Because only one greenlet runs at a time, there are no locks or queues.
 
-### v0.6.0 — see [`0.6.0.md`](https://github.com/ndif-team/nnsight/blob/main/0.6.0.md)
+The worker/model event protocol is `VALUE` / `SWAP` / `SKIP` / `BARRIER` (the `Event` enum). The old `END` / `EXCEPTION` events are gone.
 
-Headline features:
+### Model classes
 
-| Area | Change |
-|------|--------|
-| NDIF | Seamless serialization of local code via cloudpickle by-value (`nnsight.register(...)` for pip-installed packages; auto-registration for editable installs and your script's local imports). Python 3.9+ clients now work regardless of NDIF's Python version. |
-| vLLM | Full vLLM integration: single GPU, multi-GPU tensor parallelism, Ray distributed executor, multi-node Ray, `mode="async"` with streaming. |
-| Iteration | `tracer.iter` now supports plain `for` loops in addition to `with` blocks (faster — no code capture overhead). |
-| NDIF utilities | `nnsight.compare()`, `nnsight.status()`, `nnsight.is_model_running(...)` for env diffing and deployment checks. |
-| Diagnostics | Cleaner traceback reconstruction; nnsight internals hidden by default; `python -d` re-enables them. |
-| Trace dispatch | Smarter trace-vs-invoker detection — kw-only inputs (`input_ids=...`) now correctly create implicit invokers. |
-| Performance | 2.4–3.9x faster traces vs v0.5.15 via always-on trace caching, persistent pymount, removed `torch._dynamo.disable` wrappers, batched `PyFrame_LocalsToFast`, and filtered globals copy. `TRACE_CACHING` config is deprecated (always on). |
-| New models | `VisionLanguageModel` (LLaVA / Qwen2-VL / etc.), `DiffusionModel` (UNet + transformer pipelines, with `DiffusionBatcher`). |
-| Robustness | `python -c "..."` works; multiple `NNsight` wrappers on the same model coexist; reference-cycle memory leaks fixed. |
-| Wire format | NDIF results compressed with zstandard. |
+- `NNsight(module)` — base wrapper for any `torch.nn.Module`.
+- `TransformersModel("repo/id", task=...)` — the **primary** HuggingFace class, backed by a `transformers.pipeline`; supports any task.
+- `DiffusionModel` — any `diffusers` pipeline (UNet- or transformer-based).
+- `VLLM(..., mode="sync"|"async")` — vLLM-backed, interventions run inside the engine worker.
+- `LanguageModel` / `VisionLanguageModel` — now **deprecated** thin subclasses that warn on construction; use `TransformersModel(task=...)`.
 
-Breaking changes:
+### `generate` vs `pipe`
 
-- Removed deprecated v0.4 namespace items: `nnsight.apply()`, `nnsight.log()`, `nnsight.local()`, `nnsight.cond()`, `nnsight.iter()`, `nnsight.stop()`, `nnsight.trace()`, and the `nnsight.list/dict/int/...` type wrappers (use plain Python builtins).
-- Removed the `trace=` parameter on `.trace()` / `.generate()`.
-- `obj.stop()` on arbitrary objects removed — use `tracer.stop()`.
-- Newly deprecated (still works, will be removed): `model.iter`, `model.all()`, `model.next()` (use the `tracer.*` versions); `with tracer.iter[...]:` (use `for step in tracer.iter[...]:`).
-- Custom `_prepare_input` / `_batch` implementations may need updating to match the `Batchable` interface in `nnsight/intervention/batching.py`.
+`model.generate(...)` now generates through the **model** and returns **token ids** (read `tracer.result`), greedy by default. `model.pipe(...)` runs the whole task **pipeline** and returns its records (decoded text, labels, ...) — that is what the old `generate` returned. `model.trace(...)` runs one forward; `model.scan(...)` runs one forward under fake tensors for shape inference.
 
-### v0.5.x
+### `eproperty` reintroduced
 
-Introduced the thread-based deferred-execution architecture (Tracer + Interleaver + Mediator + Envoy + eproperty). Standard Python `if`/`for` statements work inside traces, replacing the v0.4 `nnsight.cond()` / `session.iter()` DSL. v0.4 namespace items emit `DeprecationWarning`s.
+The `eproperty` descriptor is back, with a new API. Decorate a stub with `@eproperty` (or `@eproperty(key=..., description=...)`) to define a hookable value; the stub is the *preprocess* mapping the served value to what the user reads, refined by `.postprocess` (a written value before the swap), `.transform` (write an edited preprocess view back to the model's layout), and `.provide` (serve the value from the model side via `interleaver.handle`). A `description=` surfaces the value in the Envoy repr tree. `Envoy.input` / `.inputs` / `.output`, `tracer.result`, and `VLLM.logits` / `.samples` are all built on it; add your own on a model subclass. See [extending.md](../usage/extending.md).
 
-### v0.4.x and earlier
+### `save` is guarded
 
-Proxy-based deferred execution. Used `nnsight.apply()`, `nnsight.cond()`, `nnsight.iter()`, `nnsight.list()`, etc. as a tracing DSL. Replaced by the v0.5 architecture; documented here only for migration context.
+`nnsight.save(x)` / `x.save()` now **raises** if called outside a trace (it used to be a silent no-op). It marks a value to survive past the enclosing `with model.trace(...):` block, so it only makes sense inside one.
+
+### Iteration
+
+Target occurrences across a repeated run with `tracer.iter[...]` (loop form: `for step in tracer.iter[:3]:`) or `tracer.all()`. The `with tracer.iter[...]:` block still works but is deprecated. `tracer.next()`, `model.iter`, and `model.all()` are gone or deprecated.
+
+### Config
+
+`CONFIG.API.HOST` / `APIKEY` / `COMPRESS` and `CONFIG.APP.DEBUG` / `REMOTE_LOGGING` / `PYMOUNT`. Loaded from a user file (`~/.config/nnsight/config.yaml`) over shipped defaults, then env (`NDIF_API_KEY`, `NDIF_HOST`, `NNSIGHT_DEBUG`). The old `CROSS_INVOKER`, `CACHE_DIR`, and `TRACE_CACHING` settings are gone. See [config.md](./config.md).
+
+### Remote
+
+- `remote=True` → `RemoteBackend` (blocking over one websocket, or `blocking=False` submit/poll).
+- `remote="local"` → `LocalSimulationBackend` (serialize/deserialize dry run, offline).
+- `AsyncRemoteBackend` — `await backend` for the saves dict, `async for` for streamed status updates.
+- Model identity via `model.to_model_key()` / `Class.from_model_key(...)`.
+- The old `tracer.local()` hybrid streaming is **not** ported.
+
+### Removed v0.4-era namespace
+
+`nnsight.apply()`, `nnsight.log()`, `nnsight.local()`, `nnsight.cond()`, `nnsight.iter()`, `nnsight.session()`, and the `nnsight.list/dict/int/...` type wrappers are removed — use plain Python and `model.session()`.
 
 ## Where to read more
 
-- Full v0.6 notes: [`0.6.0.md`](https://github.com/ndif-team/nnsight/blob/main/0.6.0.md)
-- README: [`README.md`](https://github.com/ndif-team/nnsight/blob/main/README.md)
-- Internals deep-dive: [`NNsight.md`](https://github.com/ndif-team/nnsight/blob/main/NNsight.md)
+- README: [`../../README.md`](../../README.md)
 - Documentation site: [https://nnsight.net](https://nnsight.net)

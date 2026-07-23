@@ -8,54 +8,97 @@ sources: []
 
 # Developing NNsight
 
-This folder is the internals reference for the `refactor/transform` branch of nnsight. It is intentionally one level below the user-facing `docs/usage/` and `docs/concepts/` folders: docs here cite source `file:line`, describe data flow between subsystems, and explain extension points for custom backends, runtimes, and envoys.
+This folder is the internals reference for nnsight. It sits one level below the
+user-facing `docs/usage/`, `docs/concepts/`, and `docs/models/` folders: docs here
+cite source `file:line`, describe data flow between subsystems, and explain
+extension points for custom tracers, backends, and model runtimes.
 
-Audience: nnsight contributors and AI agents whose users want to debug or extend the library. If you are looking for "how do I run a trace," start in `docs/usage/`.
+Audience: nnsight contributors and AI agents whose users want to debug or extend
+the library. If you are looking for "how do I run a trace," start in
+`docs/usage/`; for the mental models behind the machinery, start in
+`docs/concepts/`.
+
+## The one-paragraph model
+
+`with model.trace(x): ...` does **not** run its body inline. A `Tracer` captures
+the block's source, compiles the body to a standalone code object, and — on
+`__exit__` — runs it *interleaved* with the model's forward pass. The body runs in
+a **greenlet** (a `Mediator`); it parks whenever it reads or writes an activation
+(`model.layer.output`), the model runs until a forward hook reaches that location,
+the value is handed to the worker (edited on the way back if the worker wrote to
+it), and the worker resumes. One `Interleaver` owns the hooks and the workers; a
+`Backend` decides what "run the block" means (execute locally, ship to NDIF, store
+as an edit).
 
 ## What this covers
 
-The internal architecture is organized into layered subsystems:
-
-- **Tracer** — captures the body of a `with` block, parses it via AST, and compiles it into a callable function. Lives under `src/nnsight/intervention/tracing/`.
-- **Backend** — compiles the function source to a code object, executes it, and routes results. Lives under `src/nnsight/intervention/backends/`.
-- **Interleaver / Mediator** — coordinates the model's forward pass with one worker thread per invoke; routes value/swap/skip/barrier events between threads via PyTorch hooks. Lives in `src/nnsight/intervention/interleaver.py`.
-- **Hook system** — lazy, one-shot PyTorch hooks installed on demand by mediators (`src/nnsight/intervention/hooks.py`).
-- **Source accessor** — AST-based forward injection for in-module operation tracing (`src/nnsight/intervention/source.py`).
-- **Envoy / eproperty** — user-facing proxy and the descriptor protocol that ties everything together (`src/nnsight/intervention/envoy.py`, `interleaver.py`).
-- **Batching, serialization, runtimes** — multi-invoke batching, dill-based serialization for remote execution, and pluggable model runtimes such as vLLM.
+- **Tracing** (`src/nnsight/tracing/`) — capture a `with` block's source, parse
+  and compile the body, run it through a backend, and push results back into the
+  caller's frame. Model-agnostic; no torch.
+- **Interleaving** (`src/nnsight/intervention/interleaver.py`) — greenlet workers
+  (`Mediator`) coordinated with the model's forward pass via PyTorch hooks
+  (`Interleaver`), using the `Event` protocol (`VALUE`/`SWAP`/`SKIP`/`BARRIER`).
+- **Envoy** (`src/nnsight/intervention/envoy.py`) — the module proxy that exposes
+  `.input`/`.output`/`.source`/`.skip` and drives `interleave()`.
+- **Batching** (`src/nnsight/intervention/batching.py`) — combine several
+  `tracer.invoke(...)` inputs into one forward and scope each block to its rows.
+- **Backends** (`src/nnsight/tracing/backend.py`,
+  `src/nnsight/intervention/backends/`) — local, remote (NDIF), local-simulation.
 
 ## Table of contents
 
 ### Big picture
 
-- `docs/developing/architecture-overview.md` — top-down "how everything fits": Tracer to Backend to Interleaver to Mediator to PyTorch hooks.
-- `docs/developing/tracing-pipeline.md` — capture, parse, compile, execute. The `Tracer.Info` lifecycle and the cache key.
+- `docs/developing/architecture-overview.md` — top-down map: Tracer → Backend →
+  Interleaver → Mediator (greenlet) → PyTorch hooks → Envoy.
+- `docs/developing/tracing-pipeline.md` — capture → parse → build → compile →
+  execute, `Scope`, the skip hook, the per-site cache.
 
 ### Interleaver
 
-- `docs/developing/interleaver-internals.md` — `Interleaver`, `Mediator`, the event loop, `handle()` fan-out, `iterate_requester()`.
-- `docs/developing/lazy-hook-system.md` — one-shot input/output hooks, `add_ordered_hook`, the sentinel hook, persistent cache and iter hooks.
-- `docs/developing/source-accessor-internals.md` — `SourceAccessor`, `OperationAccessor`, `FunctionCallWrapper`, recursive `.source` and `rebind`.
+- `docs/developing/interleaver-internals.md` — `Interleaver`, `Mediator`, the
+  greenlet park/switch dance, `Event`, `handle()` fan-out, iteration tagging.
+- `docs/developing/hook-system.md` — how forward hooks are installed at instrument
+  time and pass through when idle; the source/skip controller.
+- `docs/developing/source-internals.md` — `.source` operation-level
+  access via AST-instrumented forwards.
 
-### Extension API
+### Batching
 
-- `docs/developing/eproperty-deep-dive.md` — the `eproperty` descriptor as the formal extension API. `IEnvoy`, the stub idiom, `preprocess`/`postprocess`/`transform`, `provide`.
-- `docs/developing/adding-a-new-backend.md` — subclassing `Backend` for custom execution strategies (remote, simulated, async).
-- `docs/developing/adding-a-new-runtime.md` — wrapping a non-PyTorch runtime (vLLM-style) with a custom model class, batcher, and provider eproperties.
+- `docs/developing/batching-internals.md` — `Batcher` add/narrow/widen, batch
+  groups, `gather_skip`/`assemble_skip`.
 
-### Other
+### Backends
 
-- `docs/developing/batching-internals.md` — `Batchable`, `Batcher`, batch groups, narrow/swap, multi-invoke semantics.
-- `docs/developing/serialization.md` — dill-based pickling for remote execution; `__getstate__` / `__setstate__` on tracers, mediators, and envoys.
-- `docs/developing/backends.md` — the existing backends (`ExecutionBackend`, `EditingBackend`, `RemoteBackend`, `LocalSimulationBackend`).
-- `docs/developing/vllm-integration.md` — `VLLM`, `NNsightGPUModelRunner`, `VLLMBatcher`, and how vLLM's scheduler ordering is reconciled with mediator batch groups.
-- `docs/developing/testing.md` — running the test suite, conda env, key test files, smoke vs full validation.
-- `docs/developing/performance.md` — where overhead lives, the trace cache, `PYMOUNT`, and how to profile.
-- `docs/developing/agent-evals.md` — running agent-driven evaluations against the docs and code.
-- `docs/developing/contributing.md` — branch policy, commit style, and PR checklist.
+- `docs/developing/backends.md` — the `Backend` base and the existing backends
+  (`RemoteBackend`, `AsyncRemoteBackend`, `LocalSimulationBackend`), and how a
+  model selects one from `remote=`.
+- `docs/developing/adding-a-new-backend.md` — recipe for subclassing `Backend`.
+
+### Extending
+
+- `docs/developing/extending-envoy.md` — the extension surface for new hookable
+  values: an `eproperty` descriptor on a model/runtime subclass, served from the
+  driver with its `.provide`.
+- `docs/developing/adding-a-new-runtime.md` — plug a new model type or inference
+  engine in via the modeling mixins.
+- `docs/developing/serialization.md` — source-based serialization for remote runs.
+
+### Reference
+
+- `docs/developing/performance.md` — where overhead lives and how to measure it.
+- `docs/developing/testing.md` — running the suite offline; what each test covers.
+- `docs/developing/contributing.md` — house style, branch/commit conventions.
+
+### Related concept docs
+
+The `docs/concepts/` folder holds the shorter, mental-model versions of several of
+these topics — `deferred-execution.md`, `threading-and-mediators.md`,
+`interleaver-and-hooks.md`, `batching-and-invokers.md`, `source-tracing.md`,
+`envoy.md`. Read those first if you want the "why" before the "how".
 
 ## Related
 
-- `NNsight.md` (repo root) — long-form design document. Most internals docs in this folder summarize and update sections of `NNsight.md` for the `refactor/transform` branch.
-- `0.6.0.md` (repo root) — release notes for v0.6.0; describes the user-visible surface of the lazy-hook and eproperty refactor.
-- `CLAUDE.md` (repo root) — project-level instructions, including the development & testing notes that this folder expands on.
+- `docs/concepts/index.md` — mental models for the same machinery.
+- `docs/models/index.md` — the model classes (`NNsight`, `TransformersModel`,
+  `DiffusionModel`, `VLLM`) that wrap the intervention layer.

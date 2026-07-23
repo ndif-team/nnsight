@@ -3,31 +3,44 @@ title: Invoke and Batching
 one_liner: Multiple inputs in one trace via `tracer.invoke(...)`, including empty invokes that operate on the full batch.
 tags: [usage, batching, invoker]
 related: [docs/usage/trace.md, docs/usage/barrier.md, docs/usage/access-and-modify.md]
-sources: [src/nnsight/intervention/tracing/invoker.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/tracing/tracer.py:433, src/nnsight/intervention/interleaver.py:718]
+sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/envoy.py]
 ---
 
 # Invoke and Batching
 
 ## What this is for
 
-`tracer.invoke(...)` adds an input to the trace's batch and runs an intervention block against that input's slice of the batch. Each invoke runs as a **separate worker thread** — they are serialized by the interleaver but each holds its own intervention code, history, and iteration counters.
+`with model.trace() as tracer:` may contain several `with tracer.invoke(x):`
+blocks. Their inputs are combined into a **single batched forward**, and each
+block's interventions see only *its* rows of every activation.
 
-There are two kinds of invokes:
+Each invoke's block runs as its own **worker** (a greenlet `Mediator`). Workers
+resume in the order the model reaches what each asked for, not the order they were
+written — that is what makes them a batch rather than a sequence.
 
-- **Input invoke**: `tracer.invoke(prompt)` — contributes data to the batch. Calls `model._prepare_input` and (for the 2nd+ input invoke) `model._batch`. Gets `batch_group = [start, size]`.
-- **Empty invoke**: `tracer.invoke()` — no input, operates on the **entire** combined batch. `batch_group = None`. Does not call `_batch`.
+Two kinds of invoke:
 
-Source: `src/nnsight/intervention/batching.py:114` (Batcher), `src/nnsight/intervention/tracing/invoker.py:14` (Invoker), `src/nnsight/intervention/interleaver.py:718` (Mediator).
+- **Input invoke**: `tracer.invoke(prompt)` — contributes rows to the batch. Its
+  reads/edits are scoped (narrowed) to those rows.
+- **Empty invoke**: `tracer.invoke()` — no input, no row scoping. Sees the
+  **entire** combined batch.
 
 ## When to use / when not to use
 
-- Use multiple input invokes to run several prompts in one forward pass. Requires a model that implements `_prepare_input` and `_batch` (`LanguageModel` does — base `NNsight` does not).
-- Use empty invokes to break a single input into multiple intervention threads (avoids forward-pass-order constraints within a single invoke), or to run different logic on the combined batch.
-- Use a single positional arg on `.trace(...)` if you only have one input — it creates an implicit invoke.
+- Use multiple input invokes to run several prompts in one forward pass. Requires
+  a model that implements `_batch_size` / `_batch` (`TransformersModel` does;
+  base `NNsight` does not — see below).
+- Use an empty invoke to run logic over the whole combined batch.
+- Use a single positional arg on `.trace(x)` when you only have one input — it is
+  an implicit single invoke over the whole batch.
 
 ## Canonical pattern
 
 ```python
+from nnsight.modeling.transformers import TransformersModel
+
+model = TransformersModel("openai-community/gpt2", dispatch=True)
+
 with model.trace() as tracer:
     with tracer.invoke("The Eiffel Tower is in"):
         out_paris = model.lm_head.output[:, -1].save()
@@ -36,102 +49,138 @@ with model.trace() as tracer:
         out_rome = model.lm_head.output[:, -1].save()
 ```
 
+Each invoke's `.output` carries only that invoke's row(s). A batched last-token
+logit from an invoke equals the same prompt run on its own.
+
 ## Batched input (single invoke, list of strings)
 
 ```python
 with model.trace(["Hello", "World"]):
-    logits = model.lm_head.output.save()  # shape: [2, seq, vocab]
+    logits = model.lm_head.output.save()   # shape: [2, seq, vocab]
 ```
 
-For `LanguageModel`, `_prepare_input` tokenizes the list with padding (`src/nnsight/modeling/language.py:241`).
+`TransformersModel._batch_size` tokenizes the list with left-padding and
+reports one row per prompt.
 
 ## Empty invokes — operate on the full batch
 
 ```python
 with model.trace() as tracer:
-    with tracer.invoke("Hello"):
-        out_a = model.lm_head.output[:, -1].save()       # shape [1, vocab]
-    with tracer.invoke(["World", "Test"]):
-        out_b = model.lm_head.output[:, -1].save()       # shape [2, vocab]
+    with tracer.invoke("The Eiffel Tower is in"):
+        a = model.lm_head.output[:, -1].save()      # 1 row
+    with tracer.invoke(["Rome", "Berlin"]):
+        b = model.lm_head.output[:, -1].save()      # 2 rows
 
-    # Empty invoke: sees the merged batch (3 rows)
-    with tracer.invoke():
-        out_all = model.lm_head.output[:, -1].save()     # shape [3, vocab]
-
-    # Another empty invoke is another thread — same merged batch
-    with tracer.invoke():
-        first_layer = model.transformer.h[0].output.save()
+    with tracer.invoke():                            # whole batch: 3 rows
+        whole = model.lm_head.output[:, -1].save()
+# whole.shape[0] == 3, and torch.cat([a, b]) == whole
 ```
 
-`Batcher.batch` returns `batch_group=None` for empty invokes (`batching.py:196`); during interleaving `narrow(None)` returns the full tensor and `swap(None, value)` replaces the full tensor.
+An empty invoke does **not** call `_batch`, so it works even on a base `NNsight`.
 
-## Out-of-order access via empty invokes
+## Mixed input formats
 
-A single invoke's worker thread blocks on each `.output` request — modules must be accessed in forward-pass order. To access modules "out of order" use a second invoke (its thread starts at the top of the next forward pass... or, in single-pass mode, runs serially after the prior invoke):
+Every input format a forward accepts is batchable, and formats can be mixed
+across invokes — string, list of strings, token-id list, 1-D tensor, pre-tokenized
+encoding:
 
 ```python
+ids = model.tokenizer("Madison Square Garden is in").input_ids
 with model.trace() as tracer:
-    with tracer.invoke("Hello"):
-        layer5 = model.transformer.h[5].output.save()
-    with tracer.invoke():       # empty invoke, separate thread
-        layer1 = model.transformer.h[1].output.save()
+    with tracer.invoke(ids):                 # token-id list -> 1 row
+        pass
+    with tracer.invoke(["a b c", "d e"]):    # 2 rows
+        pass
+    with tracer.invoke():
+        whole = model.lm_head.output[:, -1].save()   # 3 rows total
 ```
 
-## Cross-invoke variable sharing
+Tokenizer kwargs on an invoke apply to that invoke's tokenization (not the
+model): `tracer.invoke("word " * 50, truncation=True, max_length=4)`.
 
-Variables defined in one invoke are visible to later invokes (when `CONFIG.APP.CROSS_INVOKER` is `True`, the default). The mediator pushes its locals to the parent frame on every event (`interleaver.py:1304`, `Mediator.push/pull`).
+## Cross-invoke value sharing
+
+Invokes of one trace share the scope they were written in, so a name one invoke
+binds is readable by a later invoke — no config flag required:
 
 ```python
 with model.trace() as tracer:
     with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[:, -1, :]
+        clean = model.transformer.h[5].output
 
     with tracer.invoke("The Colosseum is in"):
-        # Use clean_hs from the previous invoke. If both invokes touch the
-        # same module a barrier is required — see Gotchas.
-        model.transformer.h[5].output[:, -1, :] = clean_hs
-        patched = model.lm_head.output.save()
+        # Park past where `clean` was bound (h[5]) before reading it.
+        model.transformer.h[6].output   # advances this worker past h[5]
+        patched = (clean.sum()).save()
 ```
 
-When two invokes both access the same module, you need `tracer.barrier(n)` to synchronize them. See `docs/usage/barrier.md`.
+The reader must reach the name **after** the binder produced it. Every worker
+runs up to its first park before the model runs, so a read is only safe once the
+reader has parked on a location the model reaches *after* the binder's. Reading a
+cross-invoke name too early raises `NameError` (see Gotchas). When both invokes
+need to hand a value across the *same* module, use `tracer.barrier(n)` — see
+[barrier.md](barrier.md).
 
-## Threading model
+## Per-invoke iteration and cache
 
-- One mediator (worker thread) per invoke.
-- Threads run serially — `Interleaver.__enter__` starts each one, then drains its first event. Only one mediator's intervention code runs at a time.
-- Each mediator owns: an `event_queue`/`response_queue` pair, a `history` set, an `iteration_tracker`, a `batch_group`, and a `hooks` list. See `Mediator` in `src/nnsight/intervention/interleaver.py:718`.
-- Worker thread captures the caller's CUDA stream so it doesn't race with the main thread (`interleaver.py:900`).
+Each invoke keeps its own iteration counter and its own cache scope:
+
+```python
+with model.generate(max_new_tokens=5, do_sample=False) as tracer:
+    with tracer.invoke("Madison Square Garden is in"):
+        first = nnsight.save([])
+        for _ in tracer.iter[1:3]:
+            first.append(model.lm_head.output[0][-1].argmax(dim=-1))
+    with tracer.invoke("Madison Square Garden is in"):
+        second = nnsight.save([])
+        for _ in tracer.iter[:3]:
+            second.append(model.lm_head.output[0][-1].argmax(dim=-1))
+# len(first) == 2, len(second) == 3
+```
+
+A `tracer.cache(...)` opened inside an invoke records that invoke's rows only.
 
 ## Implementing batching for a custom model
 
-To support multiple input invokes on a non-`LanguageModel`, override `_prepare_input` and `_batch` (mixin: `Batchable` in `src/nnsight/intervention/batching.py:35`):
+Base `NNsight` runs a single invoke fine, but batching two or more raises
+`NotImplementedError`. To support it, override `_batch_size` (row count) and
+`_batch` (combine the invokes):
 
 ```python
-from nnsight import NNsight
+import torch
+from nnsight.intervention.envoy import Envoy
 
-class MyModel(NNsight):
-    def _prepare_input(self, *inputs, **kwargs):
-        # return (args, kwargs, batch_size)
-        return inputs, kwargs, len(inputs[0])
+class BatchEnvoy(Envoy):
+    def _batch_size(self, *inputs, **kwargs):
+        # rows this invoke contributes (0 if it has no data)
+        return inputs[0].shape[0] if inputs else 0
 
-    def _batch(self, batched_input, *args, **kwargs):
-        # combine new args/kwargs with batched_input -> (args, kwargs)
-        ...
+    def _batch(self, invokes, fn):
+        # invokes: list of (inputs, kwargs); return (args, kwargs) for fn
+        return (torch.cat([inputs[0] for inputs, _ in invokes]),), {}
 ```
-
-Without these, multiple input invokes raise `NotImplementedError: Batching is not implemented`.
 
 ## Gotchas
 
-- Empty invokes do **not** trigger `_batch` — they always work, even on base `NNsight`.
-- An empty invoke must be preceded by at least one input invoke (or a `.trace(input)`). Otherwise nothing has been put on the batch and the model never executes.
-- Cannot nest invokes (`Cannot invoke during an active model execution / interleaving.`) — `Invoker.__init__` raises if interleaving is in progress (`invoker.py:32`).
-- Sharing a variable derived from `.output` of a module that **both** invokes also touch requires `tracer.barrier(n)` — otherwise `NameError` because the second invoke runs before the first has produced the value. See `docs/usage/barrier.md`.
-- Within an invoke, modules must be accessed in forward-pass order. To access "out of order" use additional invokes.
+- **Base `NNsight` cannot batch multiple input invokes** — two input invokes raise
+  `NotImplementedError: ... does not support batching multiple invokes`. Empty
+  invokes always work.
+- **A trace with no direct input needs at least one invoke.** `with model.trace():`
+  with an empty body raises `ValueError` ("trace() needs an input, or at least one
+  `with tracer.invoke(...)` block").
+- **Invokes cannot nest.** Opening an invoke while the model is running raises
+  `ValueError: Cannot invoke while the model is already running.`
+- **Reading a cross-invoke name before the binder ran raises `NameError`.** Park
+  the reader past the module the value came from first.
+- **Batching only narrows with two or more non-empty invokes.** A lone invoke *is*
+  the whole batch, so it sees every row untouched.
+- **A batched `.skip()` must cover every row** — skip the module in every invoke or
+  none; a shared forward can't run for only the unskipped rows (`ValueError: ...
+  cover every row`). See [skip.md](skip.md).
 
 ## Related
 
-- `docs/usage/trace.md`
-- `docs/usage/barrier.md`
-- `docs/usage/access-and-modify.md`
-- `docs/usage/save.md`
+- [trace.md](trace.md)
+- [barrier.md](barrier.md) — cross-invoke synchronization.
+- [access-and-modify.md](access-and-modify.md)
+- [skip.md](skip.md)

@@ -1,197 +1,133 @@
 # Contributing to NNsight
 
-Thanks for your interest in contributing to nnsight! This guide covers everything you need to get started.
+Thanks for your interest in contributing! This guide covers getting set up, running
+the tests, and the conventions this repo follows.
 
-## Getting Started
+## Getting started
 
 ### Prerequisites
 
 - Python 3.10+
-- [PyTorch](https://pytorch.org/) >= 2.4.0
-- Git
+- [PyTorch](https://pytorch.org/)
+- Git, and a C compiler for the optional `.save()` mount extension (a failed build
+  is a warning, not an error — nnsight falls back to `nnsight.save(value)`).
 
-### Development Setup
+### Development setup
 
-1. Fork and clone the repository:
+Clone your fork, then install in editable mode with the dev extras:
 
 ```bash
 git clone https://github.com/<your-username>/nnsight.git
 cd nnsight
+pip install -e ".[dev]"
 ```
 
-2. Install in development mode:
+`[dev]` adds the test toolchain (pytest) and the extra runtimes the suite
+exercises (diffusers, pillow, accelerate) on top of nnsight's core install —
+which already includes transformers and the remote (NDIF) deps. The tests import
+the **installed** package — there is no `sys.path` shim — so the editable install
+is what makes them resolve to your working tree.
+
+Quick smoke test (no model download):
 
 ```bash
-pip install -e ".[test]"
+pytest tests/test_tracing.py -q
 ```
 
-This installs nnsight in editable mode along with test dependencies (pytest, pytest-cov).
+## Running tests
 
-3. Verify your setup:
+Run the suite on CPU, skipping the vLLM tests (they need a GPU and the `vllm` extra):
 
 ```bash
-pytest tests/test_tiny.py --device cpu -x
+CUDA_VISIBLE_DEVICES="" pytest tests/ -q --ignore=tests/vllm
 ```
 
-### Optional Dependencies
+Notes:
 
-- **diffusers**: Required for `DiffusionModel` support. Install with `pip install diffusers`.
-- **vllm**: Required for vLLM integration. Install with `pip install vllm>=0.12`.
+- Many tests download small models from the HuggingFace Hub on first run (gpt2, a few
+  tiny random checkpoints, tiny diffusion pipelines); they're cached afterward.
+- Diffusion tests `pytest.importorskip("diffusers")`, so they skip cleanly if
+  diffusers isn't installed.
+- The vLLM suite (`tests/vllm/`) needs a CUDA GPU and `pip install nnsight[vllm]` (or
+  `pip install vllm`); it's excluded from the default run above.
 
-These are not required for core development or running the main test suite.
-
-## Project Structure
+## Project structure
 
 ```
 src/nnsight/
-├── _c/                          # C extensions (pymount)
+├── _c/                       # optional C extension: mounts .save() on every object
+├── tracing/                  # capture → parse → execute (Tracer, Backend, util, hint)
 ├── intervention/
-│   ├── batching.py              # Batchable interface
-│   ├── envoy.py                 # Core Envoy wrapper (module proxy)
-│   ├── interleaver.py           # Hook dispatch, thread management
-│   ├── backends/                # Execution backends
-│   ├── tracing/
-│   │   ├── base.py              # Tracer base class, source extraction
-│   │   ├── tracer.py            # InterleavingTracer, ScanningTracer
-│   │   ├── invoker.py           # Invoker for batched execution
-│   │   ├── iterator.py          # Step iteration (tracer.iter)
-│   │   ├── globals.py           # Global state, pymount lifecycle
-│   │   ├── backwards.py         # Gradient tracing
-│   │   └── util.py              # Exception handling, frame utils
-│   └── serialization.py         # NDIF serialization
+│   ├── envoy.py              # the Envoy tree (the module proxy)
+│   ├── eproperty.py          # descriptor behind .input/.output/tracer.result/...
+│   ├── interleaver.py        # the Interleaver + Mediator (greenlets, event protocol)
+│   ├── batching.py           # Batcher: narrow/widen, batch groups
+│   ├── source.py             # .source AST instrumentation
+│   ├── tracer.py             # InterleavingTracer / ScanningTracer / Invoker
+│   ├── cache.py              # tracer.cache
+│   ├── serialization.py      # source-based serialization for remote
+│   └── backends/             # remote.py (blocking / non-blocking / async), local.py
 ├── modeling/
-│   ├── base.py                  # NNsight base class
-│   ├── language.py              # LanguageModel
-│   ├── vlm.py                   # VisionLanguageModel
-│   ├── diffusion.py             # DiffusionModel
-│   ├── huggingface.py           # HuggingFace model mixin
-│   ├── transformers.py          # Transformers integration
-│   └── mixins/                  # Meta loading, dispatch, remote
-├── schema/                      # Config schema
-├── ndif.py                      # Remote execution (NDIF)
-└── util.py                      # Utilities
+│   ├── base.py               # NNsight base class
+│   ├── huggingface.py        # HuggingFaceModel
+│   ├── transformers.py       # TransformersModel (the primary HF wrapper)
+│   ├── diffusion.py          # DiffusionModel + DiffusionBatcher
+│   ├── language.py / vlm.py  # LanguageModel / VisionLanguageModel (deprecated aliases)
+│   ├── mixins/               # Loadable, Meta (lazy build/dispatch), Remotable
+│   └── vllm/                 # the vLLM runtime
+├── schema/                   # CONFIG (config.py), request/response schemas
+└── util.py
 ```
 
-### Key Architectural Concepts
+### Architecture in one paragraph
 
-NNsight uses **deferred execution with thread-based synchronization**:
+nnsight runs on **deferred, interleaved execution**. Code inside `with model.trace(...)`
+is captured as source, compiled, and run as a **greenlet** interleaved with the
+model's forward pass: reading `.output` parks the greenlet until the model reaches
+that module and a forward hook hands the value over; assigning to `.output` splices a
+value in. The event protocol is `VALUE`/`SWAP`/`SKIP`/`BARRIER`. The full picture is
+in [NNsight.md](./NNsight.md); the task docs are under [`docs/`](docs/), routed by
+[CLAUDE.md](./CLAUDE.md).
 
-1. Code inside `with model.trace(...)` is extracted via AST, compiled, and run in a worker thread.
-2. When the thread accesses `.output` or `.input`, it blocks until the model's forward pass provides the value via a PyTorch hook.
-3. Each invoke runs in its own thread, executing serially in definition order.
+## Making changes
 
-Understanding this architecture is important for working on the intervention system. See [CLAUDE.md](./CLAUDE.md) and [NNsight.md](./NNsight.md) for deep technical documentation.
+### Code style
 
-## Running Tests
+Read [STYLE.md](./STYLE.md) — it's the canonical house style. In short: tight,
+present-tense prose in comments and docstrings that describe how the code *is* (not
+its history); comments only where the logic isn't self-evident; keep changes focused.
 
-### Full Test Suite
+### Writing tests
 
-```bash
-pytest tests/test_lm.py tests/test_tiny.py tests/test_0516_features.py \
-  tests/test_debug.py tests/test_memory_cleanup.py tests/test_multiple_wrappers.py \
-  --device cpu
-```
+- Tests live in `tests/` and import `nnsight` from the installed package (no
+  `sys.path` inserts).
+- Keep them CPU-runnable; guard GPU-only paths and use `pytest.importorskip(...)` for
+  optional dependencies.
+- To collect values across a trace, **save the container** and store raw values —
+  `xs = nnsight.save([]); xs.append(model...output)` — never `xs.append(x.save())`
+  (see [docs/gotchas/save.md](docs/gotchas/save.md)).
 
-### Quick Smoke Test
+## Submitting changes
 
-```bash
-pytest tests/test_tiny.py --device cpu -x
-```
+1. Branch from the latest `main`: `git checkout -b my-feature main`.
+2. Make the change and add tests; run `CUDA_VISIBLE_DEVICES="" pytest tests/ -q --ignore=tests/vllm`.
+3. Commit with an `area: summary` subject (e.g. `tracing: ...`, `docs: ...`) and open
+   a PR against `main`.
+4. In the PR: what the change does and why, related issues, and any breaking changes.
 
-### Diffusion Tests
+## Reporting bugs
 
-Requires `diffusers` to be installed. Uses a tiny test model (~1.4M params) that runs on CPU:
-
-```bash
-pytest tests/test_diffusion.py --device cpu
-```
-
-### GPU Tests
-
-If you have a CUDA GPU available:
-
-```bash
-pytest tests/test_lm.py --device cuda:0
-```
-
-### Test Markers
-
-Tests are organized with pytest markers: `scan`, `source`, `iter`, `cache`, `rename`, `skips`, `order`. You can run a specific category:
-
-```bash
-pytest tests/test_lm.py -m iter --device cpu
-```
-
-## Making Changes
-
-### Before You Start
-
-- Check [existing issues](https://github.com/ndif-team/nnsight/issues) to see if someone is already working on what you have in mind.
-- For larger changes, open an issue first to discuss the approach.
-- For bug fixes, include a minimal reproduction if possible.
-
-### Code Style
-
-- Follow existing patterns in the codebase. NNsight doesn't use a formatter, but consistency with surrounding code is expected.
-- Keep changes focused. A bug fix shouldn't include unrelated refactoring.
-- Don't add docstrings, comments, or type annotations to code you didn't change.
-- Only add comments where the logic isn't self-evident.
-
-### Writing Tests
-
-- Tests go in the `tests/` directory.
-- Use the existing fixtures in `tests/conftest.py` where possible.
-- All tests should pass on CPU (`--device cpu`). GPU-specific tests should be skipped when no GPU is available.
-- Use `@torch.no_grad()` for inference-only tests.
-- For optional dependencies (like diffusers), use `pytest.importorskip()` at the top of the test file.
-
-### Common Development Pitfalls
-
-- **Module access order matters.** Within a single invoke, modules must be accessed in forward-pass execution order. Accessing layer 5 then layer 2 will deadlock.
-- **`.save()` is required** to persist values outside a trace context. Values without `.save()` are garbage collected.
-- **Source cache issues.** If you hit `AttributeError: 'Info' object has no attribute 'pull'`, clear the cache with `Globals.cache.clear()` from `nnsight.intervention.tracing.globals`.
-- **Benchmarking.** Define trace functions at module level (not inside loops). Warm up 2-3 iterations before timing. Use `torch.cuda.synchronize()` for GPU timing.
-
-## Submitting Changes
-
-1. Create a branch from the latest `main`:
-
-```bash
-git checkout -b my-feature main
-```
-
-2. Make your changes and add tests.
-
-3. Run the test suite:
-
-```bash
-pytest tests/test_tiny.py tests/test_lm.py --device cpu -x
-```
-
-4. Push your branch and open a pull request against `main`.
-
-5. In your PR description:
-   - Explain what the change does and why.
-   - Reference any related issues.
-   - Note any breaking changes.
-
-If your PR isn't getting the attention it deserves, come bug us on [Discord](https://discord.gg/6uFJmCSwW7)!
-
-## Reporting Bugs
-
-Open an issue at [github.com/ndif-team/nnsight/issues](https://github.com/ndif-team/nnsight/issues) with:
-
-- NNsight version (`python -c "import nnsight; print(nnsight.__version__)"`)
-- Python and PyTorch versions
-- A minimal code example that reproduces the issue
-- The full error traceback
+Open an issue at [github.com/ndif-team/nnsight/issues](https://github.com/ndif-team/nnsight/issues) with the
+nnsight version (`python -c "import nnsight; print(nnsight.__version__)"`), your Python
+and PyTorch versions, a minimal reproduction, and the full traceback.
 
 ## Community
 
-- **Documentation:** [nnsight.net](https://nnsight.net)
-- **Forum:** [discuss.ndif.us](https://discuss.ndif.us)
-- **Discord:** [discord.gg/6uFJmCSwW7](https://discord.gg/6uFJmCSwW7)
+- Documentation: [nnsight.net](https://nnsight.net)
+- Forum: [discuss.ndif.us](https://discuss.ndif.us)
+- Discord: [discord.gg/6uFJmCSwW7](https://discord.gg/6uFJmCSwW7)
 
 ## License
 
-By contributing to nnsight, you agree that your contributions will be licensed under the [MIT License](./LICENSE).
+By contributing, you agree that your contributions will be licensed under the
+[MIT License](./LICENSE).

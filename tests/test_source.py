@@ -1,265 +1,546 @@
-"""Tests for the .source feature — operation-level tracing and intervention.
-
-Covers basic source access, interventions, the forward wrapper chain
-(nnsight skip + accelerate device_map), and recursive source tracing.
-"""
 
 import pytest
 import torch
-
 import nnsight
+import torch.nn as nn
+
+from nnsight.intervention.envoy import Envoy
+from nnsight.intervention.interleaver import OutOfOrderError
+from nnsight.intervention.source import _STATE, SourceNotAvailable
 
 
-@pytest.fixture(scope="module")
-def gpt2(device: str):
-    return nnsight.LanguageModel(
-        "openai-community/gpt2", device_map=device, dispatch=True
-    )
+class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(8, 8)
+        self.fc2 = nn.Linear(8, 8)
+
+    def forward(self, x):
+        h = torch.relu(self.fc1(x))
+        return self.fc2(h)
+
+
+class Repeated(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(8, 8)
+        self.fc2 = nn.Linear(8, 8)
+
+    def forward(self, x):
+        a = torch.relu(self.fc1(x))
+        b = torch.relu(self.fc2(a))
+        return b
+
+
+class Nested(nn.Module):
+    def forward(self, x):
+        return torch.relu(torch.relu(x))
+
+
+class Decorated(nn.Module):
+    @torch.no_grad()
+    def forward(self, x):
+        return x + 1
 
 
 @pytest.fixture
-def prompt():
-    return "The Eiffel Tower is in"
+def x():
+    return torch.randn(2, 8)
 
 
-class TestSourceAccess:
-    """Basic .source access — reading operation outputs and inputs."""
+class TestListing:
+    def test_lists_operations_in_execution_order(self):
+        envoy = Envoy(MLP())
+        # fc1 runs, then relu wrapping it, then fc2.
+        assert list(envoy.source._names) == ["self_fc1_0", "torch_relu_0", "self_fc2_0"]
 
-    @torch.no_grad()
-    def test_source_output(self, gpt2: nnsight.LanguageModel):
-        with gpt2.trace("_"):
-            out = gpt2.transformer.h[0].attn.source.split_1.output.save()
+    def test_repr_lists_operations(self):
+        envoy = Envoy(MLP())
+        text = repr(envoy.source)
+        for name in ("self_fc1_0", "torch_relu_0", "self_fc2_0"):
+            assert name in text
 
-        assert isinstance(out, tuple)
+    def test_repr_shows_annotated_source(self):
+        # The overview prints the forward with ops labelled in a gutter, the def
+        # line marked with '*', and same-line ops as '+' continuations.
+        text = repr(Envoy(MLP()).source)
+        lines = text.splitlines()
+        assert "* def forward" in text
+        assert "return self.fc2(h)" in text
+        # fc1 labels its line; relu (same line) continues with a '+'.
+        assert any("self_fc1_0" in line and "->" in line for line in lines)
+        assert any("torch_relu_0" in line and "+" in line for line in lines)
 
-    @torch.no_grad()
-    def test_source_inputs(self, gpt2: nnsight.LanguageModel):
-        with gpt2.trace("_"):
-            inp = gpt2.transformer.h[0].attn.source.attention_interface_0.inputs.save()
+    def test_source_node_repr_marks_call_site(self):
+        # Zooming in marks the operation's line with '-->' / '<--' and names it.
+        text = repr(Envoy(MLP()).source.self_fc1_0)
+        assert text.startswith("model.source.self_fc1_0:")
+        marked = [line for line in text.splitlines() if "-->" in line]
+        assert len(marked) == 1
+        assert "self.fc1(x)" in marked[0] and marked[0].endswith("<--")
 
-        assert isinstance(inp, tuple)
+    def test_repeated_op_gets_distinct_occurrences(self):
+        envoy = Envoy(Repeated())
+        assert "torch_relu_0" in envoy.source._names
+        assert "torch_relu_1" in envoy.source._names
 
-    @torch.no_grad()
-    def test_multiple_source_across_layers(self, gpt2: nnsight.LanguageModel):
-        with gpt2.trace("_"):
-            out_0 = gpt2.transformer.h[0].attn.source.split_1.output.save()
-            out_1 = gpt2.transformer.h[1].attn.source.split_1.output.save()
+    def test_unknown_operation_raises_with_available(self):
+        envoy = Envoy(MLP())
+        with pytest.raises(AttributeError) as exc:
+            envoy.source.nope_0
+        assert "torch_relu_0" in str(exc.value)
 
-        assert isinstance(out_0, tuple)
-        assert isinstance(out_1, tuple)
-
-    @torch.no_grad()
-    def test_recursive_source(self, gpt2: nnsight.LanguageModel):
-        with gpt2.trace("_"):
-            out = gpt2.transformer.h[
-                0
-            ].attn.source.attention_interface_0.source.torch_nn_functional_scaled_dot_product_attention_0.output.save()
-
-        assert isinstance(out, torch.Tensor)
-
-
-class TestSourceIntervention:
-    """Modifying operation-level values via .source."""
-
-    @torch.no_grad()
-    def test_source_patching(self, gpt2: nnsight.LanguageModel):
-        with gpt2.trace("_"):
-            out = gpt2.transformer.h[0].attn.source.split_1.output
-            out = (torch.zeros_like(out[0]),) + out[1:]
-            gpt2.transformer.h[1].attn.source.split_1.output = out
-            patched = gpt2.transformer.h[1].attn.source.split_1.output.save()
-
-        assert isinstance(patched, tuple)
-        assert torch.all(patched[0] == 0)
-
-    @torch.no_grad()
-    def test_source_does_not_affect_plain_forward(
-        self, gpt2: nnsight.LanguageModel, prompt: str
-    ):
-        """Accessing .source and running a trace should not change plain model output."""
-        tokens = gpt2.tokenizer(prompt, return_tensors="pt").to(gpt2.device)
-        logits_before = gpt2(**tokens)["logits"]
-
-        # Trigger source injection
-        gpt2.transformer.h[0].attn.source
-        with gpt2.trace("_"):
-            _ = gpt2.transformer.h[0].attn.source.split_1.output.save()
-
-        logits_after = gpt2(**tokens)["logits"]
-        assert torch.allclose(logits_before, logits_after)
+    def test_decorated_forward_rejected(self):
+        envoy = Envoy(Decorated())
+        with pytest.raises(SourceNotAvailable):
+            envoy.source
 
 
-class TestSourceWrapperChain:
-    """Verify .source preserves the nnsight forward wrapper chain."""
+class TestCapture:
+    def test_captures_intermediate_value(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        captured = {}
+        with envoy.trace(x):
+            captured["relu"] = envoy.source.torch_relu_0.output
+        assert torch.allclose(captured["relu"], torch.relu(model.fc1(x)))
 
-    @torch.no_grad()
-    def test_nnsight_forward_preserved(self, gpt2: nnsight.LanguageModel):
-        """After .source injection, __nnsight_forward__ should exist and be swapped."""
-        module = gpt2.transformer.h[0].attn._module
-        assert hasattr(module, "__nnsight_forward__")
+    def test_captures_call_to_submodule(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        captured = {}
+        with envoy.trace(x):
+            captured["fc1"] = envoy.source.self_fc1_0.output
+        assert torch.allclose(captured["fc1"], model.fc1(x))
 
-        # Trigger source injection
-        gpt2.transformer.h[0].attn.source
+    def test_repeated_occurrence_captures_second(self, x):
+        model = Repeated()
+        envoy = Envoy(model)
+        expected = torch.relu(model.fc2(torch.relu(model.fc1(x))))
+        captured = {}
+        with envoy.trace(x):
+            captured["relu1"] = envoy.source.torch_relu_1.output
+        assert torch.allclose(captured["relu1"], expected)
 
-        # __nnsight_forward__ should still exist — .source swaps it, not module.forward
-        assert hasattr(module, "__nnsight_forward__")
+    def test_nested_numbering_is_execution_order(self, x):
+        model = Nested()
+        envoy = Envoy(model)
+        captured = {}
+        with envoy.trace(x):
+            # inner relu == torch_relu_0, so it equals a single relu of the input.
+            captured["inner"] = envoy.source.torch_relu_0.output
+        assert torch.allclose(captured["inner"], torch.relu(x))
 
-    @torch.no_grad()
-    def test_source_then_trace_works(self, gpt2: nnsight.LanguageModel):
-        """A normal trace should still work after .source has been accessed."""
-        gpt2.transformer.h[0].attn.source
+    def test_source_and_module_output_coexist(self, x):
+        # Requested in execution order: relu (mid-forward) before fc2's output.
+        model = MLP()
+        envoy = Envoy(model)
+        captured = {}
+        with envoy.trace(x):
+            captured["relu"] = envoy.source.torch_relu_0.output
+            captured["fc2_out"] = envoy.fc2.output
+        assert torch.allclose(captured["relu"], torch.relu(model.fc1(x)))
+        assert torch.allclose(captured["fc2_out"], model(x))
 
-        with gpt2.trace("_"):
-            out = gpt2.transformer.h[0].attn.output[0].save()
-
-        assert isinstance(out, torch.Tensor)
-        assert out.ndim == 3
-
-
-class TestSourceErrors:
-    """Edge cases and expected errors."""
-
-    @torch.no_grad()
-    def test_nonexistent_operation_raises(self, gpt2: nnsight.LanguageModel):
-        with pytest.raises(AttributeError):
-            with gpt2.trace("_"):
-                gpt2.transformer.h[0].attn.source.does_not_exist_xyz.output.save()
+    def test_out_of_order_source_request_raises(self, x):
+        envoy = Envoy(MLP())
+        with pytest.raises(OutOfOrderError):
+            with envoy.trace(x):
+                later = envoy.source.self_fc2_0.output  # fc2 runs last...
+                earlier = envoy.source.self_fc1_0.output  # ...so requesting fc1 now is late
 
 
-class TestSourceIter:
-    """`.source` combined with ``tracer.iter[...]`` — operation-level
-    intervention across multi-step generation.
+class TestInputs:
+    def test_op_input_is_first_arg(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        captured = {}
+        with envoy.trace(x):
+            # fc2 receives the relu output as its single positional argument.
+            captured["fc2_in"] = envoy.source.self_fc2_0.input
+        assert torch.allclose(captured["fc2_in"], torch.relu(model.fc1(x)))
 
-    These tests exercise the per-mediator iteration tracker for
-    operation paths, which the persistent iter hook in
-    :func:`_register_iter_hooks` keeps in sync with the parent module's
-    tracker by walking the module's ``SourceAccessor`` after each forward
-    pass (recursing into nested accessors for recursive ``.source``).
-    """
+    def test_op_inputs_is_args_kwargs(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        captured = {}
+        with envoy.trace(x):
+            captured["fc2_in"] = envoy.source.self_fc2_0.inputs
+        args, kwargs = captured["fc2_in"]
+        assert torch.allclose(args[0], torch.relu(model.fc1(x)))
+        assert kwargs == {}
 
-    @torch.no_grad()
-    def test_iter_source_output_all_steps(self, gpt2: nnsight.LanguageModel):
-        """Save an op output on every generation step via ``iter[:]``."""
-        # Touch .source before iter to keep this a Phase-1 case (the
-        # mid-loop-first-access edge case is a known limitation).
-        gpt2.transformer.h[0].attn.source
 
+class TestEditing:
+    def test_set_op_output(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        replacement = torch.full((2, 8), 5.0)
+        captured = {}
+        with envoy.trace(x):
+            envoy.source.torch_relu_0.output = replacement
+            captured["out"] = envoy.output
+        assert torch.allclose(captured["out"], model.fc2(replacement))
+
+    def test_edit_op_output_from_its_value(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        ref_relu = torch.relu(model.fc1(x))
+        captured = {}
+        with envoy.trace(x):
+            envoy.source.torch_relu_0.output = envoy.source.torch_relu_0.output + 1
+            captured["out"] = envoy.output
+        assert torch.allclose(captured["out"], model.fc2(ref_relu + 1))
+
+    def test_inplace_edit_op_output(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        captured = {}
+        with envoy.trace(x):
+            envoy.source.torch_relu_0.output[:] = 0
+            captured["out"] = envoy.output
+        assert torch.allclose(captured["out"], model.fc2(torch.zeros(2, 8)))
+
+    def test_set_op_input(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        zeros = torch.zeros(2, 8)
+        captured = {}
+        with envoy.trace(x):
+            envoy.source.self_fc2_0.input = zeros
+            captured["out"] = envoy.output
+        assert torch.allclose(captured["out"], model.fc2(zeros))
+
+    def test_set_op_inputs(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        zeros = torch.zeros(2, 8)
+        captured = {}
+        with envoy.trace(x):
+            envoy.source.self_fc2_0.inputs = ((zeros,), {})
+            captured["out"] = envoy.output
+        assert torch.allclose(captured["out"], model.fc2(zeros))
+
+
+class NestedMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.inner = MLP()
+
+    def forward(self, x):
+        return self.inner(x)
+
+
+class TestSkip:
+    def test_module_skip_with_constant(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        v = torch.full((2, 8), 3.0)
+        captured = {}
+        with envoy.trace(x):
+            envoy.fc1.skip(v)  # fc1 doesn't run; its output is v
+            captured["out"] = envoy.output
+        assert torch.allclose(captured["out"], model.fc2(torch.relu(v)))
+
+    def test_module_skip_with_own_input_first_trace(self, x):
+        # The residual-passthrough idiom. Works on the FIRST trace because `.skip`
+        # is a property: accessing it installs the controller before `.input` is
+        # read, so the forward is intercepted in time.
+        model = MLP()
+        envoy = Envoy(model)
+        captured = {}
+        with envoy.trace(x):
+            envoy.fc1.skip(envoy.fc1.input)  # fc1 passes its input through
+            captured["out"] = envoy.output
+        assert torch.allclose(captured["out"], model.fc2(torch.relu(x)))
+
+    def test_module_skip_actually_avoids_compute(self, x):
+        # A forward that would raise if run — skip must mean it never executes.
+        class Boom(nn.Module):
+            def forward(self, x):
+                raise AssertionError("forward should not run when skipped")
+
+        class Wrap(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.boom = Boom()
+
+            def forward(self, x):
+                return self.boom(x)
+
+        envoy = Envoy(Wrap())
+        captured = {}
+        with envoy.trace(x):
+            envoy.boom.skip(x)
+            captured["out"] = envoy.output
+        assert torch.allclose(captured["out"], x)
+
+    def test_op_skip(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        v = torch.full((2, 8), 2.0)
+        captured = {}
+        with envoy.trace(x):
+            envoy.source.self_fc1_0.skip(v)  # the fc1 call returns v instead of running
+            captured["out"] = envoy.output
+        assert torch.allclose(captured["out"], model.fc2(torch.relu(v)))
+
+    def test_op_skip_reports_output(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        v = torch.full((2, 8), 2.0)
+        captured = {}
+        with envoy.trace(x):
+            envoy.source.self_fc1_0.skip(v)
+            captured["fc1_out"] = envoy.source.self_fc1_0.output
+        assert torch.allclose(captured["fc1_out"], v)
+
+    def test_skipping_sourced_module_drops_its_ops(self, x):
+        # Skipping a whole module means its body never runs, so its source ops
+        # never fire — reading one is out of order, like any never-produced value.
+        envoy = Envoy(NestedMLP())
+        with pytest.raises(OutOfOrderError):
+            with envoy.trace(x):
+                envoy.inner.skip(torch.zeros(2, 8))
+                envoy.inner.source.torch_relu_0.output
+
+
+class TestInstall:
+    def test_forward_installed_permanently(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            envoy.source.torch_relu_0.output
+        # The instrumented forward stays installed (permanent, module-cached).
+        assert "forward" in model.__dict__
+        assert model.__dict__[_STATE].sourced is True
+
+    def test_untraced_inference_matches_reference(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        reference = model.fc2(torch.relu(model.fc1(x)))
+        # Access .source (installs the instrumented forward) — must not perturb a
+        # normal, untraced forward, before or after an actual source trace.
+        envoy.source
+        assert torch.allclose(model(x), reference)
+        with envoy.trace(x):
+            envoy.source.torch_relu_0.output
+        assert torch.allclose(model(x), reference)
+
+    def test_multiple_envoys_share_module(self, x):
+        # Two independent Envoys (each its own Interleaver) over the SAME module:
+        # source works through both, rebinding to whichever traces.
+        model = MLP()
+        e1 = Envoy(model)
+        e2 = Envoy(model)
+        expected = torch.relu(model.fc1(x))
+
+        with e1.trace(x):
+            a = nnsight.save(e1.source.torch_relu_0.output)
+        assert torch.allclose(a, expected)
+
+        with e2.trace(x):
+            b = nnsight.save(e2.source.torch_relu_0.output)
+        assert torch.allclose(b, expected)
+
+        # Back to e1 again — rebinds fine, and edits route to the right run.
+        with e1.trace(x):
+            e1.source.torch_relu_0.output = torch.zeros(2, 8)
+            out = nnsight.save(e1.output)
+        assert torch.allclose(out, model.fc2(torch.zeros(2, 8)))
+
+    def test_prior_source_access_makes_ordering_robust(self, x):
+        # Once installed (here, before the trace), a source value is observable
+        # even after a child-output request that would otherwise start the model.
+        model = MLP()
+        envoy = Envoy(model)
+        envoy.source  # install now
+        captured = {}
+        with envoy.trace(x):
+            captured["fc1_out"] = envoy.fc1.output
+            captured["relu"] = envoy.source.torch_relu_0.output
+        assert torch.allclose(captured["fc1_out"], model.fc1(x))
+        assert torch.allclose(captured["relu"], torch.relu(model.fc1(x)))
+
+
+# ---------------------------------------------------------------------------
+# Recursive / nested source: drilling into a called function
+# ---------------------------------------------------------------------------
+
+# Module-level so inspect.getsource can recover them when instrumented.
+
+
+def relu_double(x):
+    a = torch.relu(x)
+    b = torch.add(a, a)
+    return b
+
+
+def inner_neg(x):
+    return torch.relu(x)
+
+
+def outer_neg(x):
+    y = torch.neg(x)
+    return inner_neg(y)
+
+
+class Calls(nn.Module):
+    """forward calls a plain module-level helper."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(8, 8)
+
+    def forward(self, x):
+        h = self.fc(x)
+        return relu_double(h)
+
+
+class Deep(nn.Module):
+    """forward -> outer_neg -> inner_neg -> relu (three levels)."""
+
+    def forward(self, x):
+        return outer_neg(x)
+
+
+class Methoded(nn.Module):
+    """forward calls a bound method of the module itself."""
+
+    def compute(self, x):
+        return torch.relu(x)
+
+    def forward(self, x):
+        return self.compute(x)
+
+
+class TestRecursive:
+    def test_capture_nested_output(self, x):
+        model = Calls()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            inner = nnsight.save(envoy.source.relu_double_0.source.torch_relu_0.output)
+            outer = nnsight.save(envoy.source.relu_double_0.output)
+        assert torch.allclose(inner, torch.relu(model.fc(x)))
+        assert torch.allclose(outer, inner + inner)
+
+    def test_edit_nested_output_propagates(self, x):
+        model = Calls()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            envoy.source.relu_double_0.source.torch_relu_0.output = torch.zeros(2, 8)
+            out = nnsight.save(envoy.output)
+        # relu -> 0, so add(0,0) -> 0, and forward returns that.
+        assert torch.allclose(out, torch.zeros(2, 8))
+
+    def test_skip_nested_op(self, x):
+        model = Calls()
+        envoy = Envoy(model)
+        sentinel = torch.ones(2, 8) * 7
+        with envoy.trace(x):
+            envoy.source.relu_double_0.source.torch_add_0.skip(sentinel)
+            out = nnsight.save(envoy.source.relu_double_0.output)
+        assert torch.allclose(out, sentinel)
+
+    def test_nested_input_and_inputs(self, x):
+        model = Calls()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            first = nnsight.save(envoy.source.relu_double_0.source.torch_add_0.input)
+            args, kwargs = envoy.source.relu_double_0.source.torch_add_0.inputs
+            both = nnsight.save(args[0])
+        # add(a, a): first arg is relu(fc(x)).
+        assert torch.allclose(first, torch.relu(model.fc(x)))
+        assert torch.allclose(both, first)
+
+    def test_bound_method_recursion(self, x):
+        model = Methoded()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            r = nnsight.save(envoy.source.self_compute_0.source.torch_relu_0.output)
+        assert torch.allclose(r, torch.relu(x))
+
+    def test_depth_three(self, x):
+        model = Deep()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            deep = nnsight.save(
+                envoy.source.outer_neg_0.source.inner_neg_0.source.torch_relu_0.output
+            )
+        assert torch.allclose(deep, torch.relu(torch.neg(x)))
+
+    def test_nested_names_and_repr(self, x):
+        model = Calls()
+        envoy = Envoy(model)
+        captured = {}
+        with envoy.trace(x):
+            nested = envoy.source.relu_double_0.source
+            captured["names"] = [op.name for op in nested]
+            captured["repr"] = repr(nested)
+        assert captured["names"] == ["torch_relu_0", "torch_add_0"]
+        assert "torch_relu_0" in captured["repr"] and "torch_add_0" in captured["repr"]
+
+    def test_unknown_nested_op_raises(self, x):
+        model = Calls()
+        envoy = Envoy(model)
+        with pytest.raises(AttributeError, match="available: torch_relu_0, torch_add_0"):
+            with envoy.trace(x):
+                envoy.source.relu_double_0.source.nope_0.output
+
+    def test_builtin_target_raises(self, x):
+        # torch_relu_0 inside relu_double calls the builtin torch.relu — no source.
+        model = Calls()
+        envoy = Envoy(model)
+        with pytest.raises(SourceNotAvailable):
+            with envoy.trace(x):
+                envoy.source.relu_double_0.source.torch_relu_0.source
+
+    def test_submodule_target_raises(self, x):
+        # self_fc_0 calls a submodule; drilling in should redirect to its own .source.
+        model = Calls()
+        envoy = Envoy(model)
+        with pytest.raises(SourceNotAvailable, match="submodule"):
+            with envoy.trace(x):
+                envoy.source.self_fc_0.source
+
+    def test_outside_trace_raises(self):
+        model = Calls()
+        envoy = Envoy(model)
+        with pytest.raises(SourceNotAvailable, match="inside a trace"):
+            envoy.source.relu_double_0.source
+
+
+@pytest.fixture(scope="module")
+def gpt2():
+    from nnsight.modeling.transformers import TransformersModel
+
+    return TransformersModel("gpt2", task="text-generation", dispatch=True)
+
+
+class TestRecursiveIntegration:
+    def test_capture_nested_in_transformer(self, gpt2):
+        attn = gpt2.transformer.h[0].attn
+        captured = {}
+        with gpt2.trace("The Eiffel Tower is in"):
+            captured["names"] = attn.source.attention_interface_0.source._compiled.names
+            out = nnsight.save(
+                attn.source.attention_interface_0.source.attn_output_transpose_0.output
+            )
+        assert "attn_output_transpose_0" in captured["names"]
+        assert out.shape[0] == 1  # batch
+
+    def test_nested_source_across_generate_steps(self, gpt2):
+        attn = gpt2.transformer.h[0].attn
+        saved = []
         with gpt2.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
-            outs = list().save()
-            for step in tracer.iter[:]:
-                outs.append(gpt2.transformer.h[0].attn.source.split_1.output)
-
-        assert len(outs) == 3
-        for out in outs:
-            assert isinstance(out, tuple)
-
-    @torch.no_grad()
-    def test_iter_source_input_all_steps(self, gpt2: nnsight.LanguageModel):
-        """Save an op input on every generation step via ``iter[:]``."""
-        gpt2.transformer.h[0].attn.source
-
-        with gpt2.generate("Hello", max_new_tokens=3) as tracer:
-            inputs = list().save()
-            for step in tracer.iter[:]:
-                inputs.append(
-                    gpt2.transformer.h[0].attn.source.attention_interface_0.inputs
-                )
-
-        assert len(inputs) == 3
-        for inp in inputs:
-            assert isinstance(inp, tuple)
-
-    @torch.no_grad()
-    def test_iter_source_specific_step(self, gpt2: nnsight.LanguageModel):
-        """``iter[N]`` should fire op hooks only on step N."""
-        gpt2.transformer.h[0].attn.source
-
-        with gpt2.generate("Hello", max_new_tokens=3) as tracer:
-            outs = list().save()
-            for step in tracer.iter[1]:
-                outs.append(gpt2.transformer.h[0].attn.source.split_1.output)
-
-        assert len(outs) == 1
-
-    @torch.no_grad()
-    def test_iter_source_slice(self, gpt2: nnsight.LanguageModel):
-        """``iter[a:b]`` should fire op hooks only on the requested range."""
-        gpt2.transformer.h[0].attn.source
-
-        with gpt2.generate("Hello", max_new_tokens=4) as tracer:
-            outs = list().save()
-            for step in tracer.iter[1:3]:
-                outs.append(gpt2.transformer.h[0].attn.source.split_1.output)
-
-        assert len(outs) == 2
-
-    @torch.no_grad()
-    def test_iter_source_intervention(self, gpt2: nnsight.LanguageModel):
-        """Modifying an op output every step should change generation.
-
-        Zeroes ``attention_interface_0`` (the main attention computation)
-        on every layer at every generation step. This is heavy enough to
-        flip at least one sampled token vs. the unperturbed baseline.
-        """
-        for i in range(len(gpt2.transformer.h)):
-            gpt2.transformer.h[i].attn.source
-
-        with gpt2.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
-            base = tracer.result.save()
-
-        with gpt2.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
-            for step in tracer.iter[:]:
-                for i in range(len(gpt2.transformer.h)):
-                    attn_out = (
-                        gpt2.transformer.h[i].attn.source.attention_interface_0.output
+            for _ in tracer.iter[:3]:
+                saved.append(
+                    nnsight.save(
+                        attn.source.attention_interface_0.source.attn_output_transpose_0.output
                     )
-                    gpt2.transformer.h[i].attn.source.attention_interface_0.output = (
-                        torch.zeros_like(attn_out[0]),
-                    ) + attn_out[1:]
-            patched = tracer.result.save()
-
-        assert not torch.equal(base, patched)
-
-    @torch.no_grad()
-    def test_iter_recursive_source(self, gpt2: nnsight.LanguageModel):
-        """Recursive ``.source`` (op-of-op) under ``iter[:]``.
-
-        This exercises the recursive op-path tracker bumping in
-        :func:`_bump_source_paths` — ``...attn.attention_interface_0`` and
-        its nested ``...scaled_dot_product_attention_0`` paths must both
-        advance in lockstep with the parent module each step.
-        """
-        gpt2.transformer.h[0].attn.source
-
-        with gpt2.generate("Hello", max_new_tokens=3) as tracer:
-            outs = list().save()
-            for step in tracer.iter[:]:
-                outs.append(
-                    gpt2.transformer.h[
-                        0
-                    ].attn.source.attention_interface_0.source.torch_nn_functional_scaled_dot_product_attention_0.output
                 )
-
-        assert len(outs) == 3
-        for out in outs:
-            assert isinstance(out, torch.Tensor)
-
-    @torch.no_grad()
-    def test_iter_source_sparse(self, gpt2: nnsight.LanguageModel):
-        """Skipping op access on some steps should still work on later steps.
-
-        The persistent iter hook bumps op-path trackers every forward
-        pass regardless of whether the user registered an op hook for
-        that step, so a step-N hook still finds its tracker at N.
-        """
-        gpt2.transformer.h[0].attn.source
-
-        with gpt2.generate("Hello", max_new_tokens=4) as tracer:
-            outs = list().save()
-            for step in tracer.iter[:]:
-                if step in (0, 2):
-                    outs.append(gpt2.transformer.h[0].attn.source.split_1.output)
-
-        assert len(outs) == 2
-        for out in outs:
-            assert isinstance(out, tuple)
+        assert len(saved) == 3
+        # First step sees the full prompt; later (KV-cached) steps see one token.
+        assert saved[0].shape[1] > 1
+        assert saved[1].shape[1] == 1
+        assert saved[2].shape[1] == 1

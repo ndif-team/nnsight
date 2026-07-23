@@ -1,193 +1,244 @@
 ---
 title: Per-Head Attention
-one_liner: Two ways to read and modify individual attention heads - inline reshape inside a trace, or a custom Envoy with `eproperty.transform`.
-tags: [pattern, interpretability, attention, heads, extending]
-related: [docs/patterns/attention-patterns.md, docs/usage/extending.md, docs/patterns/ablation.md]
-sources: [src/nnsight/intervention/envoy.py:168, src/nnsight/intervention/interleaver.py:60, tests/test_transform.py:317, tests/test_transform.py:294]
+one_liner: Read and modify individual attention heads by reshaping the attention output, by reading the already-per-head tensor from `.source`, or by exposing a first-class `.heads` accessor with an `eproperty`.
+tags: [pattern, interpretability, attention, heads]
+related: [docs/patterns/attention-patterns.md, docs/usage/source.md, docs/patterns/ablation.md, docs/concepts/envoy.md, docs/usage/extending.md]
+sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, src/nnsight/intervention/source.py, tests/test_source.py, tests/test_language.py]
 ---
 
 # Per-Head Attention
 
 ## What this is for
 
-Attention output (the result of the `o_proj` / `c_proj` step) is naturally laid out as `[batch, seq, n_heads * head_dim]`. To operate on individual heads - read one head's output, ablate one head, replace one head with another's - you need to view that flat dimension as `[batch, seq, n_heads, head_dim]`.
+The value-weighted attention output (after `c_proj` / `o_proj`) is laid out as
+`[batch, seq, n_heads * head_dim]`. To operate on individual heads — read one
+head's output, ablate a head, replace one head with another's — view that flat
+dimension as `[batch, seq, n_heads, head_dim]`.
 
-Two equally valid ways:
+Three ways:
 
-1. **Inline reshape inside the trace.** Quick, no boilerplate. Best for one-off scripts.
-2. **A custom `Envoy` with an `eproperty`** that exposes `.heads` as a per-head view. Cleaner for repeated use across a model and across many traces - you write the reshape once, then `model.attn.heads[3]` everywhere.
-
-For modifying a head, the second pattern needs `eproperty.transform` to swap the user-edited reshape back into the flat tensor that the model continues to use. `transform` runs on the mediator side after the worker yields control. See `src/nnsight/intervention/interleaver.py:198` (the `transform` decorator) and the worked example at `tests/test_transform.py:317`.
+1. **Inline reshape** of `attn.output[0]` inside a trace. Works on the
+   post-projection output.
+2. **Read `.source.attention_interface_0.output[0]`**, which is *already* shaped
+   `[batch, seq, n_heads, head_dim]` (before the reshape + `c_proj`). No manual
+   reshape needed.
+3. **Expose a first-class `.heads` accessor** with a custom `eproperty` on an
+   `Envoy` subclass, wired to the attention module via `envoys=`. Then
+   `attn.heads` is a hookable per-head view you read and write like any other
+   activation — no reshape at the call site.
 
 ## When to use
 
-- Per-head attention pattern reads.
+- Per-head attention-output reads.
 - Per-head ablation studies.
-- Per-head patching (using `tracer.barrier(n)` to bring values across invokes).
-- Building a per-head metric pipeline you reuse across many models.
+- Per-head patching (with `tracer.barrier(n)` to bring values across invokes).
+- Building a per-head metric pipeline.
 
-## Pattern A: inline reshape
-
-The simplest approach - reshape inside the trace, modify a slice, reshape back.
+## Pattern A: inline reshape of the attention output
 
 ```python
 import torch
-from nnsight import LanguageModel
+from nnsight.modeling.transformers import TransformersModel
 
-model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 n_heads  = model.config.n_head
 head_dim = model.config.n_embd // n_heads
-LAYER    = 5
-HEAD     = 4
-prompt   = "The cat sat on the"
+LAYER, HEAD = 5, 4
+prompt = "The cat sat on the"
 
 # Read one head's output.
 with model.trace(prompt):
-    attn_out = model.transformer.h[LAYER].attn.output[0]    # [B, S, hidden]
+    attn_out = model.transformer.h[LAYER].attn.output[0]   # [B, S, hidden]
     B, S, H = attn_out.shape
     per_head = attn_out.view(B, S, n_heads, head_dim).save()
 
-print(per_head.shape)             # [B, S, n_heads, head_dim]
-print(per_head[:, :, HEAD].shape) # [B, S, head_dim]  -- head 4's output
+print(per_head.shape)              # torch.Size([1, 5, 12, 64])
+print(per_head[:, :, HEAD].shape)  # torch.Size([1, 5, 64])  -- head 4's output
 ```
 
-To ablate one head:
+`.attn.output` is a tuple `(attn_out, weights)`, so index `[0]` for the tensor.
+
+### Ablate one head
+
+Clone, zero one head, reshape back to flat, and assign the whole tuple:
 
 ```python
 with model.trace(prompt):
-    attn = model.transformer.h[LAYER].attn.output[0]
+    out = model.transformer.h[LAYER].attn.output
+    attn = out[0]
     B, S, _ = attn.shape
-
-    # In-place: zero head HEAD across all positions.
-    reshaped = attn.view(B, S, n_heads, head_dim)
-    reshaped[:, :, HEAD, :] = 0
-    # No swap needed - the .view shares storage with the underlying tensor,
-    # so the in-place write propagates.
-
-    logits = model.lm_head.output[:, -1, :].save()
-```
-
-This works because `view()` returns a tensor that shares storage with `attn`. In-place writes go through to the original.
-
-If you instead clone or otherwise break aliasing (e.g. `.reshape` on a non-contiguous tensor returns a copy in some cases), you must write the modified tensor back:
-
-```python
-with model.trace(prompt):
-    attn = model.transformer.h[LAYER].attn.output[0]
-    B, S, _ = attn.shape
-
     edited = attn.view(B, S, n_heads, head_dim).clone()
     edited[:, :, HEAD, :] = 0
     new_attn = edited.view(B, S, n_heads * head_dim)
-
-    # Replace - .attn.output is a tuple; preserve the rest.
-    out = model.transformer.h[LAYER].attn.output
-    model.transformer.h[LAYER].attn.output = (new_attn,) + out[1:]
+    model.transformer.h[LAYER].attn.output = (new_attn,) + tuple(out[1:])
+    logits = model.lm_head.output[:, -1, :].save()
 ```
 
-## Pattern B: custom Envoy with `eproperty`
+Rebuilding and assigning the whole tuple is the safe move: avoid in-place
+slice-assign into a tuple-element view (`attn.output[0][:, :, ...] = x`), which can
+misbehave.
 
-For a model where you do this often, define a custom `Envoy` subclass that exposes `.heads` directly. The cleanest version uses `preprocess` only - it returns a list of *views* into the model's tensor, and in-place writes propagate naturally without needing `transform`. This is exactly the pattern in `tests/test_transform.py:294`:
+## Pattern B: per-head straight from `.source`
+
+Inside GPT-2's attention forward, the attention output is per-head *before* it gets
+flattened and projected. Read it directly from the source op — no reshape:
 
 ```python
-import torch
-from nnsight import NNsight
-from nnsight.intervention.envoy import Envoy, eproperty
-from nnsight.intervention.hooks import requires_output
+with model.trace(prompt):
+    ph = (
+        model.transformer.h[LAYER].attn
+        .source.attention_interface_0.output[0]     # already [B, S, n_heads, head_dim]
+        .save()
+    )
+print(ph.shape)   # torch.Size([1, 5, 12, 64])
+```
 
+Ablate a head at this stage (before `c_proj`) by rebuilding the op's output tuple:
 
-class AttnHeadsEnvoy(Envoy):
-    """Exposes `.heads` as a list of [B, S, head_dim] views into attn output.
+```python
+with model.trace(prompt):
+    out = model.transformer.h[LAYER].attn.source.attention_interface_0.output
+    per = out[0].clone()                # [B, S, n_heads, head_dim]
+    per[:, :, HEAD, :] = 0
+    model.transformer.h[LAYER].attn.source.attention_interface_0.output = (per,) + tuple(out[1:])
+    logits = model.lm_head.output[:, -1, :].save()
+```
 
-    No clone, no transform: each list entry is a view of the underlying
-    [B, S, hidden] tensor, so in-place edits propagate directly.
-    """
+The op name (`attention_interface_0`) is GPT-2-specific — discover yours with
+`print(model.transformer.h[0].attn.source)`. See `docs/usage/source.md` and
+`docs/patterns/attention-patterns.md`.
+
+## Pattern C: a first-class `.heads` accessor via `eproperty`
+
+For repeated use, expose the per-head view as its own hookable value. An
+`eproperty` is the descriptor behind `.input` / `.output`; you can define your own.
+The decorated stub is the **preprocess** — it takes the raw value served at the
+module's location and returns what you read. Give it `@eproperty(key="output")` to
+hook the module's output. Put it on an `Envoy` subclass, then wire that subclass to
+the attention module with the `envoys=` argument, which maps a module **type** (or a
+dotted **path suffix**) to a custom `Envoy` class.
+
+GPT-2's attention `.output` is a `(attn_out, weights)` tuple, so the preprocess
+indexes `value[0]`:
+
+```python
+from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
+from nnsight.intervention.envoy import Envoy
+from nnsight.intervention.eproperty import eproperty
+from nnsight.modeling.transformers import TransformersModel
+
+class AttnHeads(Envoy):
+    @eproperty(key="output")
+    def heads(self, value):                 # value = attn output tuple; [0] is [B, S, H]
+        h = value[0]
+        b, s, d = h.shape
+        n = self._module.num_heads
+        return h.view(b, s, n, d // n).transpose(1, 2)   # aliasing view -> edits propagate
+
+model = TransformersModel(
+    "openai-community/gpt2", task="text-generation",
+    envoys={GPT2Attention: AttnHeads}, dispatch=True,
+)
+
+with model.trace(prompt):
+    model.transformer.h[LAYER].attn.heads[:, 5] = 0      # zero head 5, in place
+    logits = model.lm_head.output[:, -1, :].save()
+```
+
+`envoys={GPT2Attention: AttnHeads}` makes every `GPT2Attention` module an
+`AttnHeads` envoy; modules not named by the map stay the base `Envoy`. A string key
+matches by dotted path suffix instead of type: `envoys={"attn": AttnHeads}`.
+`self._module` is the wrapped `torch.nn.Module`, so `self._module.num_heads` reads
+the head count straight off GPT-2's attention.
+
+### Aliasing view vs `.transform`
+
+Whether you need a write-back callback depends on what the preprocess returns:
+
+- **Aliasing view — no `.transform` needed.** `value.view(...).transpose(1, 2)`
+  shares storage with the served tensor, so an in-place edit
+  (`attn.heads[:, 5] = 0`) writes through to the model for free. The example above
+  relies on exactly this.
+- **Computed / non-aliasing value — add a `.transform`.** If the preprocess
+  returns a copy (a `.reshape()` that can't view, a stack, an arithmetic result),
+  in-place edits to it never reach the model. Register a `@heads.transform` that
+  maps the edited view back to the module's real layout; it fires once, after the
+  read, and is spliced in like a swap.
+
+A module whose `.output` is a bare `[B, S, H]` tensor (an MLP, a block) uses the
+same shape as the `Heads` example in `tests/test_language.py`, which pairs a
+reshaping preprocess with a `.transform`:
+
+```python
+class Heads(Envoy):
+    n_heads = 12
 
     @eproperty(key="output")
-    @requires_output
-    def heads(self): ...
-
-    @heads.preprocess
-    def heads(self, value):
-        n_heads = self._module.n_heads          # set on the underlying module
-        B, S, H = value.shape
-        return list(value.view(B, S, n_heads, H // n_heads).unbind(dim=2))
-```
-
-Wire it onto the model with the `envoys=` mapping:
-
-```python
-# Suppose YourAttnClass is the torch class for attention output that has .n_heads
-model = NNsight(your_model, envoys={YourAttnClass: AttnHeadsEnvoy})
-
-with model.trace(x):
-    heads = model.attn.heads.save()    # list of n_heads tensors, each [B, S, head_dim]
-    heads[1][:] = 0                    # zero head 1 in place; propagates to model
-    out = model.output.save()
-```
-
-For HuggingFace GPT-2, the attention output module is the parent attention block (`GPT2Attention`); you can mount the `AttnHeadsEnvoy` on it via `envoys={GPT2Attention: AttnHeadsEnvoy}` and access `model.transformer.h[L].attn.heads`.
-
-**Where to get `n_heads`.** The example above reads `self._module.n_heads`, which works for custom modules where you control the attribute name. For real HF attention modules the attribute name varies across versions and architectures (`num_heads`, `nh`, `num_attention_heads`, etc.). Prefer pulling `n_heads` from the model's config (`model.config.n_head` for GPT-2, `model.config.num_attention_heads` for Llama-family) and pass it into your custom Envoy explicitly via `__init__`, rather than relying on a module attribute that may not exist.
-
-### When you do need `transform`
-
-If you need to expose a *clone* (so users get a safe edit surface without aliasing surprises), or you need to change the *shape* of the value seen by users vs the model, use `eproperty.preprocess` to return the user-facing form and `eproperty.transform` to reshape it back before the model sees it:
-
-```python
-class ReshapeHeadsEnvoy(Envoy):
-    n_heads = 2  # also discoverable from the wrapped module
-
-    @eproperty(key="output")
-    @requires_output
-    def heads(self): ...
-
-    @heads.preprocess
-    def heads(self, value):
-        B, H = value.shape
-        return value.clone().view(B, self.n_heads, H // self.n_heads)
+    def heads(self, value):                     # [B, S, H] -> [B, n_heads, S, head_dim]
+        b, s, h = value.shape
+        return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
 
     @heads.transform
-    @staticmethod
-    def heads(value):
-        # value is the (possibly mutated) clone from preprocess.
-        # Reshape back to what the model expects.
-        B, n_heads, head_dim = value.shape
-        return value.reshape(B, n_heads * head_dim)
+    def heads(self, value):                     # write the edited view back
+        b, nh, s, hd = value.shape
+        return value.transpose(1, 2).reshape(b, s, nh * hd)
 ```
 
-The `transform` callback runs on the mediator after the worker yields control; whatever it returns is `batcher.swap`'d back into the model. See the docstring on `eproperty.transform` (`src/nnsight/intervention/interleaver.py:198`) and the worked example `tests/test_transform.py:177` (`test_reshape_transform_per_head_edit`).
+See `docs/concepts/envoy.md` and `docs/usage/extending.md` for the full `eproperty`
+surface (`preprocess` / `postprocess` / `transform` / `provide`) and the `envoys=`
+wiring. `tests/test_language.py` (`TestCustomEnvoys`) is the worked, tested example.
 
 ## Variations
 
+### A reusable helper
+
+```python
+def heads(attn_output_tensor, n_heads):
+    B, S, H = attn_output_tensor.shape
+    return attn_output_tensor.view(B, S, n_heads, H // n_heads)
+
+with model.trace(prompt):
+    per_head = heads(model.transformer.h[LAYER].attn.output[0], n_heads).save()
+```
+
 ### Per-head patching across invokes
 
-Combine pattern A or B with `tracer.barrier(n)` to move one head's activation from a clean run into a corrupt run. See `docs/patterns/activation-patching.md`.
+Combine Pattern A or B with `tracer.barrier(n)` to move one head's activation from a
+clean run into a corrupt run. See `docs/patterns/activation-patching.md`.
 
 ### Per-head attribution
 
-Multiply a per-head reshape of `(act_clean - act_corrupt)` against the corresponding gradient and sum over `head_dim` to get a `[layer, head]` attribution map. See `docs/patterns/attribution-patching.md`.
+Multiply a per-head reshape of `(act_clean - act_corrupt)` against the corresponding
+gradient and sum over `head_dim` for a `[layer, head]` map. See
+`docs/patterns/attribution-patching.md`.
 
 ## Interpretation tips
 
-- **`n_heads` and `head_dim` are model-specific.** Read from `model.config` (HF) or store on the underlying module.
-- **`attn.output[0]` is post-projection.** This is the value-weighted output after `o_proj`. To operate before `o_proj`, you need `.source` to reach the SDPA call - see `docs/patterns/attention-patterns.md`.
-- **Aliasing matters.** A `.view()` shares storage; a `.reshape()` or `.contiguous()` may not. If your edits do not show up downstream, check whether you mutated a copy.
-- **Position dimension.** `[B, S, n_heads, head_dim]` lets you slice both head and position: `reshaped[:, -1, HEAD, :]` is "head HEAD at the last position".
+- **`n_heads` and `head_dim` are model-specific.** Read from `model.config`
+  (`n_head` / `n_embd` for GPT-2; `num_attention_heads` for Llama-family).
+- **`attn.output[0]` is post-projection**; `.source.attention_interface_0.output[0]`
+  is pre-projection and already per-head.
+- **Aliasing matters.** `.view()` shares storage; `.reshape()` / `.contiguous()` may
+  copy. If edits don't show up downstream, you mutated a copy — rebuild and assign.
+- **Position dimension.** `[B, S, n_heads, head_dim]` slices both head and position:
+  `per_head[:, -1, HEAD, :]` is "head HEAD at the last position".
 
 ## Gotchas
 
-- `.attn.output` is a tuple. Index `[0]` for the value-weighted output.
-- For `eproperty.transform`, the function is decorated with `@staticmethod` because the preprocessed value is bound by closure - see the docstring at `src/nnsight/intervention/interleaver.py:198`.
-- `eproperty` requires `IEnvoy`-like state (a `_module` and a `path`); subclass `Envoy` and use `@requires_output` / `@requires_input` from `nnsight.intervention.hooks`.
-- Mismatched `n_heads` / `head_dim` between your reshape and `model.config` produces shape errors deep in the forward; double-check using `model.scan(prompt)` first.
+- `.attn.output` is a tuple — index `[0]` for the value-weighted output.
+- When replacing, rebuild the whole tuple `(new,) + tuple(out[1:])` and assign;
+  don't `__setitem__` a tuple (`attn.output[0] = x` fails).
+- Request source ops before the module's own `.output` in a forward, or hit
+  `OutOfOrderError`.
+- Mismatched `n_heads` / `head_dim` produces shape errors deep in the forward —
+  check with `model.scan(prompt)` first.
 
 ## Related
 
-- [attention-patterns](attention-patterns.md) - Reading attention probabilities (vs operating on output).
-- [activation-patching](activation-patching.md), [ablation](ablation.md) - Things to do with one head once you have access.
-- [attribution-patching](attribution-patching.md) - Per-head attribution maps.
-- `docs/usage/extending.md` - Full reference for `envoys=` and `eproperty`.
-- `tests/test_transform.py:294` - End-to-end test of `_AttnHeadsEnvoy` on a tiny attention block.
-- `tests/test_transform.py:177` - `test_reshape_transform_per_head_edit` shows the `preprocess + transform` round-trip.
+- [attention-patterns](attention-patterns.md) — reading attention probabilities.
+- [activation-patching](activation-patching.md), [ablation](ablation.md).
+- [attribution-patching](attribution-patching.md) — per-head attribution maps.
+- `docs/usage/source.md` — how `.source` exposes intermediate ops.
+- `docs/concepts/envoy.md` — the extension surface (`eproperty`, subclassing `Envoy`).
+- `docs/usage/extending.md` — custom hookable values and the `envoys=` wiring.

@@ -1,21 +1,16 @@
 [build-system]
-requires = ["setuptools>=61", "setuptools-scm>=8"]
+requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
-[tool.setuptools_scm]
-write_to = "src/nnsight/_version.py"
 
 [project]
-dynamic = ["version"]
 name = "nnsight"
-authors = [
-    { name="Jaden Fiotto-Kaufman", email="jadenfk@outlook.com" },
-]
-description = "Package for interpreting and manipulating the internals of deep learning models."
+version = "0.8.0"
+description = "Interpreting and manipulating the internals of neural networks."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT License" }
+license = { text = "MIT" }
+authors = [{ name = "Jaden Fiotto-Kaufman", email = "JadenFK@outlook.com" }]
 keywords = ["deep learning", "neural networks", "interpretability", "pytorch", "transformers"]
-
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -28,63 +23,62 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-
 dependencies = [
-    "transformers",
-    "astor", 
+    # Core: tracing, interleaving, config, serialization.
+    "torch",
+    "greenlet",
+    "pydantic",
+    "pyyaml",
     "cloudpickle",
-    "httpx",
-    "python-socketio[client]",
-    "python-engineio>=4.13.0",
-    "pydantic>=2.9.0",
-    "torch>=2.4.0",
-    "accelerate",
-    "toml",
-    "ipython",
-    "rich",
+    # HuggingFace models (TransformersModel, tokenizers, hub access).
+    "transformers",
+    "huggingface-hub",
+    # Remote execution on NDIF.
+    "websocket-client",
     "zstandard",
+    "httpx",
+    "tqdm",
 ]
 
 [project.optional-dependencies]
-test = [
-    "pytest>=6.0",
-    "pytest-cov",
-]
-
-
-diffusers = [
+# Everything the test suite needs on top of the core install.
+dev = [
+    "pytest",
+    "pillow",
     "diffusers",
+    "accelerate",
 ]
-
-
+# High-throughput / tensor-parallel serving (needs a CUDA GPU).
 vllm = [
     "vllm",
     "triton",
 ]
+# Running an nnsight model server (the nnsight-serve entry point): the vLLM
+# engine plus the HTTP server deps.
+serve = [
+    "nnsight[vllm]",
+    "fastapi",
+    "uvicorn",
+]
 
-
-all = ["nnsight[test,diffusers,vllm]"]
+[project.scripts]
+nnsight-serve = "nnsight.modeling.vllm.serve.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/ndif-team/nnsight"
 Website = "https://nnsight.net/"
 Documentation = "https://nnsight.net/documentation/"
-Changelog = "https://github.com/ndif-team/nnsight/CHANGELOG.md"
 Repository = "https://github.com/ndif-team/nnsight.git"
 "Bug Tracker" = "https://github.com/ndif-team/nnsight/issues"
 
 [tool.setuptools]
-include-package-data = true
 license-files = ["LICENSE"]
 
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
 nnsight = ["config.yaml"]
 
-# Optional: Code formatting tools configuration
-[tool.black]
-line-length = 88
-target-version = ['py38']
-
-[tool.isort]
-profile = "black"
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,243 +1,135 @@
 ---
-title: Iteration Pitfalls (iter, all, next)
-one_liner: Multi-step generation footguns — unbounded iter[:] swallowing trailing code, .all() = iter[:], .next() vs iter, and per-call counters.
-tags: [gotcha, generate, iter, all, next]
+title: Iteration Pitfalls (iter, all)
+one_liner: Multi-step generation footguns — the for-loop form, unbounded iter[:] dropping trailing code, all() = iter[:], and per-location occurrence counting.
+tags: [gotcha, generate, iter, all]
 related: [docs/usage/iter-all-next.md, docs/usage/generate.md]
-sources: [src/nnsight/intervention/tracing/iterator.py:209, src/nnsight/intervention/tracing/iterator.py:96, src/nnsight/intervention/tracing/tracer.py:457]
+sources: [src/nnsight/intervention/iterator.py, src/nnsight/intervention/interleaver.py:605]
 ---
 
 # Iteration Pitfalls
 
 ## TL;DR
-
-**Default mental model: assume code that requests a *regular module's* `.output`/`.input` after a `tracer.iter[...]` loop in the same trace will NOT run.** Use the separate-empty-invoke pattern for such post-iter access. **Exception — the common steering shape works as-is:** inside `model.generate(..., max_new_tokens=N)` the loop is bounded (`generate` sets `interleaver.default_all = N`), so it terminates and trailing code runs; saving `model.generator.output` or `tracer.result` after the loop is safe (both are the end-of-generation output, and `model.generator` is exempt from iteration tracking).
-
-- `for step in tracer.iter[:]` and `tracer.all()` are *unbounded* by default **unless the model sets a stop**. `model.generate(..., max_new_tokens=N)` sets `default_all = N`, so the loop ends after generation and trailing code runs. Without a `default_all` (e.g. plain `iter[:]` outside `generate`), the for-loop body keeps yielding forever and the worker thread never returns to whatever follows the loop. Either way, requesting a **regular module's** `.output`/`.input` in trailing code raises `OutOfOrderError` (those forward passes are done) — but `model.generator.output` / `tracer.result` after the loop are fine.
-- Even **bounded** slices like `tracer.iter[:10]` are NOT a guarantee — if the model only generates 7 tokens (e.g., it hits EOS before `max_new_tokens`), iterations 7–9 never happen and any code waiting for them produces `MissedProviderError` warnings.
-- nnsight has a `default_all` mechanism (set on the interleaver by the model) that fills in a default stop for `iter[:]`. `LanguageModel.generate(..., max_new_tokens=N)` sets it to `N`. So `tracer.iter[:]` inside `model.generate(...)` is effectively `tracer.iter[:max_new_tokens]` — but `max_new_tokens` is a CAP, not the actual count, so the same bounded-but-not-guaranteed caveat applies.
-- **Always recommend the separate-invoke pattern** to users who want post-iter code: put the iter loop in one `tracer.invoke(prompt)`, put the post-iter access in a separate empty `tracer.invoke()` that runs as its own thread. See "Right code (option 2)" below.
-- `.next()` is the per-step manual alternative — use it when you want each step to be its own block of code.
-- The iteration tracker is **only maintained inside an iter loop**: persistent hooks are registered on entry, removed on exit. Outside an iter loop, the tracker is whatever it was when the last iter loop finished — it is not auto-reset and there are no hooks bumping it.
-- Once an iter loop has advanced the tracker past `N`, asking for `tracer.iter[N]` later in the same mediator hangs forever (you'll get a `MissedProviderError`). Use a fresh invoke for each iter range you want to access.
+- The loop form is `for step in tracer.iter[...]:` (or `for step in tracer.all():`). The old `with tracer.iter[...]:` block still works but is **deprecated** and warns.
+- **`tracer.next()` / `module.next()` do not exist.** Use `tracer.iter[i]` / `tracer.iter[[i, j]]` to target specific steps.
+- Unbounded `tracer.iter[:]` (and `tracer.all()`, which *is* `iter[:]`) runs until the model stops producing steps. The final loop iteration asks for a step the model never runs, so the worker is **unwound there** — **any code after the loop in the same block does NOT run** (a warning is emitted, not an error). This is true even inside `generate(...)`; there is no `default_all` bound.
+- To run code after the loop, either bound the loop (`tracer.iter[:N]`) or move the trailing code into a **separate empty `tracer.invoke()`**.
+- Values collected *during* the loop are kept even when the loop is unbounded — only trailing code is dropped.
+- `tracer.iter[N]` targets the `(N+1)`-th **occurrence** of a location. For a top-level block (once per step) that equals "step N"; for a module called several times per step, it's the call count.
 
 ---
 
-## Unbounded `tracer.iter[:]` and trailing module access
+## Unbounded `tracer.iter[:]` drops trailing code
 
 ### Symptom
-You write a for-loop over `tracer.iter[:]` and add code after it inside the same trace. **Pure-Python trailing code (e.g. mutating a list, printing) actually does run**, but any line that requests another module's `.output` / `.input` raises an `OutOfOrderError` ("Value was missed for ...") because the model's forward passes are already done. nnsight also prints a warning like `Execution complete but '...' was not provided. If this was in an Iterator at iteration N this iteration did not happen.`
+Code written after a `for ... in tracer.iter[:]:` loop never runs — a variable assigned there is `UnboundLocalError`/undefined afterward. nnsight warns:
+```
+'model.transformer.h.-1.output.i3' was never reached: the model ran fewer iterations than the loop requested. Values from reached iterations are kept.
+```
 
 ### Cause
-`tracer.iter[:]` is an open-ended slice with no `stop`. The `IteratorTracer.__iter__` generator (`src/nnsight/intervention/tracing/iterator.py:209`) keeps incrementing `i` and yielding indefinitely until `stop` is non-None.
+`tracer.iter[:]` has no stop, so the loop keeps handing out step indices. When the model has generated its last token, the next loop iteration parks on a location the model never reaches; at run end `check_dangling_mediators` (`src/nnsight/intervention/interleaver.py:605`) throws `OutOfOrderError` into the worker to unwind it (running `finally` blocks) and **warns** instead of raising. Because the worker is unwound at the loop, everything written after the loop is skipped. `tracer.all()` returns `self.iter[:]`, so it behaves identically.
 
-There are three ways `stop` can become set:
-1. The user provides one explicitly: `tracer.iter[:N]`.
-2. `mediator.all_stop` was set during the loop body.
-3. `interleaver.default_all` is set by the model. **`LanguageModel.generate(..., max_new_tokens=N)` sets `default_all = N`** (`src/nnsight/modeling/language.py:151`), so a plain `tracer.iter[:]` inside `generate(...)` effectively becomes `tracer.iter[:max_new_tokens]`.
-
-For plain `tracer.iter[:]` outside `generate(...)`, none of those fire — the loop yields forever and the worker thread is stuck in the for-loop's `yield` even after the model returns. `check_dangling_mediators` (`src/nnsight/intervention/interleaver.py:652`) emits the "was not provided" warning.
-
-**Even with `default_all` set:** `max_new_tokens` is a *cap*, not the *actual* number of tokens generated. The model can stop earlier (EOS token, stop strings, etc.). So `tracer.iter[:]` inside `generate(max_new_tokens=10)` may iterate fewer than 10 times. Any iteration that didn't actually happen produces a `was not provided` warning at trace exit if the user requested values for it.
-
-`tracer.all()` is exactly `tracer.iter[:]` (`src/nnsight/intervention/tracing/tracer.py:457`) — same pitfall, same `default_all` interaction.
+There is no `default_all` mechanism — `max_new_tokens` does not turn `iter[:]` into a bounded, cleanly-terminating loop.
 
 ### Wrong code
 ```python
-with model.generate("Hello", max_new_tokens=3) as tracer:
-    hidden_steps = list().save()
-    for step in tracer.iter[:]:
-        hidden_steps.append(model.transformer.h[-1].output)
-
-    # The line below requests a module value AFTER all forward passes are done →
-    # OutOfOrderError, plus a "was not provided" warning.
-    final_logits = model.lm_head.output.save()
+with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
+    steps = nnsight.save([])
+    for _ in tracer.iter[:]:
+        steps.append(model.transformer.h[-1].output[:, -1, :])
+    ids = tracer.result.save()   # NEVER runs — `ids` is undefined afterward
+# steps is populated (3 entries); ids is not defined
 ```
 
 ### Right code (RECOMMENDED — separate empty invoke)
-This is the pattern to recommend by default. Even when bounded iter would "work", the separate-invoke form is more robust against early model termination (EOS / stop strings) and makes the intent obvious. The empty invoke runs as its own thread on the same batch, **after** the iter-loop invoke finishes:
-
+The empty invoke is its own worker on the same batch, so its code runs regardless of the loop:
 ```python
 with model.generate(max_new_tokens=3) as tracer:
-    with tracer.invoke("Hello"):                # iter loop lives here
-        hidden_steps = list().save()
-        for step in tracer.iter[:]:
-            hidden_steps.append(model.transformer.h[-1].output)
-
-    with tracer.invoke():                       # empty invoke — runs after
-        final_logits = model.lm_head.output.save()    # safe: own thread, own forward pass
-        result = tracer.result.save()                 # also safe here
+    with tracer.invoke("The Eiffel Tower is in"):
+        steps = nnsight.save([])
+        for _ in tracer.iter[:]:
+            steps.append(model.transformer.h[-1].output[:, -1, :])
+    with tracer.invoke():
+        ids = tracer.result.save()      # safe — runs in its own worker
 ```
 
-### Right code (option 2: bounded iter — only safe when no post-loop module access)
+### Right code (bounded iter — only when you don't need early-stop robustness)
 ```python
-with model.generate("Hello", max_new_tokens=3) as tracer:
-    hidden_steps = list().save()
-    for step in tracer.iter[:3]:    # bounded — but iterations may still be skipped if model stops early
-        hidden_steps.append(model.transformer.h[-1].output)
-    # No module access after the loop — only post-loop pure-Python is safe
+with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
+    steps = nnsight.save([])
+    for _ in tracer.iter[:3]:
+        steps.append(model.transformer.h[-1].output[:, -1, :])
+    ids = tracer.result.save()          # runs — the loop terminated
 ```
-
-Don't put module access (e.g., `model.lm_head.output.save()`) after a bounded iter slice unless you can guarantee every iteration fires. The model can stop early (EOS, stop strings) and you'll get `MissedProviderError` warnings for the iterations that didn't happen.
+If the model stops early (EOS/stop strings) before step 3, the un-reached iterations warn but trailing code still runs.
 
 ### Mitigation / how to spot it early
-- See `Execution complete but '...' was not provided. If this was in an Iterator at iteration N this iteration did not happen` in the warnings? You hit this.
-- If a variable defined *after* a `for step in tracer.iter[:]` loop is missing outside the trace, it's this gotcha.
-- `tracer.all()` is the same thing under a different name — same fix applies.
+- See `'...' was never reached` in the warnings, or a variable defined after an `iter[:]` loop that's missing? This is it.
+- `tracer.all()` is the same as `iter[:]` — same fix.
 
 ---
 
-## `tracer.all()` is `iter[:]` in disguise
+## `tracer.iter[N]` counts occurrences, not always generation steps
 
 ### Symptom
-Same as the above — module-access code after `tracer.all()` raises `OutOfOrderError`.
+You expect `tracer.iter[2]` to mean "the 3rd generation step" for every module, but for a module called multiple times per step it targets a different call.
 
 ### Cause
-`InterleavingTracer.all` literally returns `self.iter[:]` (`src/nnsight/intervention/tracing/tracer.py:457`). It's a thin alias for the unbounded slice.
-
-### Wrong code
-```python
-with model.generate("Hello", max_new_tokens=3) as tracer:
-    for step in tracer.all():
-        model.transformer.h[0].output[:] = 0
-    final = model.lm_head.output.save()    # OutOfOrderError — model already done
-```
+Each visit to a location is tagged with its occurrence index; `tracer.iter[N]` binds the request to occurrence `N` (`src/nnsight/intervention/iterator.py`). A top-level transformer block fires once per generation step, so occurrence `N` == step `N`. A module called `k` times within one forward (a recurrent inner module, or one called in a loop) fires `k` occurrences per step, so occurrence `N` lands somewhere inside a step.
 
 ### Right code
 ```python
-with model.generate("Hello", max_new_tokens=3) as tracer:
-    for step in tracer.iter[:3]:           # bounded
-        model.transformer.h[0].output[:] = 0
-    final = model.lm_head.output.save()
-```
-
-Or use the empty-invoke pattern from the previous gotcha.
-
-### Works as-is — saving the generation after `tracer.all()`
-The trailing-access failure is specifically about **regular modules** (`lm_head`, a transformer block, …). The end-of-generation output is not a regular module, so the canonical "steer every step, then capture the full generation" shape needs no separate invoke:
-
-```python
-with model.generate(max_new_tokens=5) as tracer:
-    with tracer.invoke(prompt):
-        baseline = model.generator.output.save()
-    with tracer.invoke(prompt):
-        for _ in tracer.all():                       # bounded by default_all = max_new_tokens
-            hidden = model.transformer.h[layer].output[0]
-            hidden[:, -1] += steering_vector          # applied on every generated token
-        steered = model.generator.output.save()       # safe: generator is iter-exempt
-```
-
-`model.generator.output` (and `tracer.result`) refer to the final pipeline output and are exempt from iteration tracking, so they resolve correctly after the loop. This only holds inside `generate(...)` (which sets `default_all`); the same loop with no bound would hang as described above.
-
-### Mitigation / how to spot it early
-- Treat `tracer.all()` as bounded only when there is no **regular-module** access after it (saving `generator.output` / `tracer.result` is fine inside `generate`). Otherwise prefer explicit bounds.
-
----
-
-## `.next()` vs `iter[]` — when to use which
-
-### Symptom
-You want to inspect a *specific* generation step but writing `for step in tracer.iter[2]:` feels heavy, or you don't want to set up a loop at all.
-
-### Cause
-There are two compatible APIs and they target different ergonomics:
-
-- `tracer.iter[i]` / `tracer.iter[1:3]` / `tracer.iter[[0, 2]]` — declarative. Each yielded step sets `mediator.iteration` so subsequent `.output`/`.input` accesses target the right step.
-- `module.next()` / `tracer.next()` — imperative. Bumps `mediator.iteration` by 1 (or N). The next access lands on the new step.
-
-Use `.next()` when each step is its own logical block of code; use `iter[...]` when steps share a body and you want to vary by step index.
-
-### Right code (iter)
-```python
+# a top-level block, once per step — iter[2] is generation step 2
 with model.generate("Hello", max_new_tokens=3) as tracer:
     for step in tracer.iter[:3]:
         if step == 2:
             model.transformer.h[0].output[:] = 0
 ```
 
-### Right code (next)
-```python
-with model.generate("Hello", max_new_tokens=3) as tracer:
-    hs1 = model.transformer.h[-1].output.save()
-    hs2 = model.transformer.h[-1].next().output.save()
-    hs3 = model.transformer.h[-1].next().output.save()
-```
-
-### Mitigation / how to spot it early
-- If your steps share a body, use `iter[...]`.
-- If your steps are distinct snippets, use `.next()` and avoid the unbounded-iter footgun entirely.
+### Mitigation
+- For top-level blocks the two coincide. For inner modules, count calls per forward (`print(parent.source)`) to translate steps into occurrences.
 
 ---
 
-## The iteration tracker is only live **inside** an iter loop
+## Selecting specific steps
+
+`tracer.iter` accepts:
+- a slice — `tracer.iter[:3]` (steps 0–2), `tracer.iter[2:5]` (2–4);
+- an int — `tracer.iter[2]` (just step 2);
+- a list — `tracer.iter[[0, 2, 4]]` (those steps only).
+
+```python
+with model.generate("Hello", max_new_tokens=6) as tracer:
+    for step in tracer.iter[[0, 2, 4]]:
+        model.transformer.h[0].output[:] = 0
+```
+
+---
+
+## The deprecated `with tracer.iter[...]:` form
 
 ### Symptom
-You assume `model.layer.output` "remembers" how many times a module has fired across the whole trace and that `tracer.iter[N]` indexes into a global counter. Instead, requesting `.iter[N]` for an `N` you've already passed hangs forever, eventually surfacing as a `MissedProviderError` ("Execution complete but ... was not provided").
-
-### Cause
-The persistent iter-tracking hooks are **scoped to the iter loop**, not to the trace. `register_iter_hooks` (`src/nnsight/intervention/tracing/iterator.py:95`) registers them on `IteratorTracer.__iter__` entry, and the `finally` block (`iterator.py:286`-`291`) removes them when the loop exits. Outside an iter loop, **no hook is bumping `mediator.iteration_tracker`**.
-
-That has two important consequences:
-
-1. **The tracker is `0` for every provider path before any iter loop has run.** A bare `.next()` or a subsequent access without a wrapping `tracer.iter[...]` does not auto-advance the tracker.
-2. **The tracker is not reset between iter loops.** When an iter loop ends, the hooks are removed, but the values in `mediator.iteration_tracker` are left where they were. If you've already iterated past step 10 (so `tracker[<path>] == 11`), and then you ask for `tracer.iter[5]`, the mediator is being asked to wait for "the 5th call" of a module whose tracker is already at 11. That call is in the past — the model never fires it again, the worker waits forever, and `check_dangling_mediators` raises `MissedProviderError` (`src/nnsight/intervention/interleaver.py:652`).
-
-### Symptom — concrete
-
-```python
-# WRONG — second iter loop reaches into the past
-with model.generate("Hello", max_new_tokens=20) as tracer:
-    with tracer.invoke("Hello"):
-        for step in tracer.iter[:15]:           # tracker for h[-1].output ends at ~15
-            hs = model.transformer.h[-1].output.save()
-        for step in tracer.iter[5]:             # asks for the "5th" call — already past
-            still_hs = model.transformer.h[-1].output.save()
-            # MissedProviderError: Execution complete but `model.transformer.h.-1.output.i5` was not provided.
+```
+DeprecationWarning: `with tracer.iter[...]:` is deprecated; use `for step in tracer.iter[...]:` instead.
 ```
 
-### Right code
-Either run the second iter range without going past it first, or restructure into separate empty invokes (each invoke gets a fresh mediator and a fresh tracker):
+### Cause / fix
+The `with`-block form re-runs the captured block once per step; the `for` form is a plain loop over the body. They behave the same (including the open-ended unwind), but prefer the `for` form.
 
 ```python
-# FIXED — two invokes, two mediators, two fresh trackers
-with model.generate(max_new_tokens=20) as tracer:
-    with tracer.invoke("Hello"):
-        for step in tracer.iter[:15]:
-            hs = model.transformer.h[-1].output.save()
-    with tracer.invoke():
-        for step in tracer.iter[5]:
-            still_hs = model.transformer.h[-1].output.save()
+# deprecated
+with model.generate("Hello", max_new_tokens=2) as tracer:
+    with tracer.iter[:2]:
+        ...
+# preferred
+with model.generate("Hello", max_new_tokens=2) as tracer:
+    for _ in tracer.iter[:2]:
+        ...
 ```
-
-### What about recurrent inner modules?
-
-If a module fires **multiple times within a single generation step** (e.g. Mamba's per-token state update, a module called in a loop inside another module's forward), the iter hooks bump it multiple times per step. Within an iter loop, `tracer.iter[N]` for that module targets the `(N+1)`-th *call*, not the `(N+1)`-th *generation step*.
-
-For top-level transformer blocks that run exactly once per generation step, the two coincide. For inner recurrent modules, they don't.
-
-```python
-# WRONG MENTAL MODEL: "iter[2] means 'second generation step' for every module"
-with model.generate("Hello", max_new_tokens=3) as tracer:
-    for step in tracer.iter[2]:
-        # If recurrent_module is called 4x per generation step, this targets
-        # the 3rd CALL of recurrent_module — somewhere inside generation step 0,
-        # not the 3rd generation step.
-        v = recurrent_module.output.save()
-```
-
-### Mental fix
-
-- The iter tracker is **bound to the lifetime of the iter loop** that installed it.
-- Within an iter loop, `iter[N]` for a module means "the `(N+1)`-th time this module's forward has fired since the iter loop started." For top-level blocks, that's "step `N`"; for recurrent inner modules, it isn't.
-- If you've already passed step `N` once, you can't ask for it again in the same mediator — it's a missed provider.
-
-### Mitigation / how to spot it early
-- If you get `MissedProviderError: Execution complete but ... was not provided` after an iter loop and a `.iter[N]` for a low `N`, you've gone past `N` already. Restructure into separate invokes.
-- Print `mediator.iteration_tracker` in a debugger inside the iter loop to confirm which counters are at what value.
-- For recurrent inner modules, count how many times the parent's `forward` calls them (via `print(parent.source)` or `inspect.getsource(type(parent).forward)`) to translate generation-step targets into call counts.
 
 ---
 
 ## Related
-- [docs/usage/iter-all-next.md](../usage/iter-all-next.md) — full reference for `tracer.iter[...]`, `.all()`, and `.next()` semantics.
+- [docs/usage/iter-all-next.md](../usage/iter-all-next.md) — full `tracer.iter[...]` / `.all()` reference.
 - [docs/usage/generate.md](../usage/generate.md) — multi-token generation.
-- [docs/gotchas/order-and-deadlocks.md](order-and-deadlocks.md) — module access order rules (still apply within an iter step).
+- [docs/gotchas/order-and-deadlocks.md](order-and-deadlocks.md) — module access order rules within a step.

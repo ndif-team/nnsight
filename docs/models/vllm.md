@@ -1,35 +1,32 @@
 ---
 title: VLLM
-one_liner: High-throughput vLLM serving with NNsight interventions; supports tensor parallelism, continuous batching, and async streaming.
+one_liner: High-throughput vLLM serving with NNsight interventions; sync or async, tensor parallelism, continuous batching, streaming.
 tags: [models, vllm, serving, production]
-related: [docs/models/index.md, docs/models/language-model.md, docs/remote/index.md]
-sources: [src/nnsight/modeling/vllm/vllm.py:43, src/nnsight/modeling/vllm/batching.py:15, src/nnsight/modeling/vllm/sampling.py:4, src/nnsight/modeling/vllm/async_backend.py:19, src/nnsight/modeling/vllm/README.md, src/nnsight/modeling/vllm/IDEAS.md, src/nnsight/modeling/vllm/DISCUSSION.md]
+related: [docs/models/index.md, docs/models/transformers-model.md, docs/remote/index.md]
+sources: [src/nnsight/modeling/vllm/vllm.py:36, src/nnsight/modeling/vllm/async_backend.py:40, src/nnsight/modeling/vllm/batching.py, src/nnsight/modeling/vllm/serve/backend.py, tests/vllm/]
 ---
 
 # VLLM
 
 ## What this is for
 
-`nnsight.modeling.vllm.VLLM` runs NNsight interventions on top of vLLM's high-performance inference engine. You get PagedAttention, continuous batching, tensor parallelism, and async streaming — with arbitrary Python intervention code executing inline with the forward pass.
+`nnsight.modeling.vllm.VLLM` runs NNsight interventions on top of vLLM's inference engine. The model runs in vLLM's own worker process(es); your intervention code is serialized onto each request (via `SamplingParams.extra_args`), carried into the worker, run against the real module, and the saved values shipped back. You get PagedAttention, continuous batching, tensor parallelism, and optional async streaming, with arbitrary Python interventions inline with the forward.
 
-Same tracing API as `LanguageModel`, but the model runs in vLLM workers (potentially across multiple GPUs / nodes) and your intervention code is serialized, transported via `SamplingParams.extra_args`, and executed in those workers.
+Interventions are written exactly as for any other model — the module tree mirrors what vLLM loaded. The one structural difference: each `tracer.invoke(...)` is **one vLLM request** (one prompt), so several prompts means several invokes, not a list.
 
-This is the production / throughput path. For details on the architecture, read [`src/nnsight/modeling/vllm/README.md`](../../src/nnsight/modeling/vllm/README.md) and [`DISCUSSION.md`](../../src/nnsight/modeling/vllm/DISCUSSION.md).
+> **Running this** needs `vllm` installed and a GPU. The examples below are drawn from the source and `tests/vllm/` (which skip without a GPU).
 
 ## When to use / when not to use
 
 Use `VLLM` when:
-- You need **throughput** — vLLM is faster than HF `transformers.generate()` by an order of magnitude on real workloads.
-- You need **tensor parallelism** across multiple GPUs (single node or multi-node via Ray).
-- You're serving **multiple concurrent users** and want continuous batching.
-- You want **async streaming** (token-by-token output with intervention saves on every step).
-- You're doing **production interpretability** — running steering / probing / activation patching on a live service.
+- You need **throughput** / continuous batching for many concurrent requests.
+- You need **tensor parallelism** across GPUs.
+- You want **async token-by-token streaming** with interventions.
 
 Do not use `VLLM` when:
-- You only have a single prompt and don't need throughput — `LanguageModel` is simpler.
-- You need features vLLM doesn't fully support yet: gradients (no backward in workers), source tracing on fused CUDA kernels, model editing, scan mode, or pipeline parallelism (PP > 1 is not supported; see `IDEAS.md`).
-- You can't accept `enforce_eager=True` (see Limitations below). vLLM's CUDA graph optimization is incompatible with arbitrary PyTorch hooks, so NNsight forces eager mode.
-- You're doing diffusion or VLM work — vLLM in NNsight is currently text-only.
+- You have a single prompt and don't need throughput — [`TransformersModel`](transformers-model.md) is simpler.
+- You need gradients/backward, `.scan()`, or source tracing on fused CUDA kernels — not supported on the vLLM path.
+- You're doing diffusion or VLM work — the NNsight vLLM integration is text-only.
 
 ## Loading
 
@@ -37,9 +34,9 @@ Do not use `VLLM` when:
 from nnsight.modeling.vllm import VLLM
 
 model = VLLM(
-    "meta-llama/Llama-3.1-8B",
-    tensor_parallel_size=2,
-    gpu_memory_utilization=0.9,
+    "gpt2",
+    tensor_parallel_size=1,
+    gpu_memory_utilization=0.1,
     dispatch=True,
 )
 ```
@@ -50,127 +47,130 @@ model = VLLM(
 VLLM(
     repo_id,
     *,
-    mode="sync",                           # "sync" or "async"
-    dispatch=False,                        # eager weight loading
+    mode="sync",                  # "sync" (vllm.LLM) or "async" (AsyncLLM)
+    dispatch=False,               # True = build the engine now
     tensor_parallel_size=1,
-    pipeline_parallel_size=1,              # NOT SUPPORTED — must be 1
     gpu_memory_utilization=0.9,
-    distributed_executor_backend=None,     # "mp" (default), "ray", or an Executor class
-    enforce_eager=True,                    # forced internally; required for hooks
-    revision=None,
-    rename=None,
-    envoys=None,
-    **vllm_kwargs,                         # forwarded to vllm.LLM / AsyncLLM
+    **vllm_kwargs,                # forwarded to vllm.LLM / AsyncEngineArgs
 )
 ```
 
 | Parameter | Description |
 |-----------|-------------|
-| `repo_id` | HuggingFace repo ID. |
-| `mode` | `"sync"` (default) creates a `vllm.LLM` and runs synchronous generation; `"async"` creates a `vllm.v1.engine.async_llm.AsyncLLM` and yields a streaming async generator from `tracer.backend()`. See `vllm.py:70` and the [Async mode](#async-mode) section below. |
-| `dispatch` | If `True`, real weights load now via vLLM's standard loader. If `False`, only the meta model is built (using vLLM's `DummyModelLoader` with `device="meta"`) — no GPU memory used until first trace. See `vllm.py:135`. |
-| `tensor_parallel_size` | Number of GPUs to shard across. Tensor parallelism is **transparent** to your intervention code thanks to `VLLMBatcher` (`batching.py:15`). |
-| `pipeline_parallel_size` | Currently must be `1`. Pipeline parallelism is on the roadmap but not yet supported (`IDEAS.md`). |
-| `gpu_memory_utilization` | vLLM's KV-cache memory budget (default 0.9). Lower it (e.g. 0.1) for small models or shared GPUs. |
-| `distributed_executor_backend` | `None` / `"mp"` (multiprocessing, default) or `"ray"` (Ray distributed executor; required for multi-node TP). When you pass `"ray"`, NNsight automatically swaps in `NNsightRayExecutor` to work around a vLLM/Ray actor crash. See `vllm.py:179` and `executors/ray_workaround.py`. |
-| `enforce_eager` | Always set to `True` internally (`vllm.py:202`). CUDA graphs are incompatible with PyTorch hooks. |
-| `worker_cls` | Always set internally to `nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker`. |
-| `**vllm_kwargs` | Anything else valid for `vllm.LLM` / `AsyncEngineArgs` is forwarded. |
+| `repo_id` | HuggingFace repo id. |
+| `mode` | `"sync"` (default) builds a `vllm.LLM` and runs synchronous generation; `"async"` builds a `vllm.v1.engine.async_llm.AsyncLLM` and a trace streams outputs via `async for output in tracer.backend`. Set at construction — you can't switch per trace (`vllm.py:57`). |
+| `dispatch` | `True` creates the real engine during `__init__`. `False` (default) builds only a meta-tensor tree (via vLLM's `DummyModelLoader`, `device="meta"`) — no GPU memory used until the first trace (`vllm.py:155`). |
+| `tensor_parallel_size` | GPUs to shard across. Transparent to your interventions (see [Tensor parallelism](#tensor-parallelism-is-transparent)). |
+| `gpu_memory_utilization` | vLLM KV-cache budget (default 0.9). Lower it (e.g. 0.1) for small models / shared GPUs. |
+| `**vllm_kwargs` | Anything valid for `vllm.LLM` / `AsyncEngineArgs`. |
 
-### Dispatch behavior
+`enforce_eager=True` and the NNsight worker class are always forced internally (`vllm.py:205`, `:189`) — CUDA graphs freeze the ops they replay, so hooks can't fire inside one.
 
-- `dispatch=False` (default) loads a meta-tensor placeholder via vLLM's `DummyModelLoader` with `device="meta"` (`vllm.py:151`). No GPU memory used. The Envoy tree is fully populated so you can write intervention code referencing `model.model.layers[5].output`. Real weights load on the first `.trace()` call (or explicit `model.dispatch()`).
-- `dispatch=True` creates the `vllm.LLM` / `AsyncLLM` immediately during `__init__`.
-
-The user-process `VLLM` instance has a `vllm_entrypoint` attribute pointing at the actual engine. There is a **second** `VLLM` instance created inside each worker process by `NNsightGPUModelRunner.load_model()` — it wraps the model that vLLM loaded and owns the interleaver and `VLLMBatcher`. See `vllm/README.md:113` for details.
-
-## Canonical pattern
+## Canonical pattern (sync)
 
 ```python
 from nnsight.modeling.vllm import VLLM
 
-model = VLLM("openai-community/gpt2", gpu_memory_utilization=0.1, dispatch=True)
+model = VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True)
 
-with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
-    hidden = model.transformer.h[-2].output.save()
+with model.trace("The Eiffel Tower is located in the city of", temperature=0.0, top_p=1):
+    model.transformer.h[8].output[:] = 0        # intervene
     logits = model.logits.save()
 
 print(model.tokenizer.decode(logits.argmax(dim=-1)))
 ```
 
-### Multi-token generation with `tracer.iter`
+### `logits` and `samples`
+
+These are vLLM-specific hookable values on the model — `eproperty` descriptors (the same mechanism behind a module's `.output`/`.input`, `vllm.py:144`), not on a vanilla `vllm.LLM`, and only meaningful inside a trace. **They are how you read generated output on vLLM** — `tracer.result` is *not* served here (see below).
+
+| Property | Description |
+|----------|-------------|
+| `model.logits` | The pre-sampling logit tensor for this step. Read or assign (`model.logits = ...`). |
+| `model.samples` | The token ids the sampler drew from `logits` this step. Assigning it forces the token the engine continues from. |
+
+Under `tracer.iter`, each pass sees the next decoded step.
+
+### Multi-token generation
 
 ```python
-with model.trace("Madison Square Garden is in", max_tokens=3) as tracer:
+with model.trace("Madison Square Garden is located in the city of",
+                 temperature=0.0, top_p=1.0, max_tokens=3) as tracer:
     logits = list().save()
-    for step in tracer.iter[:]:
+    for _ in tracer.iter[0:3]:
         logits.append(model.logits)
 
-# Each step's argmax is one generated token
 print(model.tokenizer.batch_decode([l.argmax(dim=-1) for l in logits]))
-# -> [' New', ' York', ' City']
+# [' New', ' York', ' City']
 ```
+
+`tracer.all()` iterates every generated step:
+
+```python
+with model.trace(PROMPT, max_tokens=10) as tracer:
+    logits = list().save()
+    for _ in tracer.all():
+        logits.append(model.logits)
+# len(logits) == 10
+```
+
+### `generate` is an alias for `trace`
+
+vLLM generation is driven by `max_tokens`, so there is no forward/generate split. `model.generate(...)` calls `trace` and rewrites `max_new_tokens` → `max_tokens` for parity with `TransformersModel` (`trace` accepts `max_new_tokens` too).
+
+> Unlike `TransformersModel`, **`tracer.result` is not served on vLLM** — reading it parks a worker forever. Read the generated tokens through `model.logits` / `model.samples` under `tracer.iter`/`tracer.all()` (or the streamed `RequestOutput` in async mode).
 
 ### Sampling parameters
 
-`SamplingParams` are forwarded via kwargs to either the root `.trace()` or per-invoke. NNsight wraps them in `NNsightSamplingParams` (`sampling.py:4`).
+Sampling kwargs go to `trace`/`invoke` (not configured on the model) and become the request's `SamplingParams`:
 
 ```python
-# Root-level sampling params apply to all invokes by default
+# root-level params apply to all invokes
 with model.trace("Hello", temperature=0.7, top_p=0.95, max_tokens=10) as tracer:
     samples = list().save()
-    for step in tracer.iter[:]:
+    for _ in tracer.iter[:]:
         samples.append(model.samples.item())
 
-# Per-invoke sampling params
+# per-invoke params override root
 with model.trace(max_tokens=3) as tracer:
     with tracer.invoke("Hello", temperature=0.0, top_p=1.0):
-        ids_greedy = list().save()
-        for step in tracer.iter[:]:
-            ids_greedy.append(model.samples.item())
-
+        ...
     with tracer.invoke("Hello", temperature=1.5, top_p=0.95):
-        ids_sampled = list().save()
-        for step in tracer.iter[:]:
-            ids_sampled.append(model.samples.item())
+        ...
 ```
 
-Common kwargs: `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `stop`, `stop_token_ids`, `seed`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs`. See `sampling.py:13-37` for the full set.
+Common kwargs: `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `stop`, `stop_token_ids`, `seed`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs`, `lora_request` — anything `vllm.SamplingParams` takes.
 
-### Activation interventions
+### Input forms per invoke
+
+One prompt per invoke (`vllm.py:266`): a string, a list of token ids, or a tokenizer's `{input_ids, attention_mask}` dict. A list of strings / multiple prompts is rejected — use one invoke each.
+
+### Continuous batching (multiple invokes)
+
+Each invoke is one request; vLLM's continuous batcher processes them together.
+**Collect each invoke's values into its own saved variable** — a container declared
+outside the invokes and appended inside them does *not* merge back, because each
+invoke's intervention is serialized into its own request separately (unlike the
+in-process local path):
 
 ```python
-with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1) as tracer:
-    # Zero out the last MLP — changes the prediction
-    model.transformer.h[-2].mlp.output = torch.zeros_like(
-        model.transformer.h[-2].mlp.output
-    )
-    logits = model.logits.save()
+with model.trace(max_tokens=3) as tracer:
+    with tracer.invoke("The Eiffel Tower is in"):
+        paris = list().save()                 # this invoke's own saved list
+        for _ in tracer.all():
+            paris.append(model.samples.item())
+    with tracer.invoke("The capital of Japan is"):
+        tokyo = list().save()                 # a distinct saved list
+        for _ in tracer.all():
+            tokyo.append(model.samples.item())
 
-# " London" instead of " Paris"
-print(model.tokenizer.decode(logits.argmax(dim=-1)))
+print(model.tokenizer.decode(paris), model.tokenizer.decode(tokyo))
 ```
 
-### Continuous batching: invoke loop
-
-vLLM batches requests at the engine level. Each `tracer.invoke(prompt)` becomes **one** vLLM request (one prompt per invoke is enforced by `_prepare_input` at `vllm.py:266`). Multiple invokes within a single trace are submitted as separate requests but processed together by vLLM's continuous batcher.
-
-```python
-prompts = ["Prompt A", "Prompt B", "Prompt C"]
-
-with model.trace(max_tokens=512) as tracer:
-    out_ids = [list() for _ in range(len(prompts))].save()      # shared parent-scope list
-
-    for i, prompt in enumerate(prompts):
-        with tracer.invoke(prompt):
-            for step in tracer.iter[:]:
-                out_ids[i].append(model.samples.item())
-
-for i, ids in enumerate(out_ids):
-    print(f"{prompts[i]} -> {model.tokenizer.decode(ids)}")
-```
-
-Cross-invoke shared state works via the worker's globals-grafting machinery — all mediators for the same trace share the canonical `__globals__`. See `vllm/README.md:347`.
+For a **dynamic** number of prompts you can't give each invoke a distinct name in one
+trace, and a shared container won't merge. Instead fire each prompt as its **own**
+async trace concurrently (`asyncio.gather`) — the engine still batches the concurrent
+requests, and each one's saves arrive on its own finished `output`.
 
 ### Tensor parallelism is transparent
 
@@ -178,161 +178,115 @@ Cross-invoke shared state works via the worker's globals-grafting machinery — 
 model = VLLM("meta-llama/Llama-3.1-8B", tensor_parallel_size=4, dispatch=True)
 
 with model.trace("Hello", temperature=0.0):
-    # Always sees the full unsharded tensor, regardless of tp_size
-    hidden = model.model.layers[16].output.save()
-    print(hidden.shape)        # [seq, hidden] — full hidden dim
+    hidden = model.model.layers[16].output.save()   # full unsharded tensor
 ```
 
-`VLLMBatcher` (`batching.py:15`) registers pre/post hooks on `ColumnParallelLinear` and `RowParallelLinear` modules. When your intervention reads from one, the batcher gathers the sharded tensor; when you write back, it re-shards. Every TP rank runs the same intervention code on the same complete tensor.
+`VLLMBatcher` (`batching.py`) gathers a `ColumnParallelLinear`/`RowParallelLinear` shard into the full tensor before your intervention reads it and re-splits on write, so every rank runs the same code on the same complete tensor. Verified in `tests/vllm/test_tensor_parallel.py`.
 
-### Async mode
+## Async mode
 
-Pass `mode="async"` to get token-by-token streaming:
+Construct with `mode="async"`; a trace then streams `RequestOutput`s. Iterate `tracer.backend` (an attribute, not a call):
 
 ```python
 import asyncio
 from nnsight.modeling.vllm import VLLM
 
-model = VLLM("openai-community/gpt2", gpu_memory_utilization=0.1, dispatch=True, mode="async")
+model = VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True, mode="async")
 
 async def main():
-    with model.trace("The Eiffel Tower is in", temperature=0.0, max_tokens=5) as tracer:
+    with model.trace("The Eiffel Tower is located in the city of",
+                     temperature=0.0, max_tokens=5) as tracer:
         logits = model.logits.save()
 
-    async for output in tracer.backend():
-        print(f"finished={output.finished}, text={output.outputs[0].text!r}")
+    async for output in tracer.backend:
+        print(output.finished, output.outputs[0].text)
         if output.finished:
             print("saves:", list(output.saves.keys()))
 
 asyncio.run(main())
 ```
 
-Behind the scenes: `VLLM.trace()` injects `AsyncVLLMBackend` (`async_backend.py:19`), which submits the request to `AsyncLLM.generate()` and returns an async generator that yields `RequestOutput` objects. Saves are collected **only when `output.finished == True`** — at that point NNsight pulls them from workers via `collective_rpc("collect_nnsight", ...)` and attaches them as `output.saves`. Intermediate (non-final) outputs do **not** trigger save collection. See `async_backend.py:77`.
+Saves are attached **only to the finished output** (`output.finished == True`), fetched from the worker via `collect_nnsight` at that point (`async_backend.py:120`). Intermediate yields carry no saves — accumulate per-step values inside `tracer.iter[:]` instead.
 
-> If you need per-step saves at every yielded output, use `tracer.iter[:]` inside the trace block — they accumulate in your list and are returned together at the end. (A per-yield collection mode existed briefly during development and may return as an opt-in option in the future, but the current behavior is finished-only.)
-
-#### Awaiting a single result (no streaming)
-
-If you don't care about streaming and just want the final output, await the backend directly. `AsyncVLLMBackend.__await__` proxies the underlying generator (`async_backend.py:74`):
+Await the backend to drain the stream and get just the last output:
 
 ```python
-async def main():
-    with model.trace("Hello", max_tokens=3) as tracer:
-        logits = model.logits.save()
-
-    final_output = await tracer.backend()
-    print(final_output.saves["logits"].shape)
+last = await tracer.backend
+print(last.saves["logits"].shape)
 ```
 
-For most use cases `async for` is more useful — it gives you per-step output. Use `await` when you only want the terminal `RequestOutput`.
+### Async notes
 
-#### Multi-prompt async streaming
+- Async tracing takes a **single prompt** (one invoke or a direct input) — several invokes raise `NotImplementedError` (`async_backend.py:64`).
+- The stream is single-shot; once drained it won't restart.
+- A stream closed before it finishes aborts the request and frees its worker (`async_backend.py:91`).
+- Errors in the block surface when you iterate the stream (a `1/0` raises `RuntimeError: ...ZeroDivisionError`).
+- `remote=True` skips async-backend injection (`vllm.py:347`).
 
-Each `tracer.invoke(...)` is one vLLM request. With async, all requests are submitted at once and stream concurrently — vLLM's continuous batcher dynamically batches them on the GPU:
+## Remote / serve
+
+- `trace(..., remote=True)` runs on NDIF. The model key is the repo id (`vllm.py:449`).
+- `trace(..., serve=url, api_key=...)` runs the trace on a standalone **nnsight-serve** engine: the block is written against a **GPU-less** meta model, serialized like the NDIF path, sent to the server, and its saved values pushed back into your frame — so reading a `.save()`d variable after the block works exactly as locally.
+
+Start a server (holds one dispatched async engine):
+
+```bash
+nnsight-serve gpt2 --port 8000 [--api-key SECRET] [--gpu-memory-utilization 0.1]
+```
+
+Then a client with **no GPU** submits traces to it:
 
 ```python
-prompts = ["The Eiffel Tower is in", "The Colosseum is in"]
+from nnsight.modeling.vllm import VLLM
 
-async def main():
-    with model.trace(max_tokens=5) as tracer:
-        out_ids = [list() for _ in range(len(prompts))].save()
-        for i, prompt in enumerate(prompts):
-            with tracer.invoke(prompt):
-                with tracer.all():
-                    out_ids[i].append(model.samples.item())
-
-    async for output in tracer.backend():
-        print(f"req={output.request_id} finished={output.finished}")
-
-asyncio.run(main())
+model = VLLM("gpt2")                       # meta tree only, never dispatched
+with model.trace("The Eiffel Tower is in", serve="http://127.0.0.1:8000", api_key="SECRET"):
+    logits = model.logits.save()
+print(model.tokenizer.decode(logits.argmax(dim=-1)))
 ```
 
-Order of `output.request_id`s is **not** the order of your invokes — match by `request_id` if order matters.
-
-#### Async gotchas
-
-- `mode="async"` must be on the `VLLM(...)` constructor; it has no effect on `trace()`.
-- `remote=True` is incompatible with `mode="async"` — `VLLM.trace` skips async-backend injection if `remote` is passed (`vllm.py:449`). NDIF currently runs the sync vLLM path only.
-- The underlying generator is **single-shot**. Once iterated to completion, calling `tracer.backend()` again will not restart generation.
-- `output.saves` only contains values on the **finished** output (`output.finished == True`). Intermediate outputs have an empty / sparsely-populated saves dict.
-- Pipeline parallelism (`pipeline_parallel_size > 1`) is not supported.
-
-### Ray distributed executor
-
-For multi-GPU TP across the local node, `mp` (multiprocessing) is the default and works out of the box. For multi-node TP, pass `distributed_executor_backend="ray"`:
-
-```python
-model = VLLM(
-    "meta-llama/Llama-3.1-70B",
-    tensor_parallel_size=8,
-    distributed_executor_backend="ray",
-    dispatch=True,
-)
-```
-
-NNsight automatically:
-1. Swaps in `NNsightRayExecutor` to work around a vLLM/Ray actor crash (`executors/ray_workaround.py`).
-2. Connects to an existing Ray cluster (set `RAY_ADDRESS=head:6379`), or starts a fresh local one if none exists.
-3. Joins as a driver-only node so no GPUs are consumed on the client machine.
-
-See `vllm/README.md:629` for the full Ray section, and `vllm/examples/multi_node_with_ray/` for a Docker-based multi-node example.
+The server returns saved values only (not generated tokens); build and runtime errors come back with their real type and traceback. See `src/nnsight/modeling/vllm/serve/`.
 
 ## Special properties
 
 | Attribute | Description | Source |
 |-----------|-------------|--------|
-| `model.logits` | `eproperty` — the **pre-sampling** logit tensor produced by the model. Read or modify via `model.logits.save()` / `model.logits = ...`. Iterates across generation steps via `tracer.iter`. | `vllm.py:102` |
-| `model.samples` | `eproperty` — the **sampled** token IDs produced by the sampler after `.logits`. Available after sampling fires; iterates across generation steps. | `vllm.py:112` |
-| `model.tokenizer` | vLLM's tokenizer (an `AnyTokenizer`). Loaded eagerly. | `vllm.py:165` |
-| `model.vllm_entrypoint` | The underlying `vllm.LLM` (sync) or `AsyncLLM` (async). Only populated in the user process after dispatch. | `vllm.py:75` |
-| `model.dispatched` | Whether real weights are loaded. | inherited from `MetaMixin` |
-| `model._async_engine` | Boolean: `True` if `mode="async"`. | `vllm.py:73` |
-
-`model.logits` and `model.samples` are vLLM-specific. Standard `LanguageModel` doesn't have them — those models expose `lm_head.output` (which fires before sampling) and the sampled tokens via `.generator.output` (final sequence only).
+| `model.logits` / `model.samples` | Pre-sampling logits / sampled ids for the step (trace-only, `eproperty`). | `vllm.py:144` |
+| `model.tokenizer` | The tokenizer vLLM resolved for the checkpoint. Loaded eagerly. | `vllm.py:181` |
+| `model.vllm_entrypoint` | The underlying `vllm.LLM` (sync) or `AsyncLLM` (async); `None` until dispatch. | `vllm.py:58` |
+| `model.dispatched` | Whether the engine is built. | `MetaMixin` |
 
 ### Module structure
 
-The Envoy tree mirrors vLLM's internal model layout. For Llama-style models you'll typically write:
+The Envoy tree mirrors vLLM's model layout. For Llama-style models:
 
 ```python
-model.model.layers[i].self_attn.qkv_proj.output       # ColumnParallelLinear
-model.model.layers[i].self_attn.o_proj.output         # RowParallelLinear
-model.model.layers[i].mlp.gate_up_proj.output         # ColumnParallelLinear
-model.model.layers[i].mlp.down_proj.output            # RowParallelLinear
+model.model.layers[i].self_attn.qkv_proj.output   # ColumnParallelLinear
+model.model.layers[i].self_attn.o_proj.output     # RowParallelLinear
+model.model.layers[i].mlp.gate_up_proj.output
+model.model.layers[i].mlp.down_proj.output
 model.model.norm.output
 ```
 
-For GPT-2-style models in vLLM:
-
-```python
-model.transformer.h[i].attn.output
-model.transformer.h[i].mlp.output
-```
-
-Print `model` to see the actual tree for your model.
+For GPT-2-style models: `model.transformer.h[i].attn.output`, `model.transformer.h[i].mlp.output`. Print `model` to see the actual tree.
 
 ## Limitations
 
-- **`enforce_eager=True` is forced.** vLLM's CUDA graph optimization is incompatible with arbitrary PyTorch hooks. This costs you some throughput on decode-heavy workloads (see `DISCUSSION.md` for context).
-- **Pipeline parallelism (PP > 1) is not supported.** A single mediator thread can't span multiple PP stages because each stage has only its own modules. Future work — see `IDEAS.md`.
-- **One prompt per invoke.** Unlike `LanguageModel`, you cannot pass `tracer.invoke(["a", "b"])`. Each invoke = one vLLM request. Use a loop of invokes for multiple prompts (`vllm.py:267`).
-- **No backward / gradients.** Backward tracing is not supported in vLLM workers (`IDEAS.md`).
-- **No `.scan()`, no `tracer.cache()`, no module editing yet.** These work at the tracing layer but haven't been validated on the vLLM path. See `IDEAS.md` for the parity gap table.
-- **No source tracing on fused CUDA kernels.** vLLM uses custom CUDA ops for attention and other hot paths; `.source` only works on Python-level forward methods.
-- **Multi-tenant isolation is on you.** `Globals.saves` is process-global. For multi-user serving with isolation, use NDIF or build your own layer.
-- **Version sensitivity.** Currently pinned to vLLM 0.15.1, Ray 2.53.0, grpcio 1.76.0. The Ray actor workaround is a vLLM-version-specific hack.
-- **vLLM v1 only.** The integration targets vLLM's v1 architecture (the `AsyncLLM` import path is `vllm.v1.engine.async_llm`).
-- **Multi-modal models are not yet integrated.** vLLM supports VLMs but the NNsight `VLLM` wrapper is text-only for now (`IDEAS.md`).
+- **`enforce_eager=True` is forced** — costs some decode throughput, required for hooks.
+- **One prompt per invoke** — no `tracer.invoke(["a", "b"])`.
+- **No backward / gradients, no `.scan()`, no source tracing on fused CUDA kernels.**
+- **Text-only** — multimodal vLLM is not exposed.
+- **Version sensitivity** — targets vLLM's v1 architecture (`AsyncLLM` at `vllm.v1.engine.async_llm`).
 
 ## Gotchas
 
-- **Scripts must use an `if __name__ == "__main__":` guard.** vLLM uses `spawn` multiprocessing for its EngineCore subprocess (CUDA contexts can't be safely forked), and `spawn` re-imports your main module in the child. Without the guard, the child re-runs the top-level `VLLM(...)` / `.trace(...)` calls and tries to spawn another EngineCore — Python's `_check_not_importing_main` then raises `RuntimeError: An attempt has been made to start a new process before the current process has finished its bootstrapping phase`. The fix is the standard idiom:
+- **Scripts need an `if __name__ == "__main__":` guard.** vLLM uses `spawn` for its EngineCore subprocess; without the guard the child re-runs your top-level `VLLM(...)` / `.trace(...)` and raises a bootstrapping `RuntimeError`. Notebooks are fine. This is a vLLM/multiprocessing requirement, not nnsight-specific.
 
   ```python
   from nnsight.modeling.vllm import VLLM
 
   def main():
-      model = VLLM("gpt2")
+      model = VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True)
       with model.trace("hello", max_tokens=1):
           out = model.transformer.h[0].output.save()
       print(out.shape)
@@ -341,54 +295,25 @@ Print `model` to see the actual tree for your model.
       main()
   ```
 
-  This is a vLLM / Python multiprocessing requirement, not nnsight-specific — raw `vllm.LLM(...)` at module level has the same constraint. Notebooks (Jupyter / Colab) are fine because they don't re-import.
-
-- **Mode is set at construction time, not per-trace.** You can't switch between sync and async on the same `VLLM` instance. Construct with `mode="async"` if you want streaming.
-- **`tracer.backend()` only exists in async mode.** In sync mode, results are pushed back into your local variables automatically when the trace block exits.
-- **`model.logits` and `model.samples` are NNsight-specific eproperties** (`vllm.py:102-122`) — they don't exist on a vanilla `vllm.LLM`. Don't try to use them outside a trace.
-- **Per-invoke kwargs override root kwargs.** Anything you pass to `tracer.invoke(prompt, temperature=...)` overrides what you passed to `model.trace(...)` for that invoke.
-- **Empty invokes (`tracer.invoke()` with no args) work** — they see the full batch, useful for batch-wide observations.
-- **Dispatching is automatic but takes a while.** First `.trace()` after `dispatch=False` triggers full vLLM engine init. Pass `dispatch=True` if you want that pause during construction.
-- **`gpu_memory_utilization` defaults to 0.9.** For small models or shared GPUs, lower it explicitly. The test suite uses `0.1`.
-- **CUDA graphs are not the only thing forbidden.** Speculative decoding, custom CUDA samplers, and certain attention backends may also break hooks. Stick with the default attention backend if interventions misbehave.
-- **Async streaming saves are collected only when `output.finished == True`.** As of `async_backend.py:77`, `__aiter__` calls `collect_nnsight` on the final output only — intermediate yields don't trigger collection. If you want per-step saves, accumulate them inside `tracer.iter[:]` (saves end up on the final output's `.saves`).
-
-## Future work (NOT yet supported)
-
-The vLLM integration's `IDEAS.md` lists features explicitly **not** implemented today:
-
-- **Pipeline parallelism (PP > 1)** — needs per-stage mediator copies and rank-guarded interventions
-- **Scan mode** — works at the tracing layer, hasn't been wired to vLLM
-- **`tracer.cache()`** — same
-- **Module renaming** — config forwarding only
-- **Model editing (`model.edit()`)** — Envoy already wraps the model, but persistence isn't tested
-- **Module skipping (`module.skip(...)`)** — needs testing with flat tensor format
-- **Source tracing** — only works on Python forward methods, not fused kernels
-- **Gradients / backward tracing** — would require backward in workers
-- **Multi-modal vLLM** — vLLM has VLM support, NNsight doesn't expose it yet
-- **Speculative decoding** — Eagle 3 etc. would need draft/verify phase boundaries
-- **Online serving endpoint** — current integration is offline (`LLM`) only
-
-If you need any of these, file an issue or read `IDEAS.md` for the design sketches.
+- **A saved value comes back by its variable *name* — bind it.** `logits = model.logits.save()` works; a bare `model.logits.save()` marks the value but has no name to return it under, so `output.saves["logits"]` (async/serve) or the pushed-back local is silently missing. This is the most common "saves don't come back" bug on vLLM.
+- **Cross-invoke shared state does not merge.** A container declared outside the invokes and appended inside each one is serialized per request, so the appends don't come back — save per invoke (see [Continuous batching](#continuous-batching-multiple-invokes)).
+- **`tracer.result` is not served** — read output via `model.logits` / `model.samples`, not `tracer.result`.
+- **An empty `tracer.invoke()` with interventions raises** (its work would vanish); a do-nothing empty invoke is a harmless no-op.
+- **A typo'd sampling kwarg raises** (`trace(temperatur=0.0)` → `TypeError`), rather than being silently ignored.
+- **Mode is fixed at construction.** Build with `mode="async"` if you want streaming.
+- **`tracer.backend` is iterable only in async mode.** In sync mode, results land in your local variables when the block exits.
+- **`logits` / `samples` don't exist on a vanilla `vllm.LLM`** — use them only inside a trace.
+- **Per-invoke kwargs override root kwargs.**
+- **`gpu_memory_utilization` defaults to 0.9** — lower it for small/shared GPUs (tests use 0.1).
+- **Async saves are finished-only** — for per-step saves, accumulate inside `tracer.iter[:]`.
 
 ## Related
 
-### Demo repositories
-
-- [**nnsight-vllm-demos**](https://github.com/ndif-team/nnsight-vllm-demos) — runnable end-to-end demos including an async chat interface with SAE-based steering. Linked from the v0.6.0 release notes.
-- [**nnsight-vllm-lens-comparison**](https://github.com/ndif-team/nnsight-vllm-lens-comparison) — comparison of logit-lens / tuned-lens style probes running on the NNsight vLLM integration.
-
-### Docs and source
-
-- [docs/models/index.md](index.md) — pick the right wrapper
-- [docs/models/language-model.md](language-model.md) — text-only HF alternative
-- [docs/remote/](../remote/) — running traces on NDIF (an NDIF deployment may be vLLM-backed)
-- `src/nnsight/modeling/vllm/README.md` — full architectural reference (file structure, key classes, execution flow, mediator transport, batch group management, multiple interleaving phases, tensor parallelism, continuous batching, multi-token generation, async engine, Ray executor, multi-node)
-- `src/nnsight/modeling/vllm/DISCUSSION.md` — the philosophy: production-grade interpretability vs. SAE-based steering APIs
-- `src/nnsight/modeling/vllm/IDEAS.md` — feature parity gaps and future directions (PP, multi-modal, speculative decoding, online serving)
+- [docs/models/index.md](index.md) — decision tree
+- [docs/models/transformers-model.md](transformers-model.md) — the text-only HF alternative
+- [docs/remote/](../remote/) — running traces on NDIF
 - `src/nnsight/modeling/vllm/vllm.py` — `VLLM` class
 - `src/nnsight/modeling/vllm/batching.py` — `VLLMBatcher` (TP gather/scatter)
-- `src/nnsight/modeling/vllm/sampling.py` — `NNsightSamplingParams`
 - `src/nnsight/modeling/vllm/async_backend.py` — `AsyncVLLMBackend`
-- `tests/test_vllm.py` — runnable examples covering inference, generation, sampling, interventions, batching, TP, async streaming
-- [v0.6.0 release notes](../../0.6.0.md) — vLLM is the headline feature of v0.6.0
+- `src/nnsight/modeling/vllm/serve/` — nnsight-serve backend / server / CLI
+- `tests/vllm/` — runnable examples (tracing, async, tensor parallelism, requests, serve)

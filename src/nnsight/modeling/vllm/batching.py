@@ -1,168 +1,173 @@
-from typing import Any, Union
+"""Scope a worker to its own request's tokens inside a scheduled step.
+
+A stacked-tensor model gives each invoke a row range that is fixed the moment the
+trace is written. vLLM gives neither. It packs every request the scheduler picked
+for a step into one flat ``[total_tokens, hidden]`` slab — a whole prompt's tokens
+on prefill, a single token per decode step — and which requests are in that slab
+changes from step to step as they arrive and finish.
+
+So a worker's group is a *token span*, recomputed every step by
+:class:`~nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner`
+rather than assigned once up front. The row math itself is unchanged from
+:class:`~nnsight.intervention.batching.Batcher`: dim 0 is the token axis, so
+narrowing to ``[start, size]`` selects exactly a request's tokens.
+
+Under tensor parallelism a second correction is needed. vLLM splits its linear
+layers across ranks, so the value at a ``ColumnParallelLinear`` or
+``RowParallelLinear`` is one rank's shard of the real tensor. A user asked for the
+layer, not a shard of it, so those values are gathered before a worker sees them
+and re-split before vLLM's own forward carries on.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
 import torch
-from ...intervention.batching import Batcher, apply
-from ...intervention.envoy import Envoy
-from ...intervention.hooks import add_ordered_hook
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-    tensor_model_parallel_all_gather,
-    split_tensor_along_last_dim,
-    tensor_model_parallel_all_reduce,
-)
+
+from ...intervention.batching import Batcher
+from ...util import apply
 
 
 class VLLMBatcher(Batcher):
-    """Batcher that handles tensor-parallel gather/split for vLLM.
+    """A :class:`~nnsight.intervention.batching.Batcher` over vLLM's flat token axis.
 
-    vLLM's ``ColumnParallelLinear`` and ``RowParallelLinear`` layers
-    shard tensors across GPUs. When NNsight intervention code accesses
-    inputs or outputs of these layers, this batcher transparently
-    gathers the sharded tensors so the user sees the full (unsharded)
-    values, then splits them back before returning control to vLLM.
+    Attributes:
+        module: The parallel linear currently running, or None outside one.
+        type: Whether ``module``'s input or output is being served.
+        parallel: Whether ``module``'s value is really a shard.
+        gathered: The whole tensor, once assembled from every rank's shard, or None.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, envoy: Optional[object] = None) -> None:
+        super().__init__(envoy)
+        self.module: Any = None
+        self.type: Optional[str] = None
+        self.parallel: bool = False
+        self.gathered: Any = None
 
-        self.current_module = None
-        self.parallel = False
-        self.gathered = False
-        self.type = None
+    @property
+    def batching(self) -> bool:
+        """Whether narrowing applies — always.
 
-    def wrap(self, model: Envoy):
+        The base skips narrowing for a lone invoke, because one invoke *is* the
+        whole batch. That never holds here: the engine fills a step with whatever it
+        has, so a request's tokens sit alongside other requests' — another trace's,
+        another tenant's, or a decode of a request whose own block already finished.
+        A worker is only ever entitled to its own span, so there is no case in which
+        handing it the whole slab is right.
+        """
+        return True
 
-        def pre_input_hook(module: torch.nn.Module, args: Any, kwargs: Any):
-            self.current_module = module
-            self.type = "input"
+    def narrow(self, value: Any, group: Any) -> Any:
+        return super().narrow(self._whole(value), group)
 
-            if isinstance(module, RowParallelLinear):
+    def widen(self, full: Any, group: Any, edited: Any) -> Any:
+        whole = super().widen(self._whole(full), group, edited)
+        # An edit produces a fresh whole; keep it so a later worker in the same
+        # module turn reads the edit, and so release re-shards the edited value
+        # rather than the pre-edit gather.
+        if self.parallel and self.gathered is not None:
+            self.gathered = whole
+        return whole
+
+    def _whole(self, value: Any) -> Any:
+        """The real tensor behind ``value``, assembled from every rank's shard.
+
+        Only the parallel linears shard anything, so everywhere else this is the
+        value itself. The result is kept for the rest of the module's turn: workers
+        read and edit this one tensor in place, and :meth:`release` reshards it back
+        to the model afterwards. Keeping it also means each rank takes part in the
+        gather collective once per value rather than once per worker — several
+        workers reading the same value would otherwise deadlock the ranks.
+        """
+        if not self.parallel:
+            return value
+        if self.gathered is not None:
+            return self.gathered
+
+        from vllm.model_executor.layers.linear import (
+            ColumnParallelLinear,
+            RowParallelLinear,
+        )
+        from vllm.distributed.communication_op import (
+            tensor_model_parallel_all_gather,
+            tensor_model_parallel_all_reduce,
+        )
+
+        if isinstance(self.module, ColumnParallelLinear):
+            # Column sharding splits the output features, so the ranks hold
+            # different columns of the same rows.
+            collective = tensor_model_parallel_all_gather
+        elif self.type == "input":
+            # A row-parallel layer takes its input already split by feature.
+            collective = tensor_model_parallel_all_gather
+        else:
+            # Row sharding splits the summed terms, so each rank holds a partial
+            # sum and the whole is their total.
+            collective = tensor_model_parallel_all_reduce
+
+        self.gathered = apply(value, collective, torch.Tensor)
+        return self.gathered
+
+    def _shard(self, value: Any) -> Any:
+        """This rank's piece of ``value``, as vLLM's own forward expects it."""
+        from vllm.model_executor.layers.linear import (
+            ColumnParallelLinear,
+            split_tensor_along_last_dim,
+        )
+
+        module = self.module
+
+        if isinstance(module, ColumnParallelLinear) or self.type == "input":
+            return apply(
+                value,
+                lambda tensor: split_tensor_along_last_dim(
+                    tensor, num_partitions=module.tp_size
+                )[module.tp_rank].contiguous(),
+                torch.Tensor,
+            )
+        # An all-reduce summed every rank's partial; dividing evenly gives a set of
+        # partials that sums back to it.
+        return apply(value, lambda tensor: tensor / module.tp_size, torch.Tensor)
+
+    def watch(self, module: torch.nn.Module, kind: str) -> None:
+        """Note that ``module``'s ``kind`` is about to be served to workers."""
+        from vllm.model_executor.layers.linear import (
+            ColumnParallelLinear,
+            RowParallelLinear,
+        )
+
+        self.module = module
+        self.type = kind
+        self.gathered = None
+
+        if isinstance(module, ColumnParallelLinear):
+            # vLLM gathers this itself when asked to, and then it isn't a shard.
+            self.parallel = not module.gather_output if kind == "output" else False
+        elif isinstance(module, RowParallelLinear):
+            if kind == "input":
                 self.parallel = module.input_is_parallel
-
-        def post_input_hook(module: torch.nn.Module, args: Any, kwargs: Any):
-
-            if self.parallel and self.gathered:
-
-                if isinstance(self.current_module, RowParallelLinear):
-
-                    args, kwargs = apply(
-                        (args, kwargs),
-                        lambda x: split_tensor_along_last_dim(
-                            x, num_partitions=self.current_module.tp_size
-                        )[self.current_module.tp_rank].contiguous(),
-                        torch.Tensor,
-                    )
-
-            self.parallel = False
-            self.gathered = False
-            self.current_module = None
-            self.type = None
-
-            return args, kwargs
-
-        def pre_output_hook(module: torch.nn.Module, args: Any, output: Any):
-
-            self.current_module = module
-            self.type = "output"
-
-            if isinstance(module, ColumnParallelLinear):
-                self.parallel = not module.gather_output
-            elif isinstance(module, RowParallelLinear):
+            else:
                 self.parallel = not module.reduce_results
-
-        def post_output_hook(module: torch.nn.Module, args: Any, output: Any):
-
-            if self.parallel and self.gathered:
-
-                if isinstance(self.current_module, ColumnParallelLinear):
-
-                    # Undo tensor_model_parallel_all_gather by splitting back along last dimension
-                    output = apply(
-                        output,
-                        lambda x: split_tensor_along_last_dim(
-                            x, num_partitions=self.current_module.tp_size
-                        )[self.current_module.tp_rank].contiguous(),
-                        torch.Tensor,
-                    )
-
-                elif isinstance(self.current_module, RowParallelLinear):
-
-                    # Undo tensor_model_parallel_all_reduce by dividing by tp_size
-                    # Since all_reduce sums across ranks, dividing gives each rank 1/tp_size of the sum
-                    output = apply(
-                        output, lambda x: x / self.current_module.tp_size, torch.Tensor
-                    )
-
+        else:
             self.parallel = False
-            self.gathered = False
-            self.current_module = None
-            self.type = None
 
-            return output
+    def release(self, value: Any) -> Any:
+        """Hand vLLM back what it should carry on with, and stop watching.
 
-        # Mark the hooks with mediator_idx so they sort correctly when
-        # add_ordered_hook rebuilds the hook dict for intervention hooks:
-        #
-        # - pre_* hooks use -inf so they fire BEFORE any mediator hook
-        #   (they set up the batcher state that narrow/gather depend on).
-        # - post_* hooks use +inf so they fire AFTER every mediator hook
-        #   (they clean up after all interventions have read/modified
-        #   the potentially-gathered values, and split the tensors
-        #   back to their sharded form before vLLM resumes).
-        pre_input_hook.mediator_idx = float("-inf")
-        post_input_hook.mediator_idx = float("inf")
-        pre_output_hook.mediator_idx = float("-inf")
-        post_output_hook.mediator_idx = float("inf")
-
-        for module in model.modules():
-            if isinstance(module._module, (RowParallelLinear, ColumnParallelLinear)):
-                add_ordered_hook(module._module, pre_input_hook, "input")
-                add_ordered_hook(module._module, post_input_hook, "input")
-                add_ordered_hook(module._module, pre_output_hook, "output")
-                add_ordered_hook(module._module, post_output_hook, "output")
-
-    def check_gathered(self):
-
-        if self.parallel and not self.gathered:
-
-            if isinstance(self.current_module, ColumnParallelLinear):
-
-                if self.type == "output":
-
-                    self.current_value = apply(
-                        self.current_value,
-                        lambda x: tensor_model_parallel_all_gather(x),
-                        torch.Tensor,
-                    )
-
-            elif isinstance(self.current_module, RowParallelLinear):
-
-                if self.type == "input":
-
-                    self.current_value = apply(
-                        self.current_value,
-                        lambda x: tensor_model_parallel_all_gather(x),
-                        torch.Tensor,
-                    )
-
-                elif self.type == "output":
-
-                    self.current_value = apply(
-                        self.current_value,
-                        lambda x: tensor_model_parallel_all_reduce(x),
-                        torch.Tensor,
-                    )
-
-            self.gathered = True
-
-    def narrow(self, batch_group: Union[int, None]):
-
-        self.check_gathered()
-
-        return super().narrow(batch_group)
-
-    def swap(self, batch_group: Union[int, None], swap_value: Any):
-
-        self.check_gathered()
-
-        return super().swap(batch_group, swap_value)
+        If the value was gathered, the workers read and edited *that* whole tensor,
+        so what vLLM continues from is a fresh shard of it — not the shard it
+        produced, which the workers never saw. An edit rebuilds the whole through
+        :meth:`widen`, which writes it back onto ``gathered``, so re-sharding
+        ``gathered`` carries the edit; a read leaves ``gathered`` as the plain
+        assembly. When nothing gathered (the common, unsharded case) the value
+        passes straight through.
+        """
+        if self.parallel and self.gathered is not None:
+            value = self._shard(self.gathered)
+        self.module = None
+        self.type = None
+        self.parallel = False
+        self.gathered = None
+        return value

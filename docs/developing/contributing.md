@@ -1,110 +1,114 @@
 ---
 title: Contributing
-one_liner: Branch conventions, the pre-PR validation suite, and where to find the team.
+one_liner: House style, branch/commit conventions, and the pre-PR routine for this repo.
 tags: [internals, dev]
-related: [docs/developing/testing.md, docs/developing/agent-evals.md, docs/developing/architecture-overview.md]
-sources: [CONTRIBUTING.md, pytest.ini, tests/conftest.py]
+related: [docs/developing/testing.md, docs/developing/architecture-overview.md]
+sources: [STYLE.md, pyproject.toml, tests/]
 ---
 
 # Contributing
 
 ## What this covers
 
-A short pointer document for contributors. The full contributing guide lives in [`CONTRIBUTING.md`](../../CONTRIBUTING.md) at the repository root — go there for development setup (clone, install, environment), project structure, and detailed test instructions. This page covers the things specific to working on this branch and the validation routine before submitting a PR.
+How work lands in this repo: the canonical style guide, branch and commit
+conventions, and what to run before opening a PR. The authoritative style document
+is [`STYLE.md`](../../STYLE.md) at the repository root — read it first; the notes
+here don't restate it.
 
-## Architecture / How it works
+## Style: read `STYLE.md`
 
-### Branching conventions
+[`STYLE.md`](../../STYLE.md) is the house style, written for humans and agents
+alike. Its philosophy drives every rule, so when a rule doesn't cover your case the
+philosophy tells you what to do. The load-bearing points:
 
-The repo uses three categories of branches:
+- **Comment *why*, never *what*.** If a comment paraphrases the line under it,
+  delete it. Say what the reader can't see: greenlet/weakref lifetimes, hook
+  ordering, autograd aliasing, serialization boundaries. The source is present
+  tense — no "this used to", no issue numbers, no TODO/FIXME. Git holds history.
+- **Three-layer docs.** The module docstring teaches the concept; a thing's
+  docstring states its contract and reasoning; the inline comment explains why
+  *this* implementation. Every core module opens with a concept-teaching docstring.
+- **Delete before you add.** Prefer removing a concept to introducing one — a plain
+  method over a custom descriptor, one dispatch point over a fan-out of handlers.
+- **Layer in one direction:** `tracing → intervention → modeling`. Nothing in
+  `tracing/` imports `intervention/` or `modeling/`; nothing imports the root
+  `__init__` from inside the package.
+- **The bare (non-underscore) surface is the public API.** Underscore everything
+  that isn't user-facing. Extension points are underscore-prefixed methods with
+  working defaults — no ABCs, no `Mixin` suffix.
+- **Modern typing throughout:** `from __future__ import annotations` after every
+  module docstring; `X | None`, `list[str]`, not `Optional`/`List`. Annotate every
+  parameter and return.
+- **Raise by default; warn only** when the program can proceed with a
+  degraded-but-sane result. Deprecations use `DeprecationWarning`, `stacklevel=2`.
+  No `assert`, no `logging` in library code. Error messages are terse, quote values
+  with `{x!r}`, and name the user-facing API rather than internals.
 
-- **`main`** — release-stable. PRs target this branch unless explicitly told otherwise.
-- **`dev`** — integration branch where merged work accumulates between releases.
-- **`feature/<name>`** — new features. Branched from `main` (or `dev`).
-- **`refactor/<name>`** — non-feature internal restructuring. Branched from `main` (or `dev`). The current branch (`refactor/transform`) is one of these.
-- **`fix/<name>`** — bug fixes. Branched from `main`.
+## Branches
 
-Create your branch from the latest `main` unless your work is layered on a still-open feature branch.
+`main` is the release-stable branch; PRs target it unless told otherwise. Branch
+from the latest `main` for your change. Interactive git flags (`git rebase -i`,
+`git add -i`) aren't used here — prefer new commits over force-pushes during
+review; the reviewer squashes on merge.
 
-### Pre-PR checklist
+## Commits
 
-Before opening a PR, run the standard validation suite (matches `CONTRIBUTING.md`):
+Commit subjects are `area: lowercase imperative summary`, where `area` is the part
+of the tree touched. From the log:
 
-```bash
-pytest tests/test_lm.py tests/test_tiny.py tests/test_0516_features.py \
-  tests/test_debug.py tests/test_memory_cleanup.py tests/test_multiple_wrappers.py \
-  --device cpu
+```
+tracing: add mark() for out-of-trace saves; guard save() to inside a trace
+transformers: keep standalone children across a model env rebind
+vllm: stream traces on an async engine (mode="async")
+remote: async backend returns the saves dict instead of pushing
 ```
 
-Plus, depending on what you touched:
+The body explains the *why* and the constraint — the same standard the source
+comments hold to (name the failure mode, the counterfactual). Commits made with
+agent assistance end with a trailer:
 
-| If you touched... | Also run... |
-|-------------------|-------------|
-| `src/nnsight/intervention/serialization.py` or any closure / dataclass code | `tests/test_serialization_edge_cases.py`, `tests/test_lambda_serialization.py`, `tests/test_dataclass_serialization.py`, `tests/test_local_simulation.py` |
-| `src/nnsight/modeling/vllm/` | `pytest tests/test_vllm.py --tp 1` (needs GPU + vllm install) |
-| `src/nnsight/modeling/diffusion.py` | `pytest tests/test_diffusion.py --device cpu` |
-| `src/nnsight/modeling/vlm.py` | `pytest tests/test_vlm.py --device cpu` |
-| Source extraction or `tracing/base.py` | `tests/test_source.py`, `tests/test_transform.py` |
-| Hooks / interleaver | `tests/test_envoys.py`, `tests/test_memory_cleanup.py`, `tests/test_multiple_wrappers.py` |
-
-For a quick smoke test during development:
-
-```bash
-pytest tests/test_tiny.py --device cpu -x
+```
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ```
 
-See [testing.md](./testing.md) for the full test inventory.
+## Before you open a PR
 
-### Code style
+There is no separate `CONTRIBUTING.md`; the routine is the test suite.
 
-The project follows the conventions in [`CONTRIBUTING.md`](../../CONTRIBUTING.md):
+Run the offline suite on CPU (see [testing.md](./testing.md) for the details):
 
-- Match the surrounding code's style. There is no enforced formatter.
-- Keep changes focused. Don't bundle unrelated refactors into a bug fix.
-- Don't add docstrings, comments, or type annotations to code you didn't change.
-- Comments are for the **why** when the logic is non-obvious. The **what** should be self-evident from the code.
-- Don't proactively add files (READMEs, examples, helpers) unless asked.
+```bash
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm
+```
 
-### What gets reviewed quickly
+Then, depending on what you touched, run the mirroring test file(s) — the suite is
+laid out one file per concept:
 
-PRs that get merged fast tend to:
+| If you touched... | Run at least |
+|-------------------|--------------|
+| `intervention/serialization.py`, `schema/request.py` | `tests/test_serialization.py` |
+| `intervention/source.py` | `tests/test_source.py`, `tests/test_interleaving.py` |
+| `intervention/interleaver.py`, hooks | `tests/test_interleaving.py`, `tests/test_memory.py`, `tests/test_multiple_wrappers.py` |
+| `tracing/` | `tests/test_tracing.py` |
+| `intervention/batching.py` | `tests/test_batching.py` |
+| `modeling/transformers.py`, `modeling/huggingface.py` | `tests/test_language.py`, `tests/test_modeling.py`, `tests/test_encoder.py` |
+| `modeling/diffusion.py` | `tests/test_diffusion.py` |
+| `modeling/vlm.py` | `tests/test_vlm.py` |
+| `intervention/backends/remote.py` | `tests/test_remote_backend.py`, `tests/test_serialization.py` (`remote="local"`) |
+| `modeling/vllm/` | `python -m pytest tests/vllm/` (needs GPU + `vllm`) |
 
-- Fix one thing or add one feature.
-- Include a test that fails before the change and passes after.
-- Have a one-paragraph description in the PR body explaining the why.
-- Reference the issue they close (`Fixes #N`).
-- Pass the validation suite locally before pushing.
-
-### What slows things down
-
-- Touching many files for one logical change. If you find yourself editing 15 files, consider whether some of them are independent and should be separate PRs.
-- Mixing formatting changes with substantive changes.
-- Adding docstrings / comments / type hints to unchanged code.
-- Skipping tests with a "this isn't really testable" comment without explaining why.
-- Force-pushing over review feedback (use new commits; the reviewer will squash on merge).
-
-### Getting feedback before you write code
-
-For larger changes, open a GitHub issue first describing the approach. The team responds quickly on Discord and the forum. If your PR has been sitting for a few days without a review, ping it on Discord rather than opening a duplicate PR.
-
-## Key files / docs
-
-- [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — full contributing guide (setup, test commands, project structure)
-- [`CLAUDE.md`](../../CLAUDE.md) — agent-friendly architectural overview
-- [`NNsight.md`](../../NNsight.md) — deep technical reference
-- [`pytest.ini`](../../pytest.ini) — pytest configuration + marker registration
-- `tests/conftest.py` — shared fixtures and CLI flags
+A PR merges fastest when it fixes or adds one thing, ships a test that fails before
+and passes after, explains the why in a paragraph, and passes the suite locally.
 
 ## Where the team is
 
-- **GitHub issues** — [github.com/ndif-team/nnsight/issues](https://github.com/ndif-team/nnsight/issues) — bugs, feature requests, design discussions
-- **Discord** — [discord.gg/6uFJmCSwW7](https://discord.gg/6uFJmCSwW7) — real-time help, design discussions, hanging out
-- **Forum** — [discuss.ndif.us](https://discuss.ndif.us) — longer-form questions, tutorials, community-shared code
-- **Documentation** — [nnsight.net](https://nnsight.net)
+- **GitHub** — issues and PRs on the nnsight repository.
+- **Discord** — [discord.gg/6uFJmCSwW7](https://discord.gg/6uFJmCSwW7) — real-time help and design discussion.
+- **Forum** — [discuss.ndif.us](https://discuss.ndif.us) — longer-form questions.
+- **Docs** — [nnsight.net](https://nnsight.net).
 
 ## Related
 
-- [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — the canonical contributing guide
-- [testing.md](./testing.md) — full test inventory + flag reference
-- [agent-evals.md](./agent-evals.md) — meta-test suite for documentation quality
-- [architecture-overview.md](./architecture-overview.md) — start here for the big picture
+- [`STYLE.md`](../../STYLE.md) — the canonical style guide
+- [testing.md](./testing.md) — full test inventory and how to run offline

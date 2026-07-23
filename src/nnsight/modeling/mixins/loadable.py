@@ -1,52 +1,38 @@
-from typing import Dict, Optional
+from __future__ import annotations
+
+from typing import Any
 
 import torch
 
-from ..base import NNsight
+from ...intervention.envoy import Envoy
 
 
-class LoadableMixin(NNsight):
-    """Mixin that adds model loading from an identifier (e.g. a repo ID or path).
+class Loadable(Envoy):
+    """An :class:`~nnsight.intervention.envoy.Envoy` that loads its own module.
 
-    Extends :class:`NNsight` so the first argument can be either a
-    ``torch.nn.Module`` (wrapped directly) or an identifier that is
-    resolved by :meth:`_load`.
-
-    Subclasses must implement :meth:`_load` to define how an identifier
-    is converted into a ``torch.nn.Module``.
-
-    Args:
-        *args: If the first argument is a ``torch.nn.Module`` it is
-            wrapped directly. Otherwise all arguments are forwarded
-            to :meth:`_load`.
-        rename (Optional[Dict[str, str]]): Module path aliases.
-            See :class:`Envoy` for details.
-        **kwargs: Forwarded to :meth:`_load` when loading from an
-            identifier.
+    Every construction goes through :meth:`_load`, which returns the module to wrap.
+    The base default returns a ready ``torch.nn.Module`` as-is (so ``Loadable(mod)``
+    wraps it directly) and otherwise isn't implemented; subclasses override it to
+    build from load arguments and to decide what a pre-loaded module means for them
+    (e.g. :class:`~nnsight.modeling.transformers.TransformersModel` wraps one in a
+    ``transformers.pipeline``). The ``rename`` spec is an Envoy concern, so it is
+    kept out of the load path.
     """
 
-    def __init__(self, *args, rename: Optional[Dict[str,str]] = None,**kwargs) -> None:
+    def __init__(
+        self, *args: Any, rename: Any = None, envoys: Any = None, **kwargs: Any
+    ) -> None:
+        # rename/envoys are Envoy concerns, not load args — keep them out of _load.
+        model = self._load(*args, **kwargs)
+        super().__init__(model, rename=rename, envoys=envoys)
 
-        if not isinstance(args[0], torch.nn.Module):
+    def _load(self, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        """Build and return the module to wrap.
 
-            model = self._load(*args, **kwargs)
-
-        else:
-
-            model = args[0]
-
-        super().__init__(model, rename=rename)
-
-    def _load(self, *args, **kwargs) -> torch.nn.Module:
-        """Load and return a ``torch.nn.Module`` from the given identifier.
-
-        Must be implemented by subclasses.
-
-        Returns:
-            torch.nn.Module: The loaded model.
-
-        Raises:
-            NotImplementedError: If not overridden by a subclass.
+        Base default: a ready ``torch.nn.Module`` is returned as-is; anything else
+        is not implemented. Subclasses override to load the real module from the
+        given arguments (e.g. a repo id).
         """
-
-        raise NotImplementedError()
+        if args and isinstance(args[0], torch.nn.Module):
+            return args[0]
+        raise NotImplementedError

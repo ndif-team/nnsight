@@ -1,119 +1,125 @@
 ---
 title: Edit
-one_liner: Persistently install interventions on a model with `model.edit()`; clear with `model.clear_edits()`.
+one_liner: Persistently install interventions on a model with `model.edit(inplace=...)`; clear with `model.clear_edits()`.
 tags: [usage, edit, persistent]
 related: [docs/usage/trace.md, docs/usage/access-and-modify.md, docs/usage/skip.md]
-sources: [src/nnsight/intervention/tracing/editing.py, src/nnsight/intervention/backends/editing.py, src/nnsight/intervention/envoy.py:316, src/nnsight/modeling/huggingface.py:65]
+sources: [src/nnsight/intervention/editing.py, src/nnsight/intervention/envoy.py]
 ---
 
 # Edit
 
 ## What this is for
 
-`model.edit()` opens an editing context whose body — the same intervention DSL as a regular trace — is **compiled and stored as a default mediator on the Envoy** instead of being executed once. Every subsequent `model.trace(...)` / `model.generate(...)` runs the stored interventions in addition to whatever the user writes.
+`model.edit(...)` opens an editing context whose body — the same intervention DSL as a regular trace — is **captured and stored on the envoy** instead of being executed once. Every subsequent `model.trace(...)` / `model.generate(...)` / `model.pipe(...)` replays the stored interventions (they run *first*, before your invokes).
 
 Two flavors:
 
-- `model.edit()` (default) — non-inplace. Returns a shallow copy of the root envoy with the new mediator attached. The original `model` is unchanged.
-- `model.edit(inplace=True)` — mutates the original model. All future traces on `model` see the edit.
+- `model.edit()` (default, `inplace=False`) — stores the edit on a **shallow copy** of the envoy; the original is left clean. Entering the block binds `(tracer, edited)`.
+- `model.edit(inplace=True)` — stores the edit on the envoy itself. Entering the block binds only `tracer`.
+
+> **`__enter__` return changed.** Non-inplace now yields a `(tracer, edited)` tuple (old nnsight yielded just the edited model). The `tracer` carries the `iter` API for per-occurrence edits.
 
 ## When to use / when not to use
 
-- Use to install always-on transforms (zero a head, add a steering vector, swap an SAE in for an MLP, etc.) without rewriting every trace.
-- Use `inplace=True` when you want every consumer of `model` to see the edit (and you can serialize / `export_edits` it for reuse).
-- Use the non-inplace form when you want to A/B compare original vs edited.
-- Don't use for one-off interventions — that is what `model.trace(...)` is for.
+- Use to install always-on transforms (zero a head, add a steering vector, swap in an SAE) without rewriting every trace.
+- Use `inplace=True` when every consumer of `model` should see the edit.
+- Use the non-inplace form to A/B compare original vs edited.
+- Don't use for one-off interventions — that is `model.trace(...)`.
 
-## Canonical pattern
+## Canonical pattern (non-inplace)
 
 ```python
-# Non-inplace: returns a shallow-copied edited model
-with model.edit() as edited_model:
-    edited_model.transformer.h[1].output[:, 1] = 0
+from nnsight.modeling.transformers import TransformersModel
 
-with model.trace("Hello"):
-    out_original = model.transformer.h[1].output.save()
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
-with edited_model.trace("Hello"):
-    out_edited = edited_model.transformer.h[1].output.save()
+# Store the edit on a copy; `model` stays clean.
+with model.edit() as (tracer, edited):
+    edited.transformer.h[0].output[0][:] = 0
+
+with edited.trace("Hello world"):
+    out_edited = edited.transformer.h[0].output[0].save()    # zeros
+with model.trace("Hello world"):
+    out_original = model.transformer.h[0].output[0].save()   # unchanged
+
+# len(model._edits) == 0 ; len(edited._edits) == 1
 ```
 
 ## In-place editing
 
 ```python
-with model.edit(inplace=True):
-    model.transformer.h[1].output[:] = 0
+with model.edit(inplace=True) as tracer:
+    model.transformer.h[1].output[0][:] = 0
 
-# Now every trace through model uses the edit
-with model.trace("Hello"):
-    out = model.transformer.h[1].output.save()  # zeros
+# Now every trace through model replays the edit
+with model.trace("Hello world"):
+    out = model.transformer.h[1].output[0].save()            # zeros
 ```
 
 ## Clearing edits
 
 ```python
-model.clear_edits()      # drops all stored mediators on this Envoy
+model.clear_edits()          # drops all stored edits on this envoy (sets _edits = [])
 ```
-
-`clear_edits` simply does `self._default_mediators = []` (`envoy.py:350`).
 
 ## How it works
 
-`Envoy.edit(...)` returns an `EditingTracer` (`src/nnsight/intervention/tracing/editing.py:15`). The tracer captures the with-block body just like an `InterleavingTracer`, but its backend is `EditingBackend` (`src/nnsight/intervention/backends/editing.py:11`):
+`Envoy.edit(...)` returns an `EditingTracer` (`src/nnsight/intervention/editing.py`). It captures the with-block like an `InterleavingTracer`, but its `execute` **stores** the captured block as a `Mediator` on `envoy._edits` instead of running it:
 
 ```python
-class EditingBackend(Backend):
-    def __call__(self, tracer):
-        invoker = tracer.invoke()
-        invoker.info = tracer.info.copy()
-        fn = super().__call__(invoker)
-        mediator = Mediator(fn, invoker.info)
-        tracer.model._default_mediators = (
-            tracer.model._default_mediators + [mediator]
-        )
+self.envoy._edits.append(Mediator(code, globals, dict(locals), copy=True, node=node))
 ```
 
-In `InterleavingTracer.compile` (`tracing/tracer.py:344`), every new tracer prepends `_default_mediators` to its own mediators list, so the stored interventions run **before** the user's invokes.
+On every later trace, `Envoy.interleave` prepends `self._edits` to the run's mediators, so stored interventions run **before** the user's invokes (and an edit's swap is visible to a same-trace read of that location). Non-inplace `edit()` stores on a `_shallow_copy` of the envoy — the underlying `torch.nn.Module`, interleaver, and children are shared, only `_edits` is independent, so no weights are duplicated.
 
 ## Multiple edits stack
 
 ```python
 with model.edit(inplace=True):
-    model.transformer.h[0].output[:] = 0   # first edit
-
+    model.transformer.h[0].output[0][:] = 0     # first edit
 with model.edit(inplace=True):
-    model.transformer.h[1].output[:] = 0   # second edit, both apply
+    model.transformer.h[1].output[0][:] = 0     # second edit — both apply
+
+# len(model._edits) == 2 ; they run in registration order on every trace
 ```
 
-Each `edit` appends a new `Mediator` to `_default_mediators`. They run in registration order on every subsequent trace.
+## Attaching a module in an edit
 
-## Persisting edits to disk (HuggingFaceModel only)
-
-`HuggingFaceModel` (and its subclasses including `LanguageModel`) adds `export_edits` / `import_edits` (`src/nnsight/modeling/huggingface.py:65`). They wrap the base `Envoy.export_edits` / `Envoy.import_edits` (`src/nnsight/intervention/envoy.py:356`):
+An edit can attach a module to the tree (adapter/LoRA/SAE) and route activations through it with `hook=True` (runs the module's full `__call__` so its submodules become observable):
 
 ```python
-# After making in-place edits
-model.export_edits(variant="zeroed_layers")
-
-# Later, in a fresh process
-model = LanguageModel("openai-community/gpt2")
-model.import_edits(variant="zeroed_layers")
+model.transformer.h[0].adapter = MyAdapter()
+with model.edit(inplace=True):
+    acts = model.transformer.h[0].output
+    model.transformer.h[0].output[:] = model.transformer.h[0].adapter(acts, hook=True)
 ```
 
-`export_edits` serializes `self._default_mediators` via the source-based serializer (`src/nnsight/intervention/serialization.py`) into the HF cache under `nnsight/exports/<repo>/<variant>.dill`. `import_edits` deserializes them back. Auto-import on load is supported via the `import_edits` constructor kwarg:
+A plain edit applies once (at the location's first occurrence). To re-apply it at every occurrence — each step of a generation loop — put the passthrough under the tracer's `iter`:
 
 ```python
-LanguageModel("openai-community/gpt2", import_edits=True)             # __default__
-LanguageModel("openai-community/gpt2", import_edits="zeroed_layers")  # named variant
+with model.edit(inplace=True) as tracer:
+    for _ in tracer.iter[:]:
+        acts = model.transformer.h[0].output
+        model.transformer.h[0].output[:] = model.transformer.h[0].adapter(acts, hook=True)
+```
+
+## Remote edits
+
+Edits ride with the model to a remote server — they live in `envoy._edits`, which serializes by value:
+
+```python
+with model.edit() as (tracer, edited):
+    edited.transformer.h[0].output[0][:] = 0
+with edited.trace("The Eiffel Tower is in", remote="local"):
+    out = edited.transformer.h[0].output[0].save()   # zeros
 ```
 
 ## Gotchas
 
-- Default mediators run **first** in every subsequent trace, before user invokes. Their interventions are visible to user code.
-- Non-inplace `edit()` returns a `_shallow_copy` of the envoy — the underlying `torch.nn.Module` is shared. Edits do not duplicate weights.
-- Calling `export_edits` before any `edit()` raises `ValueError: Cannot export an Envoy before calling .edit().`
-- Importing edits replaces nothing — they append to existing `_default_mediators`. Call `clear_edits` first if you want a clean slate.
-- The non-inplace return is the **edited model envoy** (not a tracer) — `with model.edit() as edited_model:` binds the model.
+- Stored edits run **first** on every later trace, before user invokes — their effects are visible to your code.
+- Non-inplace `edit()` binds `(tracer, edited)` — bind both and write against `edited`. `inplace=True` binds only `tracer`.
+- A plain edit applies at the *first* occurrence of a location; use the tracer's `iter` to apply at every occurrence.
+- Serializing edits to disk (`export_edits`/`import_edits`) from old nnsight is **not** available in this rewrite.
 
 ## Related
 

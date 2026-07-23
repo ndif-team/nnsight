@@ -1,34 +1,37 @@
-from vllm.v1.worker import gpu_worker
-from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
+"""The one place nnsight gets into a vLLM worker process.
+
+vLLM builds its model runner by looking the class up on the module at construction
+time, so rebinding that name before ``Worker.__init__`` resolves it is what puts an
+nnsight runner in the worker at all. Everything else in this package follows from
+the runner installed here; :meth:`~nnsight.modeling.vllm.vllm.VLLM._load` names this
+class as vLLM's ``worker_cls``, which is a supported engine argument, so no part of
+vLLM's own startup is patched.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
 from vllm.v1.worker import gpu_model_runner
+from vllm.v1.worker.gpu_worker import Worker
+
+from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
 
 
-class NNsightGPUWorker(gpu_worker.Worker):
-    """Custom vLLM GPU worker that uses :class:`NNsightGPUModelRunner`.
+class NNsightGPUWorker(Worker):
+    """A vLLM GPU worker whose model runner interleaves interventions."""
 
-    Monkey-patches the default ``GPUModelRunner`` class before
-    initialization so vLLM creates NNsight-aware model runners
-    that can execute intervention code during model forward passes.
-    """
-
-    def __init__(self, *args, **kwargs):
-
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Rebind before super(), which resolves the runner class off this module.
         gpu_model_runner.GPUModelRunner = NNsightGPUModelRunner
-
         super().__init__(*args, **kwargs)
 
-    def init_device(self):
-        # NNsightRayExecutor sets distributed_executor_backend to a class
-        # instead of the string "ray". vLLM's init_device skips
-        # local_world_size checks for "ray" backends, so normalize the
-        # value before calling super().
-        backend = self.parallel_config.distributed_executor_backend
-        if backend is not None and not isinstance(backend, str):
-            from vllm.v1.executor.ray_executor import RayDistributedExecutor
+    def collect_nnsight(
+        self, request_ids: list[str], finished_request_ids: Optional[list[str]] = None
+    ) -> Optional[bytes]:
+        """Return this worker's saved values, as ``collective_rpc`` reaches it here."""
+        return self.model_runner.collect_nnsight(request_ids, finished_request_ids)
 
-            if issubclass(backend, RayDistributedExecutor):
-                self.parallel_config.distributed_executor_backend = "ray"
-        super().init_device()
-
-    def collect_nnsight(self, req_ids: list[str], finished_req_ids: list[str] | None = None):
-        return self.model_runner.collect_nnsight(req_ids, finished_req_ids)
+    def nnsight_request_count(self) -> int:
+        """How many requests this worker's runner still tracks, via ``collective_rpc``."""
+        return self.model_runner.nnsight_request_count()

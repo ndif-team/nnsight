@@ -1,224 +1,249 @@
-"""
-Tests for VisionLanguageModel functionality with LLaVA-Interleave-Qwen-0.5B.
+"""Vision-language models on a real ``TransformersModel`` (a tiny Llava).
 
-These tests cover VLM-specific features:
-- Loading and basic tracing with text + images
-- Generation with vision inputs
-- Activation modification
-- Text-only fallback (no images)
-- Batching with multiple invokes
-- Scan mode
-
-Note: LLaVA's underlying Qwen2 decoder layers return the hidden state
-tensor directly (not a tuple), so `layer.output` is a 3D tensor
-`[batch, seq, hidden]` rather than a tuple `(tensor, ...)` as in GPT-2.
+A VLM uses the ``image-text-to-text`` pipeline, whose preprocessor is a
+*processor* (image processor + tokenizer) rather than a bare tokenizer. This
+exercises the processor-based loading path, tracing/generation over image+text
+input, interventions on the vision tower / projector / language model, and the
+input routing that keeps a multimodal encoding (with ``pixel_values``) from being
+re-batched as if it were plain text.
 """
+
 
 import pytest
 import torch
-import nnsight
+
+pytest.importorskip("PIL")
+
+from PIL import Image
+
+from nnsight.modeling.transformers import TransformersModel
+
+REPO = "trl-internal-testing/tiny-LlavaForConditionalGeneration"
+TASK = "image-text-to-text"
+QUESTION = "Describe"
 
 
-# =============================================================================
-# Basic Tracing with Images
-# =============================================================================
+def _image():
+    return Image.new("RGB", (64, 64), (120, 180, 60))
 
 
-class TestVLMBasic:
-    """Tests for basic VLM tracing with text and images."""
+def _prompt(model):
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "image"}, {"type": "text", "text": QUESTION}],
+        }
+    ]
+    return model.processor.apply_chat_template(messages, add_generation_prompt=True)
+
+
+def _encoding(model):
+    """A full processor encoding (input_ids, attention_mask, pixel_values, ...)."""
+    return model.processor(images=_image(), text=_prompt(model), return_tensors="pt")
+
+
+@pytest.fixture(scope="module")
+def llava():
+    return TransformersModel(REPO, task=TASK, dispatch=True)
+
+
+@pytest.fixture(scope="module")
+def llava_meta():
+    return TransformersModel(REPO, task=TASK)
+
+
+class TestBuild:
+    def test_processor_pipeline_loads(self, llava):
+        # The image-text-to-text pipeline is processor-based; loading must source a
+        # processor (not a stray tokenizer string, which the pipeline would reject).
+        assert llava.processor is not None
+        assert llava.tokenizer is not None  # derived from the processor
+        assert llava.task == TASK
+
+    def test_lazy_meta_build_tree(self, llava_meta):
+        assert llava_meta.dispatched is False
+        # The multimodal module tree is exposed as envoys.
+        for name in ("vision_tower", "multi_modal_projector", "language_model"):
+            assert hasattr(llava_meta.model, name)
+        assert next(llava_meta.model.vision_tower.parameters()).device.type == "meta"
+
+    def test_dispatch_loads_real_weights(self, llava):
+        assert llava.dispatched is True
+        assert next(llava.model.language_model.parameters()).device.type != "meta"
+
+
+class TestTrace:
+    @torch.no_grad()
+    def test_reads_multimodal_activations(self, llava):
+        enc = _encoding(llava)
+        with llava.trace(**enc):
+            projected = llava.model.multi_modal_projector.output.save()
+            hidden = llava.model.language_model.layers[0].output[0].save()
+            logits = llava.output.logits.save()
+        # The projector maps image patches into the language embedding width.
+        assert projected.shape[0] == 1
+        assert hidden.ndim == 2
+        assert logits.shape[0] == 1
 
     @torch.no_grad()
-    def test_load_and_trace(self, vlm: nnsight.VisionLanguageModel, dummy_image):
-        """Test that we can load a VLM and trace with text + image."""
-        with vlm.trace("<image>\nDescribe this image", images=[dummy_image]):
-            hidden = vlm.model.language_model.layers[-1].output.save()
-
-        assert hidden is not None
-        assert isinstance(hidden, torch.Tensor)
-        assert hidden.ndim == 3
-
-    @torch.no_grad()
-    def test_processor_exists(self, vlm: nnsight.VisionLanguageModel):
-        """Test that processor and tokenizer are loaded."""
-        assert vlm.processor is not None
-        assert vlm.tokenizer is not None
+    def test_zeroing_projector_changes_logits(self, llava):
+        enc = _encoding(llava)
+        with llava.trace(**enc):
+            base = llava.output.logits[0, -1].save()
+        with llava.trace(**enc):
+            llava.model.multi_modal_projector.output[:] = 0
+            zeroed = llava.output.logits[0, -1].save()
+        assert not torch.allclose(base, zeroed)
 
     @torch.no_grad()
-    def test_hidden_state_shapes(self, vlm: nnsight.VisionLanguageModel, dummy_image):
-        """Test that hidden states have expected dimensions."""
-        with vlm.trace("<image>\nWhat is in this image?", images=[dummy_image]):
-            first_hidden = vlm.model.language_model.layers[0].output.save()
-            last_hidden = vlm.model.language_model.layers[-1].output.save()
-
-        assert first_hidden.ndim == 3
-        assert last_hidden.ndim == 3
-        # Batch size should be 1
-        assert first_hidden.shape[0] == 1
-        assert last_hidden.shape[0] == 1
-        # Hidden dim should match
-        assert first_hidden.shape[2] == last_hidden.shape[2]
+    def test_unedited_trace_is_stable(self, llava):
+        enc = _encoding(llava)
+        with llava.trace(**enc):
+            a = llava.output.logits.save()
+        with llava.trace(**enc):
+            b = llava.output.logits.save()
+        assert torch.allclose(a, b)
 
 
-# =============================================================================
-# Generation
-# =============================================================================
-
-
-class TestVLMGeneration:
-    """Tests for VLM generation with images."""
+class TestGenerate:
+    @torch.no_grad()
+    def test_generates_text_from_image(self, llava):
+        kwargs = dict(
+            text=_prompt(llava), images=_image(), max_new_tokens=3, do_sample=False
+        )
+        with llava.pipe(**kwargs) as tracer:
+            result = tracer.result.save()
+        assert isinstance(result[0]["generated_text"], str)
 
     @torch.no_grad()
-    def test_basic_generation(self, vlm: nnsight.VisionLanguageModel, dummy_image):
-        """Test generation with text + image produces output."""
+    def test_intervention_changes_generation(self, llava):
+        kwargs = dict(
+            text=_prompt(llava), images=_image(), max_new_tokens=3, do_sample=False
+        )
+        with llava.pipe(**kwargs) as tracer:
+            base = tracer.result.save()
+        with llava.pipe(**kwargs) as tracer:
+            llava.model.multi_modal_projector.output[:] = 0
+            zeroed = tracer.result.save()
+        assert base[0]["generated_text"] != zeroed[0]["generated_text"]
+
+
+class TestScan:
+    @torch.no_grad()
+    def test_scan_reads_shapes_without_dispatch(self, llava_meta):
+        enc = _encoding(llava_meta)
+        with llava_meta.scan(**enc):
+            projected = llava_meta.model.multi_modal_projector.output.save()
+            logits = llava_meta.output.logits.save()
+        assert "Fake" in type(logits).__name__
+        assert logits.shape[0] == 1
+        assert projected.shape[0] == 1
+        assert llava_meta.dispatched is False
+
+
+class TestInputRouting:
+    """A multimodal encoding must pass straight to the model, not be re-tokenized
+    and left-pad batched as if it were plain text (which corrupts image tokens)."""
+
+    def test_multimodal_encoding_is_opaque(self, llava):
+        enc = _encoding(llava)
+        assert "pixel_values" in enc
+        # A multimodal encoding is passed to the model as-is (every field), rather
+        # than re-batched as text — which would drop pixel_values / corrupt ids.
+        assert llava._is_opaque(None, dict(enc)) is True
+
+    def test_text_only_encoding_is_pretokenized(self, llava):
+        text_only = {
+            "input_ids": torch.tensor([[1, 2, 3]]),
+            "attention_mask": torch.tensor([[1, 1, 1]]),
+        }
+        assert llava._is_pretokenized(None, text_only) is True
+
+    def test_encoding_counts_one_row(self, llava):
+        enc = _encoding(llava)
+        assert llava._batch_size(**enc) == 1
+
+    def test_keyword_image_text_counts_as_data(self, llava):
+        # A VLM generate passes data by keyword; it must read as one data row, not
+        # as params-only (which would wrongly expect invoke() blocks).
+        assert llava._batch_size(text=_prompt(llava), images=_image()) == 1
+
+    def test_params_only_still_zero_rows(self, llava):
+        assert llava._batch_size(max_new_tokens=5) == 0
+
+    def test_float_tensor_is_opaque(self, llava):
+        # A float feature tensor passes straight through; integer token ids don't.
+        assert llava._is_opaque(torch.randn(1, 3, 8, 8), {}) is True
+        assert llava._is_pretokenized(torch.tensor([[1, 2, 3]]), {}) is True
+
+
+@pytest.fixture(scope="module")
+def vlm():
+    from nnsight import VisionLanguageModel
+
+    return VisionLanguageModel(REPO, dispatch=True)
+
+
+class TestVisionLanguageModel:
+    """The deprecated ``VisionLanguageModel`` still behaves as it did before the
+    rewrite: like ``LanguageModel`` but with images, generating through the model
+    and returning token ids. It runs the processor itself (the pipeline is not in
+    the call), so a prompt plus images become the ids the model generated."""
+
+    @torch.no_grad()
+    def test_generate_returns_token_ids(self, vlm):
         with vlm.generate(
-            "<image>\nDescribe this image", images=[dummy_image], max_new_tokens=5
+            text=_prompt(vlm), images=_image(), max_new_tokens=3, do_sample=False
         ) as tracer:
-            output = vlm.generator.output.save()
-
-        decoded = vlm.tokenizer.decode(output[0], skip_special_tokens=True)
-        assert isinstance(decoded, str)
-        assert len(decoded) > 0
+            out = tracer.result.save()
+        assert isinstance(out, torch.Tensor)
+        assert out.ndim == 2 and out.shape[0] == 1
 
     @torch.no_grad()
-    def test_generation_with_invoke(
-        self, vlm: nnsight.VisionLanguageModel, dummy_image
-    ):
-        """Test generation using explicit invoke."""
-        with vlm.generate(max_new_tokens=3) as tracer:
-            with tracer.invoke("<image>\nWhat is this?", images=[dummy_image]):
-                output = vlm.generator.output.save()
-
-        decoded = vlm.tokenizer.decode(output[0], skip_special_tokens=True)
-        assert isinstance(decoded, str)
-        assert len(decoded) > 0
-
-
-# =============================================================================
-# Activation Modification
-# =============================================================================
-
-
-class TestVLMActivationModification:
-    """Tests for modifying activations in VLM traces."""
+    def test_prompt_positional_matches_text_kwarg(self, vlm):
+        prompt = _prompt(vlm)
+        with vlm.generate(prompt, images=_image(), max_new_tokens=3, do_sample=False) as t:
+            positional = t.result.save()
+        with vlm.generate(
+            text=prompt, images=_image(), max_new_tokens=3, do_sample=False
+        ) as t:
+            keyword = t.result.save()
+        assert torch.equal(positional, keyword)
 
     @torch.no_grad()
-    def test_zero_hidden_states(self, vlm: nnsight.VisionLanguageModel, dummy_image):
-        """Test zeroing out hidden states changes output."""
-        with vlm.trace("<image>\nDescribe this image", images=[dummy_image]):
-            pre = vlm.model.language_model.layers[-1].output.clone().save()
-            vlm.model.language_model.layers[-1].output[:] = 0
-            post = vlm.model.language_model.layers[-1].output.save()
-
-        assert not (pre == 0).all().item()
-        assert (post == 0).all().item()
+    def test_generation_is_greedy_by_default(self, vlm):
+        kwargs = dict(text=_prompt(vlm), images=_image(), max_new_tokens=3)
+        with vlm.generate(**kwargs) as t:
+            first = t.result.save()
+        with vlm.generate(**kwargs) as t:
+            second = t.result.save()
+        assert torch.equal(first, second)
 
     @torch.no_grad()
-    def test_save_and_access_input(self, vlm: nnsight.VisionLanguageModel, dummy_image):
-        """Test saving layer inputs."""
-        with vlm.trace("<image>\nDescribe this image", images=[dummy_image]):
-            layer_input = vlm.model.language_model.layers[0].input.save()
-            layer_output = vlm.model.language_model.layers[0].output.save()
-
-        assert layer_input is not None
-        assert isinstance(layer_input, torch.Tensor)
-        assert layer_output is not None
-        assert isinstance(layer_output, torch.Tensor)
-
-
-# =============================================================================
-# Text-Only Fallback
-# =============================================================================
-
-
-class TestVLMTextOnly:
-    """Tests for VLM with text-only input (no images)."""
+    def test_generator_output_is_the_result(self, vlm):
+        with vlm.generate(
+            text=_prompt(vlm), images=_image(), max_new_tokens=3, do_sample=False
+        ) as tracer:
+            through_generator = vlm.generator.output.save()
+            returned = tracer.result.save()
+        assert torch.equal(through_generator, returned)
 
     @torch.no_grad()
-    def test_text_only_trace(self, vlm: nnsight.VisionLanguageModel):
-        """Test tracing with text only, no images."""
-        with vlm.trace("Hello world"):
-            hidden = vlm.model.language_model.layers[-1].output.save()
-
-        assert hidden is not None
-        assert isinstance(hidden, torch.Tensor)
-        assert hidden.ndim == 3
+    def test_called_directly_returns_ids(self, vlm):
+        out = vlm.generate(
+            _prompt(vlm), images=_image(), max_new_tokens=3, do_sample=False
+        )
+        assert isinstance(out, torch.Tensor) and out.shape[0] == 1
 
     @torch.no_grad()
-    def test_text_only_generation(self, vlm: nnsight.VisionLanguageModel):
-        """Test generation with text only."""
-        with vlm.generate("The capital of France is", max_new_tokens=3) as tracer:
-            output = vlm.generator.output.save()
+    def test_intervention_changes_generation(self, vlm):
+        kwargs = dict(text=_prompt(vlm), images=_image(), max_new_tokens=3, do_sample=False)
+        with vlm.generate(**kwargs) as tracer:
+            clean = tracer.result.save()
+        with vlm.generate(**kwargs) as tracer:
+            vlm.model.multi_modal_projector.output[:] = 0
+            zeroed = tracer.result.save()
+        assert not torch.equal(clean, zeroed)
 
-        decoded = vlm.tokenizer.decode(output[0], skip_special_tokens=True)
-        assert isinstance(decoded, str)
-        assert len(decoded) > 0
-
-
-# =============================================================================
-# Batching
-# =============================================================================
-
-
-class TestVLMBatching:
-    """Tests for batching with VLM invokers."""
-
-    @torch.no_grad()
-    def test_multiple_invokes_with_images(
-        self, vlm: nnsight.VisionLanguageModel, dummy_image
-    ):
-        """Test multiple invokes each with images."""
-        from PIL import Image
-
-        img2 = Image.new("RGB", (64, 64), color=(32, 128, 64))
-
-        with vlm.trace() as tracer:
-            with tracer.invoke("<image>\nDescribe image one", images=[dummy_image]):
-                out_1 = vlm.lm_head.output[:, -1].save()
-
-            with tracer.invoke("<image>\nDescribe image two", images=[img2]):
-                out_2 = vlm.lm_head.output[:, -1].save()
-
-        assert out_1.shape[0] == 1
-        assert out_2.shape[0] == 1
-
-    @torch.no_grad()
-    def test_empty_invoke(self, vlm: nnsight.VisionLanguageModel, dummy_image):
-        """Test empty invoke (promptless) after image invoke."""
-        with vlm.trace() as tracer:
-            with tracer.invoke("<image>\nDescribe this image", images=[dummy_image]):
-                out_1 = vlm.lm_head.output[:, -1].save()
-
-            with tracer.invoke():
-                out_all = vlm.lm_head.output[:, -1].save()
-
-        assert out_1.shape[0] == 1
-        assert out_all.shape[0] == 1
-        assert torch.equal(out_1, out_all)
-
-
-# =============================================================================
-# Scan Mode
-# =============================================================================
-
-
-@pytest.mark.scan
-class TestVLMScan:
-    """Tests for scan mode with VLM."""
-
-    @torch.no_grad()
-    def test_scan_with_image(self, vlm: nnsight.VisionLanguageModel, dummy_image):
-        """Test scan mode with text + image."""
-        with vlm.scan("<image>\nDescribe this image", images=[dummy_image]):
-            out_shape = nnsight.save(vlm.model.language_model.layers[0].output.shape)
-
-        assert len(out_shape) == 3
-        assert out_shape[0] == 1
-
-    @torch.no_grad()
-    def test_scan_text_only(self, vlm: nnsight.VisionLanguageModel):
-        """Test scan mode with text only."""
-        with vlm.scan("Hello"):
-            out_shape = nnsight.save(vlm.model.language_model.layers[0].output.shape)
-
-        assert len(out_shape) == 3
-        assert out_shape[0] == 1
+    def test_task_is_image_text_to_text(self, vlm):
+        assert vlm.task == "image-text-to-text"

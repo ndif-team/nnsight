@@ -1,142 +1,138 @@
 ---
 title: Performance
-one_liner: Where NNsight overhead lives, what is cached, and how to keep traces fast.
+one_liner: Where the interleaving pipeline's overhead lives, what is cached, and how to measure it.
 tags: [internals, dev]
-related: [docs/developing/tracing-pipeline.md, docs/developing/backends.md]
-sources: [src/nnsight/intervention/tracing/base.py:204, src/nnsight/intervention/backends/base.py:18, src/nnsight/intervention/tracing/globals.py:53, 0.6.0.md]
+related: [docs/developing/tracing-pipeline.md, docs/developing/interleaver-internals.md, docs/developing/testing.md]
+sources: [tests/performance/interleave_bench.py, tests/performance/compare.py, tests/performance/README.md, src/nnsight/tracing/globals.py, src/nnsight/intervention/source.py]
 ---
 
 # Performance
 
 ## What this covers
 
-Where the per-trace cost goes, what is cached automatically, what config flags trade safety for speed, and the single biggest optimization users get wrong: consolidating multiple traces into one. Most numbers here come from the v0.6 release notes (`0.6.0.md`) and the benchmark in `tests/performance/`.
+What a `with model.trace(...):` block costs *around* the forward pass — capturing
+the block, standing up the interleaver, scoping invokes, serving interventions,
+instrumenting a forward for `.source` — and how to measure it. The pipeline cost is
+**constant in model size**: it doesn't scale with parameter count, so for real
+models where the forward takes milliseconds-to-seconds it is negligible. It only
+matters for tight loops over tiny models. The benchmark harness under
+`tests/performance/` is the source of truth; there are no fixed numbers to quote
+here because they're machine- and version-dependent — take **ratios**, not
+absolutes.
 
-## Architecture / How it works
+## The benchmark harness
 
-### Where overhead lives
+`tests/performance/interleave_bench.py` wraps a tiny stack of small linear layers
+with `nnsight.NNsight`, so a forward is a handful of negligible matmuls and what's
+left in the timings is the pipeline. It needs only `nnsight` and `torch` (no
+HuggingFace model), so the same file runs under any nnsight tree — that's the point:
+you diff two trees.
 
-A `with model.trace(...)` block has a fixed setup cost on **the first call at a given site**. From the v0.6 release notes (`0.6.0.md` lines 350–356):
+```bash
+cd tests/performance
+PYTHONPATH=/path/to/old/nnsight/src   python interleave_bench.py --tag old
+PYTHONPATH=/path/to/ndif2/nnsight/src python interleave_bench.py --tag new
+python compare.py results/old.json results/new.json    # ratio new/old; >1 = slower
+```
 
-| Scenario | v0.5.15 | v0.6.0 | Speedup |
-|----------|---------|--------|---------|
-| Empty trace (no saves) | 1196 us | 308 us | 3.9x |
-| 1 `.save()` | 1370 us | 474 us | 2.9x |
-| 12 `.save()`s | 1697 us | 716 us | 2.4x |
+Each run writes `results/<tag>.json` and prints a summary. Every measurement is a
+median over many repeats after warmup, in microseconds, with the min alongside (the
+least scheduling-polluted floor).
 
-(12-layer MLP benchmark, CPU, from `tests/performance/benchmark_interventions.py`.)
+### What each benchmark isolates
 
-After the first call, the per-trace setup drops dramatically because of caching (see below). The marginal per-`.save()` cost is roughly 30–80 us depending on what's being saved.
+| Benchmark | Isolates |
+|---|---|
+| `baseline_forward` | the raw module forward, untraced — the floor every trace sits above |
+| `capture_warm` | an empty trace once its block is captured: interleave setup + teardown |
+| `capture_cold` | the same with the capture cache cleared each time — **cold minus warm is what parsing + compiling the block costs** (paid once per site per process) |
+| `invoke_scaling[k]` | one input invoke + `k-1` empty ones; the slope is the **per-invoke** cost |
+| `intervention_scaling[n]` | a trace saving `n` layer outputs; the slope is the **per-intervention** cost |
+| `read_output_warm` vs `read_source_warm` | reading a module's output vs one op inside its forward — the gap is steady-state `.source` overhead |
+| `source_first_access` | the first `.source` on a fresh model — **compiling the instrumented forward**, a one-time cost |
 
-The overhead is **constant** in model size — it doesn't scale with parameter count. For real models where the forward pass takes seconds, NNsight overhead becomes negligible.
+The absolute numbers include the constant `baseline_forward`, so the signal is in
+the **deltas**: cold − warm is capture; the slope of a scaling sweep is the marginal
+cost; source − output is instrumentation.
 
-### What `Tracer.capture` does (per trace, first time)
+### A sample run (this repo, CPU, illustrative only)
 
-`Tracer.capture` (`src/nnsight/intervention/tracing/base.py:204`) is the bulk of trace setup:
+```
+single-shot (median of many):
+  baseline forward                 500 us
+  capture (warm)                    36 us      # empty trace over a no-op, cache warm
+  capture (cold)                    97 us      # +61 us to parse + compile the block
+  read a module output            1433 us
+  read a source op (torch_relu_0) 1448 us      # +~15 us for .source steady state
+  first source access             4899 us      # one-time: compiling the instrumented forward
 
-1. Find the user's frame. From `Tracer.__enter__` this is `get_entered_frame()` — walks past any `__enter__` chain (subclass `super().__enter__()` calls, user-defined CM wrappers). For the two direct-capture call sites (`Tensor.backward` patcher, `Envoy.__getattr__` fallback) `capture(frame=None)` falls back to `get_non_nnsight_frame()`, which walks the stack until the next frame's `__name__` is not `nnsight*`.
-2. Compute `cache_key = hash((co_filename, start_line, co_name, co_firstlineno))`.
-3. Look up `Globals.cache.get(cache_key)` — if present, reuse source, AST node, and filename. Done.
-4. On miss: extract source via `inspect.getsourcelines(frame)`, normalize indentation, parse the AST to find the `with` block, compile, and store in cache.
+intervention scaling (median us):  0->1408, 1->1430, 8->1521, 32->1854
+invoke scaling (median us):        1->1434, 8->2041, 32->4034
+```
 
-Source extraction touches `linecache`, AST parsing, and column normalization. This is what dominates the 308 us empty-trace cost on the first call.
+Numbers are machine- and load-dependent; µs-scale rows carry real run-to-run
+variance. Treat a ratio near 1.0 as "the same" and re-run before trusting a small
+difference. Do not cite these figures as authoritative — regenerate them.
 
-### What the code-object cache does (per trace, first time)
+## Where overhead lives
 
-`Backend.__call__` (`src/nnsight/intervention/backends/base.py:62`) checks `Globals.cache.code_cache` keyed by `(cache_key, type(tracer).__name__)`. On miss it runs `compile(source_code, tracer.info.filename, "exec")` and stores the resulting code object. On a hit it skips compilation entirely.
+- **Block capture (once per site per process).** `Tracer` reads the `with` block's
+  own source and compiles it. The compiled `(source, node)` is memoized keyed on the
+  block's code location in `BLOCKS` (`src/nnsight/tracing/globals.py`); a warm site
+  skips the parse/compile entirely. This is the cold − warm gap.
+- **Interleaver setup/teardown (per trace).** Building the `Interleaver`, scoping
+  each invoke, starting/parking the intervention greenlets (`Mediator`s), and tearing
+  them down. This dominates the warm empty-trace cost.
+- **Per invoke.** Each `tracer.invoke(...)` builds a worker greenlet, captures its
+  block, and registers it — the slope of `invoke_scaling`.
+- **Per intervention.** Each `.output`/`.save()` parks a worker and serves it one
+  value through `handle` — the slope of `intervention_scaling` (tens of µs each).
+- **`.source`.** First access compiles the instrumented forward (`source_first_access`,
+  a one-time cost cached in `_FORWARD_CACHE`, `source.py`); steady-state reads add a
+  small constant over reading the module's output.
 
-The tracer-type qualifier matters: the same `with` block can be wrapped differently depending on tracer subclass (`InterleavingTracer` vs `Invoker` vs `ScanningTracer`), and each gets its own compiled code.
+## The biggest win: consolidate traces
 
-PR #652 (the v0.6 caching push) reports a **13.2x speedup** on cache hits at the same trace site.
-
-### What `TracingCache` stores
-
-`TracingCache` (`src/nnsight/intervention/tracing/globals.py:53`):
-
-- `cache: dict[cache_key -> (source_lines, start_line, ast_node, filename)]` — populated by `Tracer.capture` on first hit, drained by `get`.
-- `code_cache: dict[(cache_key, tracer_type_name) -> code_object]` — populated by `Backend.__call__` on first compile, drained by `get_code`.
-
-Both are process-wide singletons. `Globals.cache.clear()` resets them. The `TRACE_CACHING` config flag from earlier versions is **deprecated** — caching is now always enabled.
-
-### Per-intervention cost
-
-Per `.output` / `.input` / `.save()` access: roughly 30–80 us. Comes from:
-
-- Mediator state machine ticks (one event per access).
-- Hook firing in the worker thread.
-- `narrow` / `swap` calls (mostly free with `needs_batching=False`).
-- `Globals.saves.add(id(obj))` for `.save()`.
-
-`.save()` via the pymount C extension adds the C-call overhead of dispatching through Python's `object` type. `nnsight.save(obj)` skips the C dispatch.
-
-### Big optimization: consolidate traces
-
-Each trace pays the per-trace setup cost (~0.3 ms) regardless of how much it does inside. **Loop inside one trace, not multiple traces in a loop.**
-
-Bad — 12 traces, ~6 ms total:
+Each trace pays the setup cost regardless of how much it does inside. **Loop inside
+one trace, not multiple traces in a loop.**
 
 ```python
+import nnsight
+
+# Bad — one trace per layer, pays setup N times
+hiddens = []
 for layer in model.transformer.h:
     with model.trace(prompt):
-        hiddens.append(layer.output.save())
-```
+        h = layer.output.save()
+    hiddens.append(h)               # append after the trace, one saved value each
 
-Good — 1 trace, ~0.7 ms:
-
-```python
+# Good — one trace, setup paid once
 with model.trace(prompt):
-    hiddens = []
-    for layer in model.transformer.h:
-        hiddens.append(layer.output.save())
+    hiddens = nnsight.save([layer.output for layer in model.transformer.h])
 ```
 
-The second version pays trace setup once and amortizes 12 saves to ~30 us each.
+## When you benchmark
 
-### Config flags that affect performance
+- **Warm up** 2-3 iterations before measuring — the first trace at a site pays the
+  full capture + compile.
+- **Define trace-using functions at module level in a real file.** Block capture
+  reads the block's source via `inspect`, so it does not work from `python -c "..."`
+  or a heredoc. (`interleave_bench.py` defines its toy modules at file scope for
+  exactly this reason.)
+- **Bind loop variables.** `def fn(p=prompt): with model.trace(p): ...` — a closure
+  over `prompt` captures the last value.
+- **GPU:** `torch.cuda.synchronize()` before and after each measurement.
 
-`CONFIG.APP.PYMOUNT` — when `True` (default), mounts `Object.save` once at first trace via `Globals.enter` (`src/nnsight/intervention/tracing/globals.py:101`). Setting `False` skips the C extension entirely; you must use `nnsight.save(obj)` instead of `obj.save()`. The performance difference is now negligible because pymount is mounted once and never unmounted (v0.6 change). Earlier versions called `PyType_Modified` on every trace enter/exit, which invalidated all CPython type caches and was expensive.
+## Key files
 
-`CONFIG.APP.CROSS_INVOKER` — when `True` (default), variables defined in one invoke are propagated to subsequent invokes via `PyFrame_LocalsToFast`. v0.6 batched this into a single call per invoke transition (instead of one per variable), so the cost is small but nonzero. Setting `False` saves a small amount of time when invokes don't need to share state.
-
-(`CONFIG.APP.CROSS_INVOKER` is set to `False` automatically inside `VLLM` because vLLM uses worker-side global grafting instead — see `src/nnsight/modeling/vllm/vllm.py:36`.)
-
-### v0.6 specific optimizations (beyond caching)
-
-From `0.6.0.md` lines 359–365:
-
-- **Persistent pymount.** `.save()` and `.stop()` mounted once at import. Earlier versions mounted/unmounted per trace, triggering `PyType_Modified` and invalidating type caches.
-- **Removed `torch._dynamo.disable` wrappers.** Hook functions previously had `@torch._dynamo.disable`, which added a `set_eval_frame` C call per forward. The hooks use closures and thread synchronization that dynamo can't compile anyway, so removal is safe.
-- **Batched `PyFrame_LocalsToFast`.** Cross-invoker variable sharing now uses one batched call instead of one-per-variable.
-- **Filtered globals copy.** When starting a worker thread, NNsight previously copied the entire `__globals__` dict. v0.6 only copies names actually referenced by the intervention's bytecode (`co_names`), reducing copy overhead.
-
-### When you're benchmarking
-
-- Always **warm up** at least 2–3 iterations before measuring. The first trace at a call site pays the full cost (capture + compile); subsequent calls hit the cache.
-- Define trace-using functions at **module level**, not inside loops or `-c` strings. NNsight extracts source via `inspect.getsourcelines`, which needs the function's source to be readable from a real file.
-- Closures in benchmark loops. `def fn(): with model.trace(prompt): ...` defined inside `for prompt in prompts:` will close over the **last** value of `prompt`. Bind it explicitly: `def fn(p=prompt): with model.trace(p): ...`.
-- For GPU timing, `torch.cuda.synchronize()` before and after each measurement.
-
-## Key files / classes
-
-- `src/nnsight/intervention/tracing/base.py:204` — `Tracer.capture` (source extraction + cache lookup)
-- `src/nnsight/intervention/backends/base.py:62` — code-object cache key + lookup
-- `src/nnsight/intervention/tracing/globals.py:53` — `TracingCache`
-- `src/nnsight/intervention/tracing/globals.py:101` — `Globals.enter` (pymount lifecycle)
-- `src/nnsight/intervention/interleaver.py` — mediator-loop overhead lives here
-- `src/nnsight/intervention/envoy.py` — `eproperty` access (per-`.output` cost)
-- `tests/performance/benchmark_interventions.py` — the canonical benchmark
-- `tests/performance/README.md` — benchmark documentation
-- `0.6.0.md` lines 345–376 — v0.6 performance numbers and rationale
-- PR #652 — 13.2x cache speedup write-up (referenced in 0.6.0.md, sections on caching)
-
-## Extension points
-
-- **Profiling a custom backend or runtime.** Wrap the relevant section in `time.perf_counter()` and call from a script that runs the same trace 10–20 times to amortize. Use `cProfile` for function-level breakdown.
-- **Adding a new cache layer.** `TracingCache.add` / `add_code` are public. If you have a new tracer subclass with its own expensive setup, follow the same pattern.
-- **Reducing intervention cost.** If an intervention does heavy work (e.g. SAE encode), consider pre-computing inside `model.edit()` so the work happens once at edit time and not per trace.
+- `tests/performance/interleave_bench.py` — the benchmark (self-contained)
+- `tests/performance/compare.py` — side-by-side ratio of two runs
+- `tests/performance/README.md` — harness documentation
+- `src/nnsight/tracing/globals.py` — `BLOCKS`, the block capture cache
+- `src/nnsight/intervention/source.py` — `_FORWARD_CACHE`, the instrumented-forward cache
 
 ## Related
 
-- [tracing-pipeline.md](./tracing-pipeline.md) — what `Tracer.capture` produces
-- [backends.md](./backends.md) — the code-object cache lives in the base backend
-- [testing.md](./testing.md) — how to run the benchmark suite
+- [tracing-pipeline.md](./tracing-pipeline.md) — what block capture produces
+- [interleaver-internals.md](./interleaver-internals.md) — mediator/greenlet overhead
+- [testing.md](./testing.md) — running the suite

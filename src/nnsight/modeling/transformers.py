@@ -1,89 +1,919 @@
+"""HuggingFace models, whatever the task, without knowing the task.
+
+Reading a model means getting an input into it. A prompt has to be tokenized, an
+image featurized, chat messages templated; a batch of them has to be padded to a
+common length; and each of those is different per task, per checkpoint, and per
+release of ``transformers``.
+
+A ``transformers.pipeline`` already knows all of it — which preprocessors a task
+loads, how to turn its inputs into model inputs, and how to collate them — so
+this module leans on the pipeline rather than re-deriving any of it:
+
+* **Loading**: ``pipeline(model=repo_id, ...)`` infers the preprocessors the task
+  needs; the task's pipeline class says which those are through its ``_load_*``
+  flags. The lazy meta build is the exception — ``pipeline()`` can't
+  ``from_config`` a model, so the meta model is built here and handed to it.
+* **Input**: each invoke goes through the task's own ``preprocess`` (with its own
+  ``_sanitize_parameters`` splitting preprocess from forward kwargs), and the
+  per-invoke encodings are padded together by the pipeline's ``pad_collate_fn``.
+* **Padding**: which side to pad is the model's business, not the task's, so it
+  follows :meth:`TransformersModel._is_causal` — decoders left-pad and get
+  mask-derived ``position_ids``; encoders keep right padding.
+
+Three ways in, and the difference matters:
+
+* ``trace`` runs **one forward**. Its input is assembled here, so it accepts what
+  the model accepts: text, token ids, a tensor, or an encoding.
+* ``generate`` generates **through the model** and returns token ids. It takes the
+  same inputs a forward does (assembled here) and generates with the checkpoint's
+  own settings, not the ``task_specific_params`` a pipeline folds in.
+* ``pipe`` runs **the whole pipeline**, which preprocesses and collates its own
+  text — so it takes what that pipeline takes — and returns what the pipeline
+  postprocesses to (decoded text, labels, ...).
+
+Some inputs can't be padded into a batch at all — a raw feature tensor, or a
+multimodal encoding — so a lone invoke carries them straight to the model, and
+asking to batch several of them is refused rather than silently mangled.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Optional
+
+import torch
+
+from ..intervention.envoy import Envoy, traceable
+from ..util import apply
 from .huggingface import HuggingFaceModel
 
-from torch.nn.modules import Module
-from transformers import AutoConfig, PreTrainedModel, PretrainedConfig
-from typing import Optional
-from typing import Type
-from transformers.models.auto import modeling_auto
-from transformers import AutoModel
+if TYPE_CHECKING:
+    from transformers import (
+        BaseImageProcessor,
+        FeatureExtractionMixin,
+        Pipeline,
+        PreTrainedTokenizerBase,
+        ProcessorMixin,
+    )
+
+
+def _import_peft():
+    """Import ``peft`` on demand (it's an optional dependency).
+
+    Only needed when a ``peft=<repo_id>`` adapter is requested, so importing it
+    lazily keeps nnsight usable without peft installed.
+    """
+    try:
+        import peft
+    except ImportError as error:
+        raise ImportError(
+            "Using `peft=<repo_id>` requires the optional `peft` package, which "
+            "is not installed. Install it with `pip install peft`."
+        ) from error
+    return peft
+
+_PREPROCESSORS = ("tokenizer", "image_processor", "feature_extractor", "processor")
+
+# Attribute -> persistent id: for a remote request these are referenced by id
+# rather than serialized, and resolved to the actor's live object server-side (see
+# _remoteable_persistent_objects / __getstate__). The pipeline is included so a
+# deserialized model's `self.pipeline` (used by generate) resolves to the server's
+# real pipeline instead of being dropped.
+_PERSISTENT = {
+    "tokenizer": "Tokenizer",
+    "processor": "Processor",
+    "image_processor": "ImageProcessor",
+    "feature_extractor": "FeatureExtractor",
+    "pipeline": "Pipeline",
+}
+
+# Architecture-shaping kwargs the meta build forwards to AutoModel.from_config.
+# The meta build reconstructs structure only, so weight/placement kwargs
+# (device_map, max_memory, ...) are dropped — they're meaningless on meta tensors,
+# and from_config forwards unknown kwargs to the model __init__, which rejects them.
+# trust_remote_code is the important one: it decides which class (and thus module
+# tree) is built, so the client's meta model matches the server's real model.
+_META_MODEL_KWARGS = ("trust_remote_code", "torch_dtype", "dtype", "attn_implementation")
+
+# Architecture-class suffix -> pipeline task, for inferring a task from a pre-loaded
+# module (the pipeline factory can only infer a task from a repo-id string).
+_ARCH_TASK = {
+    "ForCausalLM": "text-generation",
+    "ForConditionalGeneration": "text-generation",
+    "ForMaskedLM": "fill-mask",
+    "ForSequenceClassification": "text-classification",
+    "ForTokenClassification": "token-classification",
+    "ForQuestionAnswering": "question-answering",
+    "ForImageClassification": "image-classification",
+    "ForImageTextToText": "image-text-to-text",
+}
+
+
+def _infer_task(module: torch.nn.Module) -> str:
+    """Infer a pipeline task from a pre-loaded module.
+
+    A generative model (``can_generate()`` — covers ``*ForCausalLM``,
+    ``*LMHeadModel``, ...) is text-generation; otherwise match the architecture
+    class-name suffix (``*ForMaskedLM`` -> fill-mask, ...).
+    """
+    if getattr(module, "can_generate", lambda: False)():
+        return "text-generation"
+    names = getattr(module.config, "architectures", None) or [type(module).__name__]
+    for name in names:
+        for suffix, task in _ARCH_TASK.items():
+            if name.endswith(suffix):
+                return task
+    raise ValueError(
+        f"Could not infer a pipeline task for a pre-loaded {type(module).__name__}; "
+        "pass task=... explicitly (e.g. TransformersModel(model, task='text-generation'))."
+    )
+
+
+def _split_pipeline_kwargs(kwargs: dict) -> tuple[dict, dict]:
+    """Split kwargs into (top-level pipeline args, model_kwargs) for ``pipeline()``.
+
+    Names the pipeline factory declares stay top-level so a cross-cutting arg like
+    ``trust_remote_code`` reaches the model *and* the config/tokenizer load; the
+    rest are from_pretrained-only (e.g. ``max_memory``) and go through
+    ``model_kwargs``. Passed top-level, an unrecognized name is stashed in the
+    pipeline's ``_forward_params`` and forwarded to ``model.generate``, which
+    rejects it ("model_kwargs not used by the model: ['max_memory']").
+    """
+    import inspect
+
+    from transformers import pipeline
+
+    factory_params = {
+        name
+        for name, parameter in inspect.signature(pipeline).parameters.items()
+        if parameter.kind not in (parameter.VAR_KEYWORD, parameter.VAR_POSITIONAL)
+    }
+    top_level = {k: v for k, v in kwargs.items() if k in factory_params}
+    model_kwargs = {k: v for k, v in kwargs.items() if k not in factory_params}
+    return top_level, model_kwargs
+
+
+class WrapperModule(torch.nn.Module):
+    """Identity module: returns its input unchanged.
+
+    Lets nnsight expose a value that isn't produced by a real submodule — the
+    value is passed *through* this module so it becomes hookable at the module's
+    ``.output``.
+    """
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        return args[0] if len(args) == 1 else args
+
+
+class Generator(WrapperModule):
+    """Passthrough for the generation output.
+
+    Generation output is passed through this module so it is readable/editable at
+    ``model.generator.output`` inside a trace. Its :class:`Streamer` submodule
+    receives tokens as they are decoded (HuggingFace's ``streamer`` protocol), so
+    ``model.generator.streamer.output`` gives per-step token access.
+
+    Reading the finished ids through ``model.generator.output`` is deprecated —
+    ``generate`` returns them, so use ``tracer.result`` instead. The module stays
+    for the per-step ``streamer`` access, which ``tracer.result`` has no equivalent
+    for.
+    """
+
+    class Streamer(WrapperModule):
+        """Receives generated tokens during decoding via ``put`` / ``end``."""
+
+        def put(self, value: Any) -> Any:
+            return self(value)
+
+        def end(self) -> None:
+            pass
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.streamer = Generator.Streamer()
 
 
 class TransformersModel(HuggingFaceModel):
-    """NNsight wrapper for HuggingFace Transformers models.
+    """A model backed by a ``transformers.pipeline``, for any of its tasks.
 
-    Adds ``AutoConfig`` / ``AutoModel`` support on top of
-    :class:`HuggingFaceModel`. Handles config loading, meta-tensor
-    initialization via ``from_config``, and full weight loading via
-    ``from_pretrained``.
+    See the module docstring for what the pipeline is leaned on for. ``task`` picks
+    the pipeline (inferred from the checkpoint when unset). There are three ways to
+    run it: :meth:`trace` runs one forward, :meth:`generate` generates through the
+    model and returns token ids, and :meth:`pipe` runs the whole pipeline and
+    returns what it postprocesses to (decoded text, labels, ...).
 
-    Args:
-        *args: Forwarded to :class:`HuggingFaceModel`.  The first
-            positional argument is typically a repo ID string or a
-            pre-loaded ``torch.nn.Module``.
-        config_model (Optional[Type[PretrainedConfig]]): An explicit
-            HuggingFace config instance to use instead of loading one
-            from the repo. Defaults to ``None`` (auto-loaded).
-        automodel (Type[AutoModel]): The ``AutoModel`` class to use for
-            loading (e.g. ``AutoModelForCausalLM``).
-            Defaults to ``AutoModel``.
-        **kwargs: Forwarded to ``from_pretrained`` / ``from_config``.
+    The pipeline and its preprocessors are exposed as attributes, so the
+    tokenizer that will actually be used is ``model.tokenizer``. Which of them a
+    task loads varies — a text task has a ``tokenizer`` and no
+    ``image_processor``, a multimodal one has a ``processor`` — so any of them
+    may be ``None``. Passing one in adopts it instead of loading it.
 
     Attributes:
-        config (PretrainedConfig): The model's HuggingFace configuration.
-        automodel (Type[AutoModel]): The ``AutoModel`` class used for loading.
+        pipeline: The task's pipeline. Owns the model and its preprocessors.
+        tokenizer: The tokenizer, for a task that has one.
+        processor: The processor, for a multimodal task.
+        image_processor: The image processor, for a vision task.
+        feature_extractor: The feature extractor, for an audio task.
+        generator: The module generated ids are passed through. Reading them at
+            ``model.generator.output`` is deprecated (use ``tracer.result``); it
+            remains for per-step access at ``.streamer.output``.
     """
 
-    def __init__(self, *args, config_model: Type[PretrainedConfig] = None, automodel: Type[AutoModel] = AutoModel, **kwargs):
+    pipeline: Optional["Pipeline"]
+    tokenizer: Optional["PreTrainedTokenizerBase"]
+    processor: Optional["ProcessorMixin"]
+    image_processor: Optional["BaseImageProcessor"]
+    feature_extractor: Optional["FeatureExtractionMixin"]
 
-        # Use __dict__ directly so we don't mirror this onto the (possibly
-        # already-loaded) underlying module via Envoy.__setattr__ — we're
-        # caching the config on the wrapper, not mutating the model's own.
-        self.__dict__["config"] = config_model
+    def __init__(
+        self,
+        repo_id: Any,
+        *args: Any,
+        task: Optional[str] = None,
+        tokenizer: Optional[Any] = None,
+        processor: Optional[Any] = None,
+        image_processor: Optional[Any] = None,
+        feature_extractor: Optional[Any] = None,
+        peft: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        self.task = task
+        self.pipeline = None
+        self.tokenizer = tokenizer
+        self.processor = processor
+        self.image_processor = image_processor
+        self.feature_extractor = feature_extractor
+        # HuggingFace repo id of a PEFT adapter to apply on top of the base
+        # model. Applied at load time (below); server-side it can be swapped
+        # per request via _remoteable_set_env without redeploying the base.
+        self.peft = peft
 
-        self.automodel = (
-            automodel
-            if not isinstance(automodel, str)
-            else getattr(modeling_auto, automodel)
+        super().__init__(repo_id, *args, **kwargs)
+
+        # A standalone module (not part of the HF model) that generation output is
+        # passed through, so per-step tokens reach `model.generator.streamer.output`
+        # (reading the finished ids at `model.generator.output` is deprecated in
+        # favor of `tracer.result`). Added to `_children` so it shows in the tree;
+        # `_update` (dispatch) and `_remoteable_set_env` (PEFT rebind) both preserve
+        # standalone children like this one.
+        self.generator = Envoy(
+            Generator(), path=f"{self.path}.generator", interleaver=self.interleaver
+        )
+        self._children.append(self.generator)
+
+    # -- loading -------------------------------------------------------------
+
+    def _preprocessor_sources(self) -> dict:
+        # Feed pipeline a source for each preprocessor: the provided object, or
+        # the repo id for it to load (needed for the meta model, which has no
+        # path to infer from). Only the preprocessors the task's pipeline actually
+        # loads are sourced — passing a stray tokenizer source to a processor-based
+        # (multimodal) pipeline, for instance, makes it reject the string.
+        needed = self._loaded_preprocessors()
+        return {
+            attr: getattr(self, attr) or self.repo_id
+            for attr in _PREPROCESSORS
+            if getattr(self, attr) is not None or attr in needed
+        }
+
+    def _loaded_preprocessors(self) -> set:
+        # Which of tokenizer/image_processor/feature_extractor/processor the task's
+        # pipeline class loads, read from its _load_* class flags (e.g. text-
+        # generation loads a tokenizer; image-text-to-text loads a processor).
+        from transformers.pipelines import check_task
+
+        flags = {
+            "tokenizer": "_load_tokenizer",
+            "image_processor": "_load_image_processor",
+            "feature_extractor": "_load_feature_extractor",
+            "processor": "_load_processor",
+        }
+        try:
+            _, targeted, _ = check_task(self.task)
+            impl = targeted["impl"]
+        except Exception:  # noqa: BLE001 - unknown/unset task: source them all
+            return set(_PREPROCESSORS)
+        return {attr for attr, flag in flags.items() if getattr(impl, flag, False)}
+
+    def _sync(self) -> None:
+        # Adopt the pipeline's task and preprocessors. Slots the task didn't
+        # load come back as the raw repo-id string, so null those.
+        self.task = self.pipeline.task
+        for attr in _PREPROCESSORS:
+            value = getattr(self.pipeline, attr, None)
+            setattr(self, attr, None if isinstance(value, str) else value)
+        self._configure_tokenizer()
+
+    def _configure_tokenizer(self) -> None:
+        # Pad with EOS when there's no pad token. Left-pad only for causal decoders,
+        # so a batched trace/generation aligns the last real token at the right edge
+        # (``output[:, -1]`` is every row's real last token); encoder tasks keep
+        # their default (right) padding.
+        if self.tokenizer is None:
+            return
+        if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        if self._is_causal():
+            self.tokenizer.padding_side = "left"
+
+    def _is_causal(self) -> bool:
+        # A decoder-only generative model (GPT-2, Llava, ...) — as opposed to an
+        # encoder (BERT) or encoder-decoder (T5). Decides left-padding and the
+        # left-pad position_ids correction.
+        model = getattr(self.pipeline, "model", None)
+        config = getattr(model, "config", None)
+        return (
+            model is not None
+            and model.can_generate()
+            and not getattr(config, "is_encoder_decoder", False)
         )
 
-        super().__init__(*args, **kwargs)
+    def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        from transformers import AutoConfig, pipeline
+        from transformers.pipelines import check_task, get_task
 
-    def _load_config(self, repo_id: str, revision: Optional[str] = None, **kwargs):
+        # Only architecture-shaping kwargs reach the meta build (see
+        # _META_MODEL_KWARGS); AutoConfig.from_pretrained tolerates extras but
+        # from_config does not, and placement kwargs don't apply to meta tensors.
+        arch = {k: v for k, v in kwargs.items() if k in _META_MODEL_KWARGS}
 
-        if self.config is None:
+        # pipeline can't from_config, so resolve the task's model classes and
+        # build the meta model ourselves, then wrap it in a meta pipeline.
+        self.task = self.task or get_task(repo_id)
+        _, targeted, _ = check_task(self.task)
+        config = AutoConfig.from_pretrained(repo_id, revision=self.revision, **arch)
 
-            self.__dict__["config"] = AutoConfig.from_pretrained(
-                repo_id, revision=revision, **kwargs
+        error = None
+        for auto in targeted["pt"]:
+            try:
+                model = auto.from_config(config, **arch)
+                break
+            except Exception as exception:  # noqa: BLE001 - try next candidate
+                error = exception
+        else:
+            raise error
+
+        if self.peft is not None:
+            # Read only the adapter's config (adapter_config.json) and graft the
+            # adapter modules onto the meta model, so the meta architecture — and
+            # thus the module paths a remote request references — matches the
+            # adapted model the server runs. No adapter weights are loaded here.
+            peft = _import_peft()
+            model = peft.get_peft_model(model, peft.PeftConfig.from_pretrained(self.peft))
+
+        # The model is pre-built, so the meta pipeline only loads preprocessors;
+        # pass the pipeline-recognized arch kwargs (e.g. trust_remote_code) so a
+        # custom tokenizer loads correctly.
+        top_level, _ = _split_pipeline_kwargs(arch)
+        self.pipeline = pipeline(
+            self.task,
+            model=model,
+            device="meta",
+            **self._preprocessor_sources(),
+            **top_level,
+        )
+        self._sync()
+        return model
+
+    def _load(self, repo_id: Any, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        from transformers import pipeline
+
+        top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
+        if isinstance(repo_id, str):
+            # From a repo id: the pipeline loads the model and infers every
+            # preprocessor; only forward the ones the user explicitly supplied.
+            provided = {
+                attr: getattr(self, attr)
+                for attr in _PREPROCESSORS
+                if getattr(self, attr) is not None
+            }
+            self.pipeline = pipeline(
+                self.task,
+                model=repo_id,
+                revision=self.revision,
+                **provided,
+                **top_level,
+                model_kwargs=model_kwargs,
             )
+        else:
+            # From a pre-loaded module: the factory can't infer the task or the
+            # preprocessors from an instance, so infer the task and source the
+            # preprocessors from what was passed in or the model's name_or_path
+            # (captured as self.repo_id).
+            if self.task is None:
+                self.task = _infer_task(repo_id)
+            self.pipeline = pipeline(
+                self.task, model=repo_id, **self._preprocessor_sources(), **top_level
+            )
+        if self.peft is not None:
+            # The pipeline loaded the base weights; wrap them with the adapter's
+            # real weights so the dispatched model runs with the adapter applied.
+            self.pipeline.model = _import_peft().PeftModel.from_pretrained(
+                self.pipeline.model, self.peft
+            )
+        self._sync()
+        return self.pipeline.model
 
-    def _load_meta(
-        self,
-        repo_id: str,
-        revision: Optional[str] = None,
-        **kwargs,
-    ) -> Module:
+    # -- running -------------------------------------------------------------
 
-        self._load_config(repo_id, revision=revision, **kwargs)
+    def trace(self, *inputs: Any, fn: Any = None, **kwargs: Any):
+        if fn is None:
+            fn = self._call
+        return super().trace(*inputs, fn=fn, **kwargs)
 
-        model = self.automodel.from_config(
-            self.config, trust_remote_code=kwargs.get("trust_remote_code", False)
+    def scan(self, *inputs: Any, fn: Any = None, **kwargs: Any):
+        # Same forward as trace (so a string prompt is tokenized by _call),
+        # but under fake tensors — see Meta.scan.
+        if fn is None:
+            fn = self._call
+        return super().scan(*inputs, fn=fn, **kwargs)
+
+    @traceable
+    def generate(self, *inputs: Any, **kwargs: Any) -> Any:
+        """Generate through the model, returning the generated token ids.
+
+        ``with model.generate(...):`` traces the generation, so the block's
+        interventions run against every forward the decode loop makes — use
+        ``tracer.iter`` to target a particular step. Calling it directly just
+        generates. The output is the whole prompt plus completion as token ids.
+
+        Generating goes through the model, not the task's pipeline (see :meth:`pipe`
+        for that): the model takes the same inputs a forward does — text, token ids,
+        a tensor, or an encoding — and generates the way calling it would, with the
+        checkpoint's own settings rather than the ``task_specific_params`` a pipeline
+        would fold in. Read the ids off ``tracer.result``; they also pass through
+        :attr:`generator`, whose ``model.generator.streamer.output`` gives per-step
+        access (reading the finished ids at ``model.generator.output`` is deprecated
+        in favor of ``tracer.result``).
+
+        Examples:
+            >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
+            >>> with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
+            ...     ids = tracer.result.save()
+            >>> print(model.tokenizer.batch_decode(ids))
+
+        Args:
+            *inputs: What to generate from — the same forms :meth:`trace` takes.
+            **kwargs: Passed to the model's ``generate``, e.g. ``max_new_tokens``.
+                ``streamer`` defaults to this model's; pass it to override.
+
+        Returns:
+            The generated token ids, as a ``[batch, seq]`` tensor.
+        """
+        if inputs:
+            # Raw input on a direct call — no batcher assembled it, so assemble here
+            # and place it (interleave already moved whatever it was handed).
+            inputs, kwargs = self._batch_generate([(inputs, kwargs)])
+            if self.device is not None:
+                inputs, kwargs = apply(
+                    (inputs, kwargs), lambda tensor: tensor.to(self.device), torch.Tensor
+                )
+        kwargs.setdefault("streamer", self.generator.streamer._module)
+        output = self.pipeline.model.generate(*inputs, **kwargs)
+        # Pass the output through the generator module so a worker parked on
+        # `model.generator.output` receives it (and can edit it). hook=True fires the
+        # module's hooks even mid-interleave so that `.output` is observable.
+        return self.generator(output, hook=True)
+
+    @traceable
+    def pipe(self, *inputs: Any, **kwargs: Any) -> Any:
+        """Run the task's pipeline end to end, returning what it postprocesses to.
+
+        Where :meth:`generate` goes through the model and returns token ids, this
+        runs the whole pipeline — decoded-text records for text-generation, labels
+        for a classifier, and so on — the pipeline tokenizing and collating its own
+        input. Traced like the others: the block sees every forward the pipeline
+        makes.
+
+        Examples:
+            >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
+            >>> with model.pipe("The Eiffel Tower is in", max_new_tokens=3) as tracer:
+            ...     out = tracer.result.save()
+            >>> print(out[0]["generated_text"])
+
+        Args:
+            *inputs: Inputs for the task's pipeline — text, chat messages, images.
+            **kwargs: Passed to the pipeline, e.g. ``max_new_tokens``.
+
+        Returns:
+            The task pipeline's postprocessed output.
+        """
+        # Dispatch is handled by interleave when tracing.
+        return self.pipeline(*inputs, **kwargs)
+
+    # -- remote --------------------------------------------------------------
+
+    def _remoteable_persistent_objects(self) -> dict:
+        objects = super()._remoteable_persistent_objects()
+        for attr, pid in _PERSISTENT.items():
+            value = getattr(self, attr)
+            if value is not None:
+                objects[pid] = value
+        return objects
+
+    def _remoteable_get_env(self) -> dict:
+        """The per-request environment this model wants applied server-side.
+
+        Returned client-side and carried with a remote request; the server
+        applies it via :meth:`_remoteable_set_env` before running. Only the PEFT
+        adapter is transported — the base model is identified by the model key.
+        """
+        return {} if self.peft is None else {"peft": self.peft}
+
+    def _remoteable_set_env(self, env: Optional[dict]) -> None:
+        """Apply a per-request environment on the server side.
+
+        Swaps the PEFT adapter to match ``env["peft"]``, rewrapping the loaded
+        module only when the requested adapter differs from the current one so a
+        repeat request pays nothing:
+
+            current  requested  action
+            -------  ---------  ------
+            None     None       no-op
+            None     X          load X
+            X        X          no-op
+            X        Y          unload X, load Y
+            X        None       unload X
+        """
+        requested = env.get("peft") if env else None
+        if requested == self.peft:
+            return
+
+        # Rebuild the Envoy tree around the new module in place: a wrap/unwrap
+        # changes the module structure (adapter modules appear or disappear), so
+        # re-init rather than _update, reusing this envoy's interleaver and rename
+        # spec. Drop the previous tree's child-envoy attributes first — the new
+        # structure has different top-level children, and __init__ resets
+        # _children without clearing the stale attributes those children left.
+        def rebind(module: torch.nn.Module) -> None:
+            # Standalone children (whose module isn't part of the HF tree, e.g. the
+            # generator) survive the swap: Envoy.__init__ builds _children only from
+            # `module.named_children()`, so carry them across the re-init by name.
+            submodules = set(self._module.modules())
+            standalone = {
+                name: value
+                for name, value in self.__dict__.items()
+                if isinstance(value, Envoy)
+                and value is not self
+                and value._module not in submodules
+            }
+            for name, value in list(self.__dict__.items()):
+                if isinstance(value, Envoy) and value is not self:
+                    del self.__dict__[name]
+            Envoy.__init__(
+                self, module, path=self.path, interleaver=self.interleaver, rename=self._rename
+            )
+            for name, child in standalone.items():
+                self.__dict__[name] = child
+                self._children.append(child)
+            if self.pipeline is not None:
+                self.pipeline.model = module
+
+        if self.peft is not None:
+            rebind(self._module.unload())
+        if requested:
+            rebind(_import_peft().PeftModel.from_pretrained(self._module, requested))
+
+        self.peft = requested
+
+    def __getstate__(self) -> dict:
+        state = super().__getstate__()
+        # Reference the pipeline and preprocessors by persistent id instead of
+        # serializing them; the server resolves each to its live object. The
+        # pipeline stays in state (tagged) so generate's `self.pipeline` resolves.
+        for attr, pid in _PERSISTENT.items():
+            value = getattr(self, attr)
+            if value is not None:
+                value._persistent_id = pid
+        return state
+
+    # -- forward -------------------------------------------------------------
+
+    def _call(self, *inputs: Any, **kwargs: Any) -> Any:
+        preprocessor = (
+            self.processor
+            or self.tokenizer
+            or self.image_processor
+            or self.feature_extractor
+        )
+        if preprocessor is not None and inputs and isinstance(inputs[0], (str, list)):
+            # BatchEncoding/BatchFeature: .to(device) moves tensors, ** unpacks.
+            prepared = preprocessor(*inputs, return_tensors="pt").to(
+                next(self._module.parameters()).device
+            )
+            return self._module(**prepared, **kwargs)
+        return self._module(*inputs, **kwargs)
+
+    # -- batching ------------------------------------------------------------
+
+    # Encoding keys that are purely text/token; an encoding carrying anything else
+    # (pixel_values, input_features, ...) is multimodal and the model derives its
+    # own positions, so the left-pad position_ids correction is skipped for it.
+    _TEXT_KEYS = frozenset(
+        {"input_ids", "attention_mask", "token_type_ids", "position_ids", "labels"}
+    )
+
+    def _batch_size(self, *inputs: Any, **kwargs: Any) -> int:
+        """Number of batch rows an invoke's input contributes.
+
+        Accepts every input format a forward takes: a string is one row, a list of
+        strings one per prompt, a single token-id list one row, and a batch of
+        token-id lists / a 2-D tensor / a pre-tokenized encoding one per leading
+        entry. Multimodal data passed by keyword (``text=``/``images=`` to a VLM's
+        generate) counts as one row. Zero rows means params only (e.g.
+        ``max_new_tokens=``), so the trace expects ``invoke()`` blocks for the data.
+        """
+        value = inputs[0] if inputs else kwargs.get("input_ids")
+        if value is not None:
+            return self._num_rows(value)
+        # A VLM generate passes its data by keyword; treat its presence as one row.
+        if kwargs.get("text") is not None or any(
+            kwargs.get(key) is not None
+            for key in ("images", "pixel_values", "input_features")
+        ):
+            return 1
+        return 0
+
+    @staticmethod
+    def _num_rows(value: Any) -> int:
+        """The leading (row) dimension of one input value."""
+        if isinstance(value, str):
+            return 1
+        if isinstance(value, torch.Tensor):
+            return 1 if value.ndim <= 1 else value.shape[0]
+        chats = TransformersModel._as_chats(value)
+        if chats is not None:
+            return len(chats)  # a chat conversation is one row, not one per message
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return 0
+            # A flat list of token ids is a single sequence; a list of strings /
+            # sub-sequences / tensors is one row per element.
+            return 1 if isinstance(value[0], int) else len(value)
+        if hasattr(value, "get") and value.get("input_ids") is not None:
+            return TransformersModel._num_rows(value["input_ids"])
+        # A lone non-text object (e.g. a PIL image) is a single row.
+        return 1
+
+    @staticmethod
+    def _as_chats(data: Any) -> Optional[list]:
+        """Chat message(s) -> a list of ``Chat`` inputs (one per conversation).
+
+        Mirrors the chat detection :meth:`Pipeline.__call__` does before preprocess,
+        which calling :meth:`Pipeline.preprocess` directly would otherwise skip.
+        Returns ``None`` when ``data`` isn't chat messages.
+        """
+        from transformers.pipelines.base import Chat, is_valid_message
+
+        if not isinstance(data, (list, tuple)) or not data:
+            return None
+        if is_valid_message(data[0]):
+            return [Chat(list(data))]
+        if all(
+            isinstance(chat, (list, tuple)) and chat and is_valid_message(chat[0])
+            for chat in data
+        ):
+            return [Chat(list(chat)) for chat in data]
+        return None
+
+    def _batch(self, invokes: list, fn: Any) -> tuple:
+        """Combine invokes into one input for ``fn``.
+
+        ``pipe`` runs the whole pipeline, so text prompts are handed to it as a list
+        with ``batch_size`` (it preprocesses and collates them itself). ``generate``
+        and ``trace`` run the model, so their input is assembled into model inputs
+        here (see :meth:`_batch_forward`): each invoke's text/image is turned into
+        model inputs by :meth:`Pipeline.preprocess` and the per-invoke encodings are
+        padded together by the pipeline's own ``pad_collate_fn``; pre-tokenized ids
+        and raw feature tensors bypass preprocessing.
+        """
+        name = getattr(fn, "__name__", None)
+        if name == "pipe":
+            return self._batch_pipe(invokes)
+        if name == "generate":
+            return self._batch_generate(invokes)
+        return self._batch_forward(invokes)
+
+    def _batch_generate(self, invokes: list) -> tuple:
+        """Assemble invokes into model inputs for ``generate``.
+
+        Generating through the model takes the same model inputs a forward does, so
+        this is :meth:`_batch_forward` — overridden by models whose generate input
+        needs different handling (a VLM runs its processor first).
+        """
+        return self._batch_forward(invokes)
+
+    def _batch_pipe(self, invokes: list) -> tuple:
+        """Hand text prompts to the pipeline, batched with ``batch_size``.
+
+        A single non-text payload (a VLM's ``text=``/``images=`` keywords) is handed
+        to the pipeline as-is; only string prompts are combined into a batch.
+        """
+        prompts: list = []
+        forward: dict = {}
+        passthrough = None
+        for inputs, kwargs in invokes:
+            data = inputs[0] if inputs else None
+            if isinstance(data, str):
+                prompts.append(data)
+            elif isinstance(data, (list, tuple)) and data and isinstance(data[0], str):
+                prompts.extend(data)
+            else:
+                passthrough = (inputs, kwargs)
+                continue
+            forward.update(kwargs)
+
+        if passthrough is not None:
+            if len(invokes) > 1:
+                raise NotImplementedError(
+                    "Batching multimodal generate inputs isn't supported; pass a "
+                    "single text/images payload."
+                )
+            return passthrough
+
+        # A single prompt keeps the pipeline's scalar-input output shape; a real
+        # batch goes as a list with batch_size so it runs as one batch.
+        if len(prompts) == 1:
+            return (prompts[0],), forward
+        return (prompts,), {**forward, "batch_size": len(prompts)}
+
+    def _batch_forward(self, invokes: list) -> tuple:
+        """Preprocess each invoke and pad the results into one forward input.
+
+        Runs on CPU; interleave() moves inputs to the model's device after the
+        (possibly lazy) dispatch, so don't touch device here.
+        """
+        items: list = []
+        forward: dict = {}
+        for inputs, kwargs in invokes:
+            data = inputs[0] if inputs else None
+            rows, forward_kwargs = self._preprocess_invoke(data, kwargs)
+            if rows is None:
+                # A raw feature tensor / multimodal encoding can't be padded into an
+                # input_ids batch — pass a lone invoke straight to the model. An
+                # encoding (positional or via kwargs) is unpacked as keyword inputs.
+                if len(invokes) > 1:
+                    raise NotImplementedError(
+                        "Can't batch these inputs; pass text or token ids."
+                    )
+                if data is not None and hasattr(data, "keys"):
+                    return tuple(), {**dict(data), **kwargs}
+                return inputs, kwargs
+            items.extend(rows)
+            forward.update(forward_kwargs)
+
+        encoding = self._collate(items)
+        self._supply_position_ids(encoding)
+        return tuple(), {**encoding, **forward}
+
+    def _preprocess_invoke(self, data: Any, kwargs: dict) -> tuple:
+        """One invoke -> (list of per-row model-input dicts, forward kwargs).
+
+        Returns ``(None, kwargs)`` for an opaque input (a raw feature tensor or a
+        multimodal encoding) that the caller passes through to the model untouched.
+        """
+        if self._is_opaque(data, kwargs):
+            return None, kwargs
+        if self._is_pretokenized(data, kwargs):
+            return self._encode_pretokenized(data, kwargs)
+        # Text / image / audio: let the pipeline tokenize/featurize it, routing the
+        # invoke's kwargs (truncation, chat tools, ...) through its own param split.
+        preprocess_params, forward_params, _ = self.pipeline._sanitize_parameters(**kwargs)
+        # Chat message(s) are wrapped in Chat (as Pipeline.__call__ would) so the
+        # template is applied; otherwise a list of strings is one input per prompt.
+        inputs = self._as_chats(data)
+        if inputs is None:
+            inputs = list(data) if isinstance(data, (list, tuple)) else [data]
+        rows = [self.pipeline.preprocess(one, **preprocess_params) for one in inputs]
+        return rows, forward_params
+
+    def _collate(self, items: list) -> dict:
+        """Pad per-invoke encodings into one batch of model-input tensors."""
+        # Drop the pipeline's non-tensor bookkeeping (e.g. prompt_text) up front, so
+        # every item has the same keys for pad_collate_fn's consistency check.
+        items = [
+            {k: v for k, v in item.items() if isinstance(v, torch.Tensor)}
+            for item in items
+        ]
+        if len(items) == 1:
+            return dict(items[0])
+        from transformers.pipelines.base import pad_collate_fn
+
+        feature = self.feature_extractor or self.image_processor
+        return dict(pad_collate_fn(self.tokenizer, feature)(items))
+
+    @staticmethod
+    def _is_opaque(data: Any, kwargs: dict) -> bool:
+        """Whether the input must be passed to the model as-is (not batched as text).
+
+        A raw feature tensor, or an encoding (positional or via ``kwargs``) that has
+        no ``input_ids`` or carries a non-text modality field (``pixel_values``, ...).
+        """
+        if isinstance(data, torch.Tensor):
+            return data.is_floating_point()
+        if data is None:
+            return TransformersModel._has_nontext_keys(kwargs)
+        if hasattr(data, "get") and not isinstance(data, (list, tuple, str)):
+            return data.get("input_ids") is None or TransformersModel._has_nontext_keys(data)
+        return False
+
+    @staticmethod
+    def _has_nontext_keys(encoding: Any) -> bool:
+        """Whether an encoding carries a field beyond the plain text/token ones."""
+        return any(
+            key not in TransformersModel._TEXT_KEYS and value is not None
+            for key, value in dict(encoding).items()
         )
 
-        self.__dict__["config"] = model.config
+    @staticmethod
+    def _is_pretokenized(data: Any, kwargs: dict) -> bool:
+        """Whether the input is already token ids / an encoding (not raw text)."""
+        if data is None:
+            return kwargs.get("input_ids") is not None
+        if isinstance(data, str):
+            return False
+        if isinstance(data, torch.Tensor):
+            return not data.is_floating_point()
+        if isinstance(data, (list, tuple)):
+            if not data:
+                return False
+            first = data[0]
+            if isinstance(first, str):
+                return False
+            if isinstance(first, torch.Tensor):
+                return not first.is_floating_point()
+            return isinstance(first, (int, list, tuple))
+        if hasattr(data, "get"):
+            return data.get("input_ids") is not None
+        return False
 
-        return model
+    def _encode_pretokenized(self, data: Any, kwargs: dict) -> tuple:
+        """A pre-tokenized invoke -> (per-row ``{input_ids, attention_mask}`` items,
+        forward kwargs).
 
-    def _load(
-        self,
-        repo_id: str,
-        revision: Optional[str] = None,
-        **kwargs,
-    ) -> PreTrainedModel:
+        Only plain token ids reach here — a multimodal encoding is opaque and passes
+        through untouched — so every row is split to one ``[1, L]`` item for padding.
+        """
+        if data is None:
+            ids, masks = kwargs.get("input_ids"), kwargs.get("attention_mask")
+            forward = {k: v for k, v in kwargs.items() if k not in self._TEXT_KEYS}
+        elif hasattr(data, "get") and not isinstance(data, (list, tuple, torch.Tensor)):
+            ids, masks = data["input_ids"], data.get("attention_mask")
+            forward = dict(kwargs)
+        else:
+            ids, masks = data, None
+            forward = dict(kwargs)
 
-        self._load_config(repo_id, revision=revision, **kwargs)
+        id_rows = self._as_sequences(ids)
+        mask_rows = self._as_sequences(masks) if masks is not None else None
+        items = []
+        for index, sequence in enumerate(id_rows):
+            input_ids = torch.tensor(sequence).unsqueeze(0)
+            mask = (
+                torch.tensor(mask_rows[index]).unsqueeze(0)
+                if mask_rows is not None
+                else torch.ones_like(input_ids)
+            )
+            items.append({"input_ids": input_ids, "attention_mask": mask})
+        return items, forward
 
-        model = self.automodel.from_pretrained(repo_id, revision=revision, **kwargs)
+    @staticmethod
+    def _as_sequences(value: Any) -> list:
+        """Split ids/masks into a list of 1-D python-int sequences (one per row)."""
+        if isinstance(value, torch.Tensor):
+            value = value.tolist()  # 1-D -> list[int]; 2-D -> list[list[int]]
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return []
+            first = value[0]
+            if isinstance(first, (list, tuple)):
+                return [list(sequence) for sequence in value]
+            if isinstance(first, torch.Tensor):
+                return [sequence.tolist() for sequence in value]
+            # A flat list of ints is a single sequence.
+            return [list(value)]
+        return [list(value)]
 
-        self.__dict__["config"] = model.config
+    def _supply_position_ids(self, encoding: dict) -> None:
+        """Add mask-derived ``position_ids`` for a left-padded text batch (in place).
 
-        return model
+        Left padding shifts each real token's absolute index, so an absolute-position
+        model (GPT-2 family) would mispredict a short prompt padded up to a longer
+        one. Deriving ``position_ids`` from the attention mask keeps every real token
+        at its true 0-based position. Only applied to a genuinely left-padded,
+        multi-row, text-only batch: a single or unpadded row needs no correction, a
+        right-padded (encoder) batch is already correct, and a multimodal model
+        derives its own positions from the image-expanded sequence.
+        """
+        mask = encoding.get("attention_mask")
+        if (
+            not isinstance(mask, torch.Tensor)
+            or mask.dim() != 2
+            or mask.shape[0] <= 1
+            or bool(mask.all())
+            or getattr(self.tokenizer, "padding_side", None) != "left"
+            or any(key not in self._TEXT_KEYS for key in encoding)
+        ):
+            return
+        position_ids = mask.long().cumsum(-1) - 1
+        position_ids.masked_fill_(mask == 0, 0)
+        encoding["position_ids"] = position_ids

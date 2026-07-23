@@ -3,148 +3,175 @@ title: Attribution Patching
 one_liner: Linear approximation of activation patching - one clean forward, one corrupt forward+backward, then `(act_clean - act_corrupt) * grad_corrupt` per component.
 tags: [pattern, interpretability, gradients, attribution, patching]
 related: [docs/usage/backward-and-grad.md, docs/patterns/activation-patching.md, docs/patterns/gradient-based-attribution.md]
-sources: [src/nnsight/intervention/tracing/tracer.py, src/nnsight/intervention/envoy.py]
+sources: [src/nnsight/intervention/backward.py, src/nnsight/intervention/envoy.py]
 ---
 
 # Attribution Patching
 
 ## What this is for
 
-Attribution patching (Nanda, 2023) is a fast linear approximation of activation patching. Where full patching costs one forward pass *per component you want to test*, attribution patching gets you a saliency map over **every component at every position** from a single clean forward and a single corrupt forward+backward.
+Attribution patching (Nanda, 2023) is a fast linear approximation of activation
+patching. Where full patching costs one forward pass *per component you test*,
+attribution patching gets a saliency map over **every component at every position**
+from a single clean forward and a single corrupt forward+backward.
 
-The approximation is a first-order Taylor expansion. For a component activation `a` and a metric `M(a)`:
+The approximation is a first-order Taylor expansion. For a component activation `a`
+and metric `M(a)`:
 
 ```
 M(a_clean) - M(a_corrupt) ≈ (a_clean - a_corrupt) · grad_a M | a = a_corrupt
 ```
 
-So the per-component "patching effect" of swapping clean→corrupt at component `c` is approximated by the elementwise product of `(act_clean - act_corrupt)` and the gradient of the corrupt-run metric with respect to that activation, summed over the component's dimensions.
+So the per-component "patching effect" of swapping corrupt→clean at component `c` is
+the elementwise product of `(act_clean - act_corrupt)` and the gradient of the
+corrupt-run metric w.r.t. that activation, summed over the component's dimensions.
 
-In nnsight you compute this with two traces (or one session): a clean trace to grab activations, then a corrupt trace that uses `with metric.backward():` to expose `.grad` on the activations of interest. See `docs/usage/backward-and-grad.md`.
+In nnsight: a clean trace to grab activations, then a corrupt trace whose
+`with metric.backward():` exposes `.grad`. See `docs/usage/backward-and-grad.md`.
 
 Tutorial mirror: https://nnsight.net/notebooks/tutorials/attribution_patching/
 
 ## When to use
 
-- Building a per-(layer, position) attribution map without paying `O(layers * positions)` forward passes.
-- First-pass screening: use attribution patching to pick the top-K components, then verify with full activation patching on those.
-- Circuit-level attribution: you want a heatmap of all components, not a single test.
+- A per-(layer, position) attribution map without `O(layers × positions)` forwards.
+- First-pass screening: pick top-K components with attribution patching, then verify
+  the survivors with full activation patching.
+- Circuit-level attribution: a heatmap of all components, not a single test.
 
 ## Canonical pattern
 
-Logit-difference metric on a clean / corrupt prompt pair (toy example using GPT-2). The metric is `logit[answer_clean] - logit[answer_corrupt]` evaluated on the corrupt run.
+Logit-difference metric on a clean / corrupt prompt pair. The metric is
+`logit[Paris] - logit[Rome]`, evaluated on the corrupt run.
 
 ```python
 import torch
-from nnsight import LanguageModel
+from nnsight.modeling.transformers import TransformersModel
 
-model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 clean   = "The Eiffel Tower is in the city of"   # answer: " Paris"
 corrupt = "The Colosseum is in the city of"      # answer: " Rome"
-
 paris = model.tokenizer.encode(" Paris")[0]
 rome  = model.tokenizer.encode(" Rome")[0]
-
 n_layers = len(model.transformer.h)
 
-# Pass 1: clean activations at every layer's residual output.
+# Pass 1: clean activations at every layer's residual output (no grad needed).
 clean_acts = [None] * n_layers
-with model.trace(clean):
-    for L in range(n_layers):
-        clean_acts[L] = model.transformer.h[L].output.save()
+with torch.no_grad():
+    with model.trace(clean):
+        for L in range(n_layers):
+            clean_acts[L] = model.transformer.h[L].output.save()
 
-# Pass 2: corrupt forward + backward; capture corrupt activations and grads.
+# Pass 2: corrupt forward + backward; capture corrupt acts and grads.
 corrupt_acts = [None] * n_layers
 corrupt_grads = [None] * n_layers
-
 with model.trace(corrupt):
-    hidden_refs = []
+    refs = []
     for L in range(n_layers):
         hs = model.transformer.h[L].output
-        hs.requires_grad_(True)
-        hidden_refs.append(hs)
+        refs.append(hs)
         corrupt_acts[L] = hs.save()
-
     logits = model.lm_head.output[:, -1, :]
-    metric = logits[:, paris] - logits[:, rome]      # we want to maximize
-
+    metric = logits[:, paris] - logits[:, rome]
     with metric.sum().backward():
-        for L, hs in enumerate(hidden_refs):
-            corrupt_grads[L] = hs.grad.save()
+        for L in reversed(range(n_layers)):        # reverse-forward order
+            corrupt_grads[L] = refs[L].grad.save()
 
-# Compute attribution per layer (sum over batch, seq, hidden).
 attribution = torch.tensor([
     ((clean_acts[L] - corrupt_acts[L]) * corrupt_grads[L]).sum().item()
     for L in range(n_layers)
 ])
-
 for L, a in enumerate(attribution.tolist()):
     print(f"layer {L:2d}: attribution = {a:+.4f}")
 ```
 
-A high positive score at layer L means "swapping the corrupt residual for the clean one at layer L would significantly raise the (Paris - Rome) logit gap" - i.e. layer L's residual carries city-relevant information.
+```
+layer  0: attribution = -0.4535
+layer  1: attribution = -1.3249
+layer  2: attribution = +0.2888
+...
+layer 10: attribution = +2.7499
+layer 11: attribution = +3.1342
+```
+
+A high positive score at layer L means "swapping the corrupt residual for the clean
+one at layer L would raise the (Paris − Rome) logit gap" — i.e. layer L's residual
+carries city-relevant information.
 
 **Order rules:**
 
-- Inside the corrupt trace, modules are accessed in forward order (`L = 0, 1, ..., n-1`).
-- Inside the `metric.sum().backward():` context, gradients should be accessed in reverse order. The example uses `for L, hs in enumerate(hidden_refs)` for clarity; if you hit a "value was not provided" error, reverse the loop. See `docs/usage/backward-and-grad.md`.
+- In the corrupt trace, access modules in forward order (`L = 0 … n-1`).
+- Inside `with metric.sum().backward():`, request gradients in **reverse** order
+  (`reversed(range(n_layers))`); forward order there raises `OutOfOrderError`.
+- Intermediate activations (layer outputs) are already in the graph, so no
+  `requires_grad_(True)` is needed. Run the corrupt pass *without* `torch.no_grad()`.
 
 ## Variations
 
 ### Per-position attribution (heatmap)
 
-Drop the `.sum()` over the seq dimension to get a `[layer, seq]` heatmap:
+Drop the `.sum()` over the seq dimension for a `[layer, seq]` heatmap:
 
 ```python
 heatmap = torch.stack([
     ((clean_acts[L] - corrupt_acts[L]) * corrupt_grads[L]).sum(dim=-1).squeeze(0)
     for L in range(n_layers)
-], dim=0)   # [n_layers, seq]
+], dim=0)   # torch.Size([12, 10]) for this prompt
 ```
 
 ### Sub-block attribution (attention vs MLP)
 
-Track `block.attn.output[0]` and `block.mlp.output` instead of (or in addition to) the residual.
+Track `block.attn.output[0]` (attention output is a **tuple** — index `[0]` for the
+hidden tensor) and `block.mlp.output` (a plain tensor) instead of, or in addition
+to, the block residual.
 
 ### Per-head attribution
 
-Reshape attention output into `[B, S, n_heads, head_dim]` and do the elementwise product per-head, summing only over `head_dim`. See `docs/patterns/per-head-attention.md`.
+Reshape attention output into `[B, S, n_heads, head_dim]` and take the elementwise
+product per head, summing only over `head_dim`. See
+[per-head-attention](per-head-attention.md).
 
-### Tracing in one session
+### Both passes in one session
 
-To run both passes as a single remote request:
+To ship both passes as a single (remote) request, wrap them in
+`with model.session():` — a value read in one trace flows into the next without an
+explicit `.save()`:
 
 ```python
-with model.session(remote=True):
+with model.session():
     with model.trace(clean):
         for L in range(n_layers):
-            clean_acts[L] = model.transformer.h[L].output   # no .save()
+            clean_acts[L] = model.transformer.h[L].output   # no .save() inside a session
     with model.trace(corrupt):
-        # ...same as above...
+        ...   # same as above
 ```
 
-In a session, intermediate values cross trace boundaries without `.save()`. See `docs/usage/session.md`.
+See `docs/usage/session.md`.
 
 ## Interpretation tips
 
-- **Attribution can have either sign.** Positive = clean is better than corrupt at this component. Negative = the corrupt activation is actually more aligned with the metric here.
-- **Magnitude is comparable across components only when summing the same number of dimensions.** Per-layer sums of a residual are comparable across layers; comparing residual sums to per-head sums is not.
-- **First-order approximation has limits.** Attribution patching is exact when the metric is a linear function of the activation. For deep networks it is a useful screen, not ground truth - validate top components with full activation patching.
-- **Effect of a component**: many practitioners compute `attribution[L] / |full_metric_diff|` to get a fractional contribution.
-- **Normalize per-row when plotting heatmaps**, otherwise one large layer drowns out the rest.
+- **Attribution has a sign.** Positive = clean beats corrupt here; negative = the
+  corrupt activation is more aligned with the metric.
+- **Magnitudes compare only across equal-dimension sums.** Per-layer residual sums
+  are comparable across layers; residual sums vs per-head sums are not.
+- **First-order limits.** Exact only when the metric is linear in the activation;
+  for deep nets it's a screen, not ground truth — validate top components with full
+  activation patching.
+- **Fractional effect:** many practitioners report `attribution[L] / |full_diff|`.
+- **Normalize per-row** when plotting heatmaps, or one big layer drowns the rest.
 
 ## Gotchas
 
-- You must `requires_grad_(True)` on every activation you want a gradient on, *before* you compute the metric.
-- Inside `with metric.backward():`, only `.grad` is accessible - no `.input` / `.output`. Capture the activations themselves *before* entering the backward context. See `docs/usage/backward-and-grad.md`.
-- Forward order vs backward order: forward access in execution order, backward access in reverse. Skipping this can produce silent errors or hangs.
-- Different attention implementations expose different op trees - see `docs/patterns/attention-patterns.md`.
-- The metric must be differentiable end-to-end. Argmax, top-k indices etc. are not.
+- **Request `.grad` in reverse-forward order** inside the backward context.
+- **Only `.grad` inside `with metric.backward():`** — capture activations in the
+  forward body first.
+- **Attention output is a tuple** (`.output[0]` is the hidden tensor); a block's and
+  the MLP's `.output` are plain tensors. See [attention-patterns](attention-patterns.md).
+- **The metric must be differentiable** end-to-end.
 
 ## Related
 
-- [activation-patching](activation-patching.md) - The exact (and slower) operation that attribution patching approximates.
+- [activation-patching](activation-patching.md) — the exact (slower) operation this approximates.
 - [gradient-based-attribution](gradient-based-attribution.md)
 - `docs/usage/backward-and-grad.md`
 - https://nnsight.net/notebooks/tutorials/attribution_patching/

@@ -1,1142 +1,957 @@
+"""The :class:`Envoy` — nnsight's window into a running PyTorch model.
+
+An :class:`Envoy` wraps a :class:`torch.nn.Module` and mirrors its submodule
+tree, so every module in the model has a matching envoy reachable by the same
+attribute path (``model.transformer.h[0].mlp``). Envoys are the objects you
+interact with when tracing: they expose each module's live ``input``/``output``
+during a forward pass, let you overwrite those values, read gradients, skip
+whole modules, and reach individual operations inside a forward via
+:attr:`~Envoy.source`.
+
+You open a trace with ``with model.trace(x):`` and, inside the block, read or
+write envoy attributes as if the forward pass had paused at each module for you.
+Capture a value with ``.save()`` to use it after the trace:
+
+.. code-block:: python
+
+    from nnsight.intervention.envoy import Envoy
+
+    model = Envoy(my_module)
+
+    with model.trace(x):
+        hidden = model.layer1.output.save()   # captured mid-forward
+        model.layer2.output[:] = 0            # overwrite layer2's output in place
+
+    print(hidden.shape)                        # available after the block
+
+Gradients are available the same way. Call ``.backward()`` on a captured value
+as a context manager and, inside it, read ``.grad`` on tensors you captured
+earlier in the forward — you can edit gradients too:
+
+.. code-block:: python
+
+    with model.trace(x):
+        a1 = model.fc1.output
+        loss = model.output.sum()
+        with loss.backward():
+            g = a1.grad.save()     # gradient flowing into fc1's output
+            a1.grad = a1.grad * 2  # and it can be edited in place of autograd's
+
+Locations must be read in execution order: asking for an earlier module's output
+after a later one has already run raises
+:class:`~nnsight.intervention.interleaver.OutOfOrderError`.
+"""
+
 from __future__ import annotations
 
-import inspect
-import os
+import functools
 import warnings
-from functools import wraps
-from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    Union,
-)
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 import torch
-from torch.nn.modules.module import _addindent
 
-from .. import CONFIG, util
+from .. import deprecated
 from ..util import apply
 
-from .batching import Batchable
-from .source import (
-    SourceEnvoy,
-    resolve_true_forward,
-    get_or_create_source_accessor,
+from ..tracing.hint import Object
+from ..tracing.tracer import Tracer, WithBlockNotFoundError
+from .interleaver import (
+    EarlyStopException,
+    Interleaver,
+    Mediator,
 )
-from .tracing.base import Tracer, WithBlockNotFoundError
-from .tracing.editing import EditingTracer
-from .tracing.globals import Object
-from .tracing.iterator import IteratorProxy, register_counters_for_active_iters
-from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import Interleaver, Mediator, IEnvoy, eproperty
-from .hooks import (
-    hooked_input,
-    hooked_output,
-    requires_input,
-)
+from .batching import Batcher
+from .editing import EditingTracer
+from .eproperty import eproperty
+from .source import Source
+from .tracer import InterleavingTracer
+from .util import first_input, replace_first_input
 
 
-def trace_only(fn: Callable):
+def traceable(method: Callable) -> Callable:
+    """Make an Envoy method usable as a trace context.
 
-    @wraps(fn)
-    def wrapper(self: Envoy, *args, **kwargs):
+    ``with envoy.method(...):`` traces the method (runs it interleaved with the
+    block's interventions); ``envoy.method(...)`` just calls it. While already
+    interleaving, it always just calls the method (we're inside a trace).
+    """
 
-        if self.interleaver is None:
-            raise ValueError(f"Must be within a trace to use `.{fn.__name__}(...)`")
-
-        return fn(self, *args, **kwargs)
+    @functools.wraps(method)
+    def wrapper(self: Envoy, *args: Any, **kwargs: Any) -> Any:
+        fn = method.__get__(self, type(self))
+        # Already inside a trace: just run the method — we're mid-interleave.
+        if self.interleaver.interleaving:
+            return method(self, *args, **kwargs)
+        tracer = self.trace(*args, fn=fn, **kwargs)
+        try:
+            tracer.capture()
+        except WithBlockNotFoundError:
+            # Called directly (not as a `with` block): run it through interleave
+            # so dispatch, device placement, and input prep still happen — same
+            # path as trace(trace=False). Only edits apply (interleave adds them).
+            return self.interleave(fn, *args, **kwargs)
+        return tracer
 
     return wrapper
 
 
-class Envoy(Batchable):
-    """
-    A proxy class that wraps a PyTorch module to enable intervention during execution.
+def _addindent(text: str, spaces: int) -> str:
+    lines = text.split("\n")
+    if len(lines) == 1:
+        return text
+    first = lines.pop(0)
+    lines = [(spaces * " ") + line for line in lines]
+    return first + "\n" + "\n".join(lines)
 
-    This class provides access to module inputs and outputs during forward passes,
-    and allows for modification of these values through an interleaving mechanism.
-    It serves as the primary interface for inspecting and modifying the behavior
-    of neural network modules during execution.
+
+class Envoy:
+    """Wraps a :class:`torch.nn.Module` to expose and edit its values during a trace.
+
+    One envoy mirrors one module and reads or overwrites that module's live
+    ``input``/``output`` (and gradients) as the forward pass runs, driving those
+    interventions through a shared :class:`~nnsight.intervention.interleaver.Interleaver`.
+    The child envoys mirror the module's submodule tree, so the whole model is
+    reachable by attribute path from the root envoy. See the module docstring for
+    the mental model.
 
     Attributes:
-        path (str): The module's location in the model hierarchy.
-            Example: "model.encoder.layer1" indicates this module is the first layer of the encoder in the model.
-        _module (torch.nn.Module): The underlying PyTorch module
-        _source (Optional[EnvoySource]): Source code representation of the module
-        interleaver (Optional[Interleaver]): Interleaver for managing execution flow
-        _default_mediators (List[List[str]]): List of default mediators created with .edit
-        _children (List[Envoy]): List of child Envoys
-        _alias (Aliaser): Aliaser object for managing aliases
+        path: The module's dotted location in the tree, e.g. ``"model.transformer.h.0"``.
+            Every location the interleaver reads (``{path}.output``, ``{path}.skip``)
+            is derived from it.
+        interleaver: The :class:`~nnsight.intervention.interleaver.Interleaver`
+            shared across the whole tree; it installs the hooks and routes values.
+        _module: The wrapped :class:`torch.nn.Module`.
+        _edits: Default interventions registered by :meth:`edit`, replayed on every
+            trace (a list of :class:`~nnsight.intervention.interleaver.Mediator`).
+        _children: The direct child envoys, in module order.
     """
 
     def __init__(
         self,
         module: torch.nn.Module,
-        interleaver: Optional[Interleaver] = None,
-        path: Optional[str] = "model",
-        rename: Optional[Dict[str, Union[str, List[str]]]] = None,
-        envoys: Optional[
-            Union[Type["Envoy"], Dict[Type[torch.nn.Module], Type["Envoy"]]]
-        ] = None,
+        path: str = "model",
+        interleaver: Interleaver | None = None,
+        rename: dict[str, str | list[str]] | None = None,
+        envoys: dict | None = None,
     ) -> None:
-        """
-        Initialize an Envoy for a PyTorch module.
-
-        Args:
-            module (torch.nn.Module): The PyTorch module to wrap
-            interleaver (Optional[Interleaver]): Optional interleaver for managing execution flow
-            path (Optional[str]): Optional path string representing the module's location in the model hierarchy
-            rename (Optional[Dict[str, Union[str, List[str]]]]): Optional dictionary mapping module names to alias names.
-                Example: {"layer1": "first_layer", "layer2": "second_layer"}
-                Example: {".model.layers": ".layers"} <-- Mounts .layers to the root model.
-                Example: {".transformer": ["model", "mdl"]} <-- Allows access of .transformer as .model or .mdl
-            envoys (Optional[Union[Type[Envoy], Dict]]):
-                Controls which Envoy class wraps descendant modules. Propagates down the envoy tree.
-                - None (default): all descendants are wrapped with the base Envoy class.
-                - A class: all descendants are wrapped with that class.
-                - A dict whose values are ``Envoy`` subclasses. Keys may be:
-                    * A ``torch.nn.Module`` subclass — matches when the class appears in the
-                      descendant's MRO. Example: ``{torch.nn.Linear: MyLinearEnvoy}``.
-                    * A string — matches when the descendant's envoy path ends with the key
-                      treated as a dotted suffix (component-wise). With a rename dict in play,
-                      each component also matches via single-component aliases — so
-                      ``{"attn": MyAttnEnvoy}`` matches a path ending in ``self_attn`` when
-                      the user passed ``rename={"self_attn": "attn"}``.
-                  Type keys are tried first; string keys are a fallback. Descendants without
-                  a match fall back to the base Envoy class.
-                Example: {torch.nn.Linear: MyLinearEnvoy, "self_attn": MyAttnEnvoy}
-
-        """
-        self.path = path
-
         self._module = module
-        self._module.__path__ = path
-
-        self._source = None
-
+        self.path = path
         self.interleaver = interleaver if interleaver is not None else Interleaver()
-        self.interleaver.wrap_module(module)
+        # instrument installs the input/output hooks and the source/skip controller
+        # (registering this interleaver on the module) — see Interleaver.instrument.
+        self.interleaver.instrument(self)
 
-        self._default_mediators: List[Mediator] = []
+        # Default interventions registered via .edit(), replayed on every trace.
+        self._edits: list[Mediator] = []
 
+        # Module-name aliases (see `rename` / :meth:`_bind_aliases`). `_rename` is
+        # the raw spec, inherited by children; `_aliases` maps each alias bound on
+        # *this* envoy to the real path it resolved from (used by `__repr__`).
+        self._rename = rename
+        self._aliases: dict[str, str] = {}
+
+        # Optional map choosing a custom Envoy subclass per child module (by module
+        # type or path suffix); inherited by children so it applies all the way
+        # down. See :meth:`_resolve_envoy_class`.
         self._envoys = envoys
 
-        if rename is not None:
-            self._alias = Aliaser(rename)
+        self._children: list[Envoy] = []
+
+        for name, child in module.named_children():
+            self._add_envoy(name, child)
+
+        # Children exist now, so multi-component alias paths (e.g. "h.0") resolve.
+        self._bind_aliases()
+
+    def _wrap_envoy(self, name: str, module: torch.nn.Module) -> Envoy:
+        # Mirror a module already on self._module as an envoy child. __dict__.get
+        # (not getattr) so this is safe to call from __getattr__.
+        existing = self.__dict__.get(name)
+        if isinstance(existing, Envoy):
+            self._children.remove(existing)
+        child_path = f"{self.path}.{name}"
+        envoy = self._resolve_envoy_class(module, child_path)(
+            module,
+            path=child_path,
+            interleaver=self.interleaver,
+            rename=self._rename,
+            envoys=self._envoys,
+        )
+        self._children.append(envoy)
+        # A submodule whose name shadows an Envoy attribute (e.g. BERT's `output`)
+        # would otherwise be masked by that attribute — or trip its setter on the
+        # object.__setattr__ below. Give the submodule the name and relocate the
+        # nnsight attribute to `nns_<name>`.
+        if not name.startswith("_") and hasattr(Envoy, name):
+            self._mount_overloaded(name, envoy)
         else:
-            self._alias = None
-
-        for name, module in list(self._module.named_children()):
-            setattr(self, name, module)
-
-        if rename is not None:
-            self._alias.build(self)
-
-    @property
-    def _children(self) -> List[Envoy]:
-        """
-        Get the children of the Envoy.
-        """
-        return [envoy for envoy in self.__dict__.values() if isinstance(envoy, Envoy)]
-
-    def __getitem__(self, key: str) -> Envoy:
-        """
-        Access a child Envoy by index for Module Lists.
-
-        Args:
-            key: The index of the child Envoy to retrieve
-
-        Returns:
-            The child Envoy at the specified index
-        """
-        return self._children[key]
-
-    @property
-    def interleaving(self) -> bool:
-        """
-        Check if the Envoy is currently nterleaving.
-
-        Returns:
-            True if the Envoy is interleaving, False otherwise
-        """
-        return self.interleaver is not None and self.interleaver.interleaving
-
-    #### Properties ####
-
-    @hooked_output()
-    def output(self) -> Object:
-        """Get the output of the module's forward pass.
-
-        Examples:
-            >>> with model.trace("Hello World"):
-            ...     attn = model.transformer.h[0].attn.output[0].save()
-        """
-
-    @hooked_input()
-    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
-        """Get the inputs to the module's forward pass.
-
-        Returns:
-            (args, kwargs) tuple of positional and keyword arguments.
-
-        Examples:
-            >>> with model.trace("Hello World"):
-            ...     args, kwargs = model.transformer.h[0].attn.inputs
-        """
-
-    @hooked_input()
-    def input(self) -> Object:
-        """Get the first input to the module's forward pass.
-
-        Convenience wrapper around :attr:`inputs` that extracts the first
-        positional argument, or the first keyword argument if there are no
-        positional arguments.
-
-        Examples:
-            >>> with model.trace("Hello World"):
-            ...     hidden_states = model.transformer.h[0].attn.input.save()
-        """
-
-    @input.preprocess
-    def input(self, value):
-        return [*value[0], *value[1].values()][0]
-
-    @input.postprocess
-    def input(self, value):
-        inputs = self.inputs
-        return (value, *inputs[0][1:]), inputs[1]
-
-    @property
-    def source(self) -> SourceEnvoy:
-        """Get the source code representation of the module.
-
-        Lazily resolves to a :class:`SourceEnvoy` over the module's global
-        :class:`SourceAccessor`. The accessor — and its per-call-site
-        :class:`OperationAccessor` instances — are created once per module
-        and shared across all Envoys / Interleavers / Mediators that touch
-        it. This Envoy keeps a per-instance :class:`SourceEnvoy` so each
-        Envoy has its own user-facing wrapper.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> print(model.transformer.h[0].attn.source)
-            >>> with model.trace("Hello World"):
-            ...     attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
-
-        Returns:
-            A :class:`SourceEnvoy` exposing operation-level access.
-        """
-        if self._source is None:
-            # Detect first-ever build so we can wire it into any in-progress
-            # iter loop (see register_counters_for_active_iters). The accessor
-            # is cached on the module, so "newly built" is module-global, not
-            # per-Envoy.
-            newly_built = getattr(self._module, "__source_accessor__", None) is None
-            accessor = get_or_create_source_accessor(self._module)
-            if newly_built:
-                register_counters_for_active_iters(self.interleaver, accessor)
-            self._source = SourceEnvoy(accessor, interleaver=self.interleaver)
-        return self._source
-
-    def __call__(self, *args, hook: bool = False, **kwargs):
-        return (
-            self._module.forward(*args, **kwargs)
-            if self.interleaver.current is not None and not hook
-            else self._module(*args, **kwargs)
-        )
-
-    #### Public methods ####
-
-    def trace(
-        self,
-        *args,
-        trace: bool = True,
-        fn: Optional[Callable] = None,
-        tracer_cls: Type[InterleavingTracer] = InterleavingTracer,
-        **kwargs,
-    ):
-        """
-        Create a tracer for this module.
-
-        This method returns a tracer that can be used to capture and modify
-        the execution of the module.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.trace("Hello World"):
-            ...     model.transformer.h[0].attn.output[0][:] = 0
-
-            ...     output = model.output.save()
-            >>> print(output)
-
-        Args:
-            *args: Arguments to pass to the tracer
-            trace: If False, bypass tracing entirely — run the underlying
-                module on the prepared input and return its output.
-                Useful for one-shot forward passes that don't need
-                intervention. Defaults to True.
-            **kwargs: Keyword arguments to pass to the tracer
-
-        Returns:
-            An InterleavingTracer for this module, or — when ``trace=False``
-            — the module's output value directly.
-        """
-
-        if fn is None:
-            fn = self.__call__
-
-        # ``trace=False``: bypass tracing, run the module directly on the
-        # prepared input. Mirrors the WithBlockNotFoundError fallback in
-        # __getattr__ so users get the same one-shot semantics whether
-        # they call ``model.method(...)`` (no with) or ``model.trace(..., trace=False)``.
-        if not trace:
-            args, kwargs, _ = self._prepare_input(*args, **kwargs)
-            return fn(*args, **kwargs)
-
-        return tracer_cls(fn, self, *args, **kwargs)
-
-    def scan(self, *args, **kwargs):
-        """
-        Just like .trace() but runs the model in fake tensor mode to validate operations and inspect tensor shapes.
-
-        This method returns a tracer that runs the model in fake tensor mode to validate operations
-        and inspect tensor shapes without performing actual computation. This is useful for:
-        - Validating that operations will work with given input shapes
-        - Inspecting the shapes and types of tensors that would flow through the model
-        - Debugging shape mismatches or other tensor-related issues.
-
-        Note this will not dispatch the model if not dispatched.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> # Value error as the fake inputs and outputs have not been scanned in.
-            >>> print(model.transformer.h[0].mlp.output.shape)
-            >>> # Scan the model to validate operations and inspect shapes
-            >>> with model.scan("Hello World"):
-            ...     # Access fake inputs/outputs to inspect shapes
-            ...     attn_input = model.transformer.h[0].attn.input.save()
-            ...     attn_output = model.transformer.h[0].attn.output[0].save()
-            >>> print(f"Attention input shape: {attn_input.shape}")
-            >>> print(f"Attention output shape: {attn_output.shape}")
-            >>> print(model.transformer.h[0].mlp.output.shape)
-
-        Args:
-            *args: Arguments to pass to the tracer
-            **kwargs: Keyword arguments to pass to the tracer
-
-        Returns:
-            A ScanningTracer for this module
-        """
-        return ScanningTracer(self.__call__, self, *args, hook=True, **kwargs)
-
-    def edit(self, *, inplace: bool = False):
-        """
-        Create an editing tracer for this module. Allows for setting default interventions.
-        This means this tracer won't execute the module, but will instead set default interventions that are applied on all future executions.
-
-        Edits can be cleared with `Envoy.clear_edits()`.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> # Now the first layer attention output will always be 0.
-            >>> with model.edit() as edited_model:
-            ...     edited_model.transformer.h[0].attn.output[:] = 0
-
-
-            >>> with model.trace("Hello World"):
-            ...     output = model.output.save()
-            >>> # The orignal model will have the default output.
-            >>> print(output)
-
-            >>> with edited_model.trace("Hello World"):
-            ...     edited_output = edited_model.output.save()
-            >>> # The edited model will have the output after our intervention.
-            >>> print(edited_output)
-
-
-        Args:
-            inplace (bool, optional): Whether to edit in place. Defaults to False.
-
-        Returns:
-            (EditingTracer): An EditingTracer for this module
-        """
-
-        return EditingTracer(self.__call__, self, inplace=inplace)
-
-    def clear_edits(self):
-        """
-        Clear all edits for this Envoy.
-        """
-        self._default_mediators = []
-
-    def export_edits(
-        self, name: str, export_dir: Optional[str] = None, variant: str = "__default__"
-    ):
-        """TODO
-
-        Args:
-            name (str): _description_
-            export_dir (Optional[str], optional): _description_. Defaults to None.
-            variant (str, optional): _description_. Defaults to '__default__'.
-
-        Raises:
-            ValueError: _description_
-        """
-
-        if len(self._default_mediators) == 0:
-            raise ValueError("Cannot export an Envoy before calling .edit().")
-
-        if export_dir is None:
-
-            export_dir = os.path.join(CONFIG.APP.CACHE_DIR, "exports")
-
-        export_dir = os.path.expanduser(os.path.join(export_dir, name))
-
-        os.makedirs(export_dir, exist_ok=True)
-
-        from . import serialization
-
-        serialization.save(
-            self._default_mediators, os.path.join(export_dir, f"{variant}.dill")
-        )
-
-    def import_edits(
-        self, name: str, export_dir: Optional[str] = None, variant: str = "__default__"
-    ):
-        """TODO
-
-        Args:
-            name (str): _description_
-            export_dir (Optional[str], optional): _description_. Defaults to None.
-            variant (str, optional): _description_. Defaults to '__default__'.
-        """
-
-        if export_dir is None:
-
-            export_dir = os.path.join(CONFIG.APP.CACHE_DIR, "exports")
-
-        export_dir = os.path.expanduser(os.path.join(export_dir, name))
-
-        from . import serialization
-
-        imported_mediators = serialization.load(
-            os.path.join(export_dir, f"{variant}.dill"), self
-        )
-
-        self._default_mediators.extend(imported_mediators)
-
-    # TODO legacy
-    def session(self, *args, tracer_cls: Type[Tracer] = Tracer, **kwargs):
-        tracer = tracer_cls(*args, **kwargs)
-        setattr(tracer, "model", self)
-        return tracer
-
-    @property
-    @trace_only
-    def iter(self):
+            object.__setattr__(self, name, envoy)
+        return envoy
+
+    def _mount_overloaded(self, name: str, envoy: Envoy) -> None:
+        # Keep `name` for the submodule and move nnsight's attribute to `nns_name`.
+        # The override lives on a per-instance subclass so only this envoy is
+        # affected; all its siblings and the shared Envoy class are untouched.
         warnings.warn(
-            "model.iter is deprecated and will be removed in a future version. "
-            "Use tracer.iter instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return IteratorProxy(self.interleaver)
-
-    @trace_only
-    def all(self):
-        warnings.warn(
-            "model.all() is deprecated and will be removed in a future version. "
-            "Use tracer.all() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.iter[:]
-
-    @trace_only
-    def next(self, step: int = 1):
-        warnings.warn(
-            "model.next() is deprecated and will be removed in a future version. "
-            "Use tracer.next() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self.interleaver.current.iteration += step
-        return self
-
-    @trace_only
-    @requires_input
-    def skip(self, replacement: Any):
-        """Skips the execution of this module duting execution / interleaving.
-        Behavior is the module will not be executed and will return a replacement value instead.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.trace("Hello World"):
-            ...     # Skip the first layer and replace it with the input to the layer.
-            ...     model.transformer.h[0].skip((model.transformer.h[0].input, None))
-            ...     output = model.output.save()
-            >>> print(output)
-
-        Args:
-            replacement (Any): The replacement value to replace the module's output with.
-        """
-
-        return self.interleaver.current.skip(
-            self.interleaver.iterate_requester(f"{self.path}.input"), replacement
+            f"Module '{self.path}' has a submodule named '{name}', which shadows "
+            f"Envoy's '{name}'. The submodule keeps '.{name}'; nnsight's '{name}' "
+            f"is available as '.nns_{name}' on this module."
         )
 
-    def to(self, device: torch.device):
+        cls = type(self)
+        if not cls.__name__.endswith("__Overloaded"):
+            cls = type(f"{cls.__name__}__Overloaded", (cls,), {})
+            object.__setattr__(self, "__class__", cls)
+
+        original = getattr(Envoy, name)
+        setattr(cls, f"nns_{name}", original)
+
+        # A property is a data descriptor (it wins over the instance dict), so a
+        # plain stored child would still be masked — override `name` on the
+        # subclass to hand back the stored child, keeping the original setter so
+        # `envoy.name = value` still writes the intervention (for output/input).
+        if isinstance(original, property):
+            setattr(
+                cls,
+                name,
+                property(lambda self, _n=name: self.__dict__[_n], original.fset, original.fdel),
+            )
+        # A method is not a data descriptor, so the stored child already wins;
+        # nothing more to override.
+        self.__dict__[name] = envoy
+
+    def _bind_aliases(self) -> None:
+        """Bind each ``rename`` alias as an attribute pointing at the same Envoy.
+
+        For every ``path -> alias(es)`` entry, resolve ``path`` *relative to this
+        envoy*; if it names a descendant envoy, bind each alias as an attribute on
+        this envoy pointing at that same descendant object. Because every envoy in
+        the tree runs this, a single-component path like ``"mlp"`` binds wherever
+        it resolves (each block that has one), while a multi-component path like
+        ``"transformer.h.3.mlp"`` binds only on the envoy it resolves from. A
+        leading dot is a no-op — path components are matched by name (an empty
+        first component is skipped, mirroring :func:`nnsight.util.fetch_attr`).
+
+        Aliases are ordinary attributes referencing the *same* child object (not
+        copies, and not added to :attr:`_children`), so ``__getattr__`` needs no
+        alias branch, iteration doesn't double-count, and re-pointing the tree on
+        dispatch (:meth:`_update`, in place) keeps them valid with no rebuild.
         """
-        Move the module to a specific device.
+        if not self._rename:
+            return
+        for path, aliases in self._rename.items():
+            path = path.lstrip(".")
+            try:
+                target = self.get(path)
+            except AttributeError:
+                continue
+            if not isinstance(target, Envoy):
+                continue
+            for alias in [aliases] if isinstance(aliases, str) else aliases:
+                object.__setattr__(self, alias, target)
+                self._aliases[alias] = path
 
-        This method moves the underlying PyTorch module to the specified device.
+    def _add_envoy(self, name: str, module: torch.nn.Module) -> Envoy:
+        # Register a (possibly new) module on self._module, then mirror it.
+        self._module.add_module(name, module)
+        return self._wrap_envoy(name, module)
 
-        Args:
-            device: The device to move the module to
+    def _resolve_envoy_class(self, module: torch.nn.Module, path: str) -> type["Envoy"]:
+        """The :class:`Envoy` class to wrap ``module`` (at ``path``) with.
 
-        Returns:
-            Self, for method chaining
-        """
-        self._module.to(device)
-
-        return self
-
-    def cpu(self, *args, **kwargs):
-        """
-        Move the module to the CPU.
-        """
-        self._module.cpu(*args, **kwargs)
-        return self
-
-    def cuda(self, *args, **kwargs):
-        """
-        Move the module to the GPU.
-        """
-        self._module.cuda(*args, **kwargs)
-        return self
-
-    @property
-    def device(self) -> Optional[torch.device]:
-        """
-        Get the device the module is on. Finds the first parameter and return its device.
-        """
-        try:
-            return next(self._module.parameters()).device
-        except:
-            return None
-
-    @property
-    def devices(self) -> Optional[set[torch.device]]:
-        """
-        Get the devices the module is on. Finds all parameters and return their devices.
-        """
-        try:
-            return {p.device for p in self._module.parameters()}
-        except:
-            return set()
-
-    def modules(
-        self,
-        include_fn: Callable[[Envoy], bool] = None,
-        names: bool = False,
-    ) -> List[Envoy]:
-        """
-        Get all modules in the Envoy tree.
-
-        This method returns all Envoys in the tree, optionally filtered by
-        an inclusion function.
-
-        Args:
-            include_fn: Optional function to filter modules
-            names: Whether to include module names in the result
-
-        Returns:
-            A list of Envoys or (name, Envoy) tuples
-        """
-        result = []
-
-        for envoy in self._children:
-
-            result.extend(envoy.modules(include_fn=include_fn, names=names))
-
-        if include_fn is None or include_fn(self):
-
-            if names:
-                result.append((self.path, self))
-            else:
-                result.append(self)
-
-        return result
-
-    def named_modules(self, *args, **kwargs) -> List[Tuple[str, Envoy]]:
-        """
-        Returns all Envoys in the Envoy tree along with their name/module_path.
-
-        This is a convenience method that calls modules() with names=True.
-
-        Args:
-            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
-            *args, **kwargs: Additional arguments to pass to modules()
-
-        Returns:
-            List[Tuple[str, Envoy]]: Included Envoys and their names/module_paths.
-        """
-
-        return self.modules(*args, **kwargs, names=True)
-
-    def get(self, path: str) -> Object:
-        """Gets the Envoy/Proxy via its path.
-
-        e.x:
-            model = nnsight.LanguageModel("openai-community/gpt2")
-
-            module = model.get('transformer.h.0.mlp')
-
-            with model.trace("Hello"):
-                value = model.get('transformer.h.0.mlp.output').save()
-
-        Args:
-            path (str): '.' separated path.
-
-        Returns:
-            Union[Envoy, InterventionProxyType]: Fetched Envoy/Proxy
-        """
-        return util.fetch_attr(self, path)
-
-    def interleave(self, fn: Union[Callable, str], *args, **kwargs):
-
-        device = self.device
-
-        (args, kwargs) = apply(
-            (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
-        )
-
-        if isinstance(fn, str):
-            fn = getattr(self, fn)
-
-        try:
-            with self.interleaver:
-                result = fn(*args, **kwargs)
-
-                self.interleaver.handle("result", result)
-
-            self.interleaver.check_cache_full()
-            self.interleaver.check_dangling_mediators()
-
-        finally:
-            self.interleaver.cancel()
-
-    #### Private methods ####
-
-    def _resolve_envoy_class(
-        self, module: torch.nn.Module, path: Optional[str] = None
-    ) -> Type[Envoy]:
-        """Resolve which Envoy class to use for wrapping a child module.
-
-        Consults ``self._envoys``:
-        - If None, returns the base Envoy class.
-        - If a class, returns that class.
-        - If a dict, keys can be:
-            - A ``torch.nn.Module`` subclass. Matches when the class appears in
-              ``module``'s MRO. Type-keyed matches are tried first.
-            - A string. Matches when ``path`` ends with the key treated as a
-              dotted suffix (component-wise, not substring). With a rename dict
-              in play, each component matches either literally or via an alias
-              from a single-component rename entry — so a key like ``"attn"``
-              will match a path ending in ``self_attn`` when the user passed
-              ``rename={"self_attn": "attn"}``.
-          Type keys are checked before string keys. Falls back to the base
-          Envoy class if no entry matches.
+        Consults the :attr:`_envoys` map (``None`` -> the base :class:`Envoy`): a
+        single class wraps every child with it; a dict's keys are either a
+        ``torch.nn.Module`` subclass (matched against the module's MRO, tried
+        first) or a string dotted path-suffix (``"attn"``, ``"transformer.h"``).
+        Falls back to the base :class:`Envoy` when nothing matches — so a model can
+        give, e.g., its attention modules a subclass exposing a ``.heads`` eproperty.
         """
         mapping = self._envoys
-
         if mapping is None:
             return Envoy
-
         if isinstance(mapping, type):
             return mapping
-
         for cls in type(module).__mro__:
             if cls in mapping:
                 return mapping[cls]
-
-        if path is not None:
-            for key, envoy_cls in mapping.items():
-                if isinstance(key, str) and self._path_matches_key(path, key):
-                    return envoy_cls
-
+        for key, envoy_cls in mapping.items():
+            if isinstance(key, str) and self._path_ends_with(path, key):
+                return envoy_cls
         return Envoy
 
-    def _path_matches_key(self, path: str, key: str) -> bool:
-        """Does ``path`` end with dotted ``key``, with alias-aware components?
-
-        Both path and key are split on ``.``. The key is matched as a suffix of
-        the path, component by component. A key component matches a path
-        component if they are equal, or if the path component has the key
-        component as a rename alias (see :meth:`_component_matches`).
-        """
-        key = key.removeprefix(".")
-        if not key:
-            return False
-        path_parts = path.split(".")
-        key_parts = key.split(".")
-        if len(key_parts) > len(path_parts):
-            return False
-        tail = path_parts[-len(key_parts) :]
-        return all(self._component_matches(pc, kc) for pc, kc in zip(tail, key_parts))
-
-    def _component_matches(self, path_component: str, key_component: str) -> bool:
-        """Whether ``key_component`` is a valid name for ``path_component``.
-
-        True if they are equal, or if the rename dict contains a
-        single-component entry ``{path_component: [..., key_component, ...]}``
-        (the user aliased ``path_component`` to ``key_component``).
-
-        Multi-component rename entries (e.g. ``{"transformer.h": "layers"}``)
-        are not consulted here; component matching is single-component only.
-        """
-        if path_component == key_component:
-            return True
-        if self._alias is None:
-            return False
-        for rename_key, aliases in self._alias.rename.items():
-            stripped = rename_key.removeprefix(".")
-            if "." in stripped:
-                continue
-            if stripped != path_component:
-                continue
-            if isinstance(aliases, str):
-                aliases = [aliases]
-            if key_component in aliases:
-                return True
-        return False
-
-    def _add_envoy(self, module: torch.nn.Module, name: str) -> Envoy:
-        """
-        Adds a new Envoy for a given torch module under this Envoy.
-
-        This method creates a new Envoy for a child module and adds it to
-        this Envoy's children.
-
-        Args:
-            module: Module to create Envoy for.
-            name: Name of envoy/attribute.
-        """
-        module_path = f"{self.path}.{name}"
-
-        envoy_cls = self._resolve_envoy_class(module, module_path)
-
-        envoy = envoy_cls(
-            module,
-            path=module_path,
-            rename=self._alias.rename if self._alias is not None else None,
-            interleaver=self.interleaver,
-            envoys=self._envoys,
-        )
-
-        setattr(self._module, name, module)
-
-        # If the module already has a sub-module named 'input' or 'output',
-        # mount the proxy access to 'nns_input' or 'nns_output instead.
-
-        if hasattr(Envoy, name):
-            self._handle_overloaded_mount(envoy, name)
-        else:
-            super().__setattr__(name, envoy)
-
-        return envoy
-
-    def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str) -> None:
-        """If a given module already has an attribute of the same name as something nnsight wants to add, we need to rename it.
-
-        Directly edits the underlying class to accomplish this.
-
-        Args:
-            envoy (Envoy): Envoy to handle.
-            mount_point (str): Overloaded attribute name.
-        """
-
-        warnings.warn(
-            f"Module `{self.path}` of type `{type(self._module)}` has pre-defined a `{mount_point}` attribute. nnsight access for `{mount_point}` will be mounted at `.nns_{mount_point}` instead of `.{mount_point}` for this module only."
-        )
-
-        # If we already shifted a mount point dont create another new class.
-        if "Preserved" in self.__class__.__name__:
-
-            new_cls = self.__class__
-
-        else:
-
-            new_cls = type(
-                f"{self.__class__.__name__}.Preserved",
-                (self.__class__,),
-                {},
-            )
-
-            object.__setattr__(self, "__class__", new_cls)
-
-        # Get the normal proxy mount point
-        mount = getattr(Envoy, mount_point)
-
-        setattr(new_cls, f"nns_{mount_point}", mount)
-
-        if isinstance(mount, eproperty):
-
-            # Replace the eproperty with a property that returns the child
-            # envoy from the instance dict, but delegates setter to the
-            # original eproperty's __set__.
-            original_ep = mount
-
-            def _ep_getter(slf, _mp=mount_point):
-                return slf.__dict__[_mp]
-
-            def _ep_setter(slf, value, _ep=original_ep):
-                _ep.__set__(slf, value)
-
-            setattr(new_cls, mount_point, property(_ep_getter, _ep_setter))
-
-        elif isinstance(mount, property):
-
-            mount = property(
-                lambda slf: slf.__dict__[mount_point],
-                mount.fset,
-                mount.fdel,
-                mount.__doc__,
-            )
-
-            setattr(new_cls, mount_point, mount)
-
-        # Move it to nns_<mount point>
-        self.__dict__[mount_point] = envoy
-
-    def _update(self, module: torch.nn.Module) -> None:
-        """Updates the ._model attribute using a new model of the same architecture.
-        Used when loading the real weights (dispatching) and need to replace the underlying modules.
-        """
-
-        for name, existing_child in self._module.named_children():
-
-            if hasattr(module, name):
-
-                child = getattr(module, name)
-
-                self.__dict__[name]._update(child)
-
-            else:
-                setattr(module, name, existing_child)
-
-        # Capture the existing SourceAccessor (if any) before the old module
-        # is dropped — its OperationAccessors carry hook state and any
-        # nested SourceAccessors for recursive source tracing.
-        old_accessor = getattr(self._module, "__source_accessor__", None)
-
-        self._module = module
-        self._module.__path__ = self.path
-        self.interleaver.wrap_module(module)
-
-        # Transfer the SourceAccessor onto the new module, rebinding its
-        # injected forward against the new module's true fn.
-        # OperationAccessors are kept intact so any pre-existing
-        # OperationEnvoy / SourceEnvoy references remain valid after dispatch.
-        if old_accessor is not None:
-            old_accessor.rebind(resolve_true_forward(module))
-            module.__source_accessor__ = old_accessor
-
-    def _update_alias(self, alias: Dict[str, str]):
-        """
-        Update the alias for this Envoy and its children.
-        """
-        if alias is not None:
-            self._alias = Aliaser(alias)
-            self._alias.build(self)
-
-            for envoy in self._children:
-                envoy._update_alias(alias)
-
-    def _shallow_copy(self) -> Envoy:
-        """Creates a new instance copy of the same class with the all the attributes of the original instance.
-
-        Returns:
-            Self: NNsightModel
-        """
-        copy = self.__class__.__new__(self.__class__)
-        for key, value in self.__dict__.items():
-            copy.__dict__[key] = value
-
-        return copy
-
-    #### Dunder methods ####
-
-    def __len__(self):
-        """
-        Get the length of the Envoy.
-        """
-        return len(self._module)
-
-    def __iter__(self):
-        """
-        Iterate over the Envoy.
-        """
-        return iter(self._children)
-
-    def __str__(self):
-        """
-        String representation of the Envoy.
-
-        Returns:
-            A string representation of the Envoy showing its path
-        """
-        return self.__repr__()
-
-    def __reprlist__(self):
-
-        list_of_reprs = [repr(item) for item in self]
-        if len(list_of_reprs) == 0:
-            return self._module._get_name() + "()"
-
-        start_end_indices = [[0, 0]]
-        repeated_blocks = [list_of_reprs[0]]
-        for i, r in enumerate(list_of_reprs[1:], 1):
-            if r == repeated_blocks[-1]:
-                start_end_indices[-1][1] += 1
-                continue
-
-            start_end_indices.append([i, i])
-            repeated_blocks.append(r)
-
-        lines = []
-        main_str = self._module._get_name() + "("
-        for (start_id, end_id), b in zip(start_end_indices, repeated_blocks):
-            local_repr = f"({start_id}): {b}"  # default repr
-
-            if start_id != end_id:
-                n = end_id - start_id + 1
-                local_repr = f"({start_id}-{end_id}): {n} x {b}"
-
-            local_repr = _addindent(local_repr, 2)
-            lines.append(local_repr)
-
-        main_str += "\n  " + "\n  ".join(lines) + "\n"
-        main_str += ")"
-        return main_str
-
-    def __repr__(self):
-        """
-        Representation of the Envoy.
-
-        Returns:
-            The string representation of the Envoy
-        """
-
-        if isinstance(self._module, torch.nn.ModuleList):
-            return self.__reprlist__()
-
-        # We treat the extra repr like the sub-module, one item per line
-        extra_lines = []
-        extra_repr = self._module.extra_repr()
-        # empty string will be split into list ['']
-        if extra_repr:
-            extra_lines = extra_repr.split("\n")
-        child_lines = []
-        for envoy in self._children:
-            key = envoy.path.split(".")[-1]
-            mod_str = repr(envoy)
-            mod_str = _addindent(mod_str, 2)
-            if self._alias is not None and key in self._alias.name_to_aliases:
-                key = "/".join([*self._alias.name_to_aliases[key], key])
-            child_lines.append("(" + key + "): " + mod_str)
-
-        if self._alias is not None:
-            for extra in self._alias.extras:
-
-                key = "/".join(self._alias.name_to_aliases[extra])
-                envoy = self.get(extra)
-                mod_str = repr(envoy)
-                mod_str = _addindent(mod_str, 2)
-                child_lines.append("(" + key + "): " + mod_str)
-
-        eproperty_lines = []
-        for cls in type(self).__mro__:
-            for attr_name, attr_val in cls.__dict__.items():
-                if isinstance(attr_val, eproperty) and attr_val.description is not None:
-                    eproperty_lines.append(
-                        "(" + attr_val.name + "): " + attr_val.description
-                    )
-
-        lines = extra_lines + child_lines + eproperty_lines
-
-        main_str = self._module._get_name() + "("
-        if lines:
-            # simple one-liner info, which most builtin Modules will use
-            if len(extra_lines) == 1 and not child_lines:
-                main_str += extra_lines[0]
-            else:
-                main_str += "\n  " + "\n  ".join(lines) + "\n"
-
-        main_str += ")"
-        return main_str
-
-    def __getattr__(self, name: str) -> Union[torch.nn.Module, Envoy, Any]:
-        """
-        Get an attribute from the underlying module.
-
-        If the attribute is callable, it will be wrapped in a tracer to enable
-        intervention during execution.
-
-        Args:
-            name: The name of the attribute to get
-
-        Returns:
-            The attribute value, possibly wrapped in a tracer
-
-        Raises:
-            AttributeError: If the attribute doesn't exist
-        """
-
-        if self._alias is not None and name in self._alias.alias_to_name:
-            return util.fetch_attr(self, self._alias.alias_to_name[name])
-
-        if hasattr(self._module, name):
-            value = getattr(self._module, name)
-
-            # It's a method bound to the module, create an interleaver for it
-            if not self.interleaver.interleaving and isinstance(
-                value,
-                (FunctionType, MethodType, BuiltinFunctionType, BuiltinMethodType),
-            ):
-
-                # If the Envoy defines a method with __nnsight_{name}__, use it instead to override
-                value = getattr(self, f"__nnsight_{name}__", value)
-
-                def trace(*args, trace: bool = True, **kwargs):
-
-                    if not trace:
-                        args, kwargs, _ = self._prepare_input(*args, **kwargs)
-                        return value(*args, **kwargs)
-
-                    try:
-                        tracer = self.trace(*args, fn=value, **kwargs)
-                        tracer.capture()
-                        return tracer
-                    except WithBlockNotFoundError as e:
-                        return value(*args, **kwargs)
-
-                return trace
-
-            elif isinstance(value, torch.nn.Module):
-                # If the _module has a module in its __dict__ but wasn't picked up when creating the Envoy,
-                # Hopefully it is alrady an Envoy somewhere in the tree.
-                # https://github.com/ndif-team/nnsight/issues/479
-                # This happened because some transformers models set this class attr: _checkpoint_conversion_mapping
-                if hasattr(value, "__path__"):
-                    return util.fetch_attr(self, value.__path__[len(self.path) :])
-                return self._add_envoy(value, name)
-            else:
-                return value
-        else:
-            raise AttributeError(f"{self} has no attribute {name}")
-
-    def __setattr__(self, key: Any, value: Any) -> None:
-        """
-        Set an attribute on the Envoy.
-
-        If the value is a PyTorch module, it will be wrapped in an Envoy to enable
-        intervention during execution.
-
-        Otherwise the write is mirrored to both the Envoy and the wrapped module
-        when applicable, so that reads via ``__dict__`` short-circuit and reads via
-        ``__getattr__`` (which falls through to ``_module``) stay consistent.
-
-        Args:
-            key: The attribute name
-            value: The attribute value
-        """
-
-        if key != "_module" and isinstance(value, torch.nn.Module):
-            self._add_envoy(value, key)
-            return
-
-        on_module = "_module" in self.__dict__ and hasattr(self._module, key)
-
-        # Set on the Envoy if it already owns the key, or if there's no _module
-        # to fall through to.
-        if key in self.__dict__ or not on_module:
-            super().__setattr__(key, value)
-
-        # Mirror to _module so the wrapped model stays in sync with the wrapper.
-        if on_module:
-            setattr(self._module, key, value)
-
-    def __getstate__(self):
-
-        state = self.__dict__.copy()
-
-        state["interleaver"]._persistent_id = "Interleaver"
-        state["_module"]._persistent_id = f"Module:{self.path}"
-
-        state.pop("_source")
-
-        return state
+    @staticmethod
+    def _path_ends_with(path: str, key: str) -> bool:
+        """Whether ``path`` ends with dotted ``key`` component-wise (not substring)."""
+        parts = path.split(".")
+        key_parts = key.removeprefix(".").split(".")
+        return len(key_parts) <= len(parts) and parts[-len(key_parts):] == key_parts
 
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-        self._source = None
+    def __getstate__(self) -> dict:
+        # For serialization: tag the heavy/server-side objects as persistent so
+        # they're referenced by id rather than serialized. The server resolves
+        # them from its own model (Module:<path>) and interleaver (Interleaver).
+        state = self.__dict__.copy()
+        state["interleaver"]._persistent_id = "Interleaver"
+        state["_module"]._persistent_id = f"Module:{self.path}"
+        return state
 
+    def _update(self, module: torch.nn.Module) -> None:
+        # Re-point an existing envoy tree at a new module of the same structure
+        # (e.g. swapping meta weights for real ones). instrument() removes this
+        # path's old hooks before re-adding, and we recurse over children by
+        # name (as in __init__), so modules shared across paths line up.
+        self._module = module
+        # instrument re-installs the hooks and the source/skip controller on the new
+        # module (its own forward; the previous module's controller doesn't carry
+        # over) — see Interleaver.instrument.
+        self.interleaver.instrument(self)
+        children = dict(module.named_children())
+        for child in self._children:
+            name = child.path.rsplit(".", 1)[-1]
+            # A child that isn't a submodule of the new module — e.g. a standalone
+            # module added to the tree (TransformersModel's `generator`) — has nothing
+            # to re-point at, so leave it as-is (it keeps its own module and hooks).
+            if name in children:
+                child._update(children[name])
 
-class Aliaser:
+    def trace(
+        self,
+        *args: Any,
+        fn: Any = None,
+        backend: Any = None,
+        tracer_cls: type[InterleavingTracer] | None = None,
+        trace: bool = True,
+        **kwargs: Any,
+    ) -> InterleavingTracer:
+        """Open a trace: a ``with`` block that runs the module and lets you read and
+        edit its intermediate values.
 
-    def __init__(self, rename: Dict[str, Union[str, List[str]]]):
-        """
-        Initialize an Aliaser.
+        Inside the block, read an envoy's ``.output``/``.input`` to capture a value,
+        or assign to it to overwrite what the module passes on. Mark a value with
+        ``.save()`` to keep it past the block.
+
+        Examples:
+            >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
+            >>> with model.trace("Hello World"):
+            ...     model.transformer.h[0].attn.output[0][:] = 0   # zero the attn output
+            ...     output = model.output.save()
+            >>> print(output)
 
         Args:
-            rename (Dict[str, Union[str, List[str]]]): Dictionary mapping module names to alias names.
-                Examples: {"layer1": "first_layer", "layer2": "second_layer"}
-                Examples: {".model.layers": ".layers"} <-- Mounts .layers to the root model.
-                Examples: {".transformer": ["model", "mdl"]} <-- Allows access of .transformer as .model or .mdl
+            *args: Arguments to pass to the tracer
+            tracer_cls: Tracer class to construct instead of the default
+                :class:`~nnsight.intervention.tracer.InterleavingTracer` — an
+                extension point for a custom tracer.
+            trace: If ``False``, bypass tracing — run the module directly on the
+                inputs and return its output. A one-shot forward with no
+                intervention: input prep, dispatch, and device placement still
+                happen (via :meth:`interleave`), but no ``with`` block is captured.
+            **kwargs: Keyword arguments to pass to the tracer
 
-        Attributes:
-            rename (Dict[str, Union[str, List[str]]]): Dictionary mapping module names to alias names.
-            alias_to_name (Dict[str, str]): Dictionary mapping alias names to module names.
-            name_to_aliases (Dict[str, List[str]]): Dictionary mapping module names to list of alias names.
-            extras (Dict[str, List[str]]): Dictionary mapping attribute paths (.transformer.h) to list of alias names.
-                Used to show dot seperated attributes in the string representation of the Envoy.
-
-
+        Returns:
+            An InterleavingTracer for this module, or — when ``trace=False`` —
+            the module's output directly.
         """
+        if fn is None:
+            fn = "__call__"
+        if not trace:
+            # One-shot forward, no trace body — only registered edits apply
+            # (interleave adds them).
+            return self.interleave(fn, *args, **kwargs)
+        if tracer_cls is None:
+            tracer_cls = InterleavingTracer
+        return tracer_cls(self, fn, *args, backend=backend, **kwargs)
 
-        self.rename = rename
+    def edit(self, *, inplace: bool = False, backend: Any = None) -> EditingTracer:
+        """Open an editing tracer: capture interventions and store them as defaults.
 
-        self.alias_to_name = {}
-        self.name_to_aliases = {}
-        self.extras = {}
+        The block is not executed against a live forward; instead the interventions
+        it captures are stored and replayed on every later trace of the (edited)
+        model. Clear them with :meth:`clear_edits`.
 
-    def build(self, envoy: Envoy):
+        Examples:
+            >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
+            >>> # The first layer's attention output will always be zeroed.
+            >>> with model.edit() as (tracer, edited_model):
+            ...     edited_model.transformer.h[0].attn.output[0][:] = 0
 
-        for name, aliases in self.rename.items():
+            >>> with model.trace("Hello World"):
+            ...     output = model.output.save()          # original model, unedited
+            >>> print(output)
 
-            try:
-                util.fetch_attr(envoy, name)
-            except:
+            >>> with edited_model.trace("Hello World"):
+            ...     edited_output = edited_model.output.save()   # edit applied
+            >>> print(edited_output)
+
+        Args:
+            inplace: If ``False`` (default), store the edit on a shallow copy and
+                leave this envoy clean, so the edited behavior is opt-in through
+                the copy. If ``True``, store it on this envoy itself.
+            backend: Backend for the underlying trace.
+
+        Returns:
+            An :class:`~nnsight.intervention.editing.EditingTracer`. Entering it
+                binds the tracer — for its ``iter`` API — and, when
+                ``inplace=False``, the edited copy as well:
+                ``with model.edit() as (tracer, edited):``. With ``inplace=True``
+                only the tracer is bound.
+        """
+        # Trace a block but store it instead of running it: the captured
+        # interventions become defaults replayed on every later trace (see
+        # EditingTracer). inplace=False edits a shallow copy, leaving self clean.
+        return EditingTracer(self, inplace=inplace, backend=backend)
+
+    def clear_edits(self) -> None:
+        """
+        Clear all edits for this Envoy.
+        """
+        self._edits = []
+
+    def session(self, backend: Any = None, tracer_cls: type[Tracer] | None = None) -> Tracer:
+        """Open a session: a scope enclosing several traces that share values.
+
+        Inside ``with model.session():`` you can open multiple ``with
+        model.trace(...)`` blocks and pass values between them — a value read in
+        one trace is available in a later trace *without* an explicit ``.save()``,
+        because the session (not each individual trace) is the save boundary. Only
+        values marked with :func:`nnsight.save` survive past the session itself.
+        Ordinary Python — loops, conditionals, building lists — runs natively in
+        the session body.
+
+        Examples:
+            >>> with model.session():
+            ...     with model.trace(x):
+            ...         hidden = model.layer1.output      # no .save() needed
+            ...     with model.trace(x):
+            ...         out = (hidden * 2).save()         # `hidden` flows in
+            >>> print(out)
+
+        Args:
+            backend: What runs the captured session block. Defaults to running it
+                in place (which executes the nested traces as it reaches them).
+            tracer_cls: Tracer class to construct instead of the default
+                :class:`~nnsight.tracing.tracer.Tracer` — an extension point for a
+                custom session tracer.
+
+        Returns:
+            A :class:`~nnsight.tracing.tracer.Tracer` acting as the session scope.
+        """
+        # A plain Tracer already captures the block, execs it as real Python (so
+        # nested traces run as reached), and gates saves at its own — outermost —
+        # boundary. That is exactly a session; no model state is needed here.
+        if tracer_cls is None:
+            tracer_cls = Tracer
+        return tracer_cls(backend=backend)
+
+    def _shallow_copy(self) -> Envoy:
+        # A twin sharing this envoy's module/interleaver/children but with its own
+        # _edits list, so editing the copy doesn't touch the original's defaults.
+        copy = object.__new__(type(self))
+        copy.__dict__.update(self.__dict__)
+        copy._edits = list(self._edits)
+        return copy
+
+    @eproperty(key="input")
+    def inputs(self, value: Any) -> Any:
+        """The module's forward inputs as an ``(args, kwargs)`` tuple.
+
+        Read or replace the whole input during a trace::
+
+            with model.trace("Hello World"):
+                args, kwargs = model.transformer.h[0].attn.inputs
+        """
+        return value
+
+    @eproperty
+    def input(self, value: Any) -> Object:
+        """The module's first forward input (first positional, else first keyword).
+
+        A convenience view over :attr:`inputs`; writing it repacks into the full
+        ``(args, kwargs)`` the model expects::
+
+            with model.trace("Hello World"):
+                hidden_states = model.transformer.h[0].attn.input.save()
+        """
+        args, kwargs = value
+        return first_input(args, kwargs)
+
+    @input.postprocess
+    def input(self, value: Any) -> Any:
+        args, kwargs = Mediator.value(f"{self.path}.input")
+        return replace_first_input(args, kwargs, value)
+
+    @eproperty
+    def output(self, value: Any) -> Object:
+        """The module's forward output — read or replace it during a trace::
+
+            with model.trace("Hello World"):
+                attn = model.transformer.h[0].attn.output[0].save()
+        """
+        return value
+
+    @property
+    @deprecated(
+        "model.iter is deprecated and will be removed in a future version. "
+        "Use tracer.iter instead."
+    )
+    def iter(self):
+        """Deprecated: use ``tracer.iter``.
+
+        An alias for ``tracer.iter[...]``; the iteration API lives on the tracer.
+        """
+        from .iterator import Iterations
+
+        return Iterations()
+
+    @deprecated(
+        "model.all() is deprecated and will be removed in a future version. "
+        "Use tracer.all() instead."
+    )
+    def all(self):
+        """Deprecated: use ``tracer.all()``."""
+        from .iterator import Iterations
+
+        # Build the range directly rather than via self.iter, so only the
+        # model.all() deprecation warns (not model.iter as well).
+        return Iterations()[:]
+
+    def skip(self, replacement: Any) -> None:
+        """Skip this module's execution, returning ``replacement`` as its output.
+
+        The module's forward is not run; ``replacement`` is used in its place.
+
+        Examples:
+            >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
+            >>> with model.trace("Hello World"):
+            ...     # Skip the first layer, passing its input through as its output.
+            ...     model.transformer.h[0].skip(model.transformer.h[0].input)
+            ...     output = model.output.save()
+            >>> print(output)
+
+        Args:
+            replacement: The value to use as the module's output; must match the
+                shape the module would return. Read it from anywhere — including
+                this module's own ``.input``, which is offered before the skip gate.
+
+        Returns:
+            Nothing; the skip takes effect when the module runs.
+        """
+        # The skip controller is installed on every module up front (see __init__),
+        # so the skip gate is offered whenever the module runs — this works even
+        # when ``replacement`` was read from the module's own input before calling
+        # skip. (nn.Module.__call__ binds `forward` before running its pre-hooks, so
+        # a controller installed only now — after the input read resumes the worker
+        # mid-pre-hook — would be too late for the already-bound forward.)
+        Mediator.skip(f"{self.path}.skip", replacement)
+
+    @property
+    def source(self) -> Source:
+        """Get the source code representation of the module.
+
+        Examples:
+            >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
+            >>> print(model.transformer.h[0].attn.source)   # list the operations
+            >>> with model.trace("Hello World"):
+            ...     attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
+
+        Returns:
+            A :class:`Source` exposing operation-level access.
+        """
+        # Intermediate operations inside this module's forward, addressable as
+        # source.{name}_{occurrence} (e.g. source.relu_0.output). A class-level
+        # property, so it wins over the __getattr__ module fallthrough. Building
+        # it permanently source-instruments the module (inert outside a trace).
+        return Source(self)
+
+    def to(self, device: torch.device) -> Envoy:
+        """Move the wrapped module to ``device`` (in place).
+
+        Args:
+            device: The device to move the module to.
+
+        Returns:
+            This envoy, for method chaining.
+        """
+        self._module.to(device)
+        return self
+
+    def cpu(self, *args: Any, **kwargs: Any) -> Envoy:
+        """Move the wrapped module to the CPU (in place); return this envoy."""
+        self._module.cpu(*args, **kwargs)
+        return self
+
+    def cuda(self, *args: Any, **kwargs: Any) -> Envoy:
+        """Move the wrapped module to the GPU (in place); return this envoy."""
+        self._module.cuda(*args, **kwargs)
+        return self
+
+    @property
+    def device(self) -> torch.device | None:
+        """The device of the module's first parameter, or ``None`` if it has none."""
+        try:
+            return next(self._module.parameters()).device
+        except StopIteration:
+            return None
+
+    @property
+    def devices(self) -> set[torch.device]:
+        """The set of devices the module's parameters live on (empty if it has none)."""
+        return {parameter.device for parameter in self._module.parameters()}
+
+    #: The :class:`~nnsight.intervention.batching.Batcher` class to batch with.
+    #: Base default is the plain dim-0-stack :class:`Batcher`; a model whose batch
+    #: layout differs (e.g. :class:`~nnsight.modeling.diffusion.DiffusionBatcher`
+    #: for classifier-free-guidance doubling) overrides it with its subclass.
+    _batcher_class: type["Batcher"] = Batcher
+
+    def _batch_size(self, *inputs: Any, **kwargs: Any) -> int:
+        """Number of batch rows an invoke's input contributes (0 if it has none).
+
+        Base default: any input is a single row. Models that batch (e.g.
+        :class:`~nnsight.modeling.transformers.TransformersModel`) override this to
+        report the true row count of a prompt / list / tensor.
+        """
+        return 1 if (inputs or kwargs) else 0
+
+    def _batch(self, invokes: list[tuple], fn: Any) -> tuple:
+        """Combine invokes' inputs into one ``(args, kwargs)`` for ``fn``.
+
+        ``invokes`` is a list of ``(inputs, kwargs)``. Base default: pass a single
+        invoke straight through; batching two or more requires a model that
+        overrides this (:class:`~nnsight.modeling.transformers.TransformersModel`).
+        """
+        if not invokes:
+            return tuple(), {}
+        if len(invokes) == 1:
+            return invokes[0]
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support batching multiple invokes"
+        )
+
+    def interleave(
+        self, fn: Any, *args: Any, batcher: "Batcher | None" = None, **kwargs: Any
+    ) -> Any:
+        """Run ``fn`` interleaved with the interleaver's registered workers.
+
+        This is the low-level driver behind :meth:`trace`; you rarely call it
+        directly. The workers (edits + per-invoke interventions, with their batch
+        groups) are set up on the interleaver first; this runs ``fn(*args, **kwargs)``
+        alongside them and clears them afterward.
+
+        Args:
+            fn: The callable to run, or a method name resolved against the module.
+            *args: Positional inputs to ``fn``. Tensors are moved to
+                :attr:`device` first. Omitted when ``batcher`` is given (the inputs
+                come from assembling it).
+            batcher: The per-invoke inputs to combine into one call. When given, it's
+                assembled into ``(args, kwargs)`` and registered on the interleaver so
+                :meth:`~nnsight.intervention.interleaver.Interleaver.handle` can
+                narrow each worker to its own rows; any ``kwargs`` passed alongside
+                (trace-level params like ``max_new_tokens``) override the assembled
+                ones.
+            **kwargs: Keyword inputs to ``fn``.
+
+        Returns:
+            Any: Whatever ``fn`` returned (typically the module's forward output).
+        """
+        # A batcher holds the per-invoke inputs: assemble them into the combined
+        # call and register it so handle() can narrow per worker. Trace-level kwargs
+        # passed alongside win over the assembled ones.
+        if batcher is not None:
+            self.interleaver.batcher = batcher
+            args, assembled = batcher.assemble(fn)
+            kwargs = {**assembled, **kwargs}
+        # Move input tensors onto the model's device so the user doesn't have to.
+        device = self.device
+        if device is not None:
+            args, kwargs = apply(
+                (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
+            )
+        # Resolve a named fn against the live module now (after any dispatch),
+        # so it binds to the module actually running rather than an earlier one.
+        if isinstance(fn, str):
+            fn = getattr(self._module, fn)
+        # Registered edits run first — prepend them so an edit's swap lands before a
+        # trace intervention reads that location. They act on the whole batch (no
+        # group); the interleaver's `prepare` has already added any invoke workers.
+        self.interleaver.mediators[:0] = self._edits
+        result = None
+        try:
+            with self.interleaver:
+                result = fn(*args, **kwargs)
+                # The model has produced its return value; serve it to any
+                # intervention parked on `tracer.result` while still interleaving.
+                self.interleaver.handle("result", result)
+            # The model finished: surface any worker still parked on a location
+            # the run never reached (an out-of-order request).
+            self.interleaver.check_dangling_mediators()
+        except EarlyStopException:
+            # An intervention stopped before the model began running: the
+            # worker raised during start(), so __enter__ never finished and
+            # __exit__ did not run to swallow it.
+            pass
+        finally:
+            self.interleaver.cancel()
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        # Only called when normal lookup fails, so envoy children (set on the
+        # instance) and real attributes are already handled. Fall through to the
+        # wrapped module. __dict__.get avoids recursing before _module is set.
+        module = self.__dict__.get("_module")
+        if module is None or not hasattr(module, name):
+            raise AttributeError(
+                f"{type(self).__name__!r} object (nor its module) has attribute {name!r}"
+            )
+
+        value = getattr(module, name)
+
+        # A submodule not yet mirrored as an envoy: wrap it so interventions
+        # work on it too (and it's reachable next time as a normal attr).
+        if isinstance(value, torch.nn.Module):
+            return self._wrap_envoy(name, value)
+
+        return value
+
+    def __call__(self, *args: Any, hook: bool = False, **kwargs: Any) -> Any:
+        """Run this module's forward — applying it ad hoc, out of execution order.
+
+        Inside a trace you can feed a module any input to compute with it away from
+        its place in the forward pass — e.g. the logit lens, running ``lm_head`` on
+        an intermediate hidden state::
+
+            with model.trace(prompt):
+                hidden = model.transformer.h[-1].output
+                logits = model.lm_head(model.transformer.ln_f(hidden))
+
+        While interleaving, ``module.forward`` is called directly rather than
+        ``module(...)``, so PyTorch's hook dispatch is skipped. That both keeps
+        this ad-hoc call from re-firing the interleaver's hooks (which would try to
+        switch into the very worker greenlet making the call) and leaves the
+        module's real place in the forward pass untouched. Outside a trace it is an
+        ordinary module call.
+
+        Pass ``hook=True`` to force the full ``module(...)`` call so the module's
+        own hooks *do* fire. Use it for a module attached to the tree that isn't
+        part of the real forward pass — an adapter, LoRA, or SAE applied in an
+        edit — so its internals become observable at ``.submodule.output``::
+
+            model.transformer.h[0].adapter = MyAdapter()
+            with model.edit() as (tracer, edited):
+                acts = edited.transformer.h[0].output
+                edited.transformer.h[0].output[:] = \
+                    edited.transformer.h[0].adapter(acts, hook=True)
+            with edited.trace(prompt):
+                inner = edited.transformer.h[0].adapter.inner.output.save()
+
+        The block above applies the adapter once, at the first time the layer runs.
+        To apply it every time — each step of a generation loop — put the
+        passthrough under the edit tracer's ``iter``::
+
+            with model.edit(inplace=True) as tracer:
+                for _ in tracer.iter[:]:
+                    acts = model.transformer.h[0].output
+                    model.transformer.h[0].output[:] = \
+                        model.transformer.h[0].adapter(acts, hook=True)
+
+        Args:
+            *args: Inputs to run the module's forward on.
+            hook: If ``False`` (default), run the forward directly while
+                interleaving, leaving the module's hooks — and its real place in
+                the forward pass — untouched. If ``True``, run the full
+                ``module(...)`` so its hooks fire and its submodules become
+                addressable; use it for a module attached to the tree rather than
+                one the forward pass already runs.
+            **kwargs: Keyword inputs to the module's forward.
+
+        Returns:
+            The module's output for these inputs.
+        """
+        if self.interleaver.interleaving and not hook:
+            return self._module.forward(*args, **kwargs)
+        return self._module(*args, **kwargs)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if isinstance(value, torch.nn.Module) and not name.startswith("_"):
+            self._add_envoy(name, value)
+        else:
+            object.__setattr__(self, name, value)
+
+    def __iter__(self) -> Iterator[Envoy]:
+        """Iterate over this envoy's direct children.
+
+        Yields each immediate child envoy — e.g. the blocks of a
+        :class:`~torch.nn.ModuleList`, so ``for layer in model.model.layers:``
+        walks the layers. This is *not* recursive; use :meth:`modules` to walk the
+        whole subtree.
+
+        Yields:
+            Envoy: Each direct child envoy, in order.
+
+        Example:
+            ::
+
+                for layer in model.model.layers:
+                    print(layer.path)
+        """
+        return iter(self._children)
+
+    def __getitem__(self, key: Any) -> Envoy:
+        """Index into direct child envoys, e.g. for a :class:`~torch.nn.ModuleList`.
+
+        Args:
+            key: Any index the underlying child list accepts (an int, or a slice).
+
+        Returns:
+            Envoy: The child envoy at ``key`` (e.g. ``model.layers[0]`` for the
+            first block of a ``ModuleList``).
+        """
+        return self._children[key]
+
+    def __len__(self) -> int:
+        """The number of entries in the wrapped module (e.g. a ``ModuleList``'s length)."""
+        return len(self._module)
+
+    def get(self, path: str) -> Any:
+        """Resolve a dotted ``path`` from this envoy, e.g. ``"transformer.h.0.mlp"``.
+
+        A programmatic alternative to attribute access, useful when the path is
+        built at runtime. Outside a trace it returns the descendant envoy; inside
+        one, a trailing ``.output``/``.input`` resolves through to the live value.
+
+        Examples:
+            >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
+            >>> module = model.get("transformer.h.0.mlp")
+            >>> with model.trace("Hello"):
+            ...     value = model.get("transformer.h.0.mlp.output").save()
+
+        Args:
+            path: A ``.``-separated attribute path relative to this envoy.
+
+        Returns:
+            The resolved child :class:`Envoy`, or the live value when ``path``
+            ends in an intervention attribute during a trace.
+        """
+        obj: Any = self
+        for part in path.split("."):
+            obj = getattr(obj, part)
+        return obj
+
+    def modules(
+        self,
+        include_fn: Callable[[Envoy], bool] | None = None,
+        names: bool = False,
+    ) -> list[Any]:
+        """Flatten this envoy's whole subtree (children first, then self) into a list.
+
+        Args:
+            include_fn: Optional predicate on an envoy; only those it returns
+                ``True`` for are kept.
+            names: If ``True``, yield ``(path, envoy)`` tuples instead of envoys.
+
+        Returns:
+            A list of :class:`Envoy` (or ``(path, Envoy)`` tuples when ``names``).
+        """
+        # Flatten the envoy tree (children first, then self), optionally filtered
+        # by include_fn and paired with each envoy's path when names=True.
+        result: list[Any] = []
+        for child in self._children:
+            result.extend(child.modules(include_fn=include_fn, names=names))
+        if include_fn is None or include_fn(self):
+            result.append((self.path, self) if names else self)
+        return result
+
+    def named_modules(
+        self, include_fn: Callable[[Envoy], bool] | None = None
+    ) -> list[tuple[str, Envoy]]:
+        """Flatten the subtree into ``(path, envoy)`` tuples: :meth:`modules` with ``names=True``.
+
+        Args:
+            include_fn: Optional predicate on an envoy; only those it returns
+                ``True`` for are kept.
+
+        Returns:
+            A list of ``(path, Envoy)`` tuples for the included envoys.
+        """
+        return self.modules(include_fn=include_fn, names=True)
+
+    def _name(self) -> str:
+        return self._module._get_name()
+
+    def _repr_modulelist(self) -> str:
+        reprs = [repr(child) for child in self._children]
+
+        start_end = [[0, 0]]
+        blocks = [reprs[0]]
+        for index, child_repr in enumerate(reprs[1:], 1):
+            if child_repr == blocks[-1]:
+                start_end[-1][1] += 1
                 continue
+            start_end.append([index, index])
+            blocks.append(child_repr)
 
-            if isinstance(aliases, str):
-                aliases = [aliases]
+        lines = []
+        for (start, end), block in zip(start_end, blocks):
+            if start == end:
+                line = f"({start}): {block}"
+            else:
+                line = f"({start}-{end}): {end - start + 1} x {block}"
+            lines.append(_addindent(line, 2))
 
-            name = name.removeprefix(".")
+        return self._name() + "(\n  " + "\n  ".join(lines) + "\n)"
 
-            if "." in name:
+    def __repr__(self) -> str:
+        if self._children and isinstance(self._module, torch.nn.ModuleList):
+            return self._repr_modulelist()
 
-                self.extras[name] = aliases
+        extra_lines = []
+        extra_repr = self._module.extra_repr()
+        if extra_repr:
+            extra_lines = extra_repr.split("\n")
 
-            self.name_to_aliases[name] = aliases
+        # Split aliases bound here into those naming a direct child (decorate its
+        # line as "alias/realname") and multi-component mounts (their own lines).
+        direct: dict[str, list[str]] = {}
+        mounts: list[str] = []
+        for alias, path in self._aliases.items():
+            if "." in path:
+                mounts.append(alias)
+            else:
+                direct.setdefault(path, []).append(alias)
 
-            for alias in aliases:
-                self.alias_to_name[alias] = name
+        child_lines = []
+        for child in self._children:
+            name = child.path.rsplit(".", 1)[-1]
+            label = "/".join([*direct.get(name, []), name])
+            child_lines.append(f"({label}): " + _addindent(repr(child), 2))
+        for alias in mounts:
+            child_lines.append(f"({alias}): " + _addindent(repr(getattr(self, alias)), 2))
+
+        # eproperties given a description surface as their own lines, so special
+        # hookable values (e.g. a model's .logits) show up in the tree; the plain
+        # .input/.output views carry no description and stay hidden.
+        eproperty_lines = []
+        seen = set()
+        for cls in type(self).__mro__:
+            for attr in cls.__dict__.values():
+                if (
+                    isinstance(attr, eproperty)
+                    and attr.description is not None
+                    and attr.name not in seen
+                ):
+                    seen.add(attr.name)
+                    eproperty_lines.append(f"({attr.name}): {attr.description}")
+
+        lines = extra_lines + child_lines + eproperty_lines
+
+        main_str = self._name() + "("
+        if lines:
+            if len(extra_lines) == 1 and not child_lines and not eproperty_lines:
+                main_str += extra_lines[0]
+            else:
+                main_str += "\n  " + "\n  ".join(lines) + "\n"
+        main_str += ")"
+        return main_str
