@@ -1,134 +1,145 @@
 ---
 title: Save
-one_liner: Persist values from a tracing context with `nnsight.save(obj)` or `obj.save()`.
+one_liner: Persist values from a tracing context with `nnsight.save(obj)` or `obj.save()`. Raises outside a trace.
 tags: [usage, tracing, save]
 related: [docs/usage/trace.md, docs/usage/scan.md, docs/usage/access-and-modify.md]
-sources: [src/nnsight/intervention/tracing/globals.py:9, src/nnsight/intervention/tracing/globals.py:91, src/nnsight/intervention/tracing/base.py:537]
+sources: [src/nnsight/tracing/tracer.py]
 ---
 
 # Save
 
 ## What this is for
 
-Inside a tracing context (`model.trace`, `model.generate`, `model.scan`, `model.session`, `tensor.backward`), variable assignments do **not** automatically escape the with-block. The tracing system only pushes back to the caller's frame the values explicitly marked as "saved". Marking a value as saved is done by `nnsight.save(value)` or, equivalently, `value.save()`.
+Inside a tracing context (`model.trace`, `model.generate`, `model.pipe`, `model.scan`, `model.session`, `tensor.backward`), variable assignments do **not** automatically escape the with-block. Only values explicitly marked as "saved" are pushed back to the caller's frame. Mark a value with `nnsight.save(value)` or, equivalently, `value.save()`.
 
 ## When to use / when not to use
 
-- Use **always** — every value you want to read after a `with model.trace(...):` block exits.
-- Required inside `model.scan(...)` too — it is a tracing context like the others. See `docs/usage/scan.md`.
-- Not needed for tensors that you only read inside the body. Saved values cost you nothing extra unless they pin GPU memory you'd rather free.
+- Use for **every** value you want to read after a `with model.trace(...):` block exits.
+- Required inside `model.scan(...)` too — it is a tracing context like the others.
+- Not needed for values you only read inside the body.
+- **Calling `save` outside a trace raises `ValueError`** (see below) — it is no longer a silent no-op.
 
 ## Canonical pattern
 
 ```python
 import nnsight
+from nnsight.modeling.transformers import TransformersModel
+
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 with model.trace("Hello"):
-    # PREFERRED: works on any object, no C-extension needed
+    # Function form: works on any object
     hidden = nnsight.save(model.transformer.h[-1].output)
-
-    # ALSO WORKS: backwards-compatible method form
-    logits = model.lm_head.output.save()
+    # Method form: equivalent
+    logits = model.output.logits.save()
 
 print(hidden.shape, logits.shape)
 ```
 
-## Why `.save()` is needed
+## save() raises outside a trace
 
-`Tracer.push()` (`src/nnsight/intervention/tracing/base.py:497`) is the bridge that copies locals from the worker frame back to the caller's frame on `__exit__`. When `Globals.stack == 1` (i.e. you are exiting the outermost trace), `push()` filters its candidate set to **only** ids in `Globals.saves` (`base.py:537`):
+A save with no trace running can't return anywhere — its mark would be cleared before anything reads it — so it errors instead of silently no-op'ing:
 
 ```python
-if Globals.stack == 1:
-    filtered_state = {
-        k: v for k, v in filtered_state.items() if id(v) in Globals.saves
-    }
-    Globals.saves.clear()
+import nnsight
+nnsight.save([])
 ```
 
-`nnsight.save(obj)` simply does `Globals.saves.add(id(obj))` (`globals.py:9`).
+```
+ValueError: save() was called outside a trace. `.save()` / nnsight.save(x) marks a
+value to return from the enclosing `with model.trace(...):` block, so it only works
+inside one — move the save into the trace block.
+```
+
+The method form raises the same way: `[1, 2, 3].save()` outside a trace → `ValueError: ... outside a trace`.
+
+## How it works
+
+Saving is per-thread state in `src/nnsight/tracing/tracer.py`:
+
+- A trace scope increments a per-thread `depth` around the backend call (`inc`/`dec`).
+- `save(value)` raises if `depth == 0`; otherwise it adds `id(value)` to the thread's saved set and returns the value unchanged.
+- On exit, `push_result` writes the body's locals back to the caller — but the **outermost** trace (depth 1) keeps only the values whose `id()` is in the saved set. The saved set is cleared when the outermost scope exits.
+
+`save` returns its argument unchanged, so save the value you bind:
+
+```python
+h = model.transformer.h[0].output.save()     # h is saved
+# NOT: (x.save() * 2) -> saves x, returns the product (unsaved). Write (x * 2).save().
+```
 
 ## Two forms — prefer `nnsight.save()`
 
 ```python
 import nnsight
 
-# Function form — recommended
-out = nnsight.save(model.transformer.h[0].output)
-
-# Method form — backwards-compatible
-out = model.transformer.h[0].output.save()
+out = nnsight.save(model.transformer.h[0].output)   # function form — recommended
+out = model.transformer.h[0].output.save()          # method form
 ```
 
-The method form depends on **pymount**, a C extension that monkey-patches a `.save` attribute onto every Python object at runtime. The function form does not. If a class defines its own `.save` method (e.g. `transformers.PreTrainedModel.save_pretrained` is unrelated, but third-party classes can shadow it), `obj.save()` will call that one instead of nnsight's. `nnsight.save()` is unaffected.
-
-`Object.save` (`src/nnsight/intervention/tracing/globals.py:18`) raises `RuntimeError` if called outside a trace context (`Globals.stack == 0`).
-
-## Pymount mechanism
-
-Controlled by `CONFIG.APP.PYMOUNT` (defaults to `True`):
-
-- On the **first** entry to any tracing context (`Globals.enter`, `globals.py:101`), if not already mounted, the C extension `nnsight._c.py_mount.mount` installs `Object.save` as a method on the base `object` class. This is a one-time global side effect — it is not unmounted on exit.
-- Once mounted, every Python object gains `.save()` for the lifetime of the process.
-- Set `CONFIG.APP.PYMOUNT = False` to skip pymount entirely. You must then use `nnsight.save()` exclusively.
+The method form relies on a C extension that mounts a `.save()` method onto every Python object at import (check with `hasattr(object(), "save")`). The function form does not, and is unaffected if a class defines its own `.save`. For plain Python types (ints, lists, dicts), always prefer `nnsight.save(...)`.
 
 ## Saving non-tensor values
-
-`obj.save()` only works if pymount is enabled (or the object is the `Object`/`torch.Tensor` proxy returned from an eproperty). Always prefer `nnsight.save(...)` for plain Python types:
 
 ```python
 import nnsight
 
 with model.scan("Hello"):
-    dim = nnsight.save(model.transformer.h[0].output.shape[-1])
-    paths = nnsight.save([m.path for m in model.modules()])
+    dim = nnsight.save(model.transformer.h[0].output.shape[-1])   # int
+    n_layers = nnsight.save(len(model.transformer.h))             # int
 
-print(dim, len(paths))
+print(dim, n_layers)   # e.g. 768 12
 ```
 
-## Saving inside generation
+## Collecting values in a list (or dict)
+
+To gather values across steps or layers, **save the container and put raw values into it** — do not `.save()` the individual elements:
 
 ```python
 with model.generate("Hello", max_new_tokens=5) as tracer:
+    per_step = nnsight.save([])                 # save the list itself, inside the trace
+    for step in tracer.iter[:5]:
+        per_step.append(model.output.logits[0, -1].argmax(dim=-1))   # append raw values
     final = tracer.result.save()
-    per_step_logits = list().save()    # save the list, append to it
-    for step in tracer.iter[:]:
-        per_step_logits.append(model.lm_head.output[0, -1].argmax(dim=-1))
+# per_step holds the 5 collected values; final is the generated ids
 ```
 
-For containers built and populated in-place, save the container — its mutated contents persist with it.
+`.save()` marks the object you bind to a name; a saved container comes back with its mutated contents. Two ways this goes wrong:
+
+- **Saving the elements** (`per_step.append(x.save())`) marks values with no name to return them under — it happens to work locally (the list is mutated in your own frame) but returns nothing on a remote trace.
+- **Leaving the container unsaved** (`per_step = []` *inside* the trace, or a `[x.save() for ...]` comprehension bound to an unsaved name) never pushes it back, so it is `UnboundLocalError` after the block.
+
+A comprehension follows the same rule — save the whole list, keep elements raw: `hiddens = nnsight.save([b.output for b in model.transformer.h])`.
 
 ## Saving inside `tensor.backward()`
 
-The backward context is a separate interleaving session. Save gradients there:
+The backward context is a nested interleaving session; values saved there reach you (an inner trace pushes everything up, the outermost trace keeps the saved ones):
 
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[-1].output
-    hs.requires_grad_(True)
-    logits = model.lm_head.output
-
-    with logits.sum().backward():
-        grad = hs.grad.save()
+    a1 = model.transformer.h[0].output
+    loss = model.output.logits.sum()
+    with loss.backward():
+        grad = a1.grad.clone().save()
 ```
 
 ## Remote traces
 
-`.save()` is what tells the remote backend which values to ship back to the client. Without it, the value is computed on the server and discarded.
+`.save()` tells the remote backend which values to ship back. Without it, the value is computed on the server and discarded. Move tensors to CPU before saving for smaller transfers:
 
 ```python
 with model.trace("Hello", remote=True):
-    out = model.lm_head.output.detach().cpu().save()
+    out = model.output.logits.detach().cpu().save()
 ```
-
-Move tensors to CPU before saving for smaller transfers.
 
 ## Gotchas
 
-- Forgetting `.save()` is the most common nnsight footgun — your variable will be a stale reference or undefined after `__exit__`.
-- `obj.save()` calling user-defined `.save` on a non-nnsight object: prefer `nnsight.save(obj)`.
-- `nnsight.save()` is safe to call on the same value multiple times — the saves set is keyed by `id()`.
-- Mutating a saved tensor in-place after the trace exits affects whatever the tensor still aliases. Clone if you want isolation: `nnsight.save(x.clone())`.
-- Saving inside `model.scan(...)` is required even though the scan exits in the same scope — scan is a tracing context and `Globals.stack` is incremented while inside.
+- Forgetting `.save()` is the most common footgun — the variable is undefined after `__exit__` (`UnboundLocalError`).
+- **A saved value comes back by its variable *name*, so bind it.** `push_result` returns the body's *locals*, filtered to the saved ones — a value marked but never assigned to a name (a bare `model.logits.save()` on its own line) has no local to return, so it silently doesn't come back. This is invisible locally (you just never read it) but obvious on vLLM/remote/serve, where you read it by name: `output.saves["logits"]` will be missing. Always write `logits = model.logits.save()`.
+- **Saving outside a trace raises** — do it inside the `with` block.
+- `nnsight.save()` is safe to call on the same value multiple times — the saved set is keyed by `id()`.
+- Mutating a saved tensor in-place after the trace exits affects whatever it still aliases. Clone for isolation: `nnsight.save(x.clone())`.
+- Save is required inside `model.scan(...)` too — it is a tracing context.
 
 ## Related
 

@@ -1,118 +1,128 @@
 ---
 title: Barrier
-one_liner: Cross-invoke synchronization point for sharing values across invokes that touch the same module.
+one_liner: Cross-invoke synchronization point for handing values across invokes that touch the same module.
 tags: [usage, batching, synchronization]
 related: [docs/usage/invoke-and-batching.md, docs/usage/access-and-modify.md, docs/usage/trace.md]
-sources: [src/nnsight/intervention/tracing/tracer.py:551, src/nnsight/intervention/tracing/tracer.py:646, src/nnsight/intervention/interleaver.py:1123]
+sources: [src/nnsight/intervention/barrier.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/interleaver.py]
 ---
 
 # Barrier
 
 ## What this is for
 
-Each `tracer.invoke(...)` runs as a separate worker thread, and threads run **serially**. A variable defined in invoke 1 is normally not yet materialized by the time invoke 2 starts referring to it — it lives in invoke 1's worker frame.
+The blocks of a trace — one per `with tracer.invoke(x):` — run in the order the
+model reaches what each asked for, not the order they were written. A value one
+block reads and another block writes is only correct if the read happened first,
+and neither block can see the other's progress.
 
-`tracer.barrier(n)` is a sync primitive: when all `n` participating invokes call `barrier()`, the interleaver pauses the first to reach it, runs the others up to their barrier call, and then releases everyone together. At that point, variables produced before each invoke's `barrier()` have been pushed back to the shared frame and are visible to other invokes.
+`tracer.barrier(n)` is that meeting point. Every block that holds the barrier
+calls it; each waits, and the last to arrive releases them all. So everything
+written **above** a barrier has happened before anything written **below** one.
 
-You need this whenever **two invokes both access the same module** and you want to share a value across the boundary.
+Reach for it whenever **two (or more) invokes hand a value across the same
+module**.
 
 ## When to use / when not to use
 
-- Use when invoke 2 needs a value that invoke 1 produced from the same module. Without a barrier, you get `NameError`.
-- Don't use when invokes touch entirely different modules — cross-invoker variable sharing handles that case automatically (controlled by `CONFIG.APP.CROSS_INVOKER`).
+- Use when a later invoke needs a value an earlier invoke produced from the *same*
+  module.
+- Don't use when invokes touch entirely different modules — shared invoke scope
+  already handles that (see [invoke-and-batching.md](invoke-and-batching.md)).
 - Don't use as a substitute for `tracer.stop()` or `module.skip()`.
 
-## Canonical pattern (activation patching)
+## Canonical pattern (embedding transfer)
 
 ```python
-with model.trace() as tracer:
-    barrier = tracer.barrier(2)   # 2 participating invokes
+from nnsight.modeling.transformers import TransformersModel
 
-    # Clean run
-    with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[:, -1, :]
-        barrier()                  # signal: clean_hs is now available
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
-    # Patched run
-    with tracer.invoke("The Colosseum is in"):
-        barrier()                  # wait until invoke 1 has materialized clean_hs
-        model.transformer.h[5].output[:, -1, :] = clean_hs
-        patched = model.lm_head.output.save()
+with model.pipe(max_new_tokens=3, do_sample=False) as tracer:
+    barrier = tracer.barrier(2)          # 2 participating invokes
+
+    with tracer.invoke("Madison Square Garden is in the city of"):
+        embeddings = model.transformer.wte.output
+        barrier()                        # signal: embeddings are read
+        result = tracer.result.save()
+
+    with tracer.invoke("_ _ _ _ _ _ _ _ _"):
+        barrier()                        # wait until the source read its embeddings
+        model.transformer.wte.output = embeddings
 ```
+
+The second prompt is only underscores, yet — because it generates from the first
+prompt's embeddings — it produces the same continuation.
 
 ## Why a barrier is required here
 
-Both invokes touch `transformer.h[5].output`. The mediator threads run serially, and the second invoke's mediator does **not** automatically wait for the first invoke's mediator to finish — it only waits when it requests its own value. The simple "cross-invoker push" mechanism (which works when invokes touch different modules) is not sufficient because the first invoke is still mid-flight when the second tries to access the shared module.
+Both invokes touch `transformer.wte.output`. Without a barrier the second invoke's
+worker would try to swap in `embeddings` before the first worker had read it —
+`NameError`, because the name isn't bound yet. The barrier pins the ordering: the
+first invoke parks at its `barrier()` with `embeddings` already read, the second
+runs up to *its* `barrier()`, and the last one through releases both.
 
-The barrier introduces an explicit synchronization point: invoke 1 pauses, the interleaver advances invoke 2 to its own `barrier()` call, then both proceed. By that time, invoke 1's locals have been pushed (`Mediator.push`, `interleaver.py:1304`) and `clean_hs` exists in the shared frame.
+## More than two participants
 
-## How it works
-
-`InterleavingTracer.barrier` (`src/nnsight/intervention/tracing/tracer.py:551`) returns a `Barrier` object (`tracer.py:646`):
-
-```python
-class Barrier:
-    def __init__(self, model, n_participants):
-        ...
-    def __call__(self):
-        mediator = self.model.interleaver.current
-        self.participants.add(mediator.name)
-        if len(self.participants) == self.n_participants:
-            participants = self.participants
-            self.participants = set()
-            mediator.send(Events.BARRIER, participants)
-        else:
-            mediator.send(Events.BARRIER, None)
-```
-
-`Mediator.handle_barrier_event` (`interleaver.py:1123`) is called by the last participant:
+`tracer.barrier(n)` supports any `n`. A barrier of three fans one invoke's value
+out to two receivers:
 
 ```python
-def handle_barrier_event(self, provider, participants):
-    if participants is not None:
-        for mediator in self.interleaver.mediators:
-            if mediator.name in participants:
-                self.interleaver.current = mediator
-                mediator.respond()
-                mediator.handle(provider, ...)
-    return False
+receiver = "_ _ _ _ _ _ _ _ _"
+with model.pipe(max_new_tokens=3, do_sample=False) as tracer:
+    barrier = tracer.barrier(3)
+    with tracer.invoke("Madison Square Garden is in the city of"):
+        embeddings = model.transformer.wte.output
+        barrier()
+        result = tracer.result.save()
+    with tracer.invoke(receiver):
+        barrier()
+        model.transformer.wte.output = embeddings
+    with tracer.invoke(receiver):
+        barrier()
+        model.transformer.wte.output = embeddings
 ```
 
-Each participating mediator is woken up in order, its `respond()` releases its waiting worker, and `handle()` lets it continue past the barrier.
+No block passes the barrier until all three reach it — every "before" happens
+before any "after".
 
-## Multiple barriers
+## Reusable
 
-A single `Barrier` instance is **reusable** — its `participants` set is reset to empty after firing. So you can use the same barrier multiple times in a single trace:
+A single `Barrier` empties its waiting list on release, so the same object can be
+used again — each round waits for its own `n` arrivals:
 
 ```python
 with model.trace() as tracer:
     barrier = tracer.barrier(2)
-
     with tracer.invoke("A"):
-        h_a_5 = model.transformer.h[5].output
+        a5 = model.transformer.h[5].output
         barrier()
-        h_a_8 = model.transformer.h[8].output
+        a8 = model.transformer.h[8].output
         barrier()
-
     with tracer.invoke("B"):
         barrier()
-        x = h_a_5  # use after first barrier
+        x = a5          # available after the first barrier
         barrier()
-        y = h_a_8  # use after second barrier
+        y = a8          # available after the second
 ```
 
-If you need different `n_participants` at different points, create separate barriers.
+For different participant counts at different points, create separate barriers.
 
 ## Gotchas
 
-- `n_participants` must equal the actual number of invokes that will call `barrier()`. If fewer call it, the barrier never fires and the trace deadlocks.
-- The barrier returned by `tracer.barrier(n)` is a value, not a context manager — call it as `barrier()`.
-- Cross-invoker sharing without a barrier works only when the shared variable is defined in invoke 1 from a module **not** also accessed in invoke 2. Otherwise: `NameError`.
-- A barrier is per-trace — defining one outside the trace context is meaningless.
-- Forgetting to call the barrier in one invoke (e.g. early `return`) hangs the trace.
+- **`n` must equal the number of invokes that call `barrier()`.** If fewer arrive,
+  it never releases and the run ends with
+  `ValueError: A barrier was never reached by every block it waits for; check the
+  count it was created with`.
+- **The return value is called, not entered.** `barrier = tracer.barrier(n)` then
+  `barrier()` — it is not a context manager.
+- **A barrier nobody calls is inert** — creating `tracer.barrier(n)` and never
+  calling it is harmless.
+- **A barrier is per-trace.** Create it inside the `with model.trace()` block.
+- **An early `return` that skips a `barrier()` in one invoke hangs that round** —
+  every participant must reach it.
 
 ## Related
 
-- `docs/usage/invoke-and-batching.md`
-- `docs/usage/access-and-modify.md`
-- `docs/usage/trace.md`
+- [invoke-and-batching.md](invoke-and-batching.md)
+- [access-and-modify.md](access-and-modify.md)
+- [trace.md](trace.md)

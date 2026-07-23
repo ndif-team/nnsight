@@ -1,207 +1,131 @@
 ---
 title: Integration Pitfalls
-one_liner: Wrapper-specific traps — LanguageModel needs a tokenizer for pre-loaded models, .source can't be called on submodule fns, auxiliary modules need hook=True, vLLM specifics.
-tags: [gotcha, language-model, source, vllm, sae, lora]
-related: [docs/models/language-model.md, docs/usage/source.md]
-sources: [src/nnsight/modeling/language.py:205, src/nnsight/intervention/source.py:658, src/nnsight/intervention/envoy.py:239, src/nnsight/modeling/vllm/vllm.py:139]
+one_liner: Wrapper-specific traps — deprecated model aliases, .source can't drill into submodule calls, auxiliary modules need hook=True, vLLM specifics.
+tags: [gotcha, transformers, source, vllm, sae, lora]
+related: [docs/models/transformers-model.md, docs/usage/source.md, docs/models/vllm.md]
+sources: [src/nnsight/modeling/language.py:19, src/nnsight/intervention/source.py:536, src/nnsight/intervention/envoy.py:682, src/nnsight/modeling/vllm/vllm.py]
 ---
 
 # Integration Pitfalls
 
 ## TL;DR
-- `LanguageModel(hf_model)` on a pre-loaded HF model raises `AttributeError: Tokenizer not found` — you must pass `tokenizer=`.
-- `.source` cannot be called on a *module* fn from inside another `.source`; the chained access raises with a message telling you to call `.source` on the submodule's envoy directly.
-- Auxiliary modules (SAEs, LoRA adapters) called inside a trace need `module(x, hook=True)` if you want `.input`/`.output` to be accessible on that aux module afterwards. The default routes through `.forward(...)` and bypasses hooks.
-- vLLM `tracer.invoke(prompt, temperature=..., top_p=..., max_tokens=...)` forwards these to vLLM's `SamplingParams`.
-- vLLM pipeline parallelism is *not* supported. `pipeline_parallel_size` is forced to 1 (`src/nnsight/modeling/vllm/vllm.py:139`). Tensor parallelism (TP) and data parallelism (DP) are supported.
+- Use `TransformersModel(repo_id, task=...)`. `LanguageModel` / `VisionLanguageModel` are **deprecated** thin subclasses that warn on construction — the tokenizer/processor comes from the task's pipeline, so there's no "pass a tokenizer" step.
+- `.source` cannot drill *into* a call that is a **submodule** — it raises `SourceNotAvailable` telling you to call `.source` on that submodule's envoy directly.
+- Auxiliary modules (SAEs, LoRA adapters) you attach and call inside a trace need `module(x, hook=True)` for their internals to be observable at `.submodule.output` — and the observation happens in a *later* trace (apply via `edit()`).
+- vLLM: pass sampling settings (`temperature`, `top_p`, `max_tokens`, ...) to `trace`/`invoke`; read/edit `model.logits` and `model.samples`; choose `VLLM(..., mode="sync"|"async")`.
 
 ---
 
-## `LanguageModel` on a pre-loaded HF model needs `tokenizer=`
+## Prefer `TransformersModel`; aliases warn
 
 ### Symptom
 ```
-AttributeError: Tokenizer not found. If you passed a pre-loaded model to `LanguageModel`,
-you need to provide a tokenizer when initializing: `LanguageModel(model, tokenizer=tokenizer)`.
+DeprecationWarning: LanguageModel is deprecated; use TransformersModel(repo_id, task='text-generation') instead.
 ```
 
 ### Cause
-When you give `LanguageModel` a repo id (string), it loads both the model and tokenizer from HuggingFace via `from_pretrained`. When you give it an already-loaded model object, it has nothing to derive the tokenizer from. The `LanguageModel.__init__` raises this exception (`src/nnsight/modeling/language.py:205`) the first time tokenization is needed.
-
-### Wrong code
-```python
-from transformers import AutoModelForCausalLM
-from nnsight import LanguageModel
-
-hf_model = AutoModelForCausalLM.from_pretrained("gpt2")
-model = LanguageModel(hf_model)   # no tokenizer
-
-with model.trace("Hello"):        # AttributeError here
-    out = model.lm_head.output.save()
-```
+`LanguageModel` (`src/nnsight/modeling/language.py:19`) and `VisionLanguageModel` are backwards-compatible names over `TransformersModel`. `TransformersModel` is backed by a `transformers.pipeline`, which loads the tokenizer/processor itself — so `model.tokenizer` is populated without you passing one.
 
 ### Right code
 ```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from nnsight import LanguageModel
+from nnsight.modeling.transformers import TransformersModel
 
-hf_model = AutoModelForCausalLM.from_pretrained("gpt2")
-tokenizer = AutoTokenizer.from_pretrained("gpt2")
-model = LanguageModel(hf_model, tokenizer=tokenizer)
-
-with model.trace("Hello"):
-    out = model.lm_head.output.save()
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
+with model.trace("Hello world"):
+    out = model.output.logits.save()
 ```
 
-### Mitigation / how to spot it early
-- If you wrap a pre-loaded model, always pass `tokenizer=`.
-- If you pass a repo id string, you don't need to.
+`TransformersModel` has three run modes: `trace` (one forward), `generate` (returns token ids — read `tracer.result`), and `pipe` (runs the whole task pipeline, returns decoded records). See [docs/models/transformers-model.md](../models/transformers-model.md).
+
+### Mitigation
+- A pre-loaded HF model still works: `TransformersModel(model)` wraps it in a pipeline, inferring the task and sourcing the tokenizer from the model's `name_or_path` (pass `task=` / `tokenizer=` if it can't be inferred — e.g. a model built without a `name_or_path`). A bare non-HF `torch.nn.Module` goes through `NNsight(module)`.
 
 ---
 
-## Don't call `.source` on a module fn from inside another `.source`
+## `.source` can't drill into a submodule call
 
 ### Symptom
 ```
-ValueError: Don't call .source on a module (...) from within another .source.
-Call it directly with: <path>.source
+SourceNotAvailable: 'self_c_proj_0' calls a submodule; call `.source` on that submodule directly instead of drilling into the call
 ```
 
 ### Cause
-`.source` rewrites the module's forward and registers per-operation hooks. Recursive `.source` works for *function* calls inside a forward, but if one of those operations is itself a *module call* (e.g. `self.c_proj(x)`), the source machinery refuses to descend into it. The error fires from `OperationEnvoy.source` (`src/nnsight/intervention/source.py:658`) when it detects the captured fn is a `torch.nn.Module`.
+`.source` decomposes a `forward` into its operations. You can drill into a plain *function* call with `op.source`, but if the call target is a `torch.nn.Module` (e.g. `self.c_proj(x)`), source refuses to descend — that module has its own envoy and hooks (`SourceEnvoy.source`, `src/nnsight/intervention/source.py:536`). Operation names include the full dotted path joined with `_` (`self.c_proj(x)` → `self_c_proj_0`).
 
-The fix is to access that submodule's envoy directly — its own `.source` works as a top-level entry.
-
-### Wrong code
+### Wrong / Right
 ```python
-with model.trace("Hello"):
-    # attempting to chain .source through a submodule call
-    out = (
-        model.transformer.h[0].attn
-        .source.self_c_proj_0       # this is a module call
-        .source.<something>         # ValueError
-        .output.save()
-    )
+# inspect available ops first
+with model.trace("Hello world"):
+    ...
+# print(model.transformer.h[0].mlp.source)   ->  self_c_fc_0, self_act_0, self_c_proj_0, self_dropout_0
+
+# wrong — c_proj is a submodule
+with model.trace("Hello world"):
+    model.transformer.h[0].mlp.source.self_c_proj_0.source     # SourceNotAvailable
+
+# right — go to the submodule's own envoy
+with model.trace("Hello world"):
+    act = model.transformer.h[0].mlp.source.self_act_0.output.save()   # a plain-fn op
+    proj = model.transformer.h[0].mlp.c_proj.output.save()            # the submodule directly
 ```
 
-### Right code
-```python
-with model.trace("Hello"):
-    # access the submodule's envoy directly, then its .source
-    out = model.transformer.h[0].attn.c_proj.source.<some_op>.output.save()
-```
-
-### Mitigation / how to spot it early
-- If you need to inspect operations inside a submodule's forward, walk to that submodule's envoy first.
-- See [docs/usage/source.md](../usage/source.md) for full source-tracing details.
+### Mitigation
+- To inspect ops inside a submodule's forward, walk to that submodule (`...mlp.c_proj`) and use *its* `.source`. See [docs/usage/source.md](../usage/source.md).
 
 ---
 
-## Auxiliary modules need `hook=True` for `.input`/`.output` access
+## Auxiliary modules need `hook=True` (and observe in a later trace)
 
 ### Symptom
-You add an SAE, LoRA adapter, or any auxiliary `nn.Module` to your model, call it inside a trace, and try to access `aux.output` afterward. Either the access deadlocks waiting for a value that never comes, or you get a missed-provider error.
+You attach an SAE/adapter, call it inside a trace, and reading `aux.submodule.output` raises `OutOfOrderError` / never fires.
 
 ### Cause
-`Envoy.__call__` has a `hook=False` default (`src/nnsight/intervention/envoy.py:239`):
-
-```python
-def __call__(self, *args, hook=False, **kwargs):
-    return (
-        self._module.forward(*args, **kwargs)
-        if self.interleaver.current is not None and not hook
-        else self._module(*args, **kwargs)
-    )
-```
-
-When you call an envoy *inside* an interleaving session and don't pass `hook=True`, it routes to `.forward(...)` directly, bypassing PyTorch's `__call__` hook dispatch. That means the sentinel hook (which keeps PyTorch in the dispatch path) is bypassed and dynamically registered one-shot hooks for `.input`/`.output` never fire.
-
-For module calls where you want post-call inspection of `.input`/`.output`, pass `hook=True` to route through the hook-dispatching path.
-
-### Wrong code
-```python
-# model.sae is an SAE you've added to the envoy tree
-with model.trace() as tracer:
-    with tracer.invoke("Hello"):
-        hs = model.transformer.h[5].output
-        recon = model.sae(hs)         # default: hook=False, routes through .forward
-        model.transformer.h[5].output[:] = recon
-
-    with tracer.invoke():
-        sae_out = model.sae.output.save()   # never fires — no hook was registered
-```
+`Envoy.__call__` defaults to `hook=False` (`src/nnsight/intervention/envoy.py:682`): while interleaving it runs `module.forward(...)` directly, skipping PyTorch's hook dispatch, so the module's submodules aren't observable. Pass `hook=True` to route through `module(...)` so its hooks fire. Apply the aux module in an `edit()` (a default intervention replayed on every trace) and observe its internals in a subsequent trace.
 
 ### Right code
 ```python
-with model.trace() as tracer:
-    with tracer.invoke("Hello"):
-        hs = model.transformer.h[5].output
-        recon = model.sae(hs, hook=True)   # routes through __call__, hooks fire
-        model.transformer.h[5].output[:] = recon
+model.transformer.h[0].adapter = MyAdapter().to(model.device)
 
-    with tracer.invoke():
-        sae_out = model.sae.output.save()   # OK — hook fired in invoke 1
+with model.edit() as (tracer, edited):
+    acts = edited.transformer.h[0].output
+    edited.transformer.h[0].output[:] = edited.transformer.h[0].adapter(acts, hook=True)
+
+with edited.trace("Hello world"):
+    inner = edited.transformer.h[0].adapter.inner.output.save()   # observable
 ```
 
-### Mitigation / how to spot it early
-- If a deadlock or missed-provider error mentions a path matching an auxiliary module you called manually, check whether you passed `hook=True`.
-- Plain modules that the model itself calls (transformer blocks, attention, MLP) are hooked automatically by the model's own forward pass — you only need `hook=True` for *your* explicit calls.
+To apply it on *every* generation step, put the passthrough under an `iter` loop in an `inplace=True` edit (see the `Envoy.__call__` docstring).
+
+### Mitigation
+- `OutOfOrderError`/missed-value mentioning a path of a module you called manually → you likely forgot `hook=True`. Modules the model itself calls (blocks, attn, mlp) are hooked automatically.
 
 ---
 
-## vLLM sampling kwargs route through `SamplingParams`
+## vLLM specifics
 
-### Symptom
-You write `tracer.invoke("Hello", temperature=0.8, top_p=0.95)` on a vLLM model and it works. You wonder where these kwargs go.
+### Cause / usage
+On `VLLM`, each invoke is its own vLLM request, so sampling settings are passed to `trace`/`invoke` rather than configured on the model, and the per-step intervention points are `model.logits` (pre-sample logits) and `model.samples` (drawn token ids):
 
-### Cause
-The `VLLM` wrapper's batcher forwards sampling-related kwargs to vLLM's `SamplingParams` so each invoke gets its own sampling configuration. Common keys: `temperature`, `top_p`, `top_k`, `max_tokens`, `min_tokens`, `frequency_penalty`, `repetition_penalty`, `n`, `seed`.
-
-### Right code
 ```python
 from nnsight.modeling.vllm import VLLM
 
-model = VLLM("gpt2", tensor_parallel_size=1, gpu_memory_utilization=0.1, dispatch=True)
-
-with model.trace(max_tokens=3) as tracer:
-    with tracer.invoke("Hello", temperature=0.8, top_p=0.95):
-        samples = list().save()
-        for step in tracer.iter[:]:
-            samples.append(model.samples.item())
+model = VLLM("gpt2", dispatch=True)                    # mode="sync" default; "async" for streaming
+with model.trace("The Eiffel Tower is in", temperature=0.0) as tracer:
+    model.transformer.h[8].output[:] = 0
+    logits = model.logits.save()
+    ids = model.samples.save()
 ```
 
-### Mitigation / how to spot it early
-- If a kwarg you pass to `tracer.invoke(...)` looks like sampling configuration, it's going to `SamplingParams`.
-- For values that aren't valid `SamplingParams` fields, vLLM raises at the SamplingParams construction step.
+Under `tracer.iter`, each pass sees the next decoded step's `logits`/`samples`.
 
----
-
-## vLLM: pipeline parallelism is not supported
-
-### Symptom
-`pipeline_parallel_size > 1` is silently overridden to 1. Or: code expecting different behavior on different stages doesn't work as expected.
-
-### Cause
-The `VLLM` wrapper forces `kwargs["pipeline_parallel_size"] = 1` (`src/nnsight/modeling/vllm/vllm.py:139`). nnsight's intervention model assumes a single mediator thread can reach every module — pipeline parallelism splits modules across stages on different GPUs, so no single worker has the full model. Tensor parallelism (TP) and data parallelism (DP) are supported because the batcher gathers/re-shards transparently.
-
-### Wrong assumption
-```python
-model = VLLM("meta-llama/Llama-3.1-70B", pipeline_parallel_size=2)  # silently overridden
-```
-
-### Right approach
-- Use TP (`tensor_parallel_size=N`) for sharding a single model across GPUs.
-- Use DP for replicating across GPUs.
-- For very large models that exceed a single node's TP capacity, the current advice is to use a different deployment topology (e.g. an NDIF deployment) rather than vLLM PP.
-
-### Mitigation / how to spot it early
-- If you set `pipeline_parallel_size > 1`, expect it to be 1 in practice.
-- See `src/nnsight/modeling/vllm/DISCUSSION.md` for the architectural reason and `IDEAS.md` for any future plans.
+### Mitigation
+- Sampling kwargs (`temperature`, `top_p`, `top_k`, `max_tokens`, ...) go to `trace`/`invoke`; invalid ones raise when vLLM builds its sampling params.
+- For engine/parallelism setup (tensor parallelism, sync vs async), see [docs/models/vllm.md](../models/vllm.md).
 
 ---
 
 ## Related
-- [docs/models/language-model.md](../models/language-model.md) — `LanguageModel` reference.
-- [docs/usage/source.md](../usage/source.md) — source-tracing docs.
-- [docs/concepts/envoy-and-eproperty.md](../concepts/envoy-and-eproperty.md) — `Envoy.__call__` and the `hook=` flag.
-- [docs/gotchas/save.md](save.md) — `.save()` mechanics (universal, including for vLLM).
+- [docs/models/transformers-model.md](../models/transformers-model.md) — the primary HF wrapper.
+- [docs/usage/source.md](../usage/source.md) — source-tracing reference.
+- [docs/models/vllm.md](../models/vllm.md) — vLLM model reference.
+- [docs/gotchas/save.md](save.md) — `.save()` mechanics (universal).

@@ -1,27 +1,19 @@
-from typing import Dict, Optional, Type, Union
-
-import torch
+from __future__ import annotations
 
 from ..intervention.envoy import Envoy
 
 
 class NNsight(Envoy):
-    """Root :class:`Envoy` that wraps a full ``torch.nn.Module`` tree.
+    """Wrap an arbitrary ``torch.nn.Module`` for tracing and intervention.
 
-    ``NNsight`` is the **base / root envoy** — the top of an envoy tree
-    that mirrors a PyTorch model's module hierarchy. Constructing one
-    recursively wraps every child ``torch.nn.Module`` in its own
-    :class:`Envoy` (or a user-specified subclass, see ``envoys`` below),
-    giving each module NNsight's intervention capabilities: access to and
-    modification of intermediate activations during execution via the
-    tracing context (``.trace`` / ``.generate`` / ``.scan`` / ``.edit`` /
-    ``.session``).
-
-    This is the simplest entry point for wrapping arbitrary PyTorch
-    models. Higher-level wrappers (``LanguageModel``, ``VLLM``,
-    ``DiffusionModel``, …) are themselves :class:`NNsight` subclasses and
-    serve as specialized root envoys — they add model-specific loading,
-    tokenization, and batching on top of the same root-envoy behavior.
+    The simplest entry point into nnsight: ``NNsight(module)`` builds a root
+    :class:`~nnsight.intervention.envoy.Envoy` mirroring the module's tree, so
+    every submodule exposes its activations inside a ``with model.trace(...):``
+    block (read them, edit them, capture gradients, ...). It is a thin, named
+    :class:`Envoy` — ``Envoy`` is the node type the tree is built from; ``NNsight``
+    is the conventional name for wrapping a whole model, and the higher-level
+    wrappers (``TransformersModel``, ``DiffusionModel``, ...) are specialized
+    envoys that add loading/tokenization on top of the same behavior.
 
     Example::
 
@@ -36,61 +28,5 @@ class NNsight(Envoy):
 
         with model.trace(torch.rand(1, 5)):
             hidden = model[0].output.save()
-
-    Customizing descendant Envoy classes
-    ------------------------------------
-
-    As the root envoy, ``NNsight`` is also where the ``envoys``
-    configuration is introduced for the whole tree. The value is
-    forwarded to :class:`Envoy` and propagated to every descendant. It
-    can be:
-
-    - ``None`` (default) — every descendant is a plain :class:`Envoy`.
-    - An :class:`Envoy` subclass — used for every descendant.
-    - A ``Dict`` whose values are :class:`Envoy` subclasses. Keys may be
-      ``torch.nn.Module`` subclasses (matched via MRO) or strings
-      (matched as a dotted suffix on the envoy path, with single-component
-      rename aliases applied — so ``{"attn": ...}`` hits a path ending
-      in ``self_attn`` when the user passed
-      ``rename={"self_attn": "attn"}``). Type keys win over string keys;
-      unmatched modules fall back to :class:`Envoy`.
-
-    Subclasses may set ``envoys`` as a class attribute to provide a
-    default for all instances; users can still override it per-instance
-    via the ``envoys=`` constructor kwarg (pass ``envoys=None`` to opt
-    out of a subclass default)::
-
-        class MyModel(NNsight):
-            envoys = {torch.nn.Linear: MyLinearEnvoy}
-
-    Args:
-        *args: Positional arguments forwarded to :class:`Envoy`.
-            The first argument should be a ``torch.nn.Module``.
-        **kwargs: Keyword arguments forwarded to :class:`Envoy`.
-
-    Class Attributes:
-        envoys: Default ``envoys`` configuration for descendant modules.
-            ``None`` on the base class. Subclasses can set this to a
-            class or dict to apply throughout the tree by default.
+        print(hidden)
     """
-
-    envoys: Optional[
-        Union[Type[Envoy], Dict[Type[torch.nn.Module], Type[Envoy]]]
-    ] = None
-
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("envoys", type(self).envoys)
-
-        super().__init__(*args, **kwargs)
-
-        # TODO: legacy
-        self.__dict__["_model"] = self._module
-
-    def __getstate__(self):
-        state = super().__getstate__()
-        state["_model"] = self._module
-        return state
-
-    def __setstate__(self, state):
-        super().__setstate__(state)
-        self.__dict__["_model"] = state["_model"]

@@ -19,18 +19,18 @@ Interpret and manipulate the internals of deep learning models
 
 ## About
 
-**nnsight** is a Python library that enables interpreting and intervening on the internals of deep learning models. It provides a clean, Pythonic interface for:
+**nnsight** lets you get inside a model's forward pass. Open a `with model.trace(...)`
+block and write ordinary Python against any internal value — a layer's output, an
+attention pattern, a gradient — as if you already had it: read it, edit it, save it.
+You don't register hooks or refactor the model; you write the intervention in the
+order it happens, and nnsight runs it interleaved with the real forward pass.
 
-- **Accessing activations** at any layer during forward passes
-- **Modifying activations** to study causal effects
-- **Computing gradients** with respect to intermediate values
-- **Batching interventions** across multiple inputs efficiently
+The same trace runs on a model on your laptop or, with `remote=True`, on a model far
+too large for it via the [NDIF](https://ndif.us/) infrastructure. nnsight works with
+any PyTorch model and ships wrappers for HuggingFace, diffusers, and vLLM.
 
-Originally developed in the [NDIF team](https://ndif.us/) at Northeastern University, nnsight supports local execution on any PyTorch model and remote execution on large models via the NDIF infrastructure.
-
-> 📖 For a deeper technical understanding of nnsight's internals (tracing, interleaving, the Envoy system, etc.), see **[NNsight.md](./NNsight.md)**.
-
----
+> 📖 For how it works under the hood — tracing, interleaving, the envoy tree — read
+> **[NNsight.md](./NNsight.md)**. Task recipes live under [`docs/`](docs/).
 
 ## Installation
 
@@ -38,473 +38,139 @@ Originally developed in the [NDIF team](https://ndif.us/) at Northeastern Univer
 pip install nnsight
 ```
 
----
-
-## Agents
-
-Inform LLM agents how to use nnsight using one of these methods:
-
-### Skills Repository
-
-**Claude Code**
-
-```bash
-# Open Claude Code terminal
-claude
-
-# Add the marketplace (one time)
-/plugin marketplace add https://github.com/ndif-team/skills.git
-
-# Install all skills
-/plugin install nnsight@skills
-```
-
-**OpenAI Codex**
-
-```bash
-# Open OpenAI Codex terminal
-codex
-
-# Install skills
-skill-installer install https://github.com/ndif-team/skills.git
-```
-
-### Context7 MCP
-
-Alternatively, use [Context7](https://github.com/upstash/context7) to provide up-to-date nnsight documentation directly to your LLM. Add `use context7` to your prompts or configure it in your MCP client:
-
-```json
-{
-  "mcpServers": {
-    "context7": {
-      "url": "https://mcp.context7.com/mcp"
-    }
-  }
-}
-```
-
-See the [Context7 README](https://github.com/upstash/context7/blob/master/README.md) for full installation instructions across different IDEs.
-
-### Documentation Files
-
-You can also add our documentation files directly to your agent's context:
-
-- **[CLAUDE.md](./CLAUDE.md)** — Comprehensive guide for AI agents working with nnsight
-- **[NNsight.md](./NNsight.md)** — Deep technical documentation on nnsight's internals
-
----
-
-## Quick Start
+## Quick start
 
 ```python
-from nnsight import LanguageModel
+from nnsight import TransformersModel
 
-model = LanguageModel('openai-community/gpt2', device_map='auto', dispatch=True)
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
-with model.trace('The Eiffel Tower is in the city of'):
-    # Intervene on activations (must access in execution order!)
-    model.transformer.h[0].output[0][:] = 0
-    
-    # Access and save hidden states from a later layer
-    hidden_states = model.transformer.h[-1].output[0].save()
-    
-    # Get model output
-    output = model.output.save()
-
-print(model.tokenizer.decode(output.logits.argmax(dim=-1)[0]))
-```
-
-> **💡 Tip:** Always call `.save()` on values you want to access after the trace exits. Without `.save()`, values are garbage collected. You can also use `nnsight.save(value)` as an alternative.
-
-## Accessing Activations
-
-```python
 with model.trace("The Eiffel Tower is in the city of"):
-    # Access attention output
-    attn_output = model.transformer.h[0].attn.output[0].save()
-    
-    # Access MLP output
-    mlp_output = model.transformer.h[0].mlp.output.save()
+    # read a hidden state (a [batch, seq, hidden] tensor)
+    hidden = model.transformer.h[6].output.save()
 
-    # Access any layer's output (access in execution order)
-    layer_output = model.transformer.h[5].output[0].save()
-    
-    # Access final logits
-    logits = model.lm_head.output.save()
+    # edit a layer's output in place — the model computes on the edited value
+    model.transformer.h[0].output[:] = 0
+
+    # keep the final logits
+    logits = model.output.logits.save()
+
+print(hidden.shape)            # torch.Size([1, 10, 768])
+print(logits.argmax(-1))       # next-token predictions
 ```
 
-**Note:** GPT-2 transformer layers return tuples where index 0 contains the hidden states.
+Inside the block you're not running the model — you're describing what to do when it
+runs. Reading `.output` gives you the real tensor once the model reaches that module;
+assigning to it splices your value in. Mark anything you want after the block with
+`.save()` (or `nnsight.save(x)`).
 
-## Modifying Activations
+> A GPT-2 block's `.output` is a plain tensor; some modules (like attention) return a
+> tuple, so you'd index `.output[0]`. `print(model)` or `print(module.source)` shows
+> the shape.
 
-### In-Place Modification
+## What you can do
 
-```python
-with model.trace("Hello"):
-    # Zero out all activations
-    model.transformer.h[0].output[0][:] = 0
-    
-    # Modify specific positions
-    model.transformer.h[0].output[0][:, -1, :] = 0  # Last token only
-```
-
-### Replacement
-
-```python
-with model.trace("Hello"):
-    # Add noise to activations
-    hs = model.transformer.h[-1].mlp.output.clone()
-    noise = 0.01 * torch.randn(hs.shape)
-    model.transformer.h[-1].mlp.output = hs + noise
-    
-    result = model.transformer.h[-1].mlp.output.save()
-```
-
-## Batching with Invokers
-
-Process multiple inputs in one forward pass. Each invoke runs its code in a **separate worker thread**:
-
-- Threads execute serially (no race conditions)
-- Each thread waits for values via `.output`, `.input`, etc.
-- Invokes run in the order they're defined
-- Cross-invoke references work because threads run sequentially
-- **Within an invoke, access modules in execution order only**
-
-```python
-with model.trace() as tracer:
-    # First invoke: worker thread 1
-    with tracer.invoke("The Eiffel Tower is in"):
-        embeddings = model.transformer.wte.output  # Thread waits here
-        output1 = model.lm_head.output.save()
-    
-    # Second invoke: worker thread 2 (runs after thread 1 completes)
-    with tracer.invoke("_ _ _ _ _ _"):
-        model.transformer.wte.output = embeddings  # Uses value from thread 1
-        output2 = model.lm_head.output.save()
-```
-
-### Prompt-less Invokers
-
-Use `.invoke()` with no arguments to operate on the entire batch:
-
-```python
-with model.trace() as tracer:
-    with tracer.invoke("Hello"):
-        out1 = model.lm_head.output[:, -1].save()
-    
-    with tracer.invoke(["World", "Test"]):
-        out2 = model.lm_head.output[:, -1].save()
-    
-    # No-arg invoke: operates on ALL 3 inputs
-    with tracer.invoke():
-        out_all = model.lm_head.output[:, -1].save()  # Shape: [3, vocab]
-```
-
-
-## Multi-Token Generation
-
-Use `.generate()` for autoregressive generation:
+**Generate** — `generate` returns token ids on `tracer.result`:
 
 ```python
 with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
-    output = model.generator.output.save()
-
-print(model.tokenizer.decode(output[0]))
-# "The Eiffel Tower is in the city of Paris"
+    ids = tracer.result.save()
+print(model.tokenizer.decode(ids[0]))     # "The Eiffel Tower is in the middle of"
 ```
 
-### Iterating Over Generation Steps
-
-```python
-with model.generate("Hello", max_new_tokens=5) as tracer:
-    logits = list().save()
-    
-    # Iterate over all generation steps
-    for step in tracer.iter[:]:
-        logits.append(model.lm_head.output[0][-1].argmax(dim=-1))
-
-print(model.tokenizer.batch_decode(logits))
-```
-
-### Conditional Interventions Per Step
-
-```python
-with model.generate("Hello", max_new_tokens=5) as tracer:
-    outputs = list().save()
-    
-    for step_idx in tracer.iter[:]:
-        if step_idx == 2:
-            model.transformer.h[0].output[0][:] = 0  # Only on step 2
-
-        outputs.append(model.transformer.h[-1].output[0])
-```
-
-> **⚠️ Warning:** Code after `tracer.iter[:]` never executes! The unbounded iterator waits forever for more steps. Put post-iteration code in a separate `tracer.invoke()`. When using multiple invokes, do not pass input to `generate()` — pass it to the first invoke:
-> ```python
-> with model.generate(max_new_tokens=3) as tracer:
->     with tracer.invoke("Hello"):  # First invoker — pass input here
->         for step in tracer.iter[:]:
->             hidden = model.transformer.h[-1].output.save()
->     with tracer.invoke():  # Second invoker — runs after generation
->         final = model.output.save()  # Now works!
-> ```
-
-
-## Gradients
-
-Gradients are accessed on **tensors** (not modules), only inside a `with tensor.backward():` context:
-
-```python
-with model.trace("Hello"):
-    hs = model.transformer.h[-1].output[0]
-    hs.requires_grad_(True)
-    
-    logits = model.lm_head.output
-    loss = logits.sum()
-    
-    with loss.backward():
-        grad = hs.grad.save()
-
-print(grad.shape)
-```
-
-
-## Model Editing
-
-Create persistent model modifications:
-
-```python
-# Create edited model (non-destructive)
-with model.edit() as model_edited:
-    model.transformer.h[0].output[0][:] = 0
-
-# Original model unchanged
-with model.trace("Hello"):
-    out1 = model.transformer.h[0].output[0].save()
-
-# Edited model has modification
-with model_edited.trace("Hello"):
-    out2 = model_edited.transformer.h[0].output[0].save()
-
-assert not torch.all(out1 == 0)
-assert torch.all(out2 == 0)
-```
-
-
-## Scanning (Shape Inference)
-
-Get shapes without running the full model. Like all tracing contexts, `.save()` is required to persist values outside the block:
+**Reach into each generation step** — save a container, append raw values (use a
+bounded range so code after the loop still runs):
 
 ```python
 import nnsight
 
-with model.scan("Hello"):
-    dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
-
-print(dim)  # 768
+with model.generate("Hello", max_new_tokens=5) as tracer:
+    tokens = nnsight.save([])
+    for step in tracer.iter[:5]:
+        tokens.append(model.output.logits[0, -1].argmax(-1))
 ```
 
-
-## Caching Activations
-
-Automatically cache outputs from modules:
+**Batch several prompts in one pass** — each `invoke` block sees only its own rows:
 
 ```python
-with model.trace("Hello") as tracer:
-    cache = tracer.cache()
-
-# Access cached values
-layer0_out = cache['model.transformer.h.0'].output
-print(cache.model.transformer.h[0].output[0].shape)
+with model.trace() as tracer:
+    with tracer.invoke("The Eiffel Tower is in"):
+        eiffel = model.transformer.h[-1].output[:, -1].save()
+    with tracer.invoke("The Great Wall is in"):
+        wall = model.transformer.h[-1].output[:, -1].save()
 ```
 
-
-## Sessions
-
-Group multiple traces for efficiency:
-
-```python
-with model.session() as session:
-    with model.trace("Hello"):
-        hs1 = model.transformer.h[0].output[0].save()
-    
-    with model.trace("World"):
-        model.transformer.h[0].output[0][:] = hs1  # Use value from first trace
-        hs2 = model.transformer.h[0].output[0].save()
-```
-
-
-## Remote Execution (NDIF)
-
-Run on NDIF's remote infrastructure:
-
-```python
-from nnsight import CONFIG
-CONFIG.set_default_api_key("YOUR_API_KEY")
-
-model = LanguageModel("meta-llama/Meta-Llama-3.1-8B")
-
-with model.trace("Hello", remote=True):
-    hidden_states = model.model.layers[-1].output.save()
-```
-
-Check available models at [nnsight.net/status](https://nnsight.net/status/)
-
-
-## vLLM Integration
-
-High-performance inference with vLLM:
-
-```python
-from nnsight.modeling.vllm import VLLM
-
-model = VLLM("gpt2", tensor_parallel_size=1, dispatch=True)
-
-with model.trace("Hello", temperature=0.0, max_tokens=5) as tracer:
-    logits = list().save()
-    
-    for step in tracer.iter[:]:
-        logits.append(model.logits)
-```
-
-
-## NNsight for Any PyTorch Model
-
-Use `NNsight` for arbitrary PyTorch models:
-
-```python
-from nnsight import NNsight
-import torch
-
-net = torch.nn.Sequential(
-    torch.nn.Linear(5, 10),
-    torch.nn.Linear(10, 2)
-)
-
-model = NNsight(net)
-
-with model.trace(torch.rand(1, 5)):
-    layer1_out = model[0].output.save()
-    output = model.output.save()
-```
-
-## Source Tracing
-
-Access intermediate operations inside a module's forward pass. `.source` rewrites the forward method to hook into all operations:
-
-```python
-# Discover available operations
-print(model.transformer.h[0].attn.source)
-# Shows forward method with operation names like:
-#   attention_interface_0 -> 66  attn_output, attn_weights = attention_interface(...)
-#   self_c_proj_0         -> 79  attn_output = self.c_proj(attn_output)
-
-# Access operation values
-with model.trace("Hello"):
-    attn_out = model.transformer.h[0].attn.source.attention_interface_0.output.save()
-```
-
-## Ad-hoc Module Application
-
-Apply modules out of their normal execution order:
+**Take gradients** with respect to an internal value:
 
 ```python
 with model.trace("The Eiffel Tower is in the city of"):
-    # Get intermediate hidden states
-    hidden_states = model.transformer.h[-1].output[0]
-    
-    # Apply lm_head to get "logit lens" view
-    logits = model.lm_head(model.transformer.ln_f(hidden_states))
-    tokens = logits.argmax(dim=-1).save()
-
-print(model.tokenizer.decode(tokens[0]))
+    hidden = model.transformer.h[-1].output
+    with model.output.logits.sum().backward():
+        grad = hidden.grad.save()
 ```
 
----
-
-## Core Concepts
-
-### Deferred Execution with Thread-Based Synchronization
-
-NNsight uses **deferred execution** with **thread-based synchronization**:
-
-1. **Code extraction**: When you enter a `with model.trace(...)` block, nnsight captures your code (via AST) and immediately exits the block
-2. **Thread execution**: Your code runs in a separate worker thread
-3. **Value waiting**: When you access `.output`, the thread **waits** until the model provides that value
-4. **Hook-based injection**: The model uses PyTorch hooks to provide values to waiting threads
+**Apply modules out of order** (a logit lens — decode a middle layer through the head):
 
 ```python
-with model.trace("Hello"):
-    # Code runs in a worker thread
-    # Thread WAITS here until layer output is available
-    hs = model.transformer.h[-1].output[0]
-    
-    # .save() marks the value to persist after the context exits
-    hs = hs.save()
-    # Alternative: hs = nnsight.save(hs)
-
-# After exiting, hs contains the actual tensor
-print(hs.shape)  # torch.Size([1, 2, 768])
+with model.trace("The Eiffel Tower is in the city of"):
+    hidden = model.transformer.h[-1].output
+    token = model.lm_head(model.transformer.ln_f(hidden))[0, -1].argmax(-1).save()
+print(model.tokenizer.decode(token))      # " Paris"
 ```
 
-**Key insight:** Your code runs directly. When you access `.output`, you get the **real tensor** - your thread just waits for it to be available.
-
-**Important:** Within an invoke, you must access modules in execution order. Accessing layer 5's output before layer 2's output will cause a deadlock (layer 2 has already been executed).
-
-### Key Properties
-
-Every module has these special properties. Accessing them causes the worker thread to **wait** for the value:
-
-| Property | Description |
-|----------|-------------|
-| `.output` | Module's forward pass output (thread waits) |
-| `.input` | First positional argument to the module |
-| `.inputs` | All inputs as `(args_tuple, kwargs_dict)` |
-
-**Note:** `.grad` is accessed on **tensors** (not modules), only inside a `with tensor.backward():` context.
-
-### Module Hierarchy
-
-Print the model to see its structure:
+**Run it remotely** on NDIF — the same trace, on a model you can't host:
 
 ```python
-print(model)
-# GPT2LMHeadModel(
-#   (transformer): GPT2Model(
-#     (h): ModuleList(
-#       (0-11): 12 x GPT2Block(
-#         (attn): GPT2Attention(...)
-#         (mlp): GPT2MLP(...)
-#       )
-#     )
-#   )
-#   (lm_head): Linear(...)
-# )
+from nnsight import CONFIG
+CONFIG.set_default_api_key("YOUR_NDIF_KEY")
+
+model = TransformersModel("meta-llama/Llama-3.1-8B")
+with model.trace("The Eiffel Tower is in", remote=True):
+    hidden = model.model.layers[-1].output.save()
 ```
 
----
+There's more — **source tracing** into a module's forward (`.source`), persistent
+**`edit()`**, **`skip()`**, **`scan()`** for shapes, **`cache()`**, **`session()`**,
+and the **vLLM** and **diffusion** runtimes. See [`docs/`](docs/) and
+[NNsight.md](./NNsight.md).
 
-## Troubleshooting
+## Your own model
 
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `OutOfOrderError: Value was missed...` | Accessed modules in wrong order | Access modules in forward-pass execution order |
-| `NameError` after `tracer.iter[:]` | Code after unbounded iter doesn't run | Use separate `tracer.invoke()` for post-iteration code; pass input to first invoke, not `generate()` |
-| `ValueError: Cannot invoke during an active model execution` | Passed input to `generate()` while using multiple invokes | Use `model.generate(max_new_tokens=N)` with no input; pass prompt to first `tracer.invoke("Hello")` |
-| `ValueError: Cannot return output of Envoy...` | No input provided to trace | Provide input: `model.trace(input)` or use `tracer.invoke(input)` |
+Any `torch.nn.Module` works — wrap it in `NNsight` and the whole tree becomes
+traceable:
 
-For more debugging tips, see the [documentation](https://www.nnsight.net).
+```python
+import torch
+from nnsight import NNsight
 
----
+net = torch.nn.Sequential(torch.nn.Linear(5, 10), torch.nn.Linear(10, 2))
+model = NNsight(net)
 
-## More Resources
+with model.trace(torch.rand(1, 5)):
+    model[0].output[:] = 0                 # zero the first layer's output
+    out = model.output.save()
 
-- **[Documentation](https://www.nnsight.net)** — Tutorials, guides, and API reference
-- **[NNsight.md](./NNsight.md)** — Deep technical documentation on nnsight's internals
-- **[CLAUDE.md](./CLAUDE.md)** — Comprehensive guide for AI agents working with nnsight
-- **[Performance Report](./tests/performance/profile/results/performance_report.md)** — Detailed performance analysis and benchmarks
+print(out)                                 # [1, 2], computed with layer 0 zeroed
+```
 
----
+## Using nnsight from an LLM agent
+
+Give an agent up-to-date nnsight knowledge one of these ways:
+
+- **Skills** — in Claude Code: `/plugin marketplace add https://github.com/ndif-team/skills.git`
+  then `/plugin install nnsight@skills`. In OpenAI Codex:
+  `skill-installer install https://github.com/ndif-team/skills.git`.
+- **Context7 MCP** — add `use context7` to prompts, or point your MCP client at
+  `https://mcp.context7.com/mcp` (see [Context7](https://github.com/upstash/context7)).
+- **Docs in context** — hand the agent [CLAUDE.md](./CLAUDE.md) (routes to the
+  task docs) and [NNsight.md](./NNsight.md) (the internals).
+
+## Learn more
+
+- **[nnsight.net](https://www.nnsight.net)** — tutorials, guides, API reference
+- **[NNsight.md](./NNsight.md)** — the design-and-implementation manual
+- **[CLAUDE.md](./CLAUDE.md)** + **[docs/](docs/)** — the task reference
+- **[nnsight.net/status](https://nnsight.net/status/)** — models available on NDIF
 
 ## Citation
 
@@ -512,12 +178,12 @@ If you use `nnsight` in your research, please cite:
 
 ```bibtex
 @article{fiottokaufman2024nnsightndifdemocratizingaccess,
-      title={NNsight and NDIF: Democratizing Access to Foundation Model Internals}, 
+      title={NNsight and NDIF: Democratizing Access to Foundation Model Internals},
       author={Jaden Fiotto-Kaufman and Alexander R Loftus and Eric Todd and Jannik Brinkmann and Caden Juang and Koyena Pal and Can Rager and Aaron Mueller and Samuel Marks and Arnab Sen Sharma and Francesca Lucchetti and Michael Ripa and Adam Belfki and Nikhil Prakash and Sumeet Multani and Carla Brodley and Arjun Guha and Jonathan Bell and Byron Wallace and David Bau},
       year={2024},
       eprint={2407.14561},
       archivePrefix={arXiv},
       primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2407.14561}, 
+      url={https://arxiv.org/abs/2407.14561},
 }
 ```

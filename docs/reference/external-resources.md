@@ -23,14 +23,7 @@ tags: [reference, links]
 |----------|-----|------------------|
 | NDIF login | [https://login.ndif.us](https://login.ndif.us) | Get your NDIF API key (paste into `CONFIG.set_default_api_key(...)`). |
 | NDIF API | [https://api.ndif.us](https://api.ndif.us) | Default value of `CONFIG.API.HOST`. Status, env, job submission, results. |
-| NDIF status page | [https://nnsight.net/status](https://nnsight.net/status) | Check which models are currently deployed and running. |
-
-## Walkthrough notebooks
-
-| Resource | Path / URL | When to go there |
-|----------|------------|------------------|
-| Walkthrough notebook (local) | [`/disk/u/jadenfk/wd/nnsight/NNsight_Walkthrough.ipynb`](../../NNsight_Walkthrough.ipynb) | End-to-end Jupyter walkthrough covering tracing, generation, batching, gradients, sessions, and remote execution. |
-| Walkthrough notebook (Colab) | [Open in Colab](https://colab.research.google.com/github/ndif-team/nnsight/blob/main/NNsight_Walkthrough.ipynb) | Same notebook, runnable in the browser. Linked from the README badge. |
+| NDIF status page | [https://nnsight.net/status](https://nnsight.net/status) | Check which models are currently deployed and running (or call `nnsight.status()`). |
 
 ## Tutorials at nnsight.net
 
@@ -51,11 +44,8 @@ If a specific link 404s, fall back to the canonical Tutorials section at [nnsigh
 
 | Doc | Path | When to read |
 |-----|------|--------------|
-| `README.md` | [`/disk/u/jadenfk/wd/nnsight/README.md`](../../README.md) | High-level intro, install, quick start. |
-| `CLAUDE.md` | [`/disk/u/jadenfk/wd/nnsight/CLAUDE.md`](../../CLAUDE.md) | LLM-agent-oriented guide to using nnsight. |
-| `NNsight.md` | [`/disk/u/jadenfk/wd/nnsight/NNsight.md`](../../NNsight.md) | Deep technical documentation on internals (tracing, interleaving, Envoy, vLLM). |
-| `0.6.0.md` | [`/disk/u/jadenfk/wd/nnsight/0.6.0.md`](../../0.6.0.md) | Detailed v0.6 release notes. |
-| Performance report | [`tests/performance/profile/results/performance_report.md`](https://github.com/ndif-team/nnsight/blob/main/tests/performance/profile/results/performance_report.md) | Benchmarks and detailed perf analysis. |
+| `README.md` | [`../../README.md`](../../README.md) | High-level intro, install, quick start. |
+| `STYLE.md` | [`../../STYLE.md`](../../STYLE.md) | Code/doc style conventions for this repo. |
 
 ## Related projects
 
@@ -64,5 +54,4 @@ If a specific link 404s, fall back to the canonical Tutorials section at [nnsigh
 | NDIF skills marketplace | [https://github.com/ndif-team/skills](https://github.com/ndif-team/skills) | Claude Code / Codex plugin with nnsight skills. |
 | nnterp | [https://github.com/ndif-team/nnterp](https://github.com/ndif-team/nnterp) | nnsight-based library standardizing transformer interfaces across model families. |
 | nnsight-vllm-demos | [https://github.com/ndif-team/nnsight-vllm-demos](https://github.com/ndif-team/nnsight-vllm-demos) | Demo apps including async chat with SAE-based steering. |
-| nnsight-vllm-lens-comparison | [https://github.com/ndif-team/nnsight-vllm-lens-comparison](https://github.com/ndif-team/nnsight-vllm-lens-comparison) | Reference implementation comparing logit-lens variants on top of vLLM. |
 | DeepWiki page | [https://deepwiki.com/ndif-team/nnsight](https://deepwiki.com/ndif-team/nnsight) | Auto-generated wiki explorer for the nnsight codebase. |

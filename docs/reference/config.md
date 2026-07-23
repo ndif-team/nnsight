@@ -1,69 +1,71 @@
 ---
 title: Configuration Reference
-one_liner: Every CONFIG.APP.* and CONFIG.API.* setting, with type, default, and when to change.
+one_liner: Every CONFIG.API.* and CONFIG.APP.* setting, with type, default, and when to change.
 tags: [reference, config]
 ---
 
 # Configuration Reference
 
-`nnsight.CONFIG` is a `ConfigModel` (Pydantic) singleton constructed at import from `src/nnsight/config.yaml`. It is composed of two sub-models:
+`nnsight.CONFIG` is a Pydantic `Config` singleton, built at import from `src/nnsight/schema/config.py`. Two sub-models:
 
-- `CONFIG.APP` — local-runtime settings (debug, pymount, cross-invoker, cache).
-- `CONFIG.API` — settings used to talk to NDIF (host, key, compression).
+- `CONFIG.API` — settings for talking to NDIF (host, key, compression).
+- `CONFIG.APP` — local-runtime settings (debug, remote logging, `.save()` mount).
+
+```python
+from nnsight import CONFIG
+print(CONFIG)
+# API=ApiConfig(HOST='https://api.ndif.us', APIKEY=None, COMPRESS=True)
+# APP=AppConfig(DEBUG=False, REMOTE_LOGGING=True, PYMOUNT=True)
+```
 
 ## How config is loaded
 
-Source of truth: `src/nnsight/schema/config.py` and `src/nnsight/config.yaml`.
+Source of truth: `src/nnsight/schema/config.py` and the shipped `src/nnsight/config.yaml`.
 
-Load order (`ConfigModel.load`):
+Load order (`Config.load`), later wins:
 
-1. Read defaults from `config.yaml` (next to the package).
-2. `from_env()` — `NDIF_API_KEY` env var (or Colab `userdata.NDIF_API_KEY`) overrides `CONFIG.API.APIKEY`; `NDIF_HOST` overrides `CONFIG.API.HOST`.
-3. `from_cli()` — if `-d` or `--debug` is in `sys.argv`, force `CONFIG.APP.DEBUG = True`.
+1. **Shipped defaults** from the package `config.yaml`. (Don't edit it — it's overwritten on upgrade.)
+2. **User file** — `~/.config/nnsight/config.yaml` (or `$XDG_CONFIG_HOME/nnsight/config.yaml`, or the path in `$NNSIGHT_CONFIG`), merged over the defaults.
+3. **Environment** — `NDIF_API_KEY`, `NDIF_HOST`, `NNSIGHT_DEBUG` (see below). In Colab, a `NDIF_API_KEY` notebook secret is a fallback when no env var and no file key is set.
 
-`CONFIG.save()` writes the current values back into `config.yaml`. The convenience helpers below also persist:
+`CONFIG.save()` writes the current values to the **user** file (creating it if needed) — never to the shipped one.
 
 ```python
 from nnsight import CONFIG
 
-CONFIG.set_default_api_key("YOUR_NDIF_KEY")  # writes APIKEY + saves
-CONFIG.set_default_app_debug(True)            # writes APP.DEBUG + saves
+CONFIG.set_default_api_key("YOUR_NDIF_KEY")  # sets APIKEY + saves to user file
 CONFIG.save()                                 # explicit save
 ```
-
-## `CONFIG.APP.*`
-
-| Name | Type | Default | What it does | When to change |
-|------|------|---------|--------------|----------------|
-| `APP.DEBUG` | `bool` | `False` | When `True`, exceptions inside a trace include the full nnsight internal stack frames. When `False`, tracebacks are reconstructed to point at user code only. | Turn on while debugging an exception you suspect originates in nnsight internals; otherwise leave off. Also enabled by `python -d`. |
-| `APP.REMOTE_LOGGING` | `bool` | `True` | Whether `print(...)` from a remote-trace worker is streamed back as `LOG` events. | Disable to silence remote logs (e.g. for noisy production scripts). |
-| `APP.PYMOUNT` | `bool` | `True` | When `True`, the `py_mount.c` C extension injects `.save()` and `.stop()` onto every Python `object` while a trace is active, enabling `tensor.save()` syntax. When `False`, you must use `nnsight.save(obj)` instead. | Disable if (a) you only use `nnsight.save()`, or (b) you have classes whose own `.save()` method is being shadowed/conflicting. |
-| `APP.CROSS_INVOKER` | `bool` | `True` | When `True`, variables assigned in one invoke are pushed/pulled across worker threads so later invokes can read them. | Disable to isolate invokes (e.g. while debugging a value-leakage bug) or for a small perf gain when you don't need cross-invoke sharing. |
-| `APP.CACHE_DIR` | `str` | `"~/.cache/nnsight/"` | Path for cached artifacts (e.g. exported edits via `Envoy.export_edits`). | Point at a faster disk or a writable location in restricted environments. |
-| `APP.TRACE_CACHING` | `bool` | `False` | **Deprecated.** Trace caching (source / AST / code-object caching) is now always on. Setting this to `True` warns and has no effect. | Don't change. Will be removed in a future version. |
 
 ## `CONFIG.API.*`
 
 | Name | Type | Default | What it does | When to change |
 |------|------|---------|--------------|----------------|
-| `API.HOST` | `str` | `"https://api.ndif.us"` | Base URL for NDIF requests (status, env, job submission, results). | Point at an internal NDIF deployment, or override via `NDIF_HOST` env var. |
-| `API.APIKEY` | `Optional[str]` | `None` (the shipped `config.yaml` may contain a placeholder) | NDIF API key sent with every remote request. | Set via `CONFIG.set_default_api_key("...")`, the `NDIF_API_KEY` env var, or Colab user data. |
-| `API.COMPRESS` | `bool` | `True` | When `True`, request payloads and result downloads use zstandard compression for faster transfers. | Disable only if you suspect a compression-layer issue or are debugging the wire format. |
+| `API.HOST` | `str` | `"https://api.ndif.us"` | Base URL for NDIF requests (status, env, job submission, results). | Point at an internal NDIF deployment; or override per call with `remote="<host url>"`, or globally via `NDIF_HOST`. |
+| `API.APIKEY` | `Optional[str]` | `None` | NDIF API key sent with every remote request. | Set via `CONFIG.set_default_api_key("...")`, the `NDIF_API_KEY` env var, or a Colab secret. |
+| `API.COMPRESS` | `bool` | `True` | zstandard-compress request payloads and result downloads for faster transfers. | Disable only when debugging the wire format / a compression issue. |
 
-## Environment-variable shortcuts
+## `CONFIG.APP.*`
+
+| Name | Type | Default | What it does | When to change |
+|------|------|---------|--------------|----------------|
+| `APP.DEBUG` | `bool` | `False` | When `True`, tracebacks keep nnsight's internal frames; when `False`, they are filtered to your own code. | Turn on to debug an exception you suspect is in nnsight internals. Also enabled by `NNSIGHT_DEBUG`. |
+| `APP.REMOTE_LOGGING` | `bool` | `True` | Whether `print(...)` from a remote run is streamed back as log events. | Disable to silence remote logs. |
+| `APP.PYMOUNT` | `bool` | `True` | Mount `.save()` onto every Python object (via the optional C extension) so `value.save()` works in a trace. When `False` (or the extension didn't build), use `nnsight.save(value)`. Mounting adds `.save` to all objects process-wide, so anything checking `hasattr(x, "save")` will see it. | Disable if you only use `nnsight.save()`, or a class's own `.save()` conflicts. |
+
+The old `CROSS_INVOKER`, `CACHE_DIR`, and `TRACE_CACHING` settings are **gone**: cross-invoke value sharing is now handled by scoping (no toggle), and trace caching is always on.
+
+## Environment variables
 
 | Variable | Effect |
 |----------|--------|
-| `NDIF_API_KEY` | Overrides `CONFIG.API.APIKEY` at import time. |
-| `NDIF_HOST` | Overrides `CONFIG.API.HOST` at import time. |
+| `NDIF_API_KEY` | Sets `CONFIG.API.APIKEY` at import. |
+| `NDIF_HOST` | Sets `CONFIG.API.HOST` at import. |
+| `NNSIGHT_DEBUG` | If set (any value), forces `CONFIG.APP.DEBUG = True`. |
+| `NNSIGHT_CONFIG` | Path to the user config file (overrides the `~/.config/nnsight/config.yaml` default). |
+| `XDG_CONFIG_HOME` | Base dir for the default user config path. |
 
-In Colab, `google.colab.userdata.NDIF_API_KEY` is also picked up automatically.
-
-## CLI shortcuts
-
-| Flag | Effect |
-|------|--------|
-| `python -d ...` or `python --debug ...` | Forces `CONFIG.APP.DEBUG = True` for the run. |
+Pass `-v` (or `--verbose`) on the command line — e.g. `python train.py -v` — to turn on debug mode for that run (equivalent to `NNSIGHT_DEBUG=1`). Note it's a plain `sys.argv` scan, so any launcher that also uses `-v` (e.g. `pytest -v`) will enable it too.
 
 ## Programmatic usage
 
@@ -75,9 +77,8 @@ print(CONFIG.APP.DEBUG, CONFIG.API.HOST)
 
 # Modify in-process (does NOT persist)
 CONFIG.APP.PYMOUNT = False
-CONFIG.APP.CROSS_INVOKER = False
 
-# Persist to config.yaml
+# Persist to the user config file
 CONFIG.save()
 
 # Set + persist API key in one call

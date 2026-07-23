@@ -1,230 +1,160 @@
 ---
 title: Source Tracing
-one_liner: .source rewrites a module's forward AST so each call site becomes a hookable operation; SourceAccessor and OperationAccessor own the per-module hook state, OperationEnvoy / SourceEnvoy are the per-Envoy wrappers.
+one_liner: .source rewrites a module's forward AST so every call site becomes a location bracketed through Interleaver.handle (input / skip / output) — the same primitive modules use, one level finer. Source is the forward view; SourceEnvoy is one operation.
 tags: [concept, mental-model, source-tracing]
-related: [docs/concepts/envoy-and-eproperty.md, docs/concepts/interleaver-and-hooks.md]
-sources: [src/nnsight/intervention/source.py:359, src/nnsight/intervention/source.py:274, src/nnsight/intervention/source.py:571, src/nnsight/intervention/source.py:688, src/nnsight/intervention/source.py:548, src/nnsight/intervention/source.py:210, src/nnsight/intervention/hooks.py:495, src/nnsight/intervention/hooks.py:589]
+related: [docs/concepts/envoy.md, docs/concepts/interleaver-and-hooks.md]
+sources: [src/nnsight/intervention/source.py:132, src/nnsight/intervention/source.py:271, src/nnsight/intervention/source.py:362, src/nnsight/intervention/source.py:414, src/nnsight/intervention/source.py:447, src/nnsight/intervention/source.py:664]
 ---
 
 # Source Tracing
 
+> Naming changed from the old docs: the module-forward view is now **`Source`** (was `SourceEnvoy`); a single operation is now **`SourceEnvoy`** (was `OperationEnvoy`). The per-module `SourceAccessor`/`OperationAccessor` split is gone — there is one per-module `_State` and one `handle`-based primitive.
+
 ## What this is for
 
-`module.source` exposes intermediate operations *inside* a module's forward method — every function call, method call, and operator becomes a hookable provider path. nnsight reaches this by parsing the module's forward source with `ast`, wrapping every `Call` node with a per-call-site dispatcher, and re-executing the rewritten function as the new forward.
+Module `.input`/`.output` are the only two locations the forward *hooks* surface. Everything in between — the individual operations inside a `forward` — is invisible, because it isn't a submodule with its own hook.
 
-This is how you intercept `attention_interface(...)`, `self.c_proj(...)`, `torch.nn.functional.scaled_dot_product_attention(...)` etc. without subclassing the module.
+`.source` makes those intermediates observable, editable, and skippable. It parses the module's `forward`, rewrites every call `fn(*args, **kwargs)` into `__nnsight_op__("source.{name}_{n}", fn, *args, **kwargs)`, and re-executes the rewritten function as the forward. At run time each op is bracketed through the **same** `Interleaver.handle` primitive modules use — `.input` before, a `.skip` gate, `.output` after — just one level finer. The interleaver knows nothing about source.
 
 ## When to use / when not to use
 
-- Use when you need access to a value that isn't a module's input or output — an internal intermediate.
-- Use recursive `.source` (calling `.source` on an `OperationEnvoy`) to descend into the called function's body.
-- **Do not** call `.source` on a sub-module from inside another `.source` — the system raises `ValueError` and tells you to access the module directly. Sub-modules already have their own source accessor.
-- Source rewriting fails if the forward is not a regular Python function (compiled CUDA kernels, extension functions, etc.). Plain Python forwards always work.
+- Use it to reach a value that is neither a module's input nor its output — an internal intermediate (an activation function, an attention call, a `torch.matmul`).
+- Use recursive `.source` (`.source` on a `SourceEnvoy`) to descend into a *called function's* body.
+- **Do not** drill `.source` into a call that is itself a submodule — access that submodule directly. It raises `SourceNotAvailable`.
+- The forward must be a plain Python function with recoverable source and no decorators. Builtins/C functions, closures over free variables, and decorated forwards raise `SourceNotAvailable`.
 
 ## Canonical pattern
 
 ```python
-import nnsight
+from nnsight.modeling.transformers import TransformersModel
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
-model = nnsight.LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+# Discover: print .source to see the forward with each op labelled.
+print(model.transformer.h[0].mlp.source)
 
-# Discover: print .source to see the rewritten forward with operation names.
-print(model.transformer.h[0].attn.source)
-
-with model.trace("Hello"):
-    # Read an internal operation's output.
-    attn_out = model.transformer.h[0].attn.source.attention_interface_0.output.save()
-
-    # Modify an internal operation's output.
-    model.transformer.h[0].attn.source.self_c_proj_0.output[:] = 0
+with model.trace("Hello world"):
+    act = model.transformer.h[0].mlp.source.self_act_0.output.save()   # read
+    model.transformer.h[0].mlp.source.self_c_proj_0.output[:] = 0      # edit
 ```
-
-## Architecture
-
-Two layers of objects, each split into a global "accessor" (per-module hook state) and a per-Envoy "wrapper" (user-facing API):
-
-| Layer | Global (per-module) | Per-Envoy wrapper |
-|-------|---------------------|-------------------|
-| Module forward | `SourceAccessor` (`source.py:359`) | `SourceEnvoy` (`source.py:688`) |
-| Single call site | `OperationAccessor` (`source.py:274`) | `OperationEnvoy` (`source.py:571`) |
-
-The accessors are cached on the module itself as `module.__source_accessor__`. Per-Envoy wrappers live on the owning Envoy. Multiple Envoys / Interleavers wrapping the same module **share** the underlying accessors — hook lists, fn-replacement state, and nested SourceAccessors for recursive source.
 
 ## Discovery: print .source
 
-Outside a trace, `print(model.transformer.h[0].attn.source)` shows the rewritten forward with operation names and line numbers:
+`print(model.transformer.h[0].mlp.source)` renders the forward with each operation labelled at its call site (verified output):
 
 ```
-                                *  def forward(self, hidden_states, ...):
-                                  1     ...
-  self_c_attn_0                -> 18    qkv = self.c_attn(hidden_states)
-                                  19    ...
-  attention_interface_0        -> 31    attn_output, attn_weights = attention_interface(
-                                  32        self, query, key, value, ...
-                                  33    )
-  attn_output_reshape_0        -> 34    attn_output = attn_output.reshape(...)
-  self_c_proj_0                -> 35    attn_output = self.c_proj(attn_output)
+                    * def forward(self, hidden_states: ...) -> torch.FloatTensor:
+ self_c_fc_0    ->  0     hidden_states = self.c_fc(hidden_states)
+ self_act_0     ->  1     hidden_states = self.act(hidden_states)
+ self_c_proj_0  ->  2     hidden_states = self.c_proj(hidden_states)
+ self_dropout_0 ->  3     hidden_states = self.dropout(hidden_states)
+                    4     return hidden_states
 ```
 
-Operation names are `<dotted_func>_<index>`. Indexing disambiguates repeated calls to the same function.
+Operation names are the **full dotted callee** joined with `_`, plus a per-name occurrence index: `self.c_fc(...)` → `self_c_fc_0`, `torch.relu(...)` → `torch_relu_0`, a bare `dropout(...)` → `dropout_0`. Indexing runs in execution order (nested calls inner-first). Print a single op to see it in context, flagged with `-->`/`<--`:
 
-Print a single operation to see it in surrounding context:
-
-```python
-print(model.transformer.h[0].attn.source.attention_interface_0)
-# -> shows the operation highlighted with --> ... <-- markers
 ```
+model.transformer.h.0.mlp.source.self_c_fc_0:
+
+    def forward(self, hidden_states: ...) -> torch.FloatTensor:
+    --> hidden_states = self.c_fc(hidden_states) <--
+        hidden_states = self.act(hidden_states)
+        ...
+```
+
+Iterating a `Source` yields its `SourceEnvoy`s in execution order: `[op.name for op in model.transformer.h[0].mlp.source]`.
 
 ## How rewriting works
 
-`SourceAccessor.__init__` (`source.py:374`) does the AST surgery via `convert(fn, self.wrap, path)` (`source.py:161`):
+`Source(envoy)` (`source.py:664`) calls `install_source(envoy)` (`source.py:414`), which:
 
-1. Read the module's forward source via `inspect.getsource`. Strip decorators (some, like transformers' `@auto_docstring`, fail when re-executed outside the class).
-2. Parse with `ast.parse`. A `FunctionCallWrapper` `NodeTransformer` visits every `Call` node *inside* the function body and replaces it:
+1. `_compiled(forward)` (cached per code object) parses the source, and `_Instrument` (`source.py:132`) — an `ast.NodeTransformer` — rewrites every `Call`:
    ```python
-   # Before:
    self.c_proj(attn_output)
-   # After:
-   wrap(self.c_proj, name="model.transformer.h.0.attn.self_c_proj_0")(attn_output)
+   # becomes
+   __nnsight_op__("source.self_c_proj_0", self.c_proj, attn_output)
    ```
-3. Compile the rewritten AST and `exec` it against a global namespace cloned from the original module + a `wrap` binding. The exec produces a new function with the same name.
-4. Build one `OperationAccessor` per call site, keyed on `<path>.<op_short_name>`.
+   It descends into arguments *before* numbering the outer call, so nested calls get lower indices (execution order).
+2. The rewritten AST is compiled and materialized into a new function whose `__nnsight_op__` global is bound to an `op` closure anchored to the module (`_make_op`, `source.py:302`).
+3. That instrumented function becomes the module's **body** in its `_State`; the installed **controller** forward runs it (see below).
 
-The injected forward is **not** written onto the module — instead, `nnsight_forward` (the wrapper installed by `Interleaver.wrap_module`) checks `module.__source_accessor__` and calls the injected function via the accessor when present (`interleaver.py:533`).
+The result (`Compiled`) carries the op labels, their line numbers, and the dedented source for the reprs.
 
-## OperationAccessor: the hook state
+## The per-module controller and `_State`
 
-Each `OperationAccessor` (`source.py:274`) owns four things:
+Installation is **lazy and permanent**. The first time a module is sourced *or* skipped, `_ensure_controller` (`source.py:392`) replaces its `forward` with a `controller` closure (`_make_controller`, `source.py:362`) and stores a `_State` on `module.__dict__["__nnsight__"]`.
 
-- `pre_hooks: List[Callable]` — appended by `operation_input_hook`. Called with `(args, kwargs)`; non-`None` return replaces them.
-- `post_hooks: List[Callable]` — appended by `operation_output_hook`. Called with the return value; non-`None` return replaces it.
-- `fn_hooks: List[Callable]` — appended by `operation_fn_hook` for recursive `.source`. Called with the current fn; returns a (possibly replaced) fn.
-- `fn_replacement: Optional[Callable]` — a one-shot fn replacement installed by `OperationEnvoy.source` for recursive source tracing. `wrap_operation` consumes and clears it before each call.
+`_State` holds:
 
-The `hooked` property is `True` if any list is non-empty or `fn_replacement` is set. `SourceAccessor.wrap` (`source.py:399`) takes the zero-overhead fast path (returns `fn` unchanged) when `hooked` is `False`.
+- `body`: the (unbound) forward to run — the original, or the source-instrumented one once `.source` is used.
+- `interleavers`: a `WeakKeyDictionary` mapping each interleaver that instrumented the module to the path it addresses it by. `active()` picks the one whose trace is currently running.
+- `sourced`: whether `body` is instrumented yet.
 
-## wrap_operation: the per-call-site dispatcher
+Each call, the controller reads the live `_State`: if no interleaver is running, it calls `body` straight through (inert outside a trace); otherwise it checks the `.skip` gate, then runs `body`. Because state is rebound per access, a module wrapped by several envoys/interleavers reports to whichever trace is currently active — and source and skip compose on one wrapper.
 
-When a call site is hooked, `SourceAccessor.wrap` returns a wrapper built by `wrap_operation` (`source.py:210`):
+## `_run_op`: the per-operation bracket
 
-```python
-@wraps(fn)
-def inner(*args, **kwargs):
-    actual_fn = op.fn_replacement or fn
-    op.fn_replacement = None  # one-shot, clear immediately
+When an instrumented op fires inside a trace, `_run_op` (`source.py:271`) brackets it under `{path}.{location}`:
 
-    for hook in list(op.fn_hooks):
-        actual_fn = hook(actual_fn)
+1. `handle("{base}.input", (args, kwargs))` — report/replace the arguments.
+2. `handle("{base}.skip", _NO_SKIP)` — if a skip is pending, return the replacement as this op's output; the call never runs.
+3. (recursive source) if a worker asked to drill into this op, offer the raw `fn` over `{base}.fn` so the worker can hand back an instrumented copy (see below).
+4. `value = fn(*args, **kwargs)` — run the call.
+5. `handle("{base}.output", value)` — report/replace the return value.
 
-    for hook in list(op.pre_hooks):
-        result = hook((args, kwargs))
-        if result is not None:
-            args, kwargs = result
+Steps 1/2/5 are the exact three handles a module hook emits — the interleaver treats an op location no differently from a module location. Occurrence tagging (`.i{n}`) applies the same way (see [Interleaver and Hooks](interleaver-and-hooks.md)).
 
-    value = actual_fn(*args, **kwargs)  # (with bound_obj handling)
+## SourceEnvoy: one operation
 
-    for hook in list(op.post_hooks):
-        result = hook(value)
-        if result is not None:
-            value = result
+`SourceEnvoy` (`source.py:447`) is the operation-level analogue of an `Envoy`. Its handles are plain properties over the mediator, mirroring an `Envoy`'s:
 
-    return value
-```
-
-Hook lists are read **live** at call time — hooks registered after the wrapper was built are still seen. `fn_replacement` is consumed *before* invocation to avoid races with the worker thread setting up the next step's replacement.
-
-## OperationEnvoy: the per-Envoy view
-
-`OperationEnvoy` (`source.py:571`) is a thin per-Envoy wrapper that satisfies `IEnvoy`. It hosts three eproperties:
-
-```python
-@eproperty()
-@requires_operation_output
-def output(self): ...
-
-@eproperty(key="input")
-@requires_operation_input
-def inputs(self): ...
-
-@eproperty(key="input")
-@requires_operation_input
-def input(self): ...   # with preprocess to extract first, postprocess to repack
-```
-
-The `requires_operation_*` decorators (`hooks.py:438`, `hooks.py:464`) register one-shot hooks on the underlying `OperationAccessor`'s hook lists rather than on a PyTorch module. See [Interleaver and Hooks](interleaver-and-hooks.md).
-
-## SourceEnvoy: the per-module wrapper
-
-`SourceEnvoy` (`source.py:688`) is what you get from `module.source`. It exposes one `OperationEnvoy` per call site as a regular attribute:
-
-```python
-src = model.transformer.h[0].attn.source     # SourceEnvoy
-op  = src.attention_interface_0                # OperationEnvoy
-val = op.output                                # eproperty access -> mediator request
-```
-
-Multiple `SourceEnvoy`s may wrap the same accessor (one per Envoy that touched `.source`); they share hook state via the underlying `OperationAccessor`s.
+- `.output` — the op's return value (`Mediator.value`/`swap` on `{path}.output`).
+- `.input` / `.inputs` — first argument / full `(args, kwargs)` on `{path}.input`.
+- `.skip(value)` — `Mediator.skip` on `{path}.skip`; the call never runs and `value` flows on.
+- `.source` — drill into the called function (recursive).
 
 ## Recursive .source
 
 To descend into an operation's called function:
 
 ```python
-sdpa = (
-    model.transformer.h[0].attn
-        .source.attention_interface_0
-        .source.torch_nn_functional_scaled_dot_product_attention_0
-        .output.save()
-)
+with model.trace("Hello world"):
+    attn  = model.transformer.h[0].attn.source
+    inner = attn.attention_interface_0.source          # drill into the call
+    scores = inner.matmul_0.output.save()              # an op inside it
 ```
 
-`OperationEnvoy.source` (`source.py:632`) handles this:
+`SourceEnvoy.source` (`source.py:503`) is **only available inside a trace**, because the call target is resolved from the live value flowing through the call (it's often a local, e.g. an attention implementation). It:
 
-1. First access: register an `operation_fn_hook` and request the operation's currently-bound fn via `mediator.request("...fn")`. The model is currently *inside* `wrap_operation` for that call site; the fn-hook fires and delivers the fn to the worker.
-2. The worker builds a nested `SourceAccessor(fn, path)` and stores it on `op.fn_replacement` so the operation, currently mid-flight, uses the injected version this step.
-3. The injected fn is also cached as `accessor._source_accessor` so subsequent `.source` accesses re-install it.
-4. A `SourceEnvoy(nested_accessor, interleaver)` is returned for user access.
+1. Marks the op location requested in `interleaver.sourced` (a `None` placeholder), then parks on `{path}.fn` until the op fires and `_run_op` hands back the live `fn`.
+2. If `fn` is a submodule, raises `SourceNotAvailable` (access that submodule directly). Otherwise `_compiled(fn)` parses it and `_build_instrumented` binds a nested `op` so *its* calls land under `{path}.source.{label}`.
+3. Caches the instrumented copy in `interleaver.sourced[path]` so later fires this run (e.g. generation steps) reuse it, and returns a nested `Source`.
 
-The fn-hook + swap dance is critical: by the time the user accesses `.source`, the operation is already running. nnsight has to substitute the injected fn for the rest of *this* call.
-
-## Caching across forward replacement
-
-`get_or_create_source_accessor(module)` (`source.py:548`) caches the `SourceAccessor` on `module.__source_accessor__`. This survives:
-
-- `torch.compile` re-binding `forward`.
-- accelerate's `_old_forward` swap on dispatch.
-- nnsight's own `_update` (e.g. when meta-tensor weights are loaded).
-
-`Envoy._update` (`envoy.py:796`) detects the swap and calls `accessor.rebind(new_fn)` (`source.py:431`) — this re-injects against the new fn but **preserves all OperationAccessor hook state** (lists, `fn_replacement`, nested accessors). Pre-existing `OperationEnvoy` / `SourceEnvoy` references stay valid.
+Verified: `attn.attention_interface_0.source` yields inner op names like `['kwargs_get_0', 'logger_warning_once_0', 'hasattr_0', 'use_gqa_in_sdpa_0', 'repeat_kv_0', 'repeat_kv_1', ...]`.
 
 ## Iteration tracking for source
 
-Operation iteration counts **invocations (fires)**, not forward passes. An op inside a loop (e.g. a Mixture-of-Experts expert loop) fires many times within one forward pass, and each fire is its own `iter[...]` index; an op that fires once per forward (across generation steps) counts the same as the module. This differs from module-level tracking, which is bumped once per forward pass.
+Occurrence tracking is **unified** with modules — no separate counter hooks. Because an op goes through `Interleaver.handle` *every time it fires*, its per-location count (`Mediator.iterations`) advances per **fire**:
 
-The counting is done by **per-fire counter hooks** (`register_op_counters`, `tracing/iterator.py`). When an iter loop is entered, a persistent counter is installed on every operation's `post_hooks` with `mediator_idx = float('inf')` — the op analog of the module iter hook — so (via `add_ordered_op_hook`) it always fires *after* the user's one-shot op hooks have compared against the tracker, then advances it. Because the counter is a `post_hook`, the op stays `hooked` and is counted **even on fires the user didn't observe** (so sparse `iter[[0, 2]]` and skipped generation steps stay aligned). The recursion descends through `OperationAccessor._source_accessor` so nested `.source` chains stay in sync.
+- An op inside a loop (e.g. an MoE expert loop) fires many times in one forward pass — each fire is its own `iter[...]` index.
+- An op that fires once per forward (across generation steps) counts once per forward, like the module.
 
-Accessors that already exist at loop entry get their counters from `register_iter_hooks`; accessors built **mid-loop** (first `.source` access inside the loop) are wired in by `register_counters_for_active_iters` via `mediator._active_iter_handles`.
+So `tracer.iter[i]` over a source op selects the i-th *fire*, which differs from module-level `iter` (once per forward pass) exactly when the op loops within a forward.
 
-**Narrow remaining limitation**: if `.source` is first built mid-loop at step N>0 of a *multi-forward* (generation) loop, that step's first op access can miss because the counter starts at 0 rather than N. Touch `.source` before the loop to avoid it. (Single-forward in-loop iteration — the common MoE case — is at step 0, so this doesn't arise.)
+## Caching across forward replacement
 
-## Lifetimes
-
-- `SourceAccessor` and `OperationAccessor` live as long as the module itself.
-- `SourceEnvoy` / `OperationEnvoy` live as long as their owning Envoy.
-- Operation hooks (input / output / fn) are one-shot and self-remove on fire. They're also tracked on `mediator.hooks` for cleanup.
-- `fn_replacement` is one-shot per call to `wrap_operation`. Re-accessing `.source` reinstalls it from the cached nested accessor.
+The instrumented forward is never written onto the module's class — it lives as the `_State.body`, run by the controller. This survives `torch.compile` re-binding, accelerate's dispatch swap, and nnsight's own `_update`: `instrument` re-installs the controller on the new module. Instrumented code is memoized per original code object in `_FORWARD_CACHE`, so re-sourcing pays the parse+compile cost once.
 
 ## Gotchas
 
-- **Don't call `.source` on a sub-module from inside another `.source`.** Access the sub-module directly (`module.attn.something.source`, not `module.attn.source.something.source`). The system raises `ValueError` if you try.
-- **Forward must be a real Python function.** `inspect.getsource` is required. Compiled extensions (custom CUDA kernels exposed as functions) won't work.
-- **Decorators on the forward are stripped.** This is intentional — re-executing a decorator outside its class context can fail (e.g. transformers' `@auto_docstring`). If a decorator was load-bearing (changing behavior beyond docstrings), source tracing will diverge from the original.
-- **Operation names depend on parsing.** `self.c_proj(x)` becomes `self_c_proj_0`. If the module's source changes (e.g. a transformers version bump renames an internal call), the operation name changes too.
-- **`iter[i]` over a source op counts invocations, not forward passes.** An op that loops within one forward is indexed `0, 1, 2, …` per fire (see [Iteration tracking for source](#iteration-tracking-for-source)).
-- **Mid-loop first-`.source` access only misses a step in *generation* loops** (step N>0); single-forward in-loop iteration is unaffected. Touch `.source` before the loop if you hit this.
+- **Op names are the full dotted callee.** `self.c_proj(x)` → `self_c_proj_0`, not `c_proj_0`. `print(module.source)` is the source of truth — an `AttributeError` on a wrong name lists the available ops.
+- **Names track the source.** A `transformers` version bump that renames an internal call renames its op.
+- **Forward must be plain Python.** No source, free variables, decorators, or C functions → `SourceNotAvailable` (cached, so it isn't re-parsed).
+- **Don't drill `.source` into a submodule call.** Access the submodule directly; drilling raises `SourceNotAvailable`.
+- **Recursive `.source` is trace-only.** The callee is resolved from the live value at run time.
+- **A skipped op still reports `.output`** as the replacement — reading `.output` of a skipped op returns what you skipped it with.
 
 ## Related
 
-- [Envoy and eproperty](envoy-and-eproperty.md) — `OperationEnvoy` is an `IEnvoy` like `Envoy`.
-- [Interleaver and Hooks](interleaver-and-hooks.md) — operation hook registration and `OperationHookHandle`.
-- Source: `src/nnsight/intervention/source.py` (full module), `src/nnsight/intervention/hooks.py` (`operation_input_hook`, `operation_output_hook`, `operation_fn_hook`, `requires_operation_*`, `add_ordered_op_hook`), `src/nnsight/intervention/tracing/iterator.py` (`register_op_counters`, `register_counters_for_active_iters`).
+- [Envoy](envoy.md) — `SourceEnvoy` mirrors an `Envoy`'s `.input`/`.output`/`.skip`.
+- [Interleaver and Hooks](interleaver-and-hooks.md) — the `handle` primitive ops share with modules, and occurrence tagging.
+- Source: `src/nnsight/intervention/source.py` (`Source`, `SourceEnvoy`, `_State`, `_Instrument`, `_run_op`, `install_source`, `install_skip`).

@@ -1,219 +1,140 @@
 ---
 title: Backward (Gradient) Pitfalls
-one_liner: Gradient tracing is a separate session — get .output values FIRST, .grad lives on tensors not modules, gradients flow in reverse.
+one_liner: with tensor.backward() interleaves the real backward — capture forward tensors FIRST, .grad lives on tensors, gradient order is reverse-forward.
 tags: [gotcha, backward, grad]
-related: [docs/usage/save.md, docs/concepts/threading-and-mediators.md]
-sources: [src/nnsight/intervention/tracing/backwards.py:69, src/nnsight/intervention/tracing/backwards.py:81, src/nnsight/__init__.py:154]
+related: [docs/usage/backward-and-grad.md, docs/gotchas/order-and-deadlocks.md]
+sources: [src/nnsight/intervention/backward.py, src/nnsight/intervention/interleaver.py:83]
 ---
 
 # Backward (Gradient) Pitfalls
 
 ## TL;DR
-- `with tensor.backward():` opens a *separate* interleaving session. Get any `.output`/`.input` you need *before* you enter the backward block.
-- `.grad` is on tensors, not modules. There's no `module.grad` — request gradients on the tensor you saved during the forward pass.
-- Gradient access order is the *reverse* of forward access order. If you accessed `h[5].output` then `h[10].output` on forward, request `.grad` for `h[10]`'s tensor before `h[5]`'s.
-- `retain_graph=True` is required if you call `.backward()` more than once on overlapping graphs.
-- Standalone `with loss.backward():` outside any `model.trace()` works for simple cases — useful when you save the forward outputs first and want to inspect gradients afterward.
+- `with tensor.backward():` runs the **real backward pass interleaved** with the block. Capture the forward tensors you want gradients for *before* the backward block, then read `.grad` on them inside it.
+- You do **not** need `requires_grad_(True)` — a tensor read from `.output` is already in the autograd graph; reading `.grad` inside the backward block registers a hook on it.
+- `.grad` is on **tensors, not modules**. There is no `module.grad`; capture the tensor, then read its `.grad`.
+- Gradient access order is the **reverse** of forward access order (gradients flow backward). Requesting an earlier-forward tensor's gradient before a later one raises `OutOfOrderError`.
+- `retain_graph=True` on the first backward if you call `.backward()` more than once on overlapping graphs.
+- A standalone `with loss.backward():` works outside a forward trace if you `.save()` the forward tensors first.
 
 ---
 
-## Backward is a separate interleaving session
+## Read forward values *before* the backward block
 
 ### Symptom
-Inside `with logits.sum().backward():`, you try to access `model.transformer.h[0].output` and get:
-
+Requesting `module.output` inside the backward block raises:
 ```
-ValueError: Cannot request `model.transformer.h.0.output` in a backwards tracer.
-You can only request `.grad`. Please define your Tensors before the Backwards Tracer
-and interact with their gradients within the Backwards Tracer.
+OutOfOrderError: 'model.transformer.h.0.output.i0' was requested but the model already ran past it
 ```
 
 ### Cause
-`backward(...)` is hooked at the `torch.Tensor` level (`src/nnsight/__init__.py:154` patches `Tensor.backward`). Entering the backward context creates a fresh `BackwardsMediator` and `Interleaver` (`src/nnsight/intervention/tracing/backwards.py:81`). The `BackwardsMediator` overrides `request` to reject anything that doesn't end in `.grad`:
-
-```python
-def request(self, requester):
-    if not requester.endswith(".grad"):
-        raise ValueError(...)
-```
-
-(`src/nnsight/intervention/tracing/backwards.py:69`).
-
-That means inside the backward block you can only access `.grad` on tensors you already captured. The forward-pass `.output`/`.input` machinery is not running there.
+The backward block runs interleaved with the *backward* pass, under its own interleaver that only serves `.grad` (`src/nnsight/intervention/backward.py`). The forward pass is already done, so a `.output` request there is never served and surfaces as `OutOfOrderError` at the end of the run.
 
 ### Wrong code
 ```python
-with model.trace("Hello"):
-    logits = model.lm_head.output
-    with logits.sum().backward():
-        # ValueError — can't access .output inside a backward tracer
-        hs = model.transformer.h[-1].output
+with model.trace("Hello world"):
+    loss = model.output.logits.sum()
+    with loss.backward():
+        hs = model.transformer.h[-1].output   # OutOfOrderError — forward is done
         grad = hs.grad.save()
 ```
 
 ### Right code
 ```python
-with model.trace("Hello"):
-    # 1) Capture forward-pass tensors BEFORE the backward block
-    hs = model.transformer.h[-1].output
-    hs.requires_grad_(True)
-    logits = model.lm_head.output
-
-    # 2) Inside the backward block, only access .grad on those captured tensors
-    with logits.sum().backward():
-        grad = hs.grad.save()
+with model.trace("Hello world"):
+    hs = model.transformer.h[-1].output       # capture during the forward
+    loss = model.output.logits.sum()
+    with loss.backward():
+        grad = hs.grad.clone().save()          # read its gradient
 ```
 
 ### Mitigation / how to spot it early
-- Treat the backward block as "read-only on gradients of tensors you already have a handle to".
-- If you need a forward intermediate for backward, capture it before opening the backward context.
+- Treat the backward block as "read/edit gradients of tensors you already hold". Capture any forward intermediate before opening it.
 
 ---
 
 ## `.grad` is on tensors, not modules
 
-### Symptom
-Errors like `AttributeError: 'Envoy' object has no attribute 'grad'`, or trying `model.transformer.h[5].grad` and seeing nothing useful.
-
 ### Cause
-Gradients in PyTorch live on tensors via `tensor.grad` and `tensor.register_hook(...)`. nnsight's `wrap_grad` (`src/nnsight/intervention/tracing/backwards.py:10`) hooks into `torch.Tensor.grad` and uses `id(tensor)` as the requester key. There's no `module.grad`; the gradient is on the *tensor* that flows through that module's output.
-
-So you save the tensor on forward, then request `.grad` on it during backward.
-
-### Wrong code
-```python
-with model.trace("Hello"):
-    logits = model.lm_head.output
-    with logits.sum().backward():
-        # there is no h[5].grad
-        g = model.transformer.h[5].grad.save()
-```
+Gradients live on tensors. nnsight keys gradient requests on `id(tensor)`, so there is no `module.grad` — capture the tensor from `.output`, then read `.grad` on it.
 
 ### Right code
 ```python
-with model.trace("Hello"):
-    hs5 = model.transformer.h[5].output
-    hs5.requires_grad_(True)
-    logits = model.lm_head.output
-
-    with logits.sum().backward():
-        g = hs5.grad.save()
+with model.trace("Hello world"):
+    hs5 = model.transformer.h[5].output       # the tensor
+    loss = model.output.logits.sum()
+    with loss.backward():
+        g = hs5.grad.clone().save()
 ```
 
-### Mitigation / how to spot it early
-- Module objects don't have gradients; *tensors* do. Capture the tensor first.
+Editing works too: `hs5.grad = hs5.grad * 2` inside the block replaces the gradient flowing onward (and downstream weight grads reflect it).
 
 ---
 
-## Gradient access order is the reverse of forward access order
+## Gradient order is the reverse of forward order
 
 ### Symptom
-You saved tensors at multiple layers on the forward pass, then tried to request `.grad` in forward order during the backward block. You get a missed-provider error like `Execution complete but '<id>.grad' was not provided`.
+```
+OutOfOrderError: '140509505995472.grad.i0' was requested but the model already ran past it
+```
+(The location is `id(tensor).grad` — match the id back to your captured variable.)
 
 ### Cause
-Backprop runs in reverse: gradients reach the deepest layer first, then propagate back to the input. The mediator thread inside the backward block synchronizes with `register_hook` callbacks fired in that order. Requesting `h[3].grad` *before* `h[10].grad` is the gradient analog of asking for `h[3].output` after `h[10].output` on forward — the deeper hook has already fired and is past.
+Backprop reaches the deepest layer first. Requesting `h[0].grad` before `h[10].grad` is the gradient analog of asking for `h[0].output` after `h[10].output` on the forward — the later hook already fired.
 
-### Wrong code
+### Wrong / Right
 ```python
-with model.trace("Hello"):
-    h3 = model.transformer.h[3].output; h3.requires_grad_(True)
-    h10 = model.transformer.h[10].output; h10.requires_grad_(True)
-    logits = model.lm_head.output
-
-    with logits.sum().backward():
-        g3 = h3.grad.save()    # waits — but h3.grad fires AFTER h10.grad
-        g10 = h10.grad.save()  # h10's grad already fired, missed
+with model.trace("Hello world"):
+    h0 = model.transformer.h[0].output
+    h10 = model.transformer.h[10].output
+    loss = model.output.logits.sum()
+    with loss.backward():
+        g10 = h10.grad.clone().save()   # later-forward gradient first
+        g0 = h0.grad.clone().save()     # then earlier
 ```
-
-### Right code
-```python
-with model.trace("Hello"):
-    h3 = model.transformer.h[3].output; h3.requires_grad_(True)
-    h10 = model.transformer.h[10].output; h10.requires_grad_(True)
-    logits = model.lm_head.output
-
-    with logits.sum().backward():
-        # reverse of forward order
-        g10 = h10.grad.save()
-        g3 = h3.grad.save()
-```
-
-### Mitigation / how to spot it early
-- Mental model: backward reverses the forward order. Mirror your accesses.
-- The exception text shows tensor ids like `139820463417744.grad` rather than module paths — that's because `wrap_grad` keys gradients on `id(tensor)`. Match the id back to your captured variable to figure out which one fired in the wrong order.
 
 ---
 
 ## `retain_graph=True` for multiple backward passes
 
 ### Symptom
-`RuntimeError: Trying to backward through the graph a second time, but the saved intermediate results have already been freed.` when you call `.backward()` more than once.
+`RuntimeError: Trying to backward through the graph a second time ...`.
 
-### Cause
-PyTorch frees the autograd graph after the first `.backward()` call. nnsight respects this — the second backward sees a freed graph. Pass `retain_graph=True` if you intend to call backward multiple times on overlapping graphs.
+### Cause / fix
+PyTorch frees the graph after the first backward. Pass `retain_graph=True` on all but the last backward.
 
-### Wrong code
 ```python
-with model.trace("Hello"):
-    hs = model.transformer.h[-1].output; hs.requires_grad_(True)
-    logits = model.lm_head.output
-
-    with logits.sum().backward():
-        g1 = hs.grad.save()
-
-    with (logits * 2).sum().backward():    # RuntimeError
-        g2 = hs.grad.save()
-```
-
-### Right code
-```python
-with model.trace("Hello"):
-    hs = model.transformer.h[-1].output; hs.requires_grad_(True)
-    logits = model.lm_head.output
-
+with model.trace("Hello world"):
+    hs = model.transformer.h[-1].output
+    logits = model.output.logits
     with logits.sum().backward(retain_graph=True):
-        g1 = hs.grad.save()
-
-    with (logits * 2).sum().backward():
-        g2 = hs.grad.save()
+        g1 = hs.grad.clone().save()
+    with (logits.sum() * 2).backward():
+        g2 = hs.grad.clone().save()
 ```
-
-### Mitigation / how to spot it early
-- If you'll backward twice, the first call needs `retain_graph=True`. The last call doesn't (and skipping it frees memory).
 
 ---
 
-## Standalone backward outside a `model.trace()`
-
-### Symptom
-You want to inspect gradients of a forward result you already saved, without holding open a forward trace.
+## Standalone backward outside a forward trace
 
 ### Cause
-`BackwardsTracer` is independent of `InterleavingTracer`. It only needs the saved tensor and the loss tensor — no forward trace context required.
+`with loss.backward():` is independent of the forward trace; it only needs the loss tensor and the tensors whose `.grad` you read. Save the forward tensors so the graph stays alive.
 
-### Right code (standalone backward)
+### Right code
 ```python
-# 1) Forward pass — save the tensors you'll want gradients for
-with model.trace("Hello"):
-    hs = model.transformer.h[-1].output
-    hs.requires_grad_(True)
-    hs = hs.save()
-    logits = model.lm_head.output.save()
+with model.trace("Hello world"):
+    hs = model.transformer.h[-1].output.save()
+    logits = model.output.logits.save()
 
-# 2) Backward pass — outside the trace
-loss = logits.sum()
-with loss.backward():
-    grad = hs.grad.save()
-
+with logits.sum().backward():
+    grad = hs.grad.clone().save()
 print(grad.shape)
 ```
 
-### Mitigation / how to spot it early
-- Use this when you want to compute gradients *after* inspecting forward results, or when you want to keep the forward trace context as short as possible.
+### Mitigation
+- Use this to inspect forward results before deciding to compute gradients, or to keep the forward trace short.
 
 ---
 
 ## Related
-- [docs/usage/save.md](../usage/save.md) — saving values for later.
-- [docs/concepts/threading-and-mediators.md](../concepts/threading-and-mediators.md) — the same mediator/interleaver model applies during backward.
-- [docs/gotchas/order-and-deadlocks.md](order-and-deadlocks.md) — forward analog of the reverse-order rule.
+- [docs/usage/backward-and-grad.md](../usage/backward-and-grad.md) — full backward/grad reference.
+- [docs/gotchas/order-and-deadlocks.md](order-and-deadlocks.md) — the forward analog of the reverse-order rule.

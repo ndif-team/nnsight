@@ -1,157 +1,139 @@
 ---
 title: Testing
-one_liner: How to run NNsight's test suite, what each test file covers, and pytest conventions used across the repo.
+one_liner: How to run NNsight's test suite offline, the C extension it exercises, and what each test file covers.
 tags: [internals, dev]
-related: [docs/developing/contributing.md, docs/developing/agent-evals.md, docs/developing/performance.md]
-sources: [tests/conftest.py, pytest.ini, tests/]
+related: [docs/developing/contributing.md, docs/developing/performance.md]
+sources: [tests/conftest.py, tests/vllm/conftest.py, pyproject.toml, setup.py, tests/]
 ---
 
 # Testing
 
 ## What this covers
 
-NNsight has a top-level `tests/` directory with pytest-driven tests for each subsystem, plus three nested directories for special purposes. This page is a map: how to invoke pytest, what command-line flags exist, what each test file is for, and conventions you should follow when adding tests.
+`tests/` mirrors the source modules — one test file per concept, named for it (see
+`STYLE.md`, "Tests mirror modules"). This page is how to run it offline, the C
+extension a couple of tests depend on, the small HuggingFace models used, and a map
+of the files.
 
-## Architecture / How it works
+## Running the suite
 
-### Pytest configuration
-
-`pytest.ini` (project root):
-
-```
-[pytest]
-pythonpath = tests
-markers =
-    scan, config, order, source, skips, iter, cache, rename
-```
-
-The `pythonpath = tests` line lets test modules import each other by name, and lets `mymethods/` and other helpers be imported as top-level packages from inside tests.
-
-The markers are used to select subsets of tests within `test_lm.py`. For example: `pytest tests/test_lm.py -m iter --device cpu`.
-
-### Custom command-line options
-
-`tests/conftest.py:21` defines:
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--device` | `cuda:0` if available else `cpu` | Device for model fixtures. Parametrizes any test that takes a `device` argument. |
-| `--tp` | `1` | Tensor parallel size for vLLM tests. Read inside vLLM-specific tests. |
-| `--test-flux` | False | Opt-in flag for slow Flux diffusion tests that need GPU + a model download. |
-
-Every test fixture that loads a model (`tiny_model`, `gpt2`, `vlm`, `tiny_sd`, `flux`) honors `--device`. Skip GPU-only tests cleanly when no GPU is available by guarding on `--device`.
-
-### Shared fixtures
-
-Defined in `tests/conftest.py`:
-
-- `tiny_model` (scope: module) — two-layer Linear `nn.Sequential` wrapped with `NNsight`. Used by `test_tiny.py`, `test_envoys.py`, etc.
-- `tiny_input` — random `[1, 5]` tensor matching `tiny_model`'s input.
-- `gpt2` (scope: module) — `LanguageModel("openai-community/gpt2", device_map=device, dispatch=True)`. Used by `test_lm.py`, `test_remote.py`, `test_source.py`, etc.
-- `vlm` (scope: module) — `VisionLanguageModel("llava-hf/llava-interleave-qwen-0.5b-hf", ...)` plus `dummy_image`.
-- `tiny_sd` (scope: module) — `DiffusionModel("segmind/tiny-sd", ...)` for fast diffusion tests.
-- `flux` (scope: module) — `FLUX.1-schnell`, gated behind `--test-flux`.
-- `ET_prompt`, `MSG_prompt` — common prompt strings used in tests.
-
-### Top-level test files
-
-| File | Coverage |
-|------|----------|
-| `test_tiny.py` | Smoke tests on the minimal `NNsight` wrapper. The fastest way to validate a refactor. |
-| `test_lm.py` | Comprehensive `LanguageModel` coverage — invokers, generation, gradients, scan, caching, source tracing, module renaming, skipping. Uses pytest markers (`scan`, `iter`, `cache`, `source`, `rename`, `skips`, `order`). |
-| `test_vllm.py` | vLLM integration. Requires `--tp` flag for tensor parallelism scenarios. Heavy — needs GPU and vllm install. |
-| `test_vllm_dispatch_bug.py` | Specific regression tests for vLLM dispatch ordering. |
-| `test_vlm.py` | `VisionLanguageModel` (multimodal). |
-| `test_diffusion.py` | `DiffusionModel`. Uses `tiny_sd` fixture (1.4M-param model, runs on CPU). |
-| `test_envoys.py` | `Envoy` proxy semantics — module access, alias paths, `.path`, `.modules()`. |
-| `test_remote.py` | NDIF remote execution. Requires API key + network. |
-| `test_serialization_edge_cases.py` | Stress tests for the source-based pickler — recursive functions, mutual recursion, lambda extraction edge cases, large object graphs. |
-| `test_lambda_serialization.py` | Lambda-specific serialization tests (multiple lambdas per line, nested lambdas, etc.). |
-| `test_dataclass_serialization.py` | Cross-version dataclass round-trip tests. |
-| `test_local_simulation.py` | `remote='local'` round-trip simulation tests. |
-| `test_local_recursion.py`, `test_local_mutual_recursion.py`, `test_mutual_recursion.py` | Recursive / mutually recursive function serialization. |
-| `test_whitelist_serialization.py` | Allowlist enforcement for `LocalSimulationBackend.SERVER_MODULES`. |
-| `test_local_env.py` | Module discovery for the local-package auto-registration path. |
-| `test_debug.py` | DEBUG mode (`CONFIG.APP.DEBUG = True`) — verifies internal frames appear. |
-| `test_memory_cleanup.py` | Hook leak / weak-reference tests. Verifies wrappers are GC-able. |
-| `test_multiple_wrappers.py` | Wrapping the same `nn.Module` with multiple `NNsight` instances coexists correctly. |
-| `test_source.py` | Source tracing (`.source.<op_name>`). |
-| `test_transform.py` | Tests for the in-progress `transform` refactor on this branch. |
-| `test_0516_features.py` | Features added on/around 2024-05-16. Catch-all for features that don't fit other files. |
-| `test_tp_stream_fix.py` | Specific regression test for vLLM TP streaming. |
-| `test_envoys.py` | Envoy mechanics. |
-
-Helpers in `tests/`:
-
-- `debug_demo.py` — manual demo script.
-- `explore_remote.py`, `explore_remote_advanced.py` — manual remote exploration scripts.
-- `repro_631.py` — minimal reproduction for issue #631.
-
-### Subdirectories
-
-- `tests/agent-evals/` — LLM agent evaluation suite. See [agent-evals.md](./agent-evals.md). Not run as part of the standard pytest suite.
-- `tests/mymethods/` — fixture package referenced by tests that need a real importable user package. `__init__.py` and `stateful.py` define functions that live in a "user module" for serialization tests.
-- `tests/performance/` — benchmark scripts (`benchmark_interventions.py`) and saved results. See [performance.md](./performance.md).
-
-### The standard validation suite
-
-The set of test files used in CI / referenced by `CONTRIBUTING.md`:
+The whole offline suite (everything except the GPU/vLLM subtree):
 
 ```bash
-pytest tests/test_lm.py tests/test_tiny.py tests/test_0516_features.py \
-  tests/test_debug.py tests/test_memory_cleanup.py tests/test_multiple_wrappers.py \
-  --device cpu
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm
 ```
 
-Quick smoke test:
+- **`LD_LIBRARY_PATH`** points at the conda env's libs so the compiled C extension
+  (`nnsight._c.py_mount`, see below) and torch load their shared objects.
+- **`CUDA_VISIBLE_DEVICES=""`** forces CPU so the tests are deterministic and run
+  without a GPU.
+- **`--ignore=tests/vllm`** skips the vLLM integration tests, which need a GPU and a
+  `vllm` install.
+
+That collects ~650 tests. Config is minimal — `pyproject.toml` has only:
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+```
+
+There are **no custom pytest CLI flags** (the old `--device`, `--tp`, `--test-flux`
+options are gone) and no registered markers beyond stock `parametrize`/`skipif`.
+Select tests the usual ways:
 
 ```bash
-pytest tests/test_tiny.py --device cpu -x
+python -m pytest tests/test_source.py -q                 # one file
+python -m pytest tests/test_language.py -k generation    # by name
+python -m pytest tests/test_saving.py -x                 # stop on first failure
 ```
 
-vLLM-only:
+`tests/conftest.py` inserts `src/` on `sys.path` and defines one shared fixture:
+`gpt2` (module-scoped, a dispatched `TransformersModel("openai-community/gpt2")`).
+Heavy models are shared fixtures; small ones are constructed inline per test file.
 
-```bash
-pytest tests/test_vllm.py --tp 1
+## The C extension (`.save()`)
+
+`obj.save()` is a method mounted onto Python's base `object` type by the optional
+`nnsight._c.py_mount` C extension (`src/nnsight/_c/py_mount.c`), built by `setup.py`.
+It requires a C compiler at install time; if none is present, setuptools silently
+skips it and `obj.save()` is unavailable (`nnsight.save(obj)` still works). The
+tests that assert the method form are guarded:
+
+```python
+@pytest.mark.skipif(not save_mounted, reason="C .save() mount not built/enabled")
 ```
+
+If `tests/test_saving.py::TestSaveMethod` is skipped, rebuild the extension
+(`pip install -e .` in an env with `gcc`/`libc6-dev`) — server images install those
+precisely so `.save()` works remotely.
+
+## Offline models
+
+Tests use small models pulled from the HF cache (all offline once cached):
+
+| Task | Repo id |
+|------|---------|
+| text-generation | `openai-community/gpt2`, `hf-internal-testing/tiny-random-LlamaForCausalLM` |
+| fill-mask | `hf-internal-testing/tiny-random-BertForMaskedLM` |
+| text-classification | `hf-internal-testing/tiny-random-DistilBertForSequenceClassification` |
+| image-classification | `hf-internal-testing/tiny-random-ViTForImageClassification` |
+| image-text-to-text (VLM) | `trl-internal-testing/tiny-LlavaForConditionalGeneration` |
+| diffusion | `hf-internal-testing/tiny-stable-diffusion-torch` |
+
+Optional-dependency modules skip themselves at import: `test_diffusion.py`
+(`importorskip("diffusers")`), `test_vision.py`/`test_vlm.py` (`importorskip("PIL")`),
+IPython-display assertions in `test_tracing.py` (`importorskip("IPython")`), and PEFT
+paths in `test_language.py` (`skipif(not peft_installed)`).
+
+## Test map
+
+| File | Covers |
+|------|--------|
+| `test_tracing.py` | block capture/parse/compile, `Info`, block cache, traceback surgery |
+| `test_interleaving.py` | `Mediator`, `Interleaver`, hooks, envoy access/editing, iteration, source iteration, cache, session, the `.save()` mount |
+| `test_envoy.py` | Envoy tree, attribute passthrough, repr, setattr, rename, device, `result`, `tracer_cls`, deprecated `iter` aliases, out-of-interleaving errors |
+| `test_source.py` | `.source` listing, capture, inputs, editing, skip, install, recursive drill-in |
+| `test_batching.py` | invokers, trace/generate batching, multi-invoke skip, barriers, invoke scope, invoker input formats |
+| `test_backward.py` | `with tensor.backward():` gradient access |
+| `test_saving.py` | `save()` / `.save()` (function and method forms), nested saves, thread safety |
+| `test_editing.py` | `model.edit(...)`, edit-with-attachment, edit serialization |
+| `test_serialization.py` | source-based `dumps`/`loads`, lambdas, recursion, local env, linecache, `remote="local"` simulation, server execution, model keys |
+| `test_remote_backend.py` | `AsyncRemoteBackend` websocket status stream consumption |
+| `test_ndif.py` | `nnsight.ndif` helpers (register, status, env comparison, `pull_env`) offline |
+| `test_modeling.py` | `_update`/meta device/loadable/meta/scan/import path/remotable/remote env, HF + Transformers construction, status display, backend threading |
+| `test_language.py` | `TransformersModel` (gpt2) — generation, activation edits, gradients, ad-hoc modules, input setting, source, early stop, iteration, session, cache |
+| `test_encoder.py` | encoder tasks (fill-mask, text-classification), padding, `pipe` |
+| `test_vision.py` | image-classification pipeline, `pipe` |
+| `test_vlm.py` | vision-language models + deprecated `VisionLanguageModel` |
+| `test_chat.py` | chat-formatted (role/content) input |
+| `test_diffusion.py` | `DiffusionModel` (tiny stable-diffusion) |
+| `test_config.py` | config precedence, Colab userdata fallback, `set_default_api_key` |
+| `test_memory.py` | trace teardown leaves no reference cycles (model/saved-object/tracer/exception) |
+| `test_multiple_wrappers.py` | one module wrapped by several `NNsight`s at once, incl. source/skip |
+| `test_util.py` | `apply`/leaf/container traversal helpers |
+
+### `tests/vllm/` (GPU + `vllm` required)
+
+Run separately: `python -m pytest tests/vllm/`. Its `conftest.py` sets
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1` (for the `collective_rpc` request-state tests).
+Files: `test_tracing.py` (logits/generation/sampling/interventions/input forms/early
+stop/deferred errors/cache), `test_async.py` (async engine streaming), `test_serve.py`
+(the `nnsight-serve` HTTP path + GPU-less client), `test_tensor_parallel.py` (sharded
+read/edit), `test_requests.py` (client/worker cleanup, batch isolation, concurrency),
+`test_ray.py` (Ray executor). TP tests use Qwen2.5-0.5B; single-rank tests use gpt2.
 
 ## Conventions
 
-- **Run on CPU when possible.** Most tests should pass with `--device cpu`. GPU-specific tests should `pytest.skip` if no GPU is available.
-- **Use `@torch.no_grad()` for inference-only tests.**
-- **`pytest.importorskip()` at the top of optional-dep test files.** `test_diffusion.py` imports diffusers; `test_vllm.py` imports vllm. Skip the whole module if missing.
-- **Pattern selection.** `pytest tests/test_lm.py -k logit_lens` runs only tests whose names contain "logit_lens".
-- **Marker selection.** `pytest tests/test_lm.py -m "iter or cache" --device cpu`.
-- **Fixture scope.** Model fixtures are `scope="module"` to avoid reloading a heavy model per test. Don't share mutable state between tests within a module.
-- **Conda environment.** Local development typically uses a conda env with nnsight in editable mode (`pip install -e ".[test]"`), plus optional dependencies (`diffusers`, `vllm`) added per-environment as needed.
-
-## Key files / classes
-
-- `pytest.ini` — pytest config + marker registration
-- `tests/conftest.py:21` — `pytest_addoption` (CLI flags)
-- `tests/conftest.py:43` — `pytest_generate_tests` (parametrize on device)
-- `tests/conftest.py:71` onward — fixtures (`tiny_model`, `gpt2`, `vlm`, `tiny_sd`, `flux`)
-- `tests/agent-evals/` — agent evaluation suite (separate harness)
-- `tests/mymethods/` — importable user-module fixture for serialization tests
-- `tests/performance/` — benchmarks (not pytest-driven; see [performance.md](./performance.md))
-
-## Lifecycle (a typical pytest run)
-
-1. `pytest_addoption` registers `--device`, `--tp`, `--test-flux`.
-2. `pytest_generate_tests` parametrizes `device`-using tests with the value from `--device`.
-3. Module-scoped fixtures load models once per module.
-4. Tests run, optionally filtered by markers (`-m`) or names (`-k`).
-5. After each module, fixtures tear down (model goes out of scope, weights are freed).
-
-## Extension points
-
-- **Add a new marker.** Append it to `pytest.ini` and tag relevant tests with `@pytest.mark.<name>`. Filter via `-m`.
-- **Add a new fixture.** Put it in `conftest.py` with appropriate `scope`. Cross-test fixtures live there; one-test fixtures can live in the test file itself.
-- **Add an opt-in heavy test.** Mirror `--test-flux`: register a new flag in `pytest_addoption`, gate the fixture on `request.config.getoption("--test-flux")`.
-- **Importable user package fixtures.** Add modules to `tests/mymethods/` if you need code that lives in a "user package" path. See `tests/test_local_env.py` for usage.
+- **Run on CPU** (`CUDA_VISIBLE_DEVICES=""`); the offline suite is CPU-clean.
+- **One test file per source concept**, named for it. Behavior groups into `Test*`
+  classes; the test name carries the assertion (`test_assignments_pushed_to_parent`),
+  so tests need no docstrings.
+- **Prefer inline fakes** — define small `nn.Module`s in the test file. Keep only the
+  expensive shared models in `conftest.py`.
+- **`importorskip` at the top** of an optional-dependency test file.
 
 ## Related
 
-- [contributing.md](./contributing.md) — pre-PR checklist, standard validation suite
-- [performance.md](./performance.md) — `tests/performance/` benchmarks
-- [agent-evals.md](./agent-evals.md) — `tests/agent-evals/` harness
+- [contributing.md](./contributing.md) — pre-PR routine and house style
+- [performance.md](./performance.md) — the `tests/performance/` benchmark harness

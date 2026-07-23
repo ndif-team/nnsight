@@ -2,555 +2,383 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from typing import TYPE_CHECKING, ClassVar, Optional, Type
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from diffusers import DiffusionPipeline, pipelines
-from transformers import PreTrainedTokenizerBase
 
-from .. import util
-from ..intervention.batching import DiffusionBatcher
+from ..intervention.batching import Batcher, BatchGroup
+from ..intervention.envoy import traceable
 from .huggingface import HuggingFaceModel
+from .mixins.meta import MetaDevice
 
 if TYPE_CHECKING:
-    from ..intervention.batching import Batcher
+    from diffusers import DiffusionPipeline
 
 
-def _resolve_component_cls(lib_name: str, cls_name: str):
-    """Resolve a pipeline component class from its library and class name.
+def _resolve_component_class(library: Optional[str], class_name: Optional[str]) -> Optional[type]:
+    """Resolve a pipeline component's class from its ``[library, class_name]`` spec.
 
-    The ``model_index.json`` config stores each component as
-    ``[library_name, class_name]``.  Library names can be ``"diffusers"``,
-    ``"transformers"``, or a diffusers pipeline subpackage name like
-    ``"stable_diffusion"``.
-
-    If the class name starts with ``"Flax"`` or ``"TF"`` (JAX/TensorFlow
-    variants), this function strips the prefix and resolves the
-    corresponding PyTorch class instead.
-
-    Returns:
-        The resolved class, or ``None`` if it cannot be found.
+    ``model_index.json`` records each component this way. The library is usually
+    ``"diffusers"`` or ``"transformers"``, but can also be a diffusers pipeline
+    subpackage (e.g. ``"stable_diffusion"`` -> ``diffusers.pipelines.stable_diffusion``
+    for a safety checker). A Flax/TF class name resolves to its PyTorch equivalent,
+    since the meta build is always PyTorch. Returns ``None`` when the spec names no
+    class (a disabled component) or the class can't be found.
     """
-    import diffusers as _diffusers
-    import transformers as _transformers
+    import diffusers
+    import transformers
 
-    if cls_name is None:
+    if class_name is None:
         return None
-
-    # Normalize Flax/TF class names to their PyTorch equivalents
+    # Flax/TF variants share the PyTorch class's name without the prefix.
     for prefix in ("Flax", "TF"):
-        if cls_name.startswith(prefix):
-            cls_name = cls_name[len(prefix) :]
+        if class_name.startswith(prefix):
+            class_name = class_name[len(prefix):]
             break
-
-    if lib_name == "diffusers":
-        return getattr(_diffusers, cls_name, None)
-    elif lib_name == "transformers":
-        return getattr(_transformers, cls_name, None)
-    else:
-        try:
-            mod = importlib.import_module(f"diffusers.pipelines.{lib_name}")
-            return getattr(mod, cls_name, None)
-        except (ImportError, RuntimeError):
-            return None
+    if library == "diffusers":
+        return getattr(diffusers, class_name, None)
+    if library == "transformers":
+        return getattr(transformers, class_name, None)
+    try:
+        module = importlib.import_module(f"diffusers.pipelines.{library}")
+    except (ImportError, RuntimeError):
+        return None
+    return getattr(module, class_name, None)
 
 
-def _build_pipeline_from_config(
-    automodel: type,
-    repo_id: str,
-    revision: Optional[str] = None,
-    config=None,
-    **kwargs,
-) -> DiffusionPipeline:
-    """Build a diffusion pipeline with meta-device ``nn.Module`` components.
+class _PipelineModule(torch.nn.Module):
+    """An ``nn.Module`` view over a ``DiffusionPipeline`` whose forward runs it.
 
-    Downloads only the pipeline's ``model_index.json`` config and each
-    component's ``config.json`` (a few KB total).  Each ``nn.Module``
-    component is instantiated from its config — no pretrained weights
-    are downloaded.  Tokenizers are loaded normally (they are lightweight
-    and have no model weights).  Other non-module components (schedulers,
-    feature extractors) are set to ``None``.
-
-    This is called inside ``init_empty_weights()`` by
-    :meth:`DiffusionModel._load_meta`, so all created parameters land
-    on the ``meta`` device.
-
-    Args:
-        automodel: The pipeline class (e.g. ``DiffusionPipeline``).
-        repo_id: HuggingFace repository ID.
-        revision: Git revision / branch / tag.
-        config: Pre-loaded pipeline config dict.  If ``None``, the
-            config is downloaded via ``automodel.load_config()``.
-        **kwargs: User overrides (e.g. ``safety_checker=None``).
-
-    Returns:
-        A pipeline instance with meta-device module components.
-    """
-    from accelerate import init_empty_weights
-    from transformers import AutoConfig
-
-    if config is None:
-        config = automodel.load_config(repo_id, revision=revision)
-
-    pipe_cls_name = config.get("_class_name", automodel.__name__)
-    pipe_cls = getattr(pipelines, pipe_cls_name, automodel)
-
-    components = {}
-    for key, val in config.items():
-        if key.startswith("_"):
-            continue
-
-        if not isinstance(val, list):
-            kwargs[key] = val
-            continue
-
-        lib_name, cls_name = val
-
-        # Honour explicit user overrides (e.g. safety_checker=None)
-        if key in kwargs:
-            components[key] = kwargs.pop(key)
-            continue
-
-        cls = _resolve_component_cls(lib_name, cls_name)
-
-        if cls is None:
-            components[key] = None
-            continue
-
-        if isinstance(cls, type) and issubclass(cls, PreTrainedTokenizerBase):
-            try:
-                components[key] = cls.from_pretrained(
-                    repo_id, subfolder=key, revision=revision
-                )
-            except Exception:
-                components[key] = None
-            continue
-
-        if not (isinstance(cls, type) and issubclass(cls, torch.nn.Module)):
-            components[key] = None
-            continue
-
-        # Create meta-device component from its config
-        try:
-            if hasattr(cls, "load_config"):
-                # Diffusers components (UNet, VAE, Transformer, etc.)
-                sub_cfg = cls.load_config(repo_id, subfolder=key, revision=revision)
-                with init_empty_weights():
-                    components[key] = cls.from_config(sub_cfg)
-            else:
-                # Transformers components (CLIPTextModel, T5, etc.)
-                auto_cfg = AutoConfig.from_pretrained(
-                    repo_id, subfolder=key, revision=revision
-                )
-                with init_empty_weights():
-                    components[key] = cls(auto_cfg)
-        except Exception:
-            components[key] = None
-
-    # Filter out from_pretrained()-specific kwargs that the pipeline
-    # constructor doesn't accept (e.g. torch_dtype, variant, device_map).
-    init_sig = inspect.signature(pipe_cls.__init__)
-    has_var_keyword = any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in init_sig.parameters.values()
-    )
-    if not has_var_keyword:
-        valid_params = set(init_sig.parameters.keys()) - {"self"}
-        kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
-
-    return pipe_cls(**components, **kwargs)
-
-
-class Diffuser(util.WrapperModule):
-    """Wrapper module that loads a diffusion pipeline and exposes its components as submodules.
-
-    All pipeline components that are ``torch.nn.Module`` or
-    ``PreTrainedTokenizerBase`` instances are registered as attributes
-    so they appear in the Envoy tree and can be traced. The exact
-    component names depend on the pipeline (e.g. ``unet`` for Stable
-    Diffusion, ``transformer`` for Flux, plus ``vae``, ``text_encoder``,
-    etc.).
-
-    Can be constructed in two ways:
-
-    1. **From pretrained** (default): pass a pipeline class and repo ID
-       to download and load full weights via ``from_pretrained()``.
-    2. **From a pre-built pipeline**: pass a ``DiffusionPipeline``
-       instance directly (used by :meth:`DiffusionModel._load_meta`
-       for meta-tensor initialization).
-
-    Args:
-        automodel_or_pipeline: Either a pipeline class
-            (``Type[DiffusionPipeline]``) for ``from_pretrained`` loading,
-            or an already-constructed ``DiffusionPipeline`` instance.
-        *args: Forwarded to ``automodel.from_pretrained()`` when loading.
-        **kwargs: Forwarded to ``automodel.from_pretrained()`` when loading.
-
-    Attributes:
-        pipeline (DiffusionPipeline): The underlying diffusers pipeline.
+    A diffusion pipeline is not itself a module — it orchestrates several
+    (unet/transformer, vae, text_encoder, ...). This registers each module
+    component as a child so the whole tree is reachable as envoys
+    (``model.unet``, ...), and forwards a call to the pipeline's denoising loop, so
+    ``model.output`` is the pipeline's result. A ``seed`` is turned into a
+    ``generator`` here (a per-image list for a batch), where the final batch size
+    is known.
     """
 
-    def __init__(
-        self, automodel_or_pipeline=DiffusionPipeline, *args, config=None, **kwargs
-    ) -> None:
+    def __init__(self, pipeline: "DiffusionPipeline") -> None:
         super().__init__()
+        # Not a Module, so this is a plain attribute — never a registered child.
+        self.pipeline = pipeline
+        for name, component in pipeline.components.items():
+            if isinstance(component, torch.nn.Module):
+                self.add_module(name, component)
 
-        if isinstance(automodel_or_pipeline, DiffusionPipeline):
-            self.pipeline = automodel_or_pipeline
-        else:
-            self.pipeline = automodel_or_pipeline.from_pretrained(*args, **kwargs)
-
-        for key, value in self.pipeline.__dict__.items():
-            if isinstance(value, torch.nn.Module) or isinstance(
-                value, PreTrainedTokenizerBase
-            ):
-                setattr(self, key, value)
-
-        self.config = config
-
-    def generate(self, *args, **kwargs):
-        """Run the full diffusion pipeline.
-
-        Calls the pipeline's ``__call__`` method (not ``.generate()``,
-        which does not exist on ``DiffusionPipeline``).
-
-        Returns:
-            The pipeline output (typically a dataclass with ``.images``).
-        """
+    def forward(self, *args: Any, seed: Optional[int] = None, **kwargs: Any) -> Any:
+        if seed is not None and kwargs.get("generator") is None:
+            kwargs["generator"] = self._generator(seed, args, kwargs)
         return self.pipeline(*args, **kwargs)
+
+    def _generator(self, seed: int, args: tuple, kwargs: dict) -> Any:
+        # One generator per image; a batch of prompts gets `seed + i` per image so
+        # each is independently reproducible (mirrors the batched-prompt offset).
+        prompt = kwargs.get("prompt", args[0] if args else None)
+        embeds = kwargs.get("prompt_embeds")
+        if embeds is not None:
+            batch = embeds.shape[0]
+        elif isinstance(prompt, (list, tuple)):
+            batch = len(prompt)
+        else:
+            batch = 1
+        total = batch * kwargs.get("num_images_per_prompt", 1)
+        device = self.pipeline.device
+        if total > 1:
+            return [torch.Generator(device).manual_seed(seed + i) for i in range(total)]
+        return torch.Generator(device).manual_seed(seed)
+
+
+class DiffusionBatcher(Batcher):
+    """Batcher for the denoiser's guidance-doubled, multi-image batch layout.
+
+    Where the base batcher assumes every batched activation is a plain dim-0 stack
+    of the invokes' rows, a diffusion denoiser sees an expanded batch: each prompt
+    is repeated ``num_images_per_prompt`` times, and under classifier-free guidance
+    the whole thing is doubled (an unconditional half followed by a conditional
+    half). This maps each invoke's plain ``[start, size]`` group onto that layout,
+    picking the case by the tensor's leading dim at run time — so an intervention on
+    ``model.unet`` reads (and writes) exactly its invoke's rows across both halves.
+    """
+
+    def __init__(self, envoy: Any, kwargs: Optional[dict] = None) -> None:
+        super().__init__(envoy, kwargs)
+        self.num_images: int = self.kwargs.get("num_images_per_prompt", 1)
+        # Plain group start -> [start, size] in the image-expanded (pre-guidance)
+        # batch. Filled as invokes are added; the sum of sizes is `image_total`.
+        self.image_groups: dict[int, list] = {}
+        self.image_total = 0
+
+    def add(self, *inputs: Any, **kwargs: Any) -> BatchGroup:
+        group = super().add(*inputs, **kwargs)
+        if group is not None:
+            _, size = group
+            image_size = size * self.num_images
+            self.image_groups[group[0]] = [self.image_total, image_size]
+            self.image_total += image_size
+        return group
+
+    def _narrow_tensor(self, tensor: torch.Tensor, group: list) -> torch.Tensor:
+        rows = tensor.shape[0]
+        if rows == self.total:  # a plain (un-expanded) activation
+            start, size = group
+            return tensor.narrow(0, start, size)
+        if rows == self.image_total:  # repeated num_images_per_prompt times
+            start, size = self.image_groups[group[0]]
+            return tensor.narrow(0, start, size)
+        if rows == self.image_total * 2:  # + classifier-free guidance (uncond|cond)
+            start, size = self.image_groups[group[0]]
+            uncond = tensor.narrow(0, start, size)
+            cond = tensor.narrow(0, start + self.image_total, size)
+            return torch.cat([uncond, cond], dim=0)
+        return tensor
+
+    def _widen_tensor(
+        self, full: torch.Tensor, group: list, edited: torch.Tensor
+    ) -> torch.Tensor:
+        rows = full.shape[0]
+        if rows == self.total:
+            start, size = group
+            return self._splice(full, start, size, edited)
+        if rows == self.image_total:
+            start, size = self.image_groups[group[0]]
+            return self._splice(full, start, size, edited)
+        if rows == self.image_total * 2:  # edited holds both halves, uncond then cond
+            start, size = self.image_groups[group[0]]
+            uncond, cond = edited.chunk(2, dim=0)
+            full = self._splice(full, start, size, uncond)
+            return self._splice(full, start + self.image_total, size, cond)
+        return full
+
+    @staticmethod
+    def _splice(
+        full: torch.Tensor, start: int, size: int, edited: torch.Tensor
+    ) -> torch.Tensor:
+        pre = full.narrow(0, 0, start)
+        post = full.narrow(0, start + size, full.shape[0] - start - size)
+        return torch.cat([pre, edited, post], dim=0)
 
 
 class DiffusionModel(HuggingFaceModel):
-    """NNsight wrapper for diffusion pipelines.
+    """A model backed by a ``diffusers.DiffusionPipeline``.
 
-    Wraps any ``diffusers.DiffusionPipeline`` so that its components
-    can be traced and intervened on. Works with UNet-based pipelines
-    (Stable Diffusion) and transformer-based pipelines (Flux, DiT)
-    alike — the denoiser is accessible as whatever attribute the
-    pipeline exposes (``model.unet`` or ``model.transformer``).
+    A diffusion pipeline orchestrates several modules (unet/transformer, vae,
+    text_encoder, ...) around a denoising loop. This wraps the whole pipeline as one
+    nnsight model: the pipeline is exposed as :attr:`pipeline`, each of its module
+    components as an envoy (``model.unet``, ``model.vae``, ...), and interventions
+    apply to any component along the way.
 
-    By default, ``.trace()`` runs the full diffusion pipeline with
-    ``num_inference_steps=1`` for fast single-step tracing. Use
-    ``.generate()`` to run the full pipeline with the default or
-    user-specified number of inference steps.
+    Both :meth:`trace` and :meth:`generate` run the whole pipeline, with
+    interventions firing on every component the denoising loop invokes;
+    ``model.output`` (and ``tracer.result``) is the pipeline's output object. They
+    differ only in the default step count: :meth:`trace` defaults to a single
+    denoising step (a fast one-step pass), :meth:`generate` uses the pipeline's own
+    default. To run one component's forward on its own, trace that envoy directly —
+    ``with model.unet.trace(sample, timestep, encoder_hidden_states=...):``.
 
-    When ``dispatch=False`` (the default), only lightweight config
-    files are downloaded and the model architecture is created with
-    meta tensors (no memory).  Real weights are loaded automatically
-    on the first ``.trace()`` or ``.generate()`` call, or explicitly
-    via ``.dispatch()``.
+    On dispatch a real pipeline is built with real weights. The lazy meta build
+    can't load a pipeline without weights, so each module component is constructed
+    from its config on the meta device while the light components (scheduler,
+    tokenizer, ...) load normally, and a meta pipeline of the same shape is
+    assembled from them.
 
-    Examples::
-
-        # Stable Diffusion (UNet-based)
-        sd = DiffusionModel("stabilityai/stable-diffusion-2-1")
-        with sd.generate("A cat", num_inference_steps=50) as tracer:
-            for step in tracer.iter[:]:
-                denoiser_out = sd.unet.output.save()
-
-        # Flux (Transformer-based)
-        flux = DiffusionModel("black-forest-labs/FLUX.1-schnell")
-        with flux.trace("A cat"):
-            denoiser_out = flux.transformer.output.save()
+    Requires the optional ``diffusers`` package.
 
     Args:
-        *args: Forwarded to :class:`HuggingFaceModel`.  The first
-            positional argument is typically a repo ID string.
-        automodel (Type[DiffusionPipeline]): The diffusers pipeline
-            class (or a string name resolvable from ``diffusers.pipelines``).
-            Defaults to ``DiffusionPipeline``.
-        **kwargs: Forwarded to the pipeline's ``from_pretrained()``.
+        repo_id: A ``diffusers`` pipeline repo id (or local path) to load.
+        rename: Optional mapping to expose components under different envoy names
+            (e.g. ``{"unet": "denoiser"}``).
+        dispatch: If ``True``, load real weights immediately; otherwise build
+            lazily on the meta device and dispatch on the first run.
+        **kwargs: Forwarded to ``DiffusionPipeline.from_pretrained`` on dispatch.
 
-    Attributes:
-        automodel (Type[DiffusionPipeline]): The pipeline class used for loading.
+    Examples:
+        >>> from nnsight.modeling.diffusion import DiffusionModel
+        >>> model = DiffusionModel("hf-internal-testing/tiny-stable-diffusion-torch")
+        >>> with model.generate("a photo of a cat", num_inference_steps=2) as tracer:
+        ...     latents = model.unet.output[0].save()   # per denoising step
+        ...     images = model.output.save()
+        >>> images.images[0]  # a PIL image
     """
 
-    def __init__(
-        self, *args, automodel: Type[DiffusionPipeline] = DiffusionPipeline, **kwargs
-    ) -> None:
+    pipeline: Optional["DiffusionPipeline"]
 
-        self.automodel = (
-            automodel
-            if not isinstance(automodel, str)
-            else getattr(pipelines, automodel)
+    def __init__(self, repo_id: Any, *args: Any, **kwargs: Any) -> None:
+        self.pipeline = None
+        super().__init__(repo_id, *args, **kwargs)
+
+    # -- loading -------------------------------------------------------------
+
+    def _meta_pipeline(self, repo_id: str) -> "DiffusionPipeline":
+        # Build the pipeline component-by-component so no weights are loaded:
+        # module components come from their config on meta (see MetaDevice),
+        # everything else (schedulers, tokenizers, processors) loads normally.
+        import diffusers
+
+        config = diffusers.DiffusionPipeline.load_config(
+            repo_id, revision=self.revision
         )
+        pipeline_cls = getattr(diffusers, config["_class_name"])
+        expected = set(inspect.signature(pipeline_cls.__init__).parameters) - {"self"}
 
-        # Use __dict__ directly so we don't mirror this onto the (possibly
-        # already-loaded) underlying module via Envoy.__setattr__ — we're
-        # caching the config on the wrapper, not mutating the model's own.
-        self.__dict__["config"] = None
-        self._model: Diffuser = None
+        components: dict[str, Any] = {}
+        for name, spec in config.items():
+            # Each component is recorded as [library_name, class_name]; scalars
+            # like `_class_name` or `requires_safety_checker` aren't components.
+            if name.startswith("_") or not isinstance(spec, list) or name not in expected:
+                continue
+            library, class_name = spec
+            klass = _resolve_component_class(library, class_name)
+            if klass is None:
+                # Unresolvable (or null) component — leave it out, as diffusers
+                # would for a disabled one (e.g. a safety checker).
+                components[name] = None
+                continue
+            components[name] = self._build_component(klass, repo_id, name)
 
-        super().__init__(*args, **kwargs)
+        return pipeline_cls(**components)
 
-    @classmethod
-    def _batcher_class(cls) -> ClassVar[Type["Batcher"]]:
-        return DiffusionBatcher
+    def _build_component(self, klass: type, repo_id: str, name: str) -> Any:
+        import transformers
 
-    def _load_config(self, repo_id: str, revision: Optional[str] = None):
-        """Load and cache the pipeline's ``model_index.json`` config.
-
-        Mirrors :meth:`TransformersModel._load_config` so that
-        ``self.config`` is available before the model is fully loaded.
-        Only downloads the config once (subsequent calls are no-ops).
-
-        Args:
-            repo_id: HuggingFace repository ID.
-            revision: Git revision of the repository.
-        """
-        if self.config is None:
-            self.__dict__["config"] = self.automodel.load_config(
-                repo_id, revision=revision
+        # Module components carry the weights, so build them empty from config.
+        if isinstance(klass, type) and issubclass(klass, torch.nn.Module):
+            if hasattr(klass, "from_config") and hasattr(klass, "load_config"):
+                # diffusers ModelMixin / ConfigMixin.
+                sub_config = klass.load_config(
+                    repo_id, subfolder=name, revision=self.revision
+                )
+                return klass.from_config(sub_config)
+            # transformers PreTrainedModel.
+            sub_config = transformers.AutoConfig.from_pretrained(
+                repo_id, subfolder=name, revision=self.revision
             )
+            return klass._from_config(sub_config)
 
-    def _load_meta(self, repo_id: str, revision: Optional[str] = None, **kwargs):
-        """Load a meta (placeholder) version of the diffusion model.
+        # Everything else is light (schedulers, tokenizers, processors) — load it
+        # fully, on a real device: their constructors may move buffers around,
+        # which a meta tensor can't do.
+        with MetaDevice.real():
+            return klass.from_pretrained(repo_id, subfolder=name, revision=self.revision)
 
-        Downloads only the pipeline and component config files (a few KB).
-        Each ``nn.Module`` component is instantiated from its config with
-        meta-device parameters — no pretrained weights are downloaded.
-        Tokenizers are loaded normally (they are lightweight).  Other
-        non-module components (scheduler, etc.) are set to ``None`` and
-        will be loaded on :meth:`dispatch`.
+    def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        self.pipeline = self._meta_pipeline(repo_id)
+        return _PipelineModule(self.pipeline)
 
-        Args:
-            repo_id: HuggingFace repository ID.
-            revision: Git revision of the repository.
-            **kwargs: User overrides forwarded to pipeline construction
-                (e.g. ``safety_checker=None``).
+    def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        from diffusers import DiffusionPipeline
 
-        Returns:
-            A :class:`Diffuser` instance with meta-device parameters.
-        """
-        self._load_config(repo_id, revision=revision)
-
-        pipeline = _build_pipeline_from_config(
-            self.automodel, repo_id, revision=revision, config=self.config, **kwargs
+        self.pipeline = DiffusionPipeline.from_pretrained(
+            repo_id, revision=self.revision, **kwargs
         )
+        return _PipelineModule(self.pipeline)
 
-        return Diffuser(pipeline, config=self.config)
+    # -- running -------------------------------------------------------------
 
-    def _load(
-        self, repo_id: str, revision: Optional[str] = None, device_map=None, **kwargs
-    ) -> Diffuser:
-        """Load the diffusion model with full weights.
+    def trace(self, *inputs: Any, **kwargs: Any):
+        """Trace the whole pipeline, defaulting to a single denoising step.
 
-        Args:
-            repo_id: HuggingFace repository ID.
-            revision: Git revision of the repository.
-            device_map: Device placement strategy.
-            **kwargs: Forwarded to ``Diffuser()``.
+        Like :meth:`generate` but with ``num_inference_steps=1`` unless overridden —
+        a fast one-step pass for inspecting or editing activations. ``model.output``
+        is the pipeline's output object.
 
-        Returns:
-            A :class:`Diffuser` instance.
-        """
-        self._load_config(repo_id, revision=revision)
-
-        model = Diffuser(
-            self.automodel,
-            repo_id,
-            revision=revision,
-            device_map=device_map,
-            config=self.config,
-            **kwargs,
-        )
-
-        return model
-
-    def _prepare_input(self, *inputs, prompt=None, prompt_embeds=None, **kwargs):
-        """Normalize raw user input into a consistent format for batching.
-
-        Accepts either a string prompt (or list of strings) or a
-        ``prompt_embeds`` tensor (or list of tensors). The input can be
-        passed as the first positional argument or via the ``prompt=``
-        / ``prompt_embeds=`` keyword. The final value lands in
-        ``kwargs`` under its canonical key; the returned positional
-        args tuple is always empty.
-
-        Args:
-            *inputs: Optional single positional input — a string,
-                list of strings, tensor, or list of tensors.
-            prompt: Optional string or list of strings.
-            prompt_embeds: Optional tensor or list of tensors.
-            **kwargs: Additional keyword arguments (passed through).
-
-        Returns:
-            Tuple of ``((), kwargs, batch_size)`` where ``kwargs``
-            contains either ``prompt`` or ``prompt_embeds``.
-        """
-        if len(inputs) > 0:
-            assert len(inputs) == 1
-            assert prompt is None and prompt_embeds is None, (
-                "Pass the prompt as either a positional arg or `prompt=`/"
-                "`prompt_embeds=`, not both."
-            )
-            value = inputs[0]
-            if isinstance(value, torch.Tensor) or (
-                isinstance(value, list)
-                and len(value) > 0
-                and isinstance(value[0], torch.Tensor)
-            ):
-                prompt_embeds = value
-            else:
-                prompt = value
-
-        if prompt is not None and prompt_embeds is not None:
-            raise ValueError("Provide either `prompt` or `prompt_embeds`, not both.")
-
-        if prompt is None and prompt_embeds is None:
-            return tuple(), kwargs, 0
-
-        if prompt is not None:
-            if isinstance(prompt, str):
-                prompt = [prompt]
-            kwargs["prompt"] = prompt
-            batch_size = len(prompt)
-        else:
-            if isinstance(prompt_embeds, list):
-                prompt_embeds = torch.stack(prompt_embeds, dim=0)
-            elif prompt_embeds.ndim == 2:
-                prompt_embeds = prompt_embeds.unsqueeze(0)
-            kwargs["prompt_embeds"] = prompt_embeds
-            batch_size = prompt_embeds.shape[0]
-
-        return tuple(), kwargs, batch_size
-
-    def _batch(self, batched_input, *args, **kwargs):
-        """Combine a new invoke's prepared prompts with already-batched prompts.
-
-        Merges ``prompt`` lists or ``prompt_embeds`` tensors from
-        multiple invokes into a single batched value for pipeline
-        execution.
-
-        Args:
-            batched_input: A tuple of ``(batched_args, batched_kwargs)``
-                from all previous invokes.
-            *args: The new invoke's prepared positional arguments
-                (always empty after :meth:`_prepare_input`).
-            **kwargs: The new invoke's prepared keyword arguments.
-
-        Returns:
-            Tuple of ``((), combined_kwargs)``.
-        """
-        _, batched_kwargs = batched_input
-        combined_kwargs = {**batched_kwargs}
-
-        new_prompt = kwargs.pop("prompt", None)
-        if new_prompt is not None:
-            existing = list(combined_kwargs.get("prompt", []))
-            combined_kwargs["prompt"] = existing + list(new_prompt)
-
-        new_embeds = kwargs.pop("prompt_embeds", None)
-        if new_embeds is not None:
-            existing = combined_kwargs.get("prompt_embeds")
-            combined_kwargs["prompt_embeds"] = (
-                torch.cat([existing, new_embeds], dim=0)
-                if existing is not None
-                else new_embeds
-            )
-
-        combined_kwargs.update(kwargs)
-
-        return tuple(), combined_kwargs
-
-    def _run_pipeline(self, *args, seed=None, **kwargs):
-        """Shared pipeline execution logic for both trace and generate.
-
-        Sets up iteration step counting on the interleaver, handles
-        seed/generator creation, runs the pipeline, wraps the output
-        through the model's forward (for hook access), and resets
-        ``default_all`` afterward.
-
-        Args:
-            *args: Additional positional arguments for the pipeline
-                (typically empty — prompts land in ``kwargs``).
-            seed: Random seed for reproducibility. If provided with
-                multiple prompts, each prompt gets ``seed + offset``.
-            **kwargs: Keyword arguments forwarded to the pipeline,
-                including ``prompt`` or ``prompt_embeds`` and any of
-                ``num_inference_steps``, ``guidance_scale``, etc.
-
-        Returns:
-            The pipeline output passed through the wrapper module.
-        """
-        if self.interleaver is not None:
-            steps = kwargs.get("num_inference_steps")
-            if steps is None:
-                try:
-                    steps = (
-                        inspect.signature(self._model.pipeline.__call__)
-                        .parameters["num_inference_steps"]
-                        .default
-                    )
-                except Exception:
-                    steps = 50
-            self.interleaver.default_all = steps
-
-        prompt = kwargs.get("prompt")
-        prompt_embeds = kwargs.get("prompt_embeds")
-        if prompt is not None:
-            batch_size = len(prompt)
-        elif prompt_embeds is not None:
-            batch_size = prompt_embeds.shape[0]
-        else:
-            batch_size = 0
-
-        generator = torch.Generator(self.device)
-
-        if seed is not None:
-            if batch_size > 1:
-                generator = [
-                    torch.Generator(self.device).manual_seed(seed + offset)
-                    for offset in range(
-                        batch_size * kwargs.get("num_images_per_prompt", 1)
-                    )
-                ]
-            else:
-                generator = generator.manual_seed(seed)
-
-        output = self._model.pipeline(*args, generator=generator, **kwargs)
-
-        if self.interleaver is not None:
-            self.interleaver.default_all = None
-
-        output = self._model(output)
-
-        return output
-
-    def __call__(self, *args, **kwargs):
-        """Run the full diffusion pipeline with a 1-step default.
-
-        Used by ``.trace()`` — defaults to ``num_inference_steps=1``
-        for fast single-step tracing unless the user overrides it.
-
-        Args:
-            *args: Additional positional arguments for the pipeline
-                (typically empty).
-            **kwargs: Keyword arguments forwarded to the pipeline,
-                including ``prompt`` or ``prompt_embeds``.
-
-        Returns:
-            The pipeline output passed through the wrapper module.
+        Examples:
+            >>> with model.trace("a photo of a cat"):
+            ...     latents = model.unet.output[0].save()
+            ...     images = model.output.save()
         """
         kwargs.setdefault("num_inference_steps", 1)
-        return self._run_pipeline(*args, **kwargs)
+        return super().trace(*inputs, **kwargs)
 
-    def __nnsight_generate__(self, *args, **kwargs):
-        """Run the full diffusion pipeline for ``.generate()`` contexts.
+    @traceable
+    def generate(self, *inputs: Any, **kwargs: Any) -> Any:
+        """Run the diffusion pipeline, returning its output object.
 
-        Unlike ``__call__``, this does not set a default for
-        ``num_inference_steps``, allowing the pipeline's own default
-        (or the user's explicit value) to take effect.
+        ``with model.generate(...):`` traces the whole pipeline, so the block's
+        interventions run against every component the denoising loop invokes (use
+        ``tracer.iter`` to target a particular inference step); calling it directly
+        just runs the pipeline. The return value is the pipeline's own output
+        object — read the images off its ``.images`` (or off ``model.output`` /
+        ``tracer.result`` inside a trace).
+
+        Examples:
+            >>> with model.generate("a photo of a cat", num_inference_steps=20):
+            ...     images = model.output.save()
+            >>> images.images[0]  # a PIL image
 
         Args:
-            *args: Additional positional arguments for the pipeline
-                (typically empty).
-            **kwargs: Keyword arguments forwarded to the pipeline,
-                including ``prompt`` or ``prompt_embeds``.
+            *inputs: The pipeline's inputs, e.g. a text prompt.
+            **kwargs: Forwarded to the pipeline, e.g. ``num_inference_steps``,
+                ``guidance_scale``, ``num_images_per_prompt``, ``output_type``.
+                ``seed`` (int) is turned into a reproducible ``generator`` — a
+                per-image list for a batch; pass ``generator`` directly to override.
 
         Returns:
-            The pipeline output passed through the wrapper module.
+            The pipeline's output object; its ``.images`` holds the generated images.
         """
-        return self._run_pipeline(*args, **kwargs)
+        # Dispatch is handled by interleave when tracing; the pipeline (and the
+        # `seed` -> `generator` conversion) runs through the root _PipelineModule.
+        return self._module(*inputs, **kwargs)
 
-    def _remoteable_model_key(self) -> str:
-        return super()._remoteable_model_key()
+    # -- batching ------------------------------------------------------------
+
+    _batcher_class = DiffusionBatcher
+
+    def _batch_size(self, *inputs: Any, **kwargs: Any) -> int:
+        """Number of batch rows an invoke's input contributes.
+
+        A prompt is one row per string (a list of prompts is one per entry);
+        ``prompt_embeds`` is one per leading row. Zero rows means params only (e.g.
+        ``num_inference_steps=``), so the trace expects ``invoke()`` blocks.
+        """
+        value = inputs[0] if inputs else kwargs.get("prompt", kwargs.get("prompt_embeds"))
+        if value is None:
+            return 0
+        if isinstance(value, str):
+            return 1
+        if isinstance(value, torch.Tensor):
+            return 1 if value.ndim == 0 else value.shape[0]
+        if isinstance(value, (list, tuple)):
+            return len(value)
+        return 1
+
+    def _batch(self, invokes: list, fn: Any) -> tuple:
+        """Merge invokes' prompts (or ``prompt_embeds``) into one pipeline call."""
+        prompts: list = []
+        embeds: list = []
+        forward: dict = {}
+        for inputs, kwargs in invokes:
+            data = inputs[0] if inputs else kwargs.get("prompt")
+            embed = kwargs.get("prompt_embeds")
+            if embed is not None:
+                embeds.append(embed if embed.ndim == 3 else embed.unsqueeze(0))
+            elif isinstance(data, str):
+                prompts.append(data)
+            elif data is not None:
+                prompts.extend(data)
+            forward.update(
+                {k: v for k, v in kwargs.items() if k not in ("prompt", "prompt_embeds")}
+            )
+        if embeds:
+            forward["prompt_embeds"] = torch.cat(embeds, dim=0)
+        else:
+            forward["prompt"] = prompts
+        return tuple(), forward
+
+    # -- remote --------------------------------------------------------------
+
+    def _remoteable_persistent_objects(self) -> dict:
+        objects = super()._remoteable_persistent_objects()
+        # The pipeline (and its light components) resolve to the server's live one;
+        # its module components are already tagged by Envoy.__getstate__.
+        if self.pipeline is not None:
+            objects["Pipeline"] = self.pipeline
+        return objects
+
+    def __getstate__(self) -> dict:
+        state = super().__getstate__()
+        # Reference the pipeline by persistent id instead of serializing it; the
+        # server resolves it to its live object (see _remoteable_persistent_objects).
+        if self.pipeline is not None:
+            self.pipeline._persistent_id = "Pipeline"
+        return state

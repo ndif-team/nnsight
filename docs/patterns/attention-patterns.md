@@ -3,144 +3,179 @@ title: Attention Patterns
 one_liner: Extract attention probability matrices from transformer blocks via `.source` to visualize what each head attends to.
 tags: [pattern, interpretability, attention, source-tracing]
 related: [docs/usage/source.md, docs/patterns/per-head-attention.md, docs/patterns/logit-lens.md]
-sources: [src/nnsight/intervention/source.py:610, src/nnsight/intervention/envoy.py:223, tests/test_lm.py:691]
+sources: [src/nnsight/intervention/source.py, src/nnsight/intervention/envoy.py, tests/test_source.py]
 ---
 
 # Attention Patterns
 
 ## What this is for
 
-The attention pattern (the softmax-normalized matrix `A` in `softmax(QK^T / sqrt(d)) V`) is the most direct read on what an attention head is "looking at". Visualizing per-layer per-head attention probabilities reveals induction heads, copy heads, syntactic heads, name-mover heads, and so on.
+The attention pattern (the softmax-normalized matrix `A` in
+`softmax(QK^T / sqrt(d)) V`) is the most direct read on what a head is "looking
+at". Visualizing per-head attention probabilities reveals induction heads, copy
+heads, name-mover heads, and so on.
 
-In nnsight, attention probabilities are not directly exposed by `.output` of an attention block - the block returns the *value-weighted* output. To get the probabilities themselves you reach into the attention computation using `.source`, which hooks intermediate operations inside the module's forward method (see `docs/usage/source.md`).
+The attention *block* doesn't expose the probabilities via `.output` — it returns
+the value-weighted result. To get the probabilities you reach into the attention
+computation with `.source`, which hooks intermediate operations inside the module's
+forward (see `docs/usage/source.md`).
 
-For HuggingFace transformer attention, the relevant operation is typically named `attention_interface_0` (the function call that computes the QKV-weighted result) and its inner `torch_nn_functional_scaled_dot_product_attention_0` (the actual SDPA call).
+For GPT-2, the relevant operation is `attention_interface_0` — the function call
+that returns `(attn_output, attn_weights)`. Discover it with `print(...source)`.
 
 ## When to use
 
-- Visualizing what each head attends to on a given prompt.
+- Visualizing what each head attends to on a prompt.
 - Identifying induction heads, copy heads, etc.
-- Confirming an attention pattern hypothesis discovered by another method.
-- Computing per-head metrics (entropy, max attention, attention to a specific position).
+- Confirming an attention-pattern hypothesis from another method.
+- Per-head metrics (entropy, max attention, attention to a specific position).
 
 ## Canonical pattern
 
-To get attention weights you usually need `attn_implementation="eager"`. Modern HF defaults to `sdpa` or `flash_attention_2`, which **do not return attention weights** as part of their output (FlashAttention computes them implicitly and never materializes them; SDPA returns `None` for weights unless `output_attentions=True` is requested through the eager path).
+You need `attn_implementation="eager"` to get attention weights. GPT-2 defaults to
+`sdpa`, which returns `None` for the weights (SDPA/FlashAttention never materialize
+them).
 
 ```python
-from nnsight import LanguageModel
+from nnsight.modeling.transformers import TransformersModel
 
-# eager attention so attention weights are exposed.
-model = LanguageModel(
+model = TransformersModel(
     "openai-community/gpt2",
-    device_map="auto",
     dispatch=True,
-    attn_implementation="eager",
+    attn_implementation="eager",     # required to expose attention weights
 )
 
 prompt = "The cat sat on the"
 
 with model.trace(prompt):
-    # `attention_interface_0` returns (attn_output, attn_weights).
+    # attention_interface_0 returns (attn_output, attn_weights).
     attn_out, attn_weights = (
         model.transformer.h[0].attn.source.attention_interface_0.output.save()
     )
 
-# attn_weights shape with eager attention: [batch, n_heads, seq, seq]
-print(attn_weights.shape)
+print(attn_weights.shape)                 # [batch, n_heads, q_seq, k_seq]
+print(attn_weights[0, 0].sum(-1))         # rows sum to 1
 ```
 
-To discover the operation name on your model, print `.source` outside a trace:
+```
+torch.Size([1, 12, 5, 5])
+tensor([1., 1., 1., 1., 1.])
+```
+
+Discover the operation name by printing `.source` (works outside a trace):
 
 ```python
 print(model.transformer.h[0].attn.source)
 # ...
-# attention_interface_0  -> 66    attn_output, attn_weights = attention_interface(...)
+#  attention_interface_0  -> 71     attn_output, attn_weights = attention_interface(
 # ...
 ```
 
-The exact name (`attention_interface_0`, `attention_interface_1`, ...) reflects the operation's index inside the forward method - the leading `_0` is iteration, not a layer index.
+The trailing `_0` is the occurrence index inside the forward, not a layer index.
 
 ## Variations
 
 ### All layers in one trace
 
 ```python
+import nnsight
+
 with model.trace(prompt):
-    patterns = []
+    patterns = nnsight.save([])
     for block in model.transformer.h:
         _, weights = block.attn.source.attention_interface_0.output
-        patterns.append(weights.save())
+        patterns.append(weights)
 
-# patterns[L].shape == [batch, n_heads, seq, seq]
+# len(patterns) == 12; patterns[L].shape == [1, 12, 5, 5]
 ```
 
-### Inside the SDPA call (recursive source)
+### Raw softmax weights (recursive source)
 
-If you want the *raw* QK softmax (e.g. before any masking quirks), recurse into the inner SDPA function:
+`attention_interface_0` resolves at run time to a plain Python function
+(`eager_attention_forward`), so you can chain `.source` again to reach the raw
+softmax — before the dtype cast and dropout:
 
 ```python
 with model.trace(prompt):
-    sdpa_out = (
+    softmax_w = (
         model.transformer.h[0].attn.source
         .attention_interface_0
-        .source
-        .torch_nn_functional_scaled_dot_product_attention_0
+        .source.nn_functional_softmax_0
         .output.save()
     )
+# softmax_w.shape == [1, 12, 5, 5]
 ```
 
-The output shape and what is returned depends on the SDPA backend. With `attn_implementation="eager"`, the wrapping `attention_interface_0` is the simpler and more reliable target.
+Recursive `.source` only works **inside a trace** (the called function is resolved
+from the live value). Print the inner ops with
+`print(model.transformer.h[0].attn.source.attention_interface_0.source)` inside a
+trace. See `docs/usage/source.md`.
 
 ### Average attention across a batch
 
 ```python
+import nnsight
+
 prompts = ["The cat sat on the", "A dog ran under the", "The bird flew over the"]
 
 with model.trace() as tracer:
-    pieces = []
+    pieces = nnsight.save([])
     for p in prompts:
         with tracer.invoke(p):
             _, w = model.transformer.h[5].attn.source.attention_interface_0.output
-            pieces.append(w.save())
+            pieces.append(w)
 
-# Each pieces[i] is [1, n_heads, seq, seq]; pad/clip if seq lengths differ.
+# each pieces[i] is [1, 12, seq, seq]; pad/clip if seq lengths differ.
 ```
 
 ### Patching the attention output (not the weights)
 
-If you want to *modify* attention behavior, patch the operation's output rather than its weights:
+To *modify* attention behavior, replace the operation's output. `.output` is a
+tuple `(attn_output, attn_weights)`; rebuild it and assign the whole tuple:
 
 ```python
+import torch
+
 with model.trace(prompt):
     out = model.transformer.h[0].attn.source.attention_interface_0.output
-    new = (torch.zeros_like(out[0]),) + out[1:]    # zero the attn output, keep weights
+    new = (torch.zeros_like(out[0]),) + tuple(out[1:])   # zero the attn output
     model.transformer.h[0].attn.source.attention_interface_0.output = new
     logits = model.lm_head.output.save()
 ```
 
-See `tests/test_lm.py:691` and `tests/test_source.py` for tested examples of source patching.
+See `tests/test_source.py` for tested source-patching examples.
 
 ## Interpretation tips
 
-- **Shape**: with eager attention, weights are `[batch, n_heads, q_seq, k_seq]`. `weights[b, h, i, j]` is "how much position `i` attends to position `j` in head `h`". Rows sum to 1 (with causal masking, the upper triangle is 0).
-- **Look at the BOS token attention.** Many heads dump probability mass on position 0 ("attention sink"). Strong attention to BOS often means "this head is not engaged on this prompt."
-- **Diagonal patterns** = self-attention / position-encoding behavior. **Off-diagonal** = real information movement.
-- **Induction heads** show a characteristic pattern on repeated tokens - position `i` attends to the position one after the previous occurrence of token at `i-1`.
-- **Compare across prompts**, not just within one. A head's behavior is more robustly characterized by its *consistent* attention across many prompts.
-- **Different attention implementations expose different things.** With `sdpa` or `flash_attention_2`, the second tuple element of `attention_interface_0` may be `None`. Use `eager`.
+- **Shape**: weights are `[batch, n_heads, q_seq, k_seq]`. `weights[b, h, i, j]` is
+  "how much position `i` attends to `j` in head `h`". Rows sum to 1 (causal mask
+  zeros the upper triangle).
+- **Watch the BOS / position-0 attention.** Many heads dump mass on position 0
+  ("attention sink"); that often means "this head isn't engaged here".
+- **Diagonal** = self / positional behavior. **Off-diagonal** = information movement.
+- **Induction heads** attend from position `i` to the token after the previous
+  occurrence of the token at `i-1`.
+- **Compare across prompts**, not just within one.
+- **Different implementations expose different things.** With `sdpa` /
+  `flash_attention_2` the weights element is `None`. Use `eager`.
 
 ## Gotchas
 
-- The operation name can vary between transformer versions. Always `print(model.transformer.h[0].attn.source)` first to confirm what is available.
-- `.source` requires accessing it on the module that *calls* the operation. Do not chain `.source.foo.source` on a *submodule* - access that submodule directly. See `docs/usage/source.md`.
-- For Llama / Mistral / Qwen the path is typically `model.model.layers[i].self_attn.source....` instead of `model.transformer.h[i].attn.source...`. The exact operation name (`attention_interface_0`, `eager_attention_forward_0`, etc.) varies by family. **There is no universal table — read the model's `forward` source code (or `print(model.<path>.source)`) to find the operation name.** This is the canonical way to discover op names per architecture.
-- `attn_implementation="flash_attention_2"` is the fastest at runtime but does not let you read attention weights. Pay the cost and use eager when you need patterns.
-- `[batch, n_heads, q_seq, k_seq]` can be very large for long contexts (`seq^2` per head per layer per batch element). For long-context analysis, save only the heads / layers you need.
+- The operation name can vary between transformer versions. `print(...attn.source)`
+  first to confirm what's available.
+- Request `attention_interface_0` **before** `attn.output` in the same forward —
+  the source op runs first, so reading `attn.output` and then the source op is out
+  of order (`OutOfOrderError`).
+- For Llama / Mistral / Qwen the path is typically
+  `model.model.layers[i].self_attn.source....`. **There is no universal op-name
+  table — read the model's `forward` (or `print(...source)`) to find it.**
+- `[batch, n_heads, q_seq, k_seq]` grows as `seq^2` per head per layer. For long
+  contexts, save only the heads / layers you need.
 
 ## Related
 
-- `docs/usage/source.md` - How `.source` works in general (forward rewriting, operation names, recursive access).
-- [per-head-attention](per-head-attention.md) - Operating on individual heads in attention output.
-- [logit-lens](logit-lens.md) - Pair attention patterns with logit lens to ask "what was this head reading, and what did the model predict next?"
-- `tests/test_lm.py:691` - Source-tracing test that exercises attention output access.
+- `docs/usage/source.md` — how `.source` works (forward rewriting, op names,
+  recursive access).
+- [per-head-attention](per-head-attention.md) — operating on individual heads.
+- [logit-lens](logit-lens.md).
+- `tests/test_source.py` — source-tracing tests.

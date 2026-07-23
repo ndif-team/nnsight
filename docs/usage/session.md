@@ -1,153 +1,86 @@
----
-title: Session
-one_liner: Group multiple traces under one context with `model.session()`; bundle remote requests into a single round-trip.
-tags: [usage, session, remote]
-related: [docs/usage/trace.md, docs/usage/save.md, docs/usage/conditionals-and-loops.md]
-sources: [src/nnsight/__init__.py:116, src/nnsight/intervention/envoy.py:413, src/nnsight/intervention/tracing/base.py:47, src/nnsight/modeling/mixins/remoteable.py:76]
----
+# Session — share values across traces
 
-# Session
-
-## What this is for
-
-`model.session()` opens a `Tracer` context that **does not run the model itself** — it captures Python code that contains one or more `model.trace(...)` blocks (and arbitrary control flow between them). The captured code is compiled once and executed in order. The two main use cases:
-
-- **Local**: bundle related traces, share variables across them naturally, run loops over many prompts.
-- **Remote** (`remote=True`): ship the whole session as a single payload to NDIF — one queue wait, one network round-trip, regardless of how many inner traces there are.
-
-The session itself is a base `Tracer` (no interleaving), so it has no `tracer.invoke`, `tracer.iter`, `tracer.cache`, etc. — those live on the inner `model.trace(...)` contexts.
-
-## When to use / when not to use
-
-- Use locally for clarity when you have several related traces that share variables.
-- Use locally to put a Python `for` loop around many traces (one trace per prompt).
-- Use **always** for remote workloads with multiple traces — saves queue time and bandwidth.
-- For a single forward pass, just use `model.trace(...)` directly.
-
-## Canonical pattern
+A **session** is a scope around several traces. A value read in one trace is
+available in a later trace **without** an explicit `.save()`, because the *session*
+— not each individual trace — is the boundary back to your code. Only values you
+mark with `.save()` survive past the session itself.
 
 ```python
-with model.session() as session:
-    with model.trace("Hello"):
-        hs = model.transformer.h[0].output.save()
+import torch
+from nnsight.modeling.transformers import TransformersModel
 
-    with model.trace("World"):
-        # use hs from the previous trace — it's a real captured tensor
-        model.transformer.h[0].output[:] = hs
-        out = model.lm_head.output.save()
-```
-
-## Looping over prompts
-
-Standard Python `for` works inside a session:
-
-```python
-prompts = ["Hello", "World", "Test"]
+model = TransformersModel("openai-community/gpt2", dispatch=True)
+P = "The Eiffel Tower is in the city of"
 
 with model.session():
-    results = list().save()
-    for prompt in prompts:
-        with model.trace(prompt):
-            results.append(model.lm_head.output.argmax(dim=-1))
+    with model.trace(P):
+        h0 = model.transformer.h[0].output       # captured — no .save() needed
+    with model.trace(P):
+        diff = (model.transformer.h[0].output - h0).abs().sum().save()
+
+print(diff.item())     # 0.0  (same input -> identical activations)
 ```
 
-See `docs/usage/conditionals-and-loops.md` for `if`/`for` semantics.
+`h0` flows from the first trace into the second on its own; only `diff` is
+`.save()`d, so only `diff` comes back out.
+
+## Why a session
+
+Outside a session, each `with model.trace(...)` is its own boundary: values don't
+cross from one trace to the next, and everything you want to keep needs `.save()`.
+A session removes the per-trace boundary so you can:
+
+- reuse a value captured in one forward inside a later one,
+- run ordinary Python — loops, conditionals, building lists — around the traces,
+
+all in one block, and only pay the `.save()` filter once, at the session edge.
+
+## Ordinary Python around the traces
+
+The session body is real Python; the nested traces run as they're reached.
+
+```python
+with model.session():
+    norms = []
+    for layer in range(3):
+        with model.trace(P):
+            norms.append(model.transformer.h[layer].output.norm())
+    stacked = torch.stack(norms).save()
+
+print([round(x, 1) for x in stacked.tolist()])   # [213.6, 658.5, 2570.4]
+```
+
+Each trace contributes one value to `norms`; only the final `stacked` tensor is
+saved and returned.
+
+## Save is still required for what you want back
+
+`.save()` inside a session marks a value to survive **the session**. A value that
+is never saved is usable in later traces but does not reach your code once the
+session exits — and calling `save()` with no session/trace active raises (see
+[save.md](save.md)).
 
 ## Remote sessions
 
-`RemoteableMixin.session` (`src/nnsight/modeling/mixins/remoteable.py:76`) accepts `remote=True` / `blocking=` / `backend=` kwargs:
+A whole session runs as one remote job with `remote=True` on the session (not on
+the inner traces) — the inner `with model.trace(...)` blocks execute against the
+server's model when it runs the session body:
 
 ```python
 with model.session(remote=True):
-    # First trace: capture activations
-    with model.trace("Megan Rapinoe plays the sport of"):
-        hs = model.model.layers[5].output[:, -1, :]   # no .save() needed inside
-
-    with model.trace("Shaquille O'Neal plays the sport of"):
-        clean = model.lm_head.output[0][-1].argmax(dim=-1).save()
-
-    with model.trace("Shaquille O'Neal plays the sport of"):
-        model.model.layers[5].output[:, -1, :] = hs   # cross-trace reference
-        patched = model.lm_head.output[0][-1].argmax(dim=-1).save()
-
-print(model.tokenizer.decode(clean), "->", model.tokenizer.decode(patched))
+    with model.trace(P):
+        h = model.transformer.h[0].output
+    with model.trace(P):
+        out = (model.transformer.h[0].output - h).abs().sum().save()
 ```
 
-Properties of remote sessions:
+Use `remote="local"` to dry-run the serialize/deserialize path offline. See
+[../remote/remote-session.md](../remote/remote-session.md).
 
-- One job submission, one queue wait, one set of status updates.
-- Variables defined in earlier traces are usable in later traces directly — the session frame is shared on the server side.
-- Only put `remote=True` on the outer `session()`, not on inner traces.
-- `blocking=False` returns immediately; check `tracer.backend.job_status` and call `tracer.backend()` to fetch when ready.
+## Notes
 
-`session(remote=True)` uses `RemoteTracer` (or `RemoteInterleavingTracer` for inner traces, set via `tracer_cls`) to support hybrid remote/local code via `tracer.local()` (`src/nnsight/modeling/mixins/remoteable.py:231`).
-
-## How it works
-
-`Envoy.session(...)` (`src/nnsight/intervention/envoy.py:413`) just constructs a base `Tracer` and attaches `model` to it:
-
-```python
-def session(self, *args, tracer_cls: Type[Tracer] = Tracer, **kwargs):
-    tracer = tracer_cls(*args, **kwargs)
-    setattr(tracer, "model", self)
-    return tracer
-```
-
-The base `Tracer` (`src/nnsight/intervention/tracing/base.py:47`) captures the with-block body, compiles it into a function, and runs it in the caller's frame via `ExecutionBackend`. Inside that function, every `with model.trace(...):` block is an independent interleaving session — each opens its own worker thread, runs its forward pass, exits, and pushes saved values back into the session frame.
-
-### What `*inputs` does on `model.session(*inputs, ...)`
-
-Positional arguments to `model.session(*inputs, ...)` are forwarded to `Tracer.__init__(*args, ...)` and stored on the tracer as `self.args`. They are then passed to the compiled session function as positional parameters when it runs. **They do NOT propagate into inner `model.trace(...)` blocks** — each inner trace opens its own interleaving session with its own positional arguments.
-
-In practice this is rarely useful — most users define inputs inside the session body. If you do pass `*inputs` here, you're effectively parameterizing the entire compiled session function:
-
-```python
-# inputs become positional args of the compiled session function;
-# they are NOT auto-forwarded into inner trace(...) calls.
-with model.session(some_payload, remote=True) as session:
-    with model.trace("Hello"):                   # "Hello" is the trace input here, not some_payload
-        out = model.lm_head.output.save()
-```
-
-There is also a top-level `nnsight.session(...)` helper (`src/nnsight/__init__.py:116`):
-
-```python
-def session(*args, **kwargs):
-    return Tracer(*args, **kwargs)
-```
-
-This returns a bare `Tracer` not bound to any model. Prefer `model.session(...)` so the model reference is available.
-
-## Sharing values across traces
-
-Locally, intermediate variables that are not `.save()`d but are assigned in the session body are still visible across traces because the session frame is the actual caller frame:
-
-```python
-with model.session():
-    with model.trace("Hello"):
-        hs = model.transformer.h[0].output   # no .save needed for session-scope use
-
-    # Plain Python — runs between traces
-    print("captured tensor:", hs.shape)
-
-    with model.trace("World"):
-        model.transformer.h[0].output[:] = hs
-        out = model.lm_head.output.save()
-```
-
-Anything you want **outside the session** still needs `.save()` (or `nnsight.save(...)`).
-
-## Gotchas
-
-- A `session()` on its own does not run the model — you need at least one inner `model.trace(...)`.
-- Remote sessions: only the outer `session()` takes `remote=True`. Inner `model.trace(...)` calls inherit the remote backend automatically.
-- Session is a `Tracer`, not an `InterleavingTracer` — `tracer.invoke`, `tracer.iter`, `tracer.cache`, `tracer.barrier`, `tracer.result` live on the inner `model.trace` contexts.
-- Variables declared inside a session but outside any `.trace()` are normal Python variables — they exist in the session's compiled function frame.
-- For values you want **after** the whole session exits, use `.save()` / `nnsight.save(...)` exactly like with `model.trace(...)`.
-
-## Related
-
-- `docs/usage/trace.md`
-- `docs/usage/save.md`
-- `docs/usage/conditionals-and-loops.md`
-- `docs/remote/...` (remote execution specifics)
+- `model.session()` returns a plain tracer that captures the block, runs it as real
+  Python (nested traces execute as reached), and gates saves at its own outermost
+  boundary — there is no separate session state.
+- There is no top-level `nnsight.session(...)`; open one from a model:
+  `model.session()`.

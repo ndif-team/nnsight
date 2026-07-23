@@ -1,153 +1,125 @@
 ---
 title: Types and Values Pitfalls
-one_liner: Misconceptions about what's "inside" a trace — values are real tensors, not proxies; FakeTensor in scan behaves slightly differently; device placement matters.
+one_liner: Values inside a trace are real tensors, not proxies; scan gives FakeTensors (branching on their content raises); device placement matters.
 tags: [gotcha, types, scan, faketensor, device]
 related: [docs/concepts/deferred-execution.md, docs/usage/scan.md]
-sources: [src/nnsight/__init__.py:128, src/nnsight/intervention/tracing/tracer.py:613, src/nnsight/intervention/interleaver.py:264]
+sources: [src/nnsight/intervention/interleaver.py:270, src/nnsight/intervention/tracer.py:299, src/nnsight/tracing/hint.py]
 ---
 
 # Types and Values Pitfalls
 
 ## TL;DR
-- Inside a trace, `.output`/`.input` deliver *real* tensors. `print(...)`, `.shape`, and arithmetic all work directly. There are no proxies.
-- Use `model.scan(input)` to inspect shapes and validate operations *without* running the model — values arrive as `FakeTensor`s.
-- Tensors you create inside a trace must be put on the right device, e.g. `torch.randn(...).to(model.transformer.h[0].output.device)` — the model's tensors are on whatever device map you loaded with.
-- Inside `.scan()`, `FakeTensor.__bool__` is patched to always return `True` (`src/nnsight/__init__.py:128`). Python `if` on a fake tensor does not reflect runtime truthiness.
+- Inside a `trace`, `.output`/`.input` deliver **real** tensors. `print`, `.shape`, `.mean()`, arithmetic all work directly. There are no proxies to "resolve".
+- `model.scan(input)` runs the forward under `FakeTensorMode` — values come back as **`FakeTensor`s** carrying shape/dtype only. Read `.shape`/`.dtype`; a fake tensor is invalid once the scan exits.
+- **Branching on fake-tensor *content* under scan raises** (`GuardOnDataDependentSymNode`), it does not silently return `True`. The old "`FakeTensor.__bool__` always True" behavior is gone. For content-dependent branching use `trace`, not `scan`.
+- Branching on **shapes/ints** (`torch.Size`, `int`) works normally in scan — those aren't fake tensors.
+- Tensors you create inside a trace must be on the model's device. Inputs *you pass to `trace`* are moved for you; tensors you build in the block are not.
 
 ---
 
-## "Values inside a trace are proxies" — they are not
+## Values inside a trace are real, not proxies
 
 ### Symptom
-Code that "looks like it should work" works. Or: someone reads about deferred execution, assumes values are proxies, and writes code defensively (cloning everything, calling `.value` on things, treating shapes as opaque) when none of that is needed.
+Defensive code — cloning everything, calling `.value`, treating shapes as opaque — that isn't needed. Or surprise that ordinary tensor ops just work.
 
 ### Cause
-nnsight's threading model is value-passing, not proxy-passing. When the worker thread accesses `.output`, it issues a `request(...)` call (`src/nnsight/intervention/interleaver.py:264`) that *blocks* until the model's hook hands back the actual tensor. The variable you receive is a real `torch.Tensor` (or whatever type the module returned). All standard PyTorch operations work on it directly.
+Interleaving is value-passing, not proxy-passing. Reading `.output` parks the worker until the model produces the value, then hands back the **actual** object (`Mediator.value`, `src/nnsight/intervention/interleaver.py:270`) — a real `torch.Tensor` (or tuple, ...). It behaves as nnsight's `Object` tensor stand-in only for editor type hints; at runtime it *is* the tensor.
 
-### Wrong assumption (no error, but unnecessary code)
+### Right code
 ```python
-with model.trace("Hello"):
+with model.trace("Hello world"):
     hs = model.transformer.h[0].output
-    shape = hs.shape   # already a real torch.Size, no .resolve() needed
-    print(shape)
-    zeros = torch.zeros(shape)   # works directly
-    mean = hs.mean()             # works directly
+    print(type(hs).__name__)     # Tensor
+    print(hs.shape)              # torch.Size([1, 2, 768])
+    print(hs.mean())             # a real scalar
+    print(hs.dtype, hs.device)   # real attributes
 ```
 
-### Right code (the same, framed correctly)
-```python
-with model.trace("Hello"):
-    hs = model.transformer.h[0].output
-    print(hs.shape)              # torch.Size([1, 5, 768])
-    print(hs.mean())             # real scalar
-    print(hs.dtype, hs.device)   # all real attributes
-```
-
-### Mitigation / how to spot it early
-- If you find yourself writing wrappers to "extract" or "resolve" values inside a trace, you're treating them as proxies — they're not. Just use them directly.
-- If you need a real Python literal *outside* the trace (e.g. an int extracted from `.shape`), `.save()` it (or `nnsight.save(...)` for non-tensor types).
+### Mitigation
+- If you're writing wrappers to "extract"/"resolve" values inside a trace, stop — use them directly.
+- To get a plain Python value *outside* the trace, `.save()` it (or `nnsight.save(...)` for non-tensors).
 
 ---
 
-## Inspect shapes without running the model: use `.scan()`
-
-### Symptom
-You want to know the output shape of a layer without paying the cost of a real forward pass, or you want to validate that an indexing operation will work before doing it for real.
+## Inspect shapes without running the model: `.scan()`
 
 ### Cause
-`model.scan(input)` runs the model under `FakeTensorMode` (`src/nnsight/intervention/tracing/tracer.py:613`). Modules execute symbolically — no real computation, but shapes propagate. You can read `.shape`, validate slicing (`output[0][:, 1000]` will error early if the dim is too small), and confirm tuple structure.
-
-`FakeTensor`s are not real tensors but they implement most introspection operations. Arithmetic on them returns more fake tensors with propagated shapes.
+`model.scan(input)` runs the forward inside `FakeTensorMode` (`src/nnsight/intervention/tracer.py:299`): modules execute symbolically, propagating shape/dtype but doing no real compute and needing no real weights.
 
 ### Right code
 ```python
 import nnsight
 
-with model.scan("Hello"):
-    dim = nnsight.save(model.transformer.h[0].output.shape[-1])
-
-print(dim)   # 768
+with model.scan("Hello world"):
+    t = model.transformer.h[0].output
+    dim = nnsight.save(t.shape[-1])          # 768
+    kind = nnsight.save(type(t).__name__)    # 'FakeTensor'
+print(dim, kind)
 ```
 
-### Mitigation / how to spot it early
-- Use `.scan()` for shape introspection / static validation.
-- Use `.trace()` for actual computation.
-- See [docs/usage/scan.md](../usage/scan.md).
+### Mitigation
+- Use `scan` for shape introspection / static validation; `trace` for real computation.
+- A fake tensor `.save()`d out of a scan is not usable once the fake mode exits — save the *shape*, not the fake tensor.
+
+---
+
+## Branching on fake-tensor content raises under scan
+
+### Symptom
+```
+GuardOnDataDependentSymNode: Could not guard on data-dependent expression ...
+```
+when you write `if (out > 0).all():` (or `bool(...)`) on a fake tensor inside `scan`.
+
+### Cause
+There is no `FakeTensor.__bool__` override in the current nnsight. Torch's fake mode cannot decide a data-dependent boolean symbolically, so it raises. (This is unlike older nnsight, which patched `__bool__` to always return `True`.)
+
+### Right code
+```python
+import nnsight
+
+with model.scan("Hello world"):
+    out = model.transformer.h[0].output
+    if out.shape[-1] > 1000:          # OK — this is a torch.Size / int
+        wide = nnsight.save(True)
+    # if (out > 0).all(): ...         # raises — content-dependent under fake mode
+```
+
+### Mitigation
+- Inside `scan`, branch only on shape/dtype. For branching on tensor *content*, run a real `trace`.
 
 ---
 
 ## Device placement for tensors created inside a trace
 
 ### Symptom
-`RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!` when you create a noise / steering vector locally and add it to a model activation.
-
-### Cause
-The model's tensors live on whatever device map you loaded with (e.g. `device_map="auto"` may put different layers on different GPUs). A tensor you make with `torch.randn(...)` defaults to CPU. Mixing them errors.
-
-### Wrong code
-```python
-steering = torch.randn(768)   # CPU
-
-with model.trace("Hello"):
-    model.transformer.h[10].output[:, -1, :] += steering   # device mismatch
+```
+RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!
 ```
 
-### Right code
+### Cause
+`interleave` moves the inputs *you pass to `trace`* onto the model's device (`src/nnsight/intervention/envoy.py`), but a tensor you construct inside the block (`torch.randn(...)`) defaults to CPU. Adding it to a GPU activation errors.
+
+### Wrong / Right
 ```python
-with model.trace("Hello"):
+# wrong — steering vector is on CPU
+steering = torch.randn(768)
+with model.trace("Hello world"):
+    model.transformer.h[10].output[:, -1, :] += steering
+
+# right — move onto the target's device
+with model.trace("Hello world"):
     target = model.transformer.h[10].output
     steering = torch.randn(768).to(target.device)
     target[:, -1, :] += steering
 ```
 
-Or compute the steering vector on the right device upfront:
-
-```python
-device = next(model.parameters()).device   # rough proxy for "main" device
-steering = torch.randn(768, device=device)
-
-with model.trace("Hello"):
-    model.transformer.h[10].output[:, -1, :] += steering
-```
-
-### Mitigation / how to spot it early
-- Read the target tensor's `.device` attribute and `.to(...)` your tensor onto it before the operation.
-- For `device_map="auto"`, different layers may be on different devices — match each to its target.
-
----
-
-## `FakeTensor.__bool__` always returns `True` in scan
-
-### Symptom
-Inside `model.scan(...)`, you write `if some_tensor:` or `if shape == 0:` and the branch always takes the "True" path regardless of the actual content.
-
-### Cause
-nnsight patches `FakeTensor.__bool__` to return `True` unconditionally (`src/nnsight/__init__.py:128`). Without this patch, many control-flow operations inside the model's forward pass would raise (because `FakeTensor.__bool__` would fail under `FakeTensorMode`'s symbolic execution). The patch lets the forward pass run to completion, but it also means *your* `if`-statements on fake tensors are not informative.
-
-### Wrong assumption
-```python
-import nnsight
-
-with model.scan("Hello"):
-    out = model.transformer.h[0].output
-    if (out > 0).all():           # always True under fake mode
-        print("non-negative")
-    if out.shape[-1] > 1000:      # this is on torch.Size — works correctly
-        print("wide hidden")
-```
-
-### Mental fix
-Boolean operations *on shapes* (`torch.Size`, `int`) work normally — those aren't `FakeTensor`s. Boolean operations *on the fake tensor data* always return `True`.
-
-For real branching on tensor *content*, you need `.trace()`, not `.scan()`.
-
-### Mitigation / how to spot it early
-- Inside `.scan()`, only branch on shape or dtype, never on tensor content.
-- For runtime-content branching, run a real `.trace()`.
+### Mitigation
+- Read the target's `.device` and `.to(...)` your tensor onto it. With `device_map="auto"`, different layers can be on different devices — match each.
 
 ---
 
 ## Related
-- [docs/concepts/deferred-execution.md](../concepts/deferred-execution.md) — full mental model of how interventions and the model interleave.
+- [docs/concepts/deferred-execution.md](../concepts/deferred-execution.md) — how interventions interleave with the model.
 - [docs/usage/scan.md](../usage/scan.md) — scan reference.
-- [docs/gotchas/save.md](save.md) — `.save()` is the only way to bring values out of any tracing context (including scan).
+- [docs/gotchas/save.md](save.md) — getting values out of any tracing context.

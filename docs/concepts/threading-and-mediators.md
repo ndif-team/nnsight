@@ -1,96 +1,108 @@
 ---
 title: Threading and Mediators
-one_liner: Each invoke is a worker thread driven by a Mediator that exchanges typed events (VALUE, SWAP, SKIP, BARRIER, END, EXCEPTION) with the main thread one at a time.
-tags: [concept, mental-model, threading]
+one_liner: Each block is one Mediator running in a greenlet (not a thread) that parks on a location and switches back to the model side, exchanging typed events (VALUE, SWAP, SKIP, BARRIER) one at a time.
+tags: [concept, mental-model, greenlets]
 related: [docs/concepts/deferred-execution.md, docs/concepts/interleaver-and-hooks.md, docs/concepts/batching-and-invokers.md]
-sources: [src/nnsight/intervention/interleaver.py:718, src/nnsight/intervention/interleaver.py:949, src/nnsight/intervention/interleaver.py:1207, src/nnsight/intervention/interleaver.py:338]
+sources: [src/nnsight/intervention/interleaver.py:56, src/nnsight/intervention/interleaver.py:93, src/nnsight/intervention/interleaver.py:245, src/nnsight/intervention/interleaver.py:345, src/nnsight/intervention/interleaver.py:375]
 ---
 
 # Threading and Mediators
 
+> This page used to describe worker *threads*. This rewrite uses **greenlets** — cooperative, single-threaded coroutines — with no locks and no queues. The filename is kept; the mechanism below is the current one.
+
 ## What this is for
 
-A `Mediator` (`interleaver.py:718`) is the runtime object behind a single `tracer.invoke(...)`. It owns:
+A `Mediator` (`interleaver.py:93`) is the runtime object behind one block of intervention code — the body of a `with model.trace(...)` (direct input) or one `with tracer.invoke(...)`. It owns:
 
-- The compiled intervention function.
-- A `Thread` that runs that function (the worker).
-- A pair of one-slot queues for synchronous handoff with the main thread.
-- Per-mediator state: history, iteration counters, batch group, hooks.
+- The compiled block (`code`) and the `Scope` it runs against (`lcls`).
+- A **greenlet** (the "worker") that runs the block.
+- `pending`: the single event the worker is currently parked on.
+- Per-run state: `iteration` / `iterations` (occurrence tracking), `batch_group`, `caches`.
 
-Mediators run **serially** within an `Interleaver`. The model executes on the main thread; a worker thread runs intervention code; values pass between them one at a time via an event protocol.
+A worker and the model take strict turns on **one OS thread**. The worker runs until it needs a value, then *parks* — a greenlet switch back to the parent (the model side) — carrying an event tuple. There is at most one pending event per mediator at a time. This is why a worker must request locations in the order the model reaches them.
 
 ## When to use / when not to use
 
-This is structural — every trace uses Mediators, including single-invoke traces. You generally don't construct a `Mediator` yourself; the tracer does. Read this doc to understand:
+Structural — every trace uses at least one Mediator. You don't construct one; the tracer does. Read this to understand:
 
-- Why two invokes can't run truly in parallel (they share the model's forward pass).
-- Why deadlocks happen if you access modules out of forward-pass order.
-- What `barrier()`, `stop()`, `skip()`, `next()` actually do under the hood.
+- Why two invokes can't truly run in parallel (they share one forward pass, on one thread).
+- Why accessing modules out of forward-pass order raises `OutOfOrderError`.
+- What `barrier()`, `stop()`, `skip()`, and `tracer.iter` do underneath.
 
 ## Canonical pattern
 
 ```python
 with model.trace() as tracer:
-    # Each invoke -> one Mediator -> one worker thread.
-    # They run in definition order, serially.
+    # Each invoke -> one Mediator -> one greenlet worker.
     with tracer.invoke("Hello"):
-        a = model.transformer.h[0].output.save()  # worker blocks until layer 0 fires
+        a = model.transformer.h[0].output.save()   # parks until layer 0 fires
 
     with tracer.invoke("World"):
-        b = model.transformer.h[0].output.save()  # this whole invoke runs after the first finishes
+        b = model.transformer.h[0].output.save()   # its own worker, same forward
 ```
 
 ## The event protocol
 
-The worker thread communicates with the main thread by putting one event on `mediator.event_queue`, then blocking on `mediator.response_queue` until the main thread fulfills it. The events are defined in `Events` (`interleaver.py:338`):
+A worker parks by switching a tuple `(Event, location, ...)` to its parent. `Event` (`interleaver.py:56`) has exactly four members:
 
-| Event | Sent from | Means |
-|-------|-----------|-------|
-| `VALUE` | worker | "I want the value at this provider path." Worker blocks; main thread delivers via `Mediator.handle` once the matching hook fires. |
-| `SWAP` | worker | "Replace the value at this provider path with this one." Main thread routes through `batcher.swap` and unblocks the worker. |
-| `SKIP` | worker | "When module X's pre-forward fires, inject `__nnsight_skip__` so its real forward is bypassed." Used by `Envoy.skip(...)`. |
-| `BARRIER` | worker | "Synchronize me with these other mediators here." Once all participants have hit the barrier, all are released. |
-| `END` | worker | "I'm finished — drain me." Sent from the try/catch wrapper that `Invoker.compile` adds. |
-| `EXCEPTION` | worker | "I crashed; here's the exception." Main thread re-raises (with traceback rewritten to point at user code via `wrap_exception`). |
+| Event | Raised from | Means |
+|-------|-------------|-------|
+| `VALUE` | `Mediator.value` | "Read the value at this location." Worker parks; the model side serves it via `Mediator.handle` once the location is reached. |
+| `SWAP` | `Mediator.swap` | "Replace the value at this location with mine." The model side substitutes it into the forward and resumes the worker. |
+| `SKIP` | `Mediator.skip` | "Skip the computation gated at this location, using my value as its result." Queried by a module/op forward wrapper *before* it runs. |
+| `BARRIER` | `Mediator.barrier` | "Wait for the other blocks." Names no location, so the model side never serves it — another worker does, on its way past the same barrier. |
 
-The two queues are `Mediator.Value` (`interleaver.py:767`), each a single-slot lock-based handoff. Only ever one event in flight per mediator — this is the source of the "must access in forward-pass order" rule.
+There are no `END` or `EXCEPTION` events. A worker finishing is just its greenlet running to completion (falsy afterwards; see `alive`, `interleaver.py:313`). An exception simply propagates out of the `switch` — with a clean intervention-only traceback stashed on it as `__intervention_tb__` before the model/hook frames pile on (`interleaver.py:345`).
+
+The location a worker parks on is tagged with the occurrence it wants: `"{location}.i{n}"` (`Mediator.event`, `interleaver.py:245`). With no `tracer.iter`, `n` is always `0`, so every request binds to the first visit — see [occurrence tagging](interleaver-and-hooks.md).
 
 ## Lifecycle
 
-1. `Mediator.start(interleaver)` (`interleaver.py:871`) launches the worker thread, captures the calling thread's CUDA stream so worker-side ops use the same stream, then waits for the first event.
-2. The worker hits an `Envoy.output` access; `eproperty.__get__` calls `interleaver.current.request(...)` which sends a VALUE event and blocks.
-3. The main thread is running the model. A one-shot PyTorch hook for that module fires, calls `mediator.handle(provider, value)` (`interleaver.py:949`), which iterates pending events and delivers the value into `response_queue`. The worker unblocks.
-4. The worker keeps running until it hits the next access (another VALUE, or SWAP for an assignment) or finishes. Each event is paired one-to-one with a hook callback.
-5. On normal completion, the try/catch wrapper sends END. `Mediator.handle_end_event` calls `Mediator.cancel`, joining the worker and clearing state.
-6. If anything raises, the wrapper sends EXCEPTION. The main thread re-raises in the user's calling thread, with the traceback rewritten to look like it came from the original source.
+1. `Interleaver.__enter__` calls `Mediator.start(interleaver)` (`interleaver.py:323`): it creates the greenlet, stashes a weakref back to the mediator on it (so intervention code can find its own mediator via `getcurrent().mediator()`), and switches in — running the block up to its first park. Whatever it parks on becomes `pending`.
+2. The worker hit an `.output` access; the property called `Mediator.value(location)`, which switched `(Event.VALUE, "…output.i0")` to the parent and blocked.
+3. The model runs on the main greenlet. When its hook reaches that module, `Interleaver.handle` calls `Mediator.handle(provider, value)` (`interleaver.py:375`), which serves the value and `switch`es back into the worker.
+4. `Mediator.handle` loops while the worker keeps parking on the *same* location (e.g. read then swap the same output), then records that the model passed this occurrence (`iterations[provider] += 1`) and returns the possibly-edited value.
+5. The worker runs to its next park, or finishes. No teardown event — a finished greenlet is just `alive == False`.
+6. `check_dangling_mediators` (`interleaver.py:605`), called after the model returns, throws `OutOfOrderError` into any worker still parked (or a `ValueError` for an unmet barrier).
 
-## Out-of-order = deadlock
+## Out-of-order = error
 
-Inside one invoke (one worker), the worker requests provider paths *in the order it executes*. The main thread runs the model forward in execution order. If the worker requests layer 5 first and then layer 2, the main thread reaches layer 2's hook first — but the worker is asking for layer 5, so `handle_value_event` sees `provider != requester`, restores the event, and returns `False` (`interleaver.py:1054`). When layer 5 finally fires the worker unblocks, but by then layer 2 has already passed: the next access to layer 2 will never be fulfilled. The next forward pass (or end-of-trace) reports `OutOfOrderError` via `check_dangling_mediators`.
+Within one worker, requests happen *in execution order*, and the model runs in forward order. If you read a **later** module's output and then an **earlier** one's, the earlier one has already run past — its next visit will never come. This is detected and raised. Verified:
 
-To access modules out of forward-pass order, use a separate invoke (separate worker, separate forward pass through the same batch).
+```python
+with model.trace("Hello"):
+    out = model.transformer.h[0].output.save()   # output comes late in the block
+    args, kwargs = model.transformer.h[0].inputs  # but input already ran
+```
 
-## Cross-mediator communication
+```
+OutOfOrderError: 'model.transformer.h.0.input.i0' was requested but the model
+already ran past it
+```
 
-- **Cross-invoke variables**: Worker threads `push()` their locals to a shared frame after every event so a later mediator can see them. Controlled by `CONFIG.APP.CROSS_INVOKER` (`interleaver.py:1304`).
-- **Barriers**: `tracer.barrier(n)` returns a callable; calling it sends a BARRIER event with the participating mediator names. The mediator that completes the barrier is the one that sees all `n` participants — it then releases all of them via `handle_barrier_event` (`interleaver.py:1123`).
-- **Provided values**: Some values aren't produced by a PyTorch hook (e.g. vLLM logits, generation results). `Interleaver.handle(...)` (`interleaver.py:601`) broadcasts these to every mediator and bumps the iteration tracker for that path.
+Read a module's `.input` **before** its `.output`. To access modules in a different order, use a separate invoke (a separate worker over the same forward).
 
-## Hooks lifecycle on a Mediator
+## Cross-worker communication
 
-Every PyTorch hook a mediator registers (one-shot intervention, persistent cache, persistent iter-tracker, gradient) is appended to `mediator.hooks`. `Mediator.remove_hooks` (`interleaver.py:1354`) drains the list at cancel. `.remove()` is idempotent across all handle types used. See [Interleaver and Hooks](interleaver-and-hooks.md) for the registration side.
+- **Cross-invoke variables**: blocks written in the same frame share their locals through the `Scope`'s `shared` dict (`tracing/util.py:32`), so a name bound in one `invoke` is visible in a later one — but only after that block has actually run. Because workers resume in *model-reached* order, not definition order, use a **barrier** when one block must read before another writes.
+- **Barriers**: `tracer.barrier(n)` returns a `Barrier` (`barrier.py:35`); each block calls it, parks on `Event.BARRIER`, and the last to arrive releases the rest by `switch`ing each parked worker directly. See [Batching and Invokers](batching-and-invokers.md).
+- **`result`**: the model's return value isn't produced by a module hook. `Envoy.interleave` calls `Interleaver.handle("result", result)` after the forward, serving anything parked on `tracer.result`.
+
+## Early stop
+
+`tracer.stop()` raises `EarlyStopException` inside the worker (`intervention/tracer.py:89`). It propagates out through the model's forward, unwinding it; `Interleaver.__exit__` swallows it (`interleaver.py:509`) since the halt was intentional.
 
 ## Gotchas
 
-- **Within one invoke, access modules in forward-pass order.** Reverse order deadlocks.
-- **Workers do not run in parallel.** Two invokes share the same forward pass; they execute serially in definition order.
-- **CUDA stream propagation matters.** `Mediator.start` reads `torch.cuda.current_stream()` on the main thread and calls `torch.cuda.set_stream` in the worker. If you swap streams *after* `start`, the worker won't follow.
-- **Iteration counter resolution is dual-mode.** Inside `tracer.iter[i]`, `mediator.iteration` is the explicit target. Outside, the per-path `iteration_tracker` is used. See `Interleaver.iterate_requester` (`interleaver.py:446`).
-- **EXCEPTION events use `wrap_exception`** to rewrite the traceback. Catching exceptions by type still works; the exception class is preserved.
+- **Access modules in forward-pass order within one invoke.** Reverse order raises `OutOfOrderError`, not a deadlock — there are no threads to hang.
+- **Workers do not run in parallel.** They interleave cooperatively on one thread; two invokes share one forward pass and resume in the order the model reaches what each asked for.
+- **A worker finding its own mediator** uses `getcurrent().mediator()` (a weakref set in `start`). `tracer.iter` and `tracer.barrier()` rely on this to reach the running mediator.
+- **Exceptions keep their type.** A raised error propagates with its class intact and a filtered, intervention-only traceback (`InterleavingTracer.traceback`).
+- **Deferring exceptions** (`Interleaver.defer_exceptions`) is a driver-specific mode (vLLM, whose engine schedules the next step itself): a worker's error is recorded on its mediator rather than raised out of the hook. Local traces don't use it.
 
 ## Related
 
-- [Deferred Execution](deferred-execution.md) — how the worker function is built before threading begins.
-- [Interleaver and Hooks](interleaver-and-hooks.md) — the hook side of the protocol.
-- [Batching and Invokers](batching-and-invokers.md) — multiple mediators on one batch.
-- Source: `src/nnsight/intervention/interleaver.py` (`Mediator`, `Interleaver`, `Events`).
+- [Deferred Execution](deferred-execution.md) — how the worker's block is captured and compiled before it runs.
+- [Interleaver and Hooks](interleaver-and-hooks.md) — the model side: hooks, `Interleaver.handle`, occurrence tagging.
+- [Batching and Invokers](batching-and-invokers.md) — multiple workers on one batched forward.
+- Source: `src/nnsight/intervention/interleaver.py` (`Event`, `Mediator`, `Interleaver`), `src/nnsight/intervention/barrier.py` (`Barrier`).

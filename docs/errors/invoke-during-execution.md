@@ -1,66 +1,69 @@
 ---
-title: Cannot Invoke During an Active Model Execution
-one_liner: "ValueError: Cannot invoke during an active model execution / interleaving — invoke was opened while the model is already running."
-tags: [error, setup, invoker]
-related: [docs/errors/model-did-not-execute.md, docs/usage/invoke-and-batching.md, docs/usage/trace.md]
-sources: [src/nnsight/intervention/tracing/invoker.py:32]
+title: Cannot Invoke While the Model Is Already Running
+one_liner: "ValueError: Cannot invoke while the model is already running. — a tracer.invoke(...) was opened after the model started executing."
+tags: [error, setup, invoke]
+related: [docs/errors/cannot-access-outside-interleaving.md, docs/usage/invoke-and-batching.md, docs/usage/trace.md]
+sources: [src/nnsight/intervention/tracer.py:344, src/nnsight/intervention/tracer.py:347]
 ---
 
-# Cannot Invoke During an Active Model Execution
+# Cannot Invoke While the Model Is Already Running
 
 ## Symptom
 
 ```
-ValueError: Cannot invoke during an active model execution / interleaving.
+ValueError: Cannot invoke while the model is already running.
 ```
 
 ## Cause
 
-`Invoker.__init__` rejects construction whenever the parent tracer's model is already interleaving (`src/nnsight/intervention/tracing/invoker.py:32`):
+`Invoker.__init__` (`src/nnsight/intervention/tracer.py:344`) rejects construction
+when the tracer's interleaver is already interleaving:
 
 ```python
-if tracer is not None and tracer.model.interleaving:
-    raise ValueError(
-        "Cannot invoke during an active model execution / interleaving."
-    )
+if tracer.envoy.interleaver.interleaving:
+    raise ValueError("Cannot invoke while the model is already running.")
 ```
 
-`tracer.model.interleaving` is true between when the interleaver context is entered and when it exits (i.e., while the worker thread is mid-flight). Invokes must all be declared **before** the trace body starts running — they are how the tracer collects batched inputs and registers mediators. Opening a new invoke after the model has already begun executing has no place to plug into.
+`interleaver.interleaving` is true from when the interleaver context is entered
+until it exits — i.e. while the greenlet workers and the model's forward pass are
+running. Invokes are how the tracer collects batched inputs and registers workers
+**before** the forward pass starts; opening a new one after the model is already
+running has nothing to plug into.
 
 ## Common triggers
 
 - Nesting `tracer.invoke(...)` inside another `tracer.invoke(...)` body.
-- Calling `model.trace(...)` from within a function that is itself executing inside another live trace.
-- Trying to add a new invoke from inside a `for step in tracer.iter[:]:` loop (the loop runs during interleaving).
+- Calling `model.trace(...)` from code that is itself running inside a live trace.
+- Opening a new invoke from inside a `for step in tracer.iter[...]:` loop (the loop body runs during interleaving).
 
 ## Fix
 
 ```python
-# WRONG — second invoke is opened inside the first invoke's body
+# WRONG — second invoke opened inside the first invoke's body
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
-        with tracer.invoke("World"):       # ValueError
+        with tracer.invoke("World"):        # ValueError
             out = model.lm_head.output.save()
 ```
 
 ```python
-# FIXED — sibling invokes, declared sequentially under the same trace
+# FIXED — sibling invokes under the same trace
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
-        out_a = model.lm_head.output.save()
+        a = model.lm_head.output.save()
     with tracer.invoke("World"):
-        out_b = model.lm_head.output.save()
+        b = model.lm_head.output.save()
 ```
 
 ```python
-# WRONG — calling .trace() from inside a running trace
+# WRONG — nested traces
 with model.trace("Hello"):
-    with model.trace("World"):             # ValueError on the inner invoker
+    with model.trace("World"):              # ValueError on the inner invoke
         out = model.lm_head.output.save()
 ```
 
 ```python
-# FIXED — use a session if you need multiple traces sharing state
+# FIXED — use a session to run multiple traces
 with model.session() as session:
     with model.trace("Hello"):
         a = model.lm_head.output.save()
@@ -68,14 +71,13 @@ with model.session() as session:
         b = model.lm_head.output.save()
 ```
 
-## Mitigation / how to avoid
+## Mitigation
 
-- Treat invokes as **siblings** under one trace, not children of each other.
-- For multiple distinct traces, use `model.session()` (`docs/usage/session.md`).
-- For "intervene on every generation step", use `tracer.iter[...]` or `tracer.all()`, not nested invokes.
+- Treat invokes as **siblings** under one trace, never children of each other.
+- For multiple distinct traces, use `model.session()`.
+- To intervene on every generation step, use `tracer.iter[...]` / `tracer.all()`, not nested invokes.
 
 ## Related
 
-- `docs/usage/invoke-and-batching.md`
-- `docs/usage/session.md`
-- `docs/errors/model-did-not-execute.md`
+- [docs/usage/invoke-and-batching.md](../usage/invoke-and-batching.md)
+- [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md)

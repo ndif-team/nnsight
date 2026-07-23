@@ -1,6 +1,0 @@
-nnsight
-torch
-transformers
-anthropic
-openai
-pyyaml

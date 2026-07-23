@@ -1,107 +1,162 @@
 ---
 title: Source Tracing
-one_liner: Hook intermediate operations inside a module's forward pass via .source.<op_name>.
+one_liner: Hook intermediate operations inside a module's forward via .source.<callable>_<n>, and drill into called functions.
 tags: [usage, source, intervention]
-related: [docs/usage/access-and-modify.md, docs/usage/cache.md, docs/concepts/threading-and-mediators.md]
-sources: [src/nnsight/intervention/source.py:359, src/nnsight/intervention/source.py:571, src/nnsight/intervention/source.py:688, src/nnsight/intervention/envoy.py:214, src/nnsight/intervention/hooks.py:438]
+related: [docs/usage/access-and-modify.md, docs/usage/skip.md, docs/usage/cache.md]
+sources: [src/nnsight/intervention/source.py, src/nnsight/intervention/envoy.py]
 ---
 
 # Source Tracing
 
 ## What this is for
 
-`module.source` exposes every call site inside a module's `forward` method as a hookable operation. nnsight rewrites the module's forward AST so each function call is wrapped in a per-call-site dispatcher; you can then read `.input` / `.output` on each operation, just like you would on a module. Useful when the value you need lives between two operations of a module's forward (e.g. attention scores before the projection) and there is no nested submodule to attach to.
+`module.source` exposes every call site inside a module's `forward` as a hookable
+operation. nnsight rewrites the module's `forward` AST so each call
+`fn(*args, **kwargs)` is bracketed by the interleaver: you can read/replace each
+operation's `.input` / `.output`, or `.skip` it — the same handles a module has,
+one level finer.
+
+Use it when the value you need lives *between* two operations of a forward (e.g. an
+activation inside an MLP, or attention scores) and there is no submodule to attach
+to.
 
 ## When to use / when not to use
 
-- Use when the activation you need is computed mid-forward inside a single module (e.g. inside `GPT2Attention.forward`) and is not exposed as a child module.
-- Use when you want to replace a single operation's output without rewriting the whole module.
-- Skip when a child module already exposes the value you need — `model.transformer.h[0].mlp.output` is cheaper than `.source` because it does not rewrite the AST.
-- Source rewriting is only triggered when `.source` has been touched on that module; the non-source path stays at zero overhead.
+- Use when the activation you need is computed mid-forward and isn't a child module.
+- Use to read or replace a single operation's output.
+- Skip when a child module already exposes the value — `model...mlp.output` is
+  cheaper than `.source` (no AST rewrite).
+- Source-instrumentation is installed lazily on first `.source` access and is inert
+  outside a trace, so normal inference is unaffected.
+
+## Discovering operations
+
+`print(module.source)` renders the forward with each operation labelled at its
+call site (works outside a trace):
+
+```python
+from nnsight.modeling.transformers import TransformersModel
+model = TransformersModel("openai-community/gpt2", dispatch=True)
+
+print(model.transformer.h[0].mlp.source)
+```
+
+```
+                    * def forward(self, hidden_states: ...) -> torch.FloatTensor:
+ self_c_fc_0    ->  0     hidden_states = self.c_fc(hidden_states)
+ self_act_0     ->  1     hidden_states = self.act(hidden_states)
+ self_c_proj_0  ->  2     hidden_states = self.c_proj(hidden_states)
+ self_dropout_0 ->  3     hidden_states = self.dropout(hidden_states)
+                    4     return hidden_states
+```
+
+`print(module.source.self_act_0)` zooms in on one call site:
+
+```
+model.transformer.h.0.mlp.source.self_act_0:
+
+    def forward(self, hidden_states: ...) -> torch.FloatTensor:
+        hidden_states = self.c_fc(hidden_states)
+    --> hidden_states = self.act(hidden_states) <--
+        hidden_states = self.c_proj(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        return hidden_states
+```
+
+## Operation naming
+
+Names are `<dotted_callee>_<occurrence>`, using the **whole** attribute chain
+joined with `_`:
+
+- `self.c_fc(...)` → `self_c_fc_0`
+- `self.act(...)` → `self_act_0`
+- `torch.relu(...)` → `torch_relu_0`
+
+The occurrence counter is per callable and runs in **execution order** — nested
+calls run inner-first, so `f(f(x))` gives the inner call `f_0` and the outer `f_1`.
+A second `relu(...)` on another line is `torch_relu_1`.
 
 ## Canonical pattern
 
-Discover operations by printing `.source` on the module (works outside a trace):
-
-```python
-print(model.transformer.h[0].attn.source)
-# ...
-#   self_c_attn_0       -> 36     query_states, key_states, value_states = self.c_attn(hidden_states).split(...)
-#   self_c_attn_0_split_0 -> 36     ...
-#   attention_interface_0 -> 66     attn_output, attn_weights = attention_interface(...)
-#   self_c_proj_0       -> 79     attn_output = self.c_proj(attn_output)
-```
-
-Inspect or modify a specific operation's value inside a trace:
-
 ```python
 with model.trace("Hello"):
-    # Read the operation's output
-    attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
+    # read an operation's output
+    act = model.transformer.h[0].mlp.source.self_act_0.output.save()
 
-    # Read its inputs as (args, kwargs)
-    args, kwargs = model.transformer.h[0].attn.source.attention_interface_0.inputs
+    # read its inputs as (args, kwargs)
+    args, kwargs = model.transformer.h[0].mlp.source.self_c_proj_0.inputs
 
-    # Replace the operation's output
-    model.transformer.h[0].attn.source.self_c_proj_0.output[:] = 0
+    # replace an operation's output for the rest of the forward
+    model.transformer.h[0].mlp.source.self_c_proj_0.output[:] = 0
 ```
 
-Print a single operation to see it highlighted in context:
+`.input` is the first argument; `.inputs` is the full `(args, kwargs)`. Assigning to
+any of them replaces the value downstream. Operations must be requested in
+execution order within a forward (see Gotchas).
+
+## Recursive source — drill into a called function
+
+An operation whose target is a plain Python function can be re-traced. Chain
+`.source` again to expose *its* operations:
 
 ```python
-print(model.transformer.h[0].attn.source.attention_interface_0)
-# .transformer.h.0.attn.attention_interface_0:
-#     ....
-#     -->     attn_output, attn_weights = attention_interface( <--
-#                 self,
-#                 query_states,
-#     ....
-```
-
-## Variations
-
-### Recursive source
-
-Operations whose target is itself a Python function can be re-traced. Just chain `.source` again:
-
-```python
-with model.trace("Hello"):
-    sdpa = (
-        model.transformer.h[0].attn
-            .source.attention_interface_0
-            .source.torch_nn_functional_scaled_dot_product_attention_0
+with model.trace("The Eiffel Tower is in"):
+    attn = model.transformer.h[0].attn
+    scores = (
+        attn.source.attention_interface_0
+            .source.attn_output_transpose_0
             .output.save()
     )
 ```
 
-The nested `SourceAccessor` is built on first access and cached on the parent `OperationAccessor`, so subsequent traces reuse it (`src/nnsight/intervention/source.py:646`).
+**Recursive `.source` only works inside a trace.** The called function is resolved
+from the live value flowing through the call at run time (call targets are often
+local variables), so `some_op.source` outside a trace raises `SourceNotAvailable`.
 
-### Operation naming
+## Iteration support
 
-Operation names follow `<dotted_callee>_<index>`, where the index disambiguates repeated calls in the same forward. `self.c_proj(...)` becomes `self_c_proj_0`; a second call is `self_c_proj_1`. `torch.nn.functional.softmax(...)` becomes `torch_nn_functional_softmax_0`. The transformer that produces these names is `FunctionCallWrapper` (`src/nnsight/intervention/source.py:92`).
-
-### Iteration support
-
-Source operations participate in `tracer.iter[...]`. Operation iteration counts **invocations**, not forward passes — a per-fire counter (`register_op_counters`, `src/nnsight/intervention/tracing/iterator.py`) advances each op's tracker once per call. So if an op runs once per forward (the usual case), `.source.<op>.output` inside `for step in tracer.iter[2]:` targets generation step 2; and if an op loops *within* a single forward (e.g. a Mixture-of-Experts expert loop), `iter[i]` targets the i-th invocation in that forward.
+Source operations participate in `tracer.iter[...]`. Operation iteration counts
+**invocations**, not forward passes:
 
 ```python
-# MoE-style: experts.<op> fires once per active expert in one forward.
-with model.trace(prompt) as tracer:
-    states = nnsight.save([])
-    for i in tracer.iter[:n_active]:
-        states.append(experts.source.current_hidden_states_to_0.output)
+# nested source across generation steps
+with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
+    saved = nnsight.save([])
+    for _ in tracer.iter[:3]:
+        saved.append(
+            model.transformer.h[0].attn
+                 .source.attention_interface_0
+                 .source.attn_output_transpose_0.output
+        )
+# len(saved) == 3; step 0 sees the full prompt, later (KV-cached) steps one token.
 ```
+
+An op that fires once per forward is indexed per generation step; an op that loops
+within one forward (e.g. an MoE expert loop) is indexed per fire.
 
 ## Gotchas
 
-- **Don't call `.source` on a module from within another `.source`.** The recursive `.source` chain only follows plain functions; if the operation's target is a `torch.nn.Module`, nnsight raises `ValueError("Don't call .source on a module ... Call it directly with: <path>.source")` (`src/nnsight/intervention/source.py:660`). Access the submodule directly instead.
-- **Decorators on the original forward are stripped** during AST rewriting, since they may fail when re-executed outside the original class context (e.g. `@auto_docstring`). The compute is identical; the decorator side effects are lost (`src/nnsight/intervention/source.py:174`).
-- **Mid-loop first-`.source` access only misses a step in *generation* loops.** If the first ever `.source` access on a module happens at step N>0 of a multi-forward (generation) iter loop, the operation tracker starts at 0 and that one access misses; touch `.source` before the loop to avoid it. Single-forward in-loop iteration (the MoE case) is at step 0, so this doesn't arise (`src/nnsight/intervention/tracing/iterator.py`, `register_counters_for_active_iters`).
-- **Hooks installed by `.source` access are one-shot** and self-remove. Re-accessing `.source.<op>.output` re-registers the hook for the next forward.
-- See [docs/gotchas/integrations.md](../gotchas/integrations.md) for the full set.
+- **Recursive `.source` requires a live trace** — outside one it raises
+  `SourceNotAvailable("recursive '.source' is only available inside a trace")`.
+- **Drilling into a submodule call is refused.** If an operation calls a
+  `torch.nn.Module`, `op.source` raises `SourceNotAvailable(... "calls a submodule;
+  call '.source' on that submodule directly ...")`. Access the submodule's own
+  `.source` instead.
+- **Builtins / C functions have no recoverable source** — drilling into e.g.
+  `torch.relu` raises `SourceNotAvailable`.
+- **Decorated forwards are rejected.** A `forward` (or drilled-into function) with a
+  decorator raises `SourceNotAvailable("decorated callable is not supported")` — the
+  decorator is load-bearing and can't be safely dropped.
+- **Requesting an operation out of execution order deadlocks → `OutOfOrderError`.**
+  Reading `self_fc2_0.output` then `self_fc1_0.output` (fc1 runs first) is late.
+- **Skipping a whole module drops its source ops.** A skipped module's body never
+  runs, so reading `skipped_module.source.<op>.output` is out of order. See
+  [skip.md](skip.md).
+- **Unknown operation names raise `AttributeError` listing the available names** —
+  handy for fixing a mistyped or wrong-occurrence label.
 
 ## Related
 
-- [access-and-modify](access-and-modify.md) — Module-level `.output` / `.input`.
-- [iter-all-next](iter-all-next.md) — Iteration semantics (operation-level paths included).
-- [docs/concepts/source-tracing.md](../concepts/source-tracing.md) — Architecture deep dive.
+- [access-and-modify.md](access-and-modify.md) — module-level `.output` / `.input`.
+- [skip.md](skip.md) — `.skip()` at the module and operation level.
+- [iter-all-next.md](iter-all-next.md) — iteration semantics.

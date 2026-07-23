@@ -1,9 +1,9 @@
 ---
 title: OutOfOrderError
-one_liner: "Mediator.OutOfOrderError: Value was missed for <requester> — module accessed out of forward-pass order within a single invoke."
-tags: [error, execution-order, threading]
-related: [docs/errors/missed-provider-error.md, docs/errors/value-was-not-provided.md, docs/concepts/threading-and-mediators.md, docs/usage/invoke-and-batching.md]
-sources: [src/nnsight/intervention/interleaver.py:760, src/nnsight/intervention/interleaver.py:1049, src/nnsight/intervention/interleaver.py:1181]
+one_liner: "OutOfOrderError: '<location>' was requested but the model already ran past it — a module value was asked for out of forward-pass order within one block."
+tags: [error, execution-order, interleaving]
+related: [docs/errors/value-was-not-provided.md, docs/errors/cannot-access-outside-interleaving.md, docs/concepts/threading-and-mediators.md, docs/usage/invoke-and-batching.md]
+sources: [src/nnsight/intervention/interleaver.py:83, src/nnsight/intervention/interleaver.py:638, src/nnsight/intervention/interleaver.py:652]
 ---
 
 # OutOfOrderError
@@ -11,81 +11,80 @@ sources: [src/nnsight/intervention/interleaver.py:760, src/nnsight/intervention/
 ## Symptom
 
 ```
-Mediator.OutOfOrderError: Value was missed for model.transformer.h.5.output.i0. Did you call an Envoy out of order?
+nnsight.intervention.interleaver.OutOfOrderError: 'model.transformer.h.1.output.i0' was requested but the model already ran past it
 ```
 
-The same surface text can appear from a `Setting ... is out of scope` swap path:
-
-```
-ValueError: Setting model.transformer.h.5.output.i0 is out of scope for scope <provider>. Did you call an Envoy out of order?
-```
-
-## Relationship to MissedProviderError
-
-In `refactor/transform`, `OutOfOrderError` is a **subclass of `Mediator.MissedProviderError`** (see `src/nnsight/intervention/interleaver.py:760`). They surface in **different code paths** but have the **same root cause**: the value you asked for is not (or no longer) available.
+Import it from `nnsight.intervention.interleaver` if you want to catch it:
 
 ```python
-class MissedProviderError(Exception): ...
-class OutOfOrderError(MissedProviderError): ...
+from nnsight.intervention.interleaver import OutOfOrderError
 ```
-
-- `OutOfOrderError` is the **eager** detection: the mediator already saw a provider with that requester string fire, so it raises immediately when the request arrives (`src/nnsight/intervention/interleaver.py:1049`). This catches the "ask for layer 1 after layer 5" pattern at the moment of asking.
-- `MissedProviderError` (its parent) is the **late** detection: the model finished, the worker is still waiting, and `check_dangling_mediators` raises (`src/nnsight/intervention/interleaver.py:652`). This catches the "module didn't fire" or "iter step never happened" patterns where the mediator never saw the provider at all.
-
-**Catching both at once:** `except Mediator.MissedProviderError` covers both. Legacy code or tutorials referring to "OutOfOrderError" still resolve to the same exception class.
-
-`MissedProviderError` is the **primary** error class post-refactor; `OutOfOrderError` is its eager-detection subclass.
 
 ## Cause
 
-Each invoke runs its body in a **single worker thread** that synchronizes with the model's forward pass. When the worker requests `module.output`, it blocks until the model fires that hook. The mediator tracks every provider it has already seen in `Mediator.history`; if a request arrives for a provider that was already seen and consumed, the mediator answers the worker with `OutOfOrderError` (`src/nnsight/intervention/interleaver.py:1049`).
+Each block of intervention code runs in its own **greenlet worker** (a
+`Mediator`) that runs in lockstep with the model's forward pass. When the block
+reads `module.output`, the worker *parks* until the model reaches that module,
+then resumes with the value. A worker can only be served locations **in the order
+the model reaches them** — it holds one pending request at a time.
 
-This means **modules within a single invoke must be accessed in forward-pass order**. Asking for layer 1's output after layer 5 has already run is impossible — layer 1's value has already been delivered and discarded.
+If you ask for layer 1's output *after* layer 5's, layer 1 has already fired and
+its value is gone by the time your request arrives. The run finishes with the
+worker still parked on `model.transformer.h.1.output`, and
+`Interleaver.check_dangling_mediators` (`src/nnsight/intervention/interleaver.py:638`)
+throws `OutOfOrderError` into the worker so the traceback points at the exact line
+that was waiting.
 
-The `.i0` / `.i1` suffix on the requester string is the iteration counter (which generation step the request targets). On a single trace this is always `.i0`.
+The `.i0` suffix on the location is the occurrence tag — which visit of that
+location the request targets. Without `tracer.iter`, it is always `.i0`; in a
+generation loop it counts `.i0`, `.i1`, `.i2`, … per step.
+
+> This is the same class raised by the "model finished, a worker is still waiting"
+> case in [value-was-not-provided.md](value-was-not-provided.md). There is no
+> separate `MissedProviderError` in this rewrite.
 
 ## Common triggers
 
-- Accessing modules in reverse order inside a single invoke or trace body.
-- Trying to read the same module's `.output` twice in one invoke.
-- Reading a `.grad` for an early layer before later layers in a `with tensor.backward():` block (gradients flow in reverse, so access order also reverses — see `docs/usage/backward-and-grad.md`).
-- Calling `module.skip(value)` in the wrong order so the skip handler sees the requester after its provider has passed (`src/nnsight/intervention/interleaver.py:1181`).
+- Reading modules in reverse order inside one block (`h[5].output` before `h[1].output`).
+- Reading the same module's `.output` twice in one block after it has fired.
+- Reading a `.grad` for an early layer before a later one inside `with tensor.backward():` — gradients flow in reverse, so access order reverses too (see [docs/usage/backward-and-grad.md](../usage/backward-and-grad.md)).
 
 ## Fix
 
 ```python
-# WRONG — layer 5 fires before layer 1 inside the same invoke; deadlock / OutOfOrderError
-with model.trace("Hello"):
+# WRONG — layer 5 fires before layer 1, so the request for h[1] arrives too late
+with model.trace("The Eiffel Tower is in"):
     out5 = model.transformer.h[5].output.save()
-    out1 = model.transformer.h[1].output.save()
+    out1 = model.transformer.h[1].output.save()   # OutOfOrderError
 ```
 
 ```python
 # FIXED — access modules in forward-pass order
-with model.trace("Hello"):
+with model.trace("The Eiffel Tower is in"):
     out1 = model.transformer.h[1].output.save()
     out5 = model.transformer.h[5].output.save()
 ```
 
-To genuinely access modules out of forward order, run a second forward pass via an empty invoke (each invoke is its own worker thread, so they're independent):
+To genuinely read modules out of forward order, run a second pass with an extra
+empty invoke — each invoke is its own worker, so their access orders are
+independent:
 
 ```python
 with model.trace() as tracer:
-    with tracer.invoke("Hello"):
+    with tracer.invoke("The Eiffel Tower is in"):
         out5 = model.transformer.h[5].output.save()
-    with tracer.invoke():           # empty invoke = new pass on the same batch
+    with tracer.invoke():           # empty invoke = another pass over the same batch
         out1 = model.transformer.h[1].output.save()
 ```
 
-## Mitigation / how to avoid
+## Mitigation
 
-- Lay your intervention code out top-to-bottom in the same order modules execute in `print(model)`.
-- For backward passes, mirror the forward order in reverse inside the `with tensor.backward():` block.
-- If you need both early and late activations and the access patterns interleave, split into multiple invokes.
+- Lay intervention code out top-to-bottom in the order modules run in `print(model)`.
+- For backward passes, mirror forward order in reverse inside `with tensor.backward():`.
+- Split interleaving access patterns across multiple invokes.
 
 ## Related
 
-- `docs/errors/missed-provider-error.md`
-- `docs/errors/value-was-not-provided.md`
-- `docs/concepts/threading-and-mediators.md`
-- `docs/usage/invoke-and-batching.md`
+- [value-was-not-provided.md](value-was-not-provided.md) — same class, the "module never fired / iter outran the model" flavor.
+- [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) — accessing a value with no trace running at all.
+- [docs/concepts/threading-and-mediators.md](../concepts/threading-and-mediators.md) — how greenlet workers park and resume.

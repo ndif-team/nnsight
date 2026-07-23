@@ -3,95 +3,85 @@ title: Scan
 one_liner: Validate shapes/operations under FakeTensor mode without running the real model (`model.scan(...)`).
 tags: [usage, scan, validation]
 related: [docs/usage/trace.md, docs/usage/save.md, docs/usage/access-and-modify.md]
-sources: [src/nnsight/intervention/tracing/tracer.py:613, src/nnsight/intervention/envoy.py:282]
+sources: [src/nnsight/intervention/tracer.py, src/nnsight/modeling/mixins/meta.py]
 ---
 
 # Scan
 
 ## What this is for
 
-`model.scan(input)` opens a tracing context that runs the model under PyTorch's `FakeTensorMode`. Tensors carry shape and dtype but no real data; no GPU memory is allocated and no kernels run. The point is to validate shape-dependent code (slicing, reshapes, intervention indexing) before paying the cost of a real forward pass.
+`model.scan(input)` opens a tracing context that runs the model under PyTorch's `FakeTensorMode`. Tensors carry shape and dtype but no real data; no kernels run and — crucially — **the model is not dispatched**. Use it to validate shape-dependent code (slicing, reshapes, intervention indexing) or inspect activation shapes without loading weights.
 
-It is an `InterleavingTracer` subclass — `ScanningTracer` (`src/nnsight/intervention/tracing/tracer.py:613`) — so all the same intervention primitives (`.output`, `.input`, `.save()`, `tracer.invoke`, `tracer.cache`, etc.) are available, only the execution backend swaps to fake-mode.
+It is an `InterleavingTracer` subclass — `ScanningTracer` (`src/nnsight/intervention/tracer.py`) — so all the same primitives (`.output`, `.input`, `.save()`, `tracer.invoke`, `tracer.cache`, ...) work; only the execution runs under fake tensors.
 
 ## When to use / when not to use
 
-- Use to inspect tensor shapes when you cannot afford to dispatch / run the model.
+- Use to inspect tensor shapes without paying to dispatch/run the model.
 - Use to catch index-out-of-range or shape-mismatch errors early.
 - **Do not** use to compute real values — outputs are `FakeTensor`s with no data.
-- Does not auto-dispatch the model — useful for shape inspection on meta-loaded models. See `MetaMixin.interleave` (`src/nnsight/modeling/mixins/meta.py:97`) which skips dispatch when `tracer` is a `ScanningTracer`.
+- Scanning does **not** dispatch the model — great for shape inspection on a meta-loaded (undispatched) model.
 
 ## Canonical pattern
 
 ```python
 import nnsight
+from nnsight.modeling.transformers import TransformersModel
 
-with model.scan("Hello"):
-    dim = nnsight.save(model.transformer.h[0].output.shape[-1])
-    # Index validation: this raises if the tensor's last dim < 11
-    model.transformer.h[0].output[:, 10] = 0
+# Undispatched: architecture on meta, no real weights.
+model = TransformersModel("openai-community/gpt2", task="text-generation")
+print(model.dispatched)   # False
 
-print(dim)  # e.g. 768
+with model.scan("The Eiffel Tower is in"):
+    dim = nnsight.save(model.transformer.h[0].output.shape[-1])   # int
+    hs = model.transformer.h[-1].output.save()                    # FakeTensor
+
+print(dim, tuple(hs.shape))            # 768 (1, 7, 768)
+print("Fake" in type(hs).__name__)     # True
+print(model.dispatched)                # False — still not loaded
 ```
 
 ## Why `.save()` is still required inside scan
 
-Scan is a tracing context — it goes through the same `Tracer.__exit__` → `Tracer.push()` path as `model.trace`. `Globals.stack` is incremented on entry and decremented on exit; only ids in `Globals.saves` survive across the boundary (see `docs/usage/save.md`).
-
-Use `nnsight.save(...)` for non-tensor values:
+Scan is a tracing context — it goes through the same save-gated push as `model.trace`. Only values you mark with `.save()` / `nnsight.save(...)` survive past the boundary (see `docs/usage/save.md`). Use `nnsight.save(...)` for non-tensor values (ints, lists):
 
 ```python
 import nnsight
 
-with model.scan("Hello"):
-    shape_int = nnsight.save(model.transformer.h[0].output.shape[-1])  # int
-    n_layers = nnsight.save(len(model.transformer.h))                      # int
-    last_logits = model.lm_head.output[:, -1].save()                       # FakeTensor
-
-print(shape_int, n_layers, last_logits.shape)
+with model.scan("Hello") as tracer:
+    shape_int = nnsight.save(model.transformer.h[0].output.shape[-1])
+    n_layers = nnsight.save(len(model.transformer.h))
 ```
 
-## Inspecting all module shapes
+## Fidelity
+
+Shapes seen in a fake scan match a real forward pass:
 
 ```python
-shapes = {}
-with model.scan("Hello") as tracer:
-    cache = tracer.cache()  # FakeTensors fill the cache
-
-# Inspect after exit
-for path, entry in cache.items():
-    if entry.output is not None and hasattr(entry.output, "shape"):
-        shapes[path] = entry.output.shape
+with model.scan("The Eiffel Tower is in"):
+    scanned = model.transformer.h[-1].output.save()
+# tuple(scanned.shape) matches the same read under model.trace(...)
 ```
 
 ## How it works
 
-`ScanningTracer.execute` wraps `super().execute` in `FakeTensorMode + FakeCopyMode` (`src/nnsight/intervention/tracing/tracer.py:621`):
+`ScanningTracer.execute` defers to `InterleavingTracer.execute` (so a string prompt is still tokenized and invokes are still batched) but wraps it in a `FakeTensorMode`:
 
 ```python
 with FakeTensorMode(
     allow_non_fake_inputs=True,
     shape_env=ShapeEnv(assume_static_by_default=True),
-) as fake_mode:
-    with FakeCopyMode(fake_mode):
-        self.batcher.batched_args = copy.deepcopy(self.batcher.batched_args)
-        self.batcher.batched_kwargs = copy.deepcopy(self.batcher.batched_kwargs)
-        super().execute(fn)
+):
+    super().execute(code)
 ```
 
-`allow_non_fake_inputs=True` means the user's batched inputs (real tensors / strings) are not turned into fakes; the model's parameters are auto-faked by `FakeCopyMode`. `assume_static_by_default=True` keeps shapes concrete numbers rather than symbolic.
-
-## Skip dispatch
-
-`MetaMixin.interleave` checks `isinstance(self.interleaver.tracer, ScanningTracer)` and **does not** auto-dispatch the model when scanning. This makes scan cheap on meta-loaded `LanguageModel`s.
+`allow_non_fake_inputs=True` lets the meta-device parameters take part without being faked first; `assume_static_by_default=True` keeps shapes concrete rather than symbolic. The meta mixin (`Meta.interleave`, `src/nnsight/modeling/mixins/meta.py`) sees the active fake mode and **skips dispatch**, leaving parameters on the meta device.
 
 ## Gotchas
 
-- Outputs are `FakeTensor`s. You cannot read their data — only shape, dtype, device.
-- `.save()` is required just like in `model.trace(...)`.
-- For non-tensor values (ints, lists, dicts), use `nnsight.save(...)` since `obj.save()` only works on objects pymount has injected onto.
-- `nnsight.bool` is patched globally so `bool(fake_tensor)` returns `True` (`src/nnsight/__init__.py:128`) — this prevents some early-exit failures inside fake mode.
-- Some operations are not supported by FakeTensor and will raise inside scan even if they work in real mode. Either add the corresponding fake meta kernel upstream or move that code out of scan.
+- Outputs are `FakeTensor`s — you can read `.shape`/`.dtype`/`.device`, not data.
+- `.save()` is required just like in `model.trace(...)`. Use `nnsight.save(...)` for non-tensor values.
+- Access modules in forward-pass order within an invoke (same rule as trace) or hit `OutOfOrderError`.
+- Some ops lack a fake/meta kernel and will raise inside scan even if they work in real mode. Move that code out of scan, or add the meta kernel upstream.
 
 ## Related
 

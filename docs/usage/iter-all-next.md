@@ -1,53 +1,56 @@
 ---
-title: Iteration — iter / all / next
-one_liner: Generation-step control via tracer.iter[...], tracer.all(), and module.next() / tracer.next().
+title: Iteration — iter / all
+one_liner: Target intervention code at specific generation steps with `for step in tracer.iter[...]` and `tracer.all()`.
 tags: [usage, generation, iteration]
-related: [docs/usage/generate.md, docs/concepts/source-tracing.md, docs/gotchas/iteration.md]
-sources: [src/nnsight/intervention/tracing/iterator.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/interleaver.py]
+related: [docs/usage/generate.md, docs/usage/source.md, docs/usage/invoke-and-batching.md]
+sources: [src/nnsight/intervention/iterator.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/interleaver.py]
 ---
 
-# Iteration — `tracer.iter` / `tracer.all()` / `.next()`
+# Iteration — `tracer.iter` / `tracer.all()`
 
 ## What this is for
 
-In `model.generate(...)`, the model runs forward once per generated token. **Iteration APIs target intervention code at specific generation steps**:
+In `model.generate(...)`, the model runs forward once per generated token, so each
+module is reached once per step. **Iteration APIs bind a stretch of trace body to a
+chosen range of those steps:**
 
-- `tracer.iter[slice|int|list]` — pick which step(s) a block of intervention code targets.
-- `tracer.all()` — equivalent to `tracer.iter[:]`. Reads as "do this for every step."
-- `tracer.next(step=1)` / `module.next(step=1)` — manually advance the mediator's `iteration` counter for straight-line code without a loop.
+- `for step in tracer.iter[slice | int | list]:` — loop the body over the selected
+  step(s). Inside the body, every `.output` / `.input` read binds to the current
+  step, and `step` is the real integer index.
+- `tracer.all()` — shorthand for `tracer.iter[:]` (every step).
 
-Inside an iter loop body, every `.output` / `.input` access is bound to the current step.
+For a single forward (`model.trace(x)`) there is only step 0, so you don't need
+these.
 
-The mechanism: `IteratorTracer.__iter__` sets `mediator.iteration = i` before each yield. One-shot intervention hooks compare against `mediator.iteration_tracker[path]`, which is bumped after every forward pass by persistent "tracker-bumping" hooks installed at loop entry (`src/nnsight/intervention/tracing/iterator.py:95`).
-
-## When to use / when not to use
-
-- Use `tracer.iter[...]` when you want different interventions on different generation steps, or when you need the step index in your code.
-- Use `tracer.all()` when you want the SAME intervention recursively on every step and you don't need the step index.
-- Use `tracer.next()` for a small fixed number of explicit steps where a `for` loop adds noise.
-- Skip all of these for a single-step trace — plain `.trace(input)` already targets step 0.
+> Note: the old `tracer.next()` / `module.next()` manual-stepping API is **gone**
+> in this rewrite. Step targeting is done with the loop forms below.
 
 ## Canonical pattern
 
-### `tracer.iter[:]` — every step, with the step index
+### `tracer.iter[:N]` — every step, with the step index
 
 ```python
-with model.generate("Hello", max_new_tokens=5) as tracer:
-    logits = list().save()
+import nnsight
+from nnsight.modeling.transformers import TransformersModel
 
-    for step in tracer.iter[:]:                    # all steps
-        logits.append(model.lm_head.output[0][-1].argmax(dim=-1))
+model = TransformersModel("openai-community/gpt2", dispatch=True)
+
+with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
+    toks = nnsight.save([])
+    for step in tracer.iter[:3]:                 # steps 0, 1, 2
+        toks.append(model.lm_head.output[0, -1].argmax(dim=-1))
+    ids = tracer.result.save()                   # final generated ids
+# len(toks) == 3, ids.shape == (1, 4)   (prompt token + 3 generated)
 ```
 
-### `tracer.all()` — every step, no step index needed
+### `tracer.all()` — every step, no index needed
 
 ```python
-with model.generate("Hello", max_new_tokens=3) as tracer:
-    hidden_states = list().save()
-
-    for step in tracer.all():                          # = tracer.iter[:]
-        model.transformer.h[0].output[:] = 0        # zero-ablate every step
-        hidden_states.append(model.transformer.h[-1].output)
+with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
+    hidden = nnsight.save([])
+    for step in tracer.all():                     # == tracer.iter[:]
+        model.transformer.h[0].output[0][:] = 0   # zero-ablate layer 0 every step
+        hidden.append(model.transformer.h[-1].output[0])
 ```
 
 ## Variations
@@ -55,8 +58,8 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 ### Slice — bounded range
 
 ```python
-with model.generate("Hello", max_new_tokens=5) as tracer:
-    out = list().save()
+with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
+    out = nnsight.save([])
     for step in tracer.iter[1:3]:                  # steps 1 and 2 only
         out.append(model.lm_head.output)
 ```
@@ -64,7 +67,7 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 ### Int — single step
 
 ```python
-with model.generate("Hello", max_new_tokens=5) as tracer:
+with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
     for step in tracer.iter[0]:                    # only the prefill step
         first = model.lm_head.output.save()
 ```
@@ -72,86 +75,71 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 ### List — explicit steps
 
 ```python
-with model.generate("Hello", max_new_tokens=5) as tracer:
-    out = list().save()
-    for step in tracer.iter[[0, 2, 4]]:            # specific steps
+with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
+    out = nnsight.save([])
+    for step in tracer.iter[[0, 2, 4]]:            # those steps only
         out.append(model.lm_head.output)
 ```
 
 ### Per-step conditional
 
-`step` is the actual integer iteration number, so a normal Python `if` works:
+`step` is the actual integer index, so a plain Python `if` works:
 
 ```python
-with model.generate("Hello", max_new_tokens=5) as tracer:
-    for step in tracer.iter[:]:
+with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
+    for step in tracer.iter[:5]:
         if step == 2:
-            model.transformer.h[0].output[:] = 0
-        # other steps pass through unchanged
+            model.transformer.h[0].output[0][:] = 0
+        # other steps pass through
 ```
-
-### `tracer.next()` — manual stepping at the tracer
-
-```python
-with model.generate("Hello", max_new_tokens=3) as tracer:
-    hs0 = model.transformer.h[-1].output.save()
-    tracer.next()                                                  # advance to step 1
-    hs1 = model.transformer.h[-1].output.save()
-    tracer.next()                                                  # advance to step 2
-    hs2 = model.transformer.h[-1].output.save()
-```
-
-`tracer.next(step=1)` does `self.model.interleaver.current.iteration += step` and returns the tracer (`src/nnsight/intervention/tracing/tracer.py:460`).
-
-### `module.next()` — manual stepping at the module (alias, deprecated)
-
-```python
-with model.generate("Hello", max_new_tokens=3) as tracer:
-    hs0 = model.transformer.h[-1].output.save()                # step 0
-    hs1 = model.transformer.h[-1].next().output.save()         # step 1
-    hs2 = model.transformer.h[-1].next().output.save()         # step 2
-```
-
-`module.next(step=1)` is an alias for `tracer.next(step=1)` — both bump the same `mediator.iteration`. The `module.next()` form **emits a `DeprecationWarning`** (`src/nnsight/intervention/envoy.py:440`); prefer `tracer.next()`.
-
-## When to choose `iter[]` vs `next()`
-
-| Situation                                            | Use                |
-|------------------------------------------------------|--------------------|
-| Same intervention every step                         | `tracer.all()`     |
-| Want the step index in your code                     | `tracer.iter[:]`   |
-| Subset of steps (slice / list / single int)          | `tracer.iter[...]` |
-| 2–3 explicit steps, straight-line code               | `tracer.next()`    |
-| Code AFTER the iter block must run (post-loop **regular-module** access) | separate empty `tracer.invoke()`, bounded `tracer.iter[:N]`, or `tracer.next()` (see Gotchas) |
-| Save `generator.output` / `tracer.result` after `all()` inside `generate(max_new_tokens=N)` | Works as-is — `default_all` bounds the loop and the generator is iter-exempt |
 
 ## How it works
 
-`tracer.iter` returns an `IteratorProxy`; subscripting returns an `IteratorTracer` (`src/nnsight/intervention/tracing/iterator.py:55`). On `__iter__`:
+`tracer.iter` returns an `Iterations` object; subscripting selects the range
+(`iterator.py`). Looping over it walks the running mediator's `iteration` pointer
+across the selected steps — before each yield it pins `iteration` so the first read
+in the body binds to that occurrence. Whatever `iteration` was before the loop is
+restored on exit, so loops can nest. `tracer.all()` is `tracer.iter[:]`.
 
-1. **Persistent iter hooks register**, one per wrapped module, with `mediator_idx = float('inf')` so they fire AFTER any intervention or cache hook. **Per-fire op counters** also register on any existing `SourceAccessor`'s operations (`register_op_counters`).
-2. For each step `i`: set `mediator.iteration = i`, yield `i` to the loop body, then advance.
-3. After the body runs and the model executes for the step, the iter hooks bump `iteration_tracker[<path>.input]` and `iteration_tracker[<path>.output]` for every module. Source **operations** are bumped separately — once per invocation by their op counter, not once per forward — so an op that loops within a forward gets a distinct `iter[i]` per fire.
-4. On exit (normal or exception), iter hooks and op counters are removed in `finally` and `mediator.iteration` is restored.
+## Deprecated: the `with` form
 
-`tracer.all()` is implemented as `tracer.iter[:]` (`src/nnsight/intervention/tracing/tracer.py:457`).
+`with tracer.iter[...]:` still works but emits a `DeprecationWarning`. It does the
+same thing the long way — the loop is moved inside, re-running the block per step.
+Prefer `for step in tracer.iter[...]:`.
+
+```python
+with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
+    with tracer.iter[:3]:            # DeprecationWarning
+        x = model.transformer.h[0].output[0].save()
+```
 
 ## Gotchas
 
-- **`tracer.iter[:]` / `tracer.all()` are unbounded *unless the model sets a default stop*.** Inside `model.generate(..., max_new_tokens=N)` the loop **is** bounded: `generate` sets `interleaver.default_all = N`, so the loop terminates after the generated tokens and trailing code runs. In particular, **saving `model.generator.output` or `tracer.result` after the loop is safe** — both refer to the end-of-generation output, and `model.generator` is exempt from iteration tracking (this is the common "steer every step, then save the full generation" shape, and the for-loop form handles it fine). What still fails is requesting a **regular module's** `.output`/`.input` after the loop (those forward passes are already done → `OutOfOrderError`), and any unbounded `iter[:]` **outside** `generate()` (no `default_all`, so the loop never stops and the lines after it never run). Caveat: `max_new_tokens` is a cap, not a guarantee — if the model stops early (EOS / stop string) the iterations that didn't happen warn `... was not provided`. For post-loop **regular-module** access, use a separate empty `tracer.invoke()`, bounded `tracer.iter[:N]`, or `tracer.next()`. See [docs/gotchas/iteration.md](../gotchas/iteration.md).
-- **Iter loops cannot be entered with `with`.** `with tracer.iter[...]:` is deprecated and emits a `DeprecationWarning`. Always use `for step in tracer.iter[...]:` (`src/nnsight/intervention/tracing/iterator.py:320`).
-- **Negative iteration values raise `ValueError`** — there is no "last step" shorthand.
-- **`iter[i]` over a source op counts invocations, not forward passes.** An op that loops within one forward (e.g. an MoE expert loop) is indexed per fire (`0, 1, 2, …`); an op that fires once per forward is indexed per generation step, same as a module.
-- **First-time `.source` access mid-loop only misses a step in *generation* loops.** If the first ever `.source` access on a module happens at step N>0 of a multi-forward loop, that step's operation hooks miss because the op counter starts at 0. Touch `.source` before the loop. Single-forward in-loop iteration is unaffected. See [source.md § Gotchas](source.md#gotchas).
-- **`WrapperModule`s (e.g. `generator`, `streamer`) are skipped** by the iter hooks. Their values are pushed via `eproperty.provide`, which bumps the tracker itself.
-- **`module.next()` is deprecated; prefer `tracer.next()`.** `model.transformer.h[-1].next()` still works but emits `DeprecationWarning` (`src/nnsight/intervention/envoy.py:440`). The behavior is identical — both bump the same `mediator.iteration`.
-- **`.next()` only advances the iteration counter.** It does not block until the model has actually run that step. The model still runs forward in lockstep with hook resolution; `.next()` just tells the mediator which step's hooks to register next.
-- **Don't mix `.next()` with an `iter[...]` loop.** Inside a `for step in tracer.iter[...]` block, `mediator.iteration` is overwritten on each yield. Calling `.next()` inside the loop will be clobbered on the next iteration.
-- **For the final pipeline output, use `tracer.result.save()` — not `model.generator.output.save()` after `tracer.next()`.** `tracer.next()` advances the iteration counter for *every* module access, including `model.generator`, but the generator only fires once at the end of generation. After `for i in range(N): tracer.next()`, requesting `model.generator.output` asks for "iteration N's generator output" which does not exist (`model.generator.output.iN was not provided`). `tracer.result` is exempt from iteration tracking and always refers to the final pipeline output, so it's the right way to capture the end-of-generation result regardless of where the iter counter is.
+- **Open-ended `iter[:]` / `all()` do not let trailing code run.** They loop until
+  the model stops generating; the final over-run request is thrown into the worker
+  as `OutOfOrderError` (caught and warned), which unwinds the loop **and every line
+  after it**. So `tracer.result.save()` placed *after* an open-ended loop never
+  runs. To capture per-step values *and* the final result, use a **bounded**
+  `iter[:N]` matching `max_new_tokens` — then trailing code runs (see the canonical
+  pattern above). This differs from old nnsight, which special-cased this via a
+  `default_all` bound.
+- **`max_new_tokens` is a cap, not a guarantee.** If the model stops early (EOS /
+  stop string), steps that didn't happen warn `'...' was never reached: the model
+  ran fewer iterations than the loop requested. Values from reached iterations are
+  kept.`
+- **Negative step values raise `ValueError`** (`tracer.iter step cannot be
+  negative: -1`) — there is no "last step" shorthand.
+- **Regular-module access after the loop is out of order.** Those forward passes are
+  already done, so requesting a module's `.output`/`.input` after the loop raises
+  `OutOfOrderError`.
+- **Source-op iteration counts invocations, not forward passes.** An op that fires
+  once per forward is indexed per generation step; an op that loops within one
+  forward (e.g. an MoE expert loop) is indexed per fire. See [source.md](source.md).
+- **`model.iter` / `model.all()` are deprecated** — use `tracer.iter` /
+  `tracer.all()`.
 
 ## Related
 
-- [generate](generate.md) — Generation context.
-- [docs/concepts/source-tracing.md](../concepts/source-tracing.md) — How `.source` interacts with iteration.
-- [docs/gotchas/iteration.md](../gotchas/iteration.md) — The unbounded-iter trailing-code footgun.
-- [docs/concepts/threading-and-mediators.md](../concepts/threading-and-mediators.md) — How `mediator.iteration` and `iteration_tracker` interact.
+- [generate.md](generate.md) — generation context.
+- [source.md](source.md) — how `.source` interacts with iteration.
+- [invoke-and-batching.md](invoke-and-batching.md) — per-invoke iteration.

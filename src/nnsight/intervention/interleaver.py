@@ -1,1517 +1,700 @@
+"""Interleaving intervention code with a model's forward pass.
+
+nnsight lets you read and edit a model's intermediate values from ordinary
+Python written *inside* a ``with model.trace(...):`` block. To make that work,
+the intervention code and the model's forward pass have to run in lockstep:
+the intervention pauses whenever it asks for a value the model hasn't produced
+yet, the model runs until it reaches that value, hands it over, and the
+intervention resumes — possibly editing the value on the way back in.
+
+This module implements that dance with `greenlets <https://greenlet.readthedocs.io>`_
+(cooperative, single-threaded coroutines), not OS threads:
+
+* Each block of intervention code becomes a :class:`Mediator`, which runs the
+  code in its own greenlet — the "worker". The worker drives the interaction:
+  it runs until it needs a value, then *parks*, switching control back to the
+  greenlet that started it (the "parent", i.e. the model side).
+
+* The worker parks by naming a **location** — a provider string such as
+  ``"model.layer1.output"`` or the run's ``"result"``. It parks to *read* a
+  location (:meth:`Mediator.value`), to *replace* one (:meth:`Mediator.swap`),
+  or to *skip* a gated computation (:meth:`Mediator.skip`). It can also park on
+  no location at all, waiting on the other workers rather than the model
+  (:meth:`Mediator.barrier`).
+
+* An :class:`Interleaver` installs PyTorch hooks on the model's modules. As the
+  forward pass reaches each location, the hook calls
+  :meth:`Interleaver.handle(location, value) <Interleaver.handle>`, which offers
+  the value to every parked worker. A worker waiting on that location is served
+  the value (read) or has its replacement substituted in (swap); the possibly
+  edited value is returned back into the model's execution.
+
+Because a worker and the model take strict turns on one thread, there are no
+locks or queues — only greenlet switches. Each :class:`Mediator` holds at most
+one pending event at a time (the location it is currently parked on). A worker
+must request locations in the order the model reaches them; asking for a
+location the model already ran past raises :class:`OutOfOrderError`.
+"""
+
 from __future__ import annotations
 
-import inspect
-import types
+import enum
 import warnings
 import weakref
 from collections import defaultdict
-from enum import Enum
-from functools import partial, wraps
-from threading import Thread
-from types import FrameType
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    List,
-    Optional,
-    Protocol,
-    Set,
-    Union,
-    runtime_checkable,
-)
-
-import _thread
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
+from greenlet import getcurrent, greenlet
 
-from .. import CONFIG
-from ..util import applyn
-from functools import partial
-from .batching import Batcher
-from .tracing.util import get_non_nnsight_frame, push_variables, wrap_exception
+from ..tracing.util import Scope
 
 if TYPE_CHECKING:
-    from .tracing.tracer import Cache, InterleavingTracer, Tracer
+    from .envoy import Envoy
 
 
-from typing import TypeVar
+class Event(enum.Enum):
+    """What a parked worker is asking for.
 
-T = TypeVar("T")
+    A worker parks by switching a tuple ``(Event, location, ...)`` to its parent;
+    :meth:`Mediator.handle` inspects the first element to decide how to serve it.
+    See :meth:`Mediator.value`, :meth:`Mediator.swap`, :meth:`Mediator.skip`, and
+    :meth:`Mediator.barrier` for how each is raised from intervention code.
 
-
-@runtime_checkable
-class IEnvoy(Protocol):
-    """Interface for objects that participate in the interleaving system.
-
-    Any object that uses :class:`eproperty` descriptors must satisfy this
-    protocol by providing:
-
-    Attributes:
-        interleaver: The :class:`Interleaver` managing execution flow.
-        path: Optional provider path prefix used to build requester/provider
-            strings (e.g. ``"model.transformer.h.0"``).  May be ``None`` or
-            empty — :meth:`eproperty._build_requester` falls back to the
-            eproperty key alone in that case.  This is how tracer-level
-            eproperties such as :attr:`InterleavingTracer.result` work
-            without a path prefix.
-
-    Notes:
-        Implementors that have no meaningful path (e.g. tracers) do **not**
-        need to declare a ``path`` attribute — :meth:`eproperty._build_requester`
-        uses ``getattr(obj, "path", "")`` so a missing attribute is treated
-        the same as ``None`` / ``""``. The attribute is declared
-        ``Optional[str]`` here for type clarity.
+    ``BARRIER`` is the odd one: it names no location, so the model side never
+    serves it — another worker does, on its way past the same barrier.
     """
 
-    interleaver: "Interleaver"
-    path: Optional[str]
-
-
-class eproperty(property):
-    """A descriptor for defining hookable properties on :class:`IEnvoy` objects.
-
-    ``eproperty`` exposes values through the interleaving request/swap
-    mechanism. During a trace, reading an ``eproperty`` issues a blocking
-    request to the interleaver; writing to it schedules a swap.
-
-    The decorated stub
-    ------------------
-
-    Every ``eproperty`` is defined by decorating a *stub method*. The body
-    of that stub is **never executed for its return value** — it is a
-    placeholder whose only jobs are:
-
-    1. Donate its ``__name__`` and ``__doc__`` to the descriptor (the name
-       becomes the default ``key``; the docstring is what users see in
-       ``help(model.transformer.h[0].output)``).
-    2. Carry the **decorators stacked on top of it** that perform the real
-       work — registering the PyTorch hook (or operation hook) that will
-       eventually deliver the value the user is about to ``request()``.
-
-    Concretely::
-
-        @eproperty()
-        @requires_output       # ← does the work: registers a one-shot
-        def output(self): ...  #   forward hook on self._module before
-                               #   the request blocks the worker thread.
-
-    On every ``__get__`` the descriptor calls ``self._hook(obj)`` (the
-    decorated stub). Because the decorator wraps the empty stub, that
-    invocation runs the decorator's pre-setup — typically registering the
-    appropriate hook so the value will arrive when the model executes —
-    and then calls the (no-op) stub. The descriptor then issues the
-    actual ``request(requester)`` call, which blocks until the hook fires.
-
-    The pre-setup decorators live in :mod:`nnsight.intervention.hooks`:
-
-    - :func:`requires_output` / :func:`requires_input` — module-level
-      one-shot forward / pre-forward hooks (used by ``Envoy``).
-    - :func:`requires_operation_output` / :func:`requires_operation_input`
-      — operation-level hooks for ``.source`` tracing (used by
-      ``OperationEnvoy``).
-    - Custom backends (e.g. vLLM) supply their own decorators in the same
-      pattern; the contract is "make sure a provider for this requester
-      string will fire before ``request()`` blocks".
-
-    A bare ``eproperty`` with no pre-setup decorator is also valid for
-    things that are provided externally — e.g. ``InterleavingTracer.result``
-    is fed by ``Envoy.interleave`` calling ``self.interleaver.handle("result", ...)``,
-    so no per-access hook setup is needed.
-
-    Path / key resolution
-    ---------------------
-
-    The interleaver is obtained from ``obj.interleaver``. The path prefix
-    is obtained from ``obj.path`` if the attribute exists and is truthy;
-    if absent or empty, the key alone is used as the requester string.
-    This is how tracer-level eproperties like ``InterleavingTracer.result``
-    work without a path prefix.
-
-    Supported implementors
-    ----------------------
-
-    Any class satisfying the :class:`IEnvoy` protocol can host
-    eproperties.  In this codebase that includes:
-
-    - :class:`Envoy` — module-level ``.output``, ``.input``, ``.inputs``
-    - :class:`OperationEnvoy` — operation-level ``.output``, ``.input``,
-      ``.inputs`` (source tracing)
-    - :class:`InterleavingTracer` — tracer-level ``.result``
-    - vLLM :class:`VLLM` — ``.logits``, ``.samples``
-
-    Args:
-        key: The interleaving key appended to ``obj.path``
-            (``<path>.<key>``).  Defaults to the stub function's name.
-            Multiple eproperties can share a key (e.g. ``Envoy.input``
-            and ``Envoy.inputs`` both use ``"input"``) to provide
-            different views on the same underlying value.
-        description: A short label shown in the repr tree.  Only eproperties
-            with a description appear in the tree.
-        iterate: Whether to append an iteration suffix (``.i0``, ``.i1``, …).
-            Defaults to ``True``.
-    """
-
-    def __init__(self, key: str = None, description: str = None, iterate: bool = True):
-        super().__init__()
-
-        self.name: str = None
-        self.key = key
-        self.description = description
-        self.iterate = iterate
-
-        self._hook: Callable = None
-        self._postprocess: Optional[Callable] = None
-        self._preprocess: Optional[Callable] = None
-        self._transform: Optional[Callable] = None
-
-    def __call__(self, hook: Callable[..., T]) -> "T | eproperty":
-        """Register the decorated stub.
-
-        ``hook`` is the user's stub method (e.g. ``def output(self): ...``)
-        with any pre-setup decorators from :mod:`nnsight.intervention.hooks`
-        already applied. The body is treated as a no-op; what matters is
-        what the decorators do when ``hook(obj)`` is invoked from
-        :meth:`__get__` — typically registering a one-shot PyTorch hook so
-        the value will be produced by the time the request blocks. The
-        stub's ``__name__`` becomes the default ``key``.
-        """
-        self.name = hook.__name__
-        self._hook = hook
-        if self.key is None:
-            self.key = self.name
-        return self
-
-    def postprocess(self, func: Callable) -> "eproperty":
-        """Register a post-processing function called on ``__set__``.
-
-        Runs on the user-supplied value just before it is swapped into the
-        running model. Used by :class:`Envoy.input` to repack a single value
-        back into the ``(args, kwargs)`` shape the model's hook expects.
-        """
-        self._postprocess = func
-        return self
-
-    def preprocess(self, func: Callable) -> "eproperty":
-        """Register a pre-processing function called on ``__get__``.
-
-        Runs on the raw value pulled from the interleaver before it is
-        returned to the user. Used by :class:`Envoy.input` to extract the
-        first positional argument from ``(args, kwargs)``.
-
-        When a corresponding :meth:`transform` is also registered, the value
-        returned by ``preprocess`` is captured by the transform's closure —
-        in-place mutations the user makes are visible inside the transform.
-        """
-        self._preprocess = func
-        return self
-
-    def transform(self, func: Callable) -> "eproperty":
-        """Register a one-shot ``__get__`` -> swap-back transform.
-
-        ``transform`` complements :meth:`preprocess`. When ``preprocess``
-        returns a *new* object (a clone, a reshape, a view onto a slice),
-        in-place edits the user makes to that object are invisible to the
-        running model — the model still holds the original value. ``transform``
-        closes that loop: at request time the preprocessed value is bound into
-        the callable via ``functools.partial`` and parked on the current
-        mediator; once the user is done with their edits and the worker yields
-        control, the mediator invokes the transform and ``batcher.swap``s the
-        return value back into the model.
-
-        The function signature is ``transform() -> Any`` (no args — the value
-        is captured by the closure). Whatever the transform returns replaces
-        the original model-side value for the rest of the forward pass.
-
-        Use cases
-        ---------
-
-        - **Safe mutable view**: ``preprocess`` returns ``value.clone()`` so
-          users can ``thing[:] = 0`` without aliasing surprises; the transform
-          returns the (mutated) clone so the model still sees their edits.
-        - **Per-head attention access**: ``preprocess`` reshapes
-          ``[B, S, H]`` into ``[B, n_heads, S, head_dim]``; the transform
-          reshapes back to ``[B, S, H]`` so the model continues with the
-          user-edited heads.
-
-        Example::
-
-            class MyEnvoy(Envoy):
-                @eproperty(key="output")
-                @requires_output
-                def heads(self): ...
-
-                @heads.preprocess
-                def heads(self, value):
-                    # Expose attention heads as a separate dim.
-                    B, S, H = value.shape
-                    return value.view(B, S, self.n_heads, H // self.n_heads)\
-                                .transpose(1, 2)
-
-                @heads.transform
-                @staticmethod
-                def heads(value):
-                    # Reshape back to the model's [B, S, H] layout.
-                    return value.transpose(1, 2).reshape(value.shape[0], value.shape[2], -1)
-
-        Notes
-        -----
-
-        - Transform is **one-shot per access** — it fires once when the value
-          event for that access is processed and is then cleared.
-        - The transform can be a plain function (commonly decorated with
-          ``@staticmethod``) since the preprocessed value already carries the
-          context via the closure.
-        - If you only want to view the value and don't intend to swap it
-          back, omit ``transform`` and just use ``preprocess``.
-        """
-        self._transform = func
-        return self
-
-    def _build_requester(self, obj: IEnvoy) -> str:
-        path = getattr(obj, "path", "")
-        return f"{path}.{self.key}" if path else self.key
-
-    def __get__(self, obj: IEnvoy, owner: Any) -> Any:
-
-        if obj is None:
-            return self
-
-        interleaver = obj.interleaver
-
-        if interleaver.interleaving:
-
-            requester = self._build_requester(obj)
-
-            # Run the decorated stub. We don't care about its return value —
-            # what matters is the side effect of any pre-setup decorators
-            # stacked on it (see hooks.py: `requires_output`, `requires_input`,
-            # operation variants). Those decorators register the one-shot
-            # PyTorch hook that will eventually deliver the value to the
-            # `request()` call below.
-            self._hook(obj)
-
-            if self.iterate:
-                requester = interleaver.iterate_requester(requester)
-
-            value = interleaver.current.request(requester)
-
-            if self._preprocess is not None:
-                value = self._preprocess(obj, value)
-
-            if self._transform is not None:
-                # Bind the preprocessed value into the transform NOW (at request
-                # time) rather than passing it at fire time. The partial holds
-                # a reference to the same object the user is about to receive,
-                # so any in-place mutations are visible when the mediator later
-                # invokes `self.transform()` and swaps the result back into the
-                # model. See :meth:`Mediator.handle_value_event`.
-                interleaver.current.transform = partial(self._transform, value)
-
-        else:
-            label = self._build_requester(obj)
-            raise ValueError(f"Cannot access `{label}` outside of interleaving.")
-
-        return value
-
-    def __set__(self, obj: IEnvoy, value: Any):
-
-        if self._postprocess is not None:
-            value = self._postprocess(obj, value)
-
-        interleaver = obj.interleaver
-
-        if interleaver.interleaving:
-
-            requester = self._build_requester(obj)
-
-            self._hook(obj)
-
-            if self.iterate:
-                requester = interleaver.iterate_requester(requester)
-
-            interleaver.current.swap(requester, value)
-
-        else:
-            label = self._build_requester(obj)
-            raise ValueError(f"Cannot set `{label}` outside of interleaving.")
-
-    def provide(self, obj: IEnvoy, value: Any) -> Any:
-        """Provide a value from the model side into the interleaving system."""
-        requester = self._build_requester(obj)
-        return obj.interleaver.handle(
-            requester,
-            value,
-            iterate=self.iterate,
-        )
-
-
-class Events(Enum):
-    """Enum for different types of events in the interleaving process."""
-
-    VALUE = "value"  # Request for a value
-    SWAP = "swap"  # Request for a swap
-    END = "end"  # Signal to end the execution
-    EXCEPTION = "exception"  # Signal that an exception occurred
-    SKIP = "skip"  # Signal that an operation should be skipped
-    BARRIER = "barrier"  # Signal that a barrier should be set
-
-
-class Cancelation(Exception):
-    """Exception raised when a request is canceled."""
-
-    pass
+    VALUE = "VALUE"  # read a location:  (Event.VALUE, location)
+    SWAP = "SWAP"  # replace a location: (Event.SWAP, location, value)
+    SKIP = "SKIP"  # skip a computation: (Event.SKIP, location, value)
+    BARRIER = "BARRIER"  # wait for the other blocks: (Event.BARRIER, None)
 
 
 class EarlyStopException(Exception):
-    """
-    Exception raised to stop the execution of the model.
-    """
+    """Raised by an intervention to halt the model run early.
 
-    pass
-
-
-class SkipException(Exception):
-    """
-    Exception raised to skip the execution of the model.
+    Thrown into the model's execution (e.g. via ``tracer.stop()``) to unwind the
+    forward pass immediately. :meth:`Interleaver.__exit__` swallows it, since the
+    early stop was intentional rather than a genuine error.
     """
 
-    def __init__(self, value: Any):
-        self.value = value
 
+class OutOfOrderError(Exception):
+    """An intervention requested a location the model already ran past.
 
-def _store_deferred_exception(mediator: Any, exception: Exception) -> None:
-    """Capture a deferred exception + metadata on the mediator.
-
-    Populates ``deferred_exception`` alongside three serialization-friendly
-    fields read by ``intervention.errors.capture_deferred``:
-
-    - ``_deferred_type_name``: original exception class name, captured BEFORE
-      any ``wrap_exception`` call that would replace the class with a dynamic
-      ``NNsightException`` subclass.
-    - ``_deferred_traceback``: formatted traceback string of the original
-      exception, for debugging across the server boundary where the user
-      cannot inspect the live frames.
-    - ``_deferred_is_control_flow``: True for ``EarlyStopException`` (raised
-      by ``tracer.stop()``), so server paths can filter intentional control
-      flow out of error responses without name compares.
+    Workers must ask for locations in the order the model reaches them. If the
+    run finishes (or moves past a location) while a worker is still parked
+    waiting for it, :meth:`Interleaver.check_dangling_mediators` throws this into
+    the worker so the traceback points at the exact line that was waiting.
     """
-    import traceback as _tb
-
-    mediator._deferred_type_name = type(exception).__name__
-    mediator._deferred_traceback = "".join(
-        _tb.format_exception(type(exception), exception, exception.__traceback__)
-    )
-    mediator._deferred_is_control_flow = isinstance(exception, EarlyStopException)
-    mediator.deferred_exception = exception
-
-
-NNSIGHT_PREFIX = "__nnsight"
-
-
-class Interleaver:
-    """
-    Manages the interleaving of model execution and interventions.
-
-    This class coordinates the flow between the model's forward pass and
-    user-defined intervention functions, allowing for inspection and
-    modification of intermediate values.
-
-    Attributes:
-        mediators (Dict[str, Mediator]): A dictionary of mediator names to mediator objects. Each meidator is responsible for a single invoke, or intervention function.
-        tracer (Optional[InterleavingTracer]): The tracer object that created this interleaver. Occationaly useful to know the tracer type for this interleaving.
-        batcher (Batcher): The batcher object that manages the slice of inputs associtated with each mediator.
-        current (Mediator): The current mediator that is being processed. Must be update before resuming a given mediator.
-    """
-
-    def __init__(
-        self,
-        mediators: List[Mediator] = [],
-        tracer: InterleavingTracer = None,
-        batcher: Batcher = None,
-    ):
-        """
-        Initialize the interleaver for a new interleaving session.
-
-        Args:
-            mediators (List[Mediator]): A list of mediator objects.
-            tracer (InterleavingTracer): The tracer object that created this interleaver.
-            batcher (Batcher): The batcher object that manages the slice of inputs associtated with each mediator.
-        """
-        self.initialize(mediators, tracer, batcher)
-
-        self._interleaving = False
-
-        # Set by the vLLM model runner around ``execute_model`` so that
-        # exceptions raised inside the worker are stored on each
-        # mediator instead of bubbling up and killing the engine.
-        self.defer_exceptions = False
-
-    def initialize(
-        self,
-        mediators: List[Mediator],
-        tracer: InterleavingTracer,
-        batcher: Batcher = None,
-    ):
-
-        self.mediators: List[Mediator] = mediators
-
-        self.tracer = tracer
-        self.batcher = batcher if batcher is not None else Batcher()
-
-        self.default_all = None
-
-        self.current: Mediator = None
-
-    def cancel(self):
-        """Cancel all mediators / intervention threads.
-
-        After each mediator's worker thread is torn down, every hook it
-        registered (module one-shot, cache, operation, gradient, iter
-        tracker) is removed via :meth:`Mediator.remove_hooks`. This is
-        the single cleanup path for all dynamic hooks registered during
-        the session.
-        """
-
-        for mediator in self.mediators:
-            mediator.cancel()
-            mediator.remove_hooks()
-
-        self.mediators = []
-        self.tracer = None
-        self.batcher = None
-        self.default_all = None
-        self.transform = None
-
-        self.current = None
-
-    def iterate_requester(self, requester: str):
-        """Append the current mediator's iteration index to a requester string.
-
-        The iteration is determined by one of two sources:
-
-        - If ``mediator.iteration`` is set (user is inside an explicit
-          ``tracer.iter[i]`` loop), use that value directly.  This is how
-          iterator tracers constrain requests to a specific generation step.
-        - If ``mediator.iteration`` is ``None`` (user is not in an iter
-          context, or a one-shot hook has just cleared it after matching),
-          fall back to ``mediator.iteration_tracker[requester]``.  The
-          tracker is maintained by persistent hooks registered by
-          :class:`IteratorTracer` (see :func:`register_iter_hooks`), which
-          increment it after every forward pass for each module path.
-
-        This dual-mode behavior lets the same requester syntax work both
-        inside and outside an iter loop.
-
-        Args:
-            requester: The base requester string (e.g. ``"model.layer.0.output"``).
-
-        Returns:
-            The requester with iteration suffix (e.g. ``"model.layer.0.output.i0"``).
-        """
-
-        mediator = self.current
-
-        iteration = (
-            mediator.iteration
-            if mediator.iteration is not None
-            else mediator.iteration_tracker[requester]
-        )
-
-        return f"{requester}.i{iteration}"
-
-    def wrap_module(self, module: torch.nn.Module):
-        """Prepare a module for lazy hook execution.
-
-        Unlike previous versions that registered permanent input/output hooks
-        on every module, this method only installs:
-
-        1. A **skippable forward wrapper** — replaces ``module.forward`` with
-           a thin wrapper that checks for ``__nnsight_skip__`` in kwargs.  If
-           present, the module's original forward is bypassed and the skip
-           value is returned directly.
-        2. A **sentinel output hook** — an empty ``register_forward_hook``
-           that returns ``output`` unchanged.  This is required because
-           PyTorch's ``Module.__call__`` fast-paths when *no* hooks are
-           registered: if a module has zero hooks at call time, dynamically
-           added hooks during the forward pass will never fire.  The sentinel
-           ensures PyTorch always goes through the hook dispatch path so that
-           one-shot hooks registered by :func:`hooks.input_hook` and
-           :func:`hooks.output_hook` can be picked up mid-forward.
-
-        Actual interception of inputs/outputs is handled lazily by one-shot
-        hooks registered on-demand by each mediator (see ``hooks.py``).
-
-        Args:
-            module: The PyTorch module to prepare.
-        """
-
-        # Check if already wrapped with skippable forward
-        pre_wrapped = hasattr(module, "__nnsight_forward__")
-
-        if not pre_wrapped:
-
-            instance_forward = module.forward
-            if hasattr(instance_forward, "__self__"):
-                # Bound method — unbind to avoid reference cycle:
-                # module -> forward -> __self__ -> module
-                original_forward = instance_forward.__func__
-            elif isinstance(instance_forward, partial):
-                # e.g. accelerate's partial(new_forward, module) for device_map —
-                # unwrap to avoid reference cycle through partial.args
-                original_forward = instance_forward.func
-            else:
-                original_forward = instance_forward
-
-            module.__nnsight_forward__ = original_forward
-
-            module_ref = weakref.ref(module)
-
-            @wraps(original_forward)
-            def nnsight_forward(*args, **kwargs):
-                m = module_ref()
-                if "__nnsight_skip__" in kwargs:
-                    entries = kwargs.pop("__nnsight_skip__")
-                    if len(entries) == 1:
-                        return entries[0][1]
-                    # Multi-invoke skip: each mediator's hook contributed its
-                    # narrow value. Sort by batch start and concat along dim 0
-                    # so the splice matches the model's expected batch order.
-                    entries.sort(key=lambda e: e[0][0] if e[0] is not None else -1)
-                    values = [v for _, v in entries]
-                    return applyn(values, lambda *t: torch.cat(t, dim=0), torch.Tensor)
-                source_accessor = getattr(m, "__source_accessor__", None)
-
-                # Once a SourceAccessor exists for this module (built on the
-                # first ``.source`` access by anyone), route through it so the
-                # injected forward fires the per-op ``wrap`` lookups. The
-                # injected forward has its own fast path — ``wrap`` returns
-                # ``fn`` unchanged for unhooked operations — so the per-call
-                # cost is just a dict lookup + bool check per call site.
-                #
-                # We deliberately do *not* gate on ``source_accessor.hooked``
-                # here: hooks may be registered mid-forward (e.g. an op-level
-                # hook registered after the worker resumes from an upstream
-                # module hook), and an entry-time check would have already
-                # taken the un-injected path by then.
-                if source_accessor is not None:
-                    return source_accessor(m, *args, **kwargs)
-                return m.__nnsight_forward__(m, *args, **kwargs)
-
-            module.forward = nnsight_forward
-
-            # Sentinel hook — keeps PyTorch in the hook dispatch path so
-            # dynamically registered one-shot hooks fire correctly.
-            module.register_forward_hook(lambda _, __, output: output)
-
-    @property
-    def interleaving(self) -> bool:
-        """
-        Check if the interleaver is currently interleaving.
-
-        Returns:
-            bool: True if the interleaver is interleaving, False otherwise
-        """
-        return self._interleaving
-
-    def __enter__(self):
-
-        # Set the interleaving flag to True to indicate that the interleaver is currently interleaving.
-        # Used by a variety of functioanlities that interact with the interleaver.
-        # Often to raise an error when one of these functionalities is called outside interleaving.
-        self._interleaving = True
-
-        try:
-            # Start all the mediators to begin their intervention threads amd wait for their first event.
-            for idx, mediator in enumerate(self.mediators):
-                mediator.idx = idx
-                if mediator.alive:
-                    continue
-                mediator.start(self)
-
-        except:
-            # Clear the interleaving flag on error.
-            self._interleaving = False
-            raise
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-
-        # Clear the interleaving flag on exit.
-        self._interleaving = False
-
-        # Clear the mediators that are no longer alive.
-        self.mediators = [mediator for mediator in self.mediators if mediator.alive]
-
-        # Swallow internal control-flow exceptions so they don't escape the
-        # ``with self.interleaver:`` block in server worker paths and kill
-        # the engine. ``EarlyStopException`` is ``tracer.stop()`` control
-        # flow; ``Cancelation`` is internal mediator bookkeeping (raised
-        # when ``mediator.cancel()`` is called during cleanup).
-        if exc_type is not None and issubclass(
-            exc_type, (EarlyStopException, Cancelation)
-        ):
-            return True
-
-    def handle(
-        self,
-        provider: Optional[str] = None,
-        value: Optional[Any] = None,
-        iterate: bool = False,
-    ):
-        """Broadcast a provider value to all mediators.
-
-        Used by :meth:`eproperty.provide` and :meth:`Envoy.interleave` to
-        push values (e.g. vLLM logits, generation results) into the
-        interleaving system.  Unlike module hooks, these values are not
-        produced by the normal PyTorch forward pass — they are pushed
-        from the model runner side, so this method acts as a fan-out to
-        every mediator and bumps the per-mediator iteration counter for
-        the provider path when ``iterate=True``.
-
-        When ``iterate=True``, the per-mediator ``iteration_tracker`` for
-        this provider path is bumped after each mediator processes the
-        value.  This mirrors the behavior of the persistent iter hooks
-        registered by :class:`IteratorTracer`, but for values that flow
-        through ``provide()`` instead of a PyTorch forward hook.
-
-        Args:
-            provider: The provider string identifying this value.
-            value: The value being provided.
-            iterate: Whether to append an iteration suffix to the provider
-                and bump the per-mediator tracker.
-
-        Returns:
-            The (potentially modified) value after the final mediator has
-            handled it.  Used by ``operation_fn_hook`` for recursive
-            source tracing, where the injected function is returned from
-            :meth:`Mediator.handle` via a SWAP event and flows back
-            through this broadcast.
-        """
-        original_provider = provider
-
-        result = value
-
-        for mediator in self.mediators:
-            if iterate:
-                iteration = mediator.iteration_tracker[original_provider]
-                provider = f"{original_provider}.i{iteration}"
-
-            result = mediator.handle(provider, value)
-
-            if iterate:
-                mediator.iteration_tracker[original_provider] += 1
-
-        return result
-
-    def check_dangling_mediators(self):
-
-        # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
-        # Or their Envoy was not called.
-        for mediator in self.mediators:
-
-            if mediator.alive:
-                requested_event, requester = mediator.event_queue.get()
-
-                if isinstance(requester, tuple):
-                    requester = requester[0]
-
-                iteration = mediator.iteration
-
-                mediator.respond(
-                    Mediator.MissedProviderError(
-                        f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called."
-                    )
-                )
-
-                if iteration != 0:
-                    try:
-                        mediator.handle()
-                    except Mediator.MissedProviderError as e:
-                        msg = f"Execution complete but `{requester}` was not provided. If this was in an Iterator at iteration {iteration} this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
-                        warnings.warn(msg)
-                else:
-                    mediator.handle()
-
-        self.mediators = []
-
-    def check_cache_full(self):
-        """
-        Print a warning if a module to be cached was missed.
-        """
-        for invoker in self.mediators:
-            for cache in invoker.user_cache:
-                if cache.modules:
-                    if cache.include_inputs and cache.include_output:
-                        for module in cache.modules:
-                            if (
-                                module not in cache.cache
-                                or cache.cache[module].inputs is None
-                            ):
-                                print(
-                                    "\033[33m"
-                                    + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called."
-                                    + "\033[0m"
-                                )
-                                return
-                    else:
-                        if any(module not in cache.cache for module in cache.modules):
-                            print(
-                                "\033[33m"
-                                + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called."
-                                + "\033[0m"
-                            )
-                            return
-
-    ### Serialization ###
-
-    def __deepcopy__(self, memo):
-
-        return self
 
 
 class Mediator:
-    """
-    Mediates between the model execution and a single intervention function.
+    """Runs one block of intervention code as a greenlet, in step with the model.
 
-    This class handles the communication between the model's forward pass and a
-    user-defined intervention function, allowing for inspection and
-    modification of intermediate values.
+    A mediator wraps one captured block — the body of a ``with`` block, or one
+    registered edit — and runs it inside a greenlet, the "worker". The worker
+    drives the interaction: it runs until the intervention asks for a value, then
+    parks, recording that pending request in :attr:`pending` and switching control
+    back to the parent greenlet (the model side). The parent later resumes it
+    through :meth:`switch` / :meth:`handle`.
+
+    The classmethods :meth:`value`, :meth:`swap`, :meth:`skip`, and
+    :meth:`barrier` are the API the intervention code calls to park
+    (:class:`Envoy` properties like ``.output`` and ``.input`` are thin wrappers
+    over them). :meth:`start`, :meth:`switch`, and :meth:`handle` are the
+    parent-side machinery that runs and feeds the worker. :meth:`current` is how
+    code inside a worker finds the mediator driving it.
+
+    The block and its scope travel; everything the run builds does not — see
+    :meth:`__getstate__`, which is how an edit rides to a remote server.
 
     Attributes:
-        interleaver (Interleaver): The interleaver that this mediator is currently running in
-        intervention (Callable): The intervention function to mediate
-        info (Tracer.Info): Information about the tracing context associated with this mediator
-        name (Optional[str]): Optional name for the mediator
-        batch_group (Optional[List[int]]): Optional batch group for the mediator to determine which slice of tensors are being intervened on
-        event_queue (SimpleQueue): Where the mediator (worker thread) puts events to be processed by the interleaver (main thread). Will only ever have 1 or 0 items in the queue.
-        response_queue (SimpleQueue): Where the interleaver (main thread) puts responses to events, to then be processed by the mediator (worker thread). Will only ever have 1 or 0 items in the queue.
-        worker (Thread): The thread that runs the intervention function
-        history (Set[str]): A set of providers that have been seen by the mediator. Used to detect out of order interventions.
-        iteration_tracker (Dict[str, int]): Per-provider-path counter maintained by
-            :func:`IteratorTracer.register_iter_hooks` (and by
-            :meth:`Interleaver.handle` for provided values).  One-shot
-            intervention hooks read this to know which generation step
-            is currently firing.  Defaults to 0 for any path that has
-            not yet been observed.
-        iteration (Optional[int]): The target iteration this mediator is
-            currently constrained to, or ``None``.  Set by
-            :class:`IteratorTracer` before each yield so subsequent
-            requests target the correct step.  Cleared back to ``None``
-            by a one-shot hook after it matches a non-zero target, so
-            later requests in the same intervention fall back to the
-            tracker-based "current step" resolution.
-        user_cache (List[Cache]): A list of caches to be used by the mediator
-        all_stop (Optional[int]): Optional number of times to execute this mediator
+        code: The captured block, compiled. Executed by the worker.
+        glbls: The globals the block was written against.
+        lcls: The :class:`~nnsight.tracing.util.Scope` the block runs in — its
+            capture-time names, the frame it shares with the blocks written beside
+            it, and those globals behind them. Doubles as what :func:`push_result`
+            reads the block's results back out of.
+        copy: Whether to exec against a fresh copy of :attr:`lcls` each run. Set
+            for an edit, which is replayed on every later trace and so must not
+            accumulate the last replay's names.
+        node: The block's AST node, kept so the mediator can serialize. ``None``
+            for a mediator rebuilt server-side from already-reduced source.
+        interleaver: The run this worker belongs to, set in :meth:`start`. Its
+            ``batcher`` owns the row scoping :meth:`handle` applies.
+        batch_group: This worker's ``[start, size]`` row range in the combined
+            batch, or ``None`` for a whole-batch worker — an edit, or an empty
+            invoke.
+        worker: The greenlet running :attr:`code`, or ``None`` before
+            :meth:`start`. Falsy once the worker has finished (see :attr:`alive`).
+        pending: The event the worker is currently parked on — a tuple like
+            ``(Event.VALUE, "model.layer1.output.i0")``, the location carrying an
+            occurrence tag (see :meth:`event`) — or ``None`` when the worker isn't
+            parked (before start or after it finishes).
+        iteration: Which occurrence of a location the worker currently wants —
+            the ``i`` in the ``.i{i}`` tag its pending request is matched under.
+            ``tracer.iter`` pins it to a step; ``None`` means *relaxed* — the
+            request resolves to the mediator's current count for that location (the
+            next occurrence the model hasn't handled). Stays ``0`` (the first
+            occurrence) with no ``tracer.iter``. Relaxes to ``None`` after the
+            first hit of a pinned non-zero step (see :meth:`handle`).
+        iterations: Per-location count of how many times the model has reached
+            each location so far this run, used to tag each visit with its
+            occurrence index. Keyed by the undecorated provider string.
+        caches: The caches this worker's ``tracer.cache()`` created. They observe
+            every location the run reaches, after interventions have had it.
     """
-
-    class MissedProviderError(Exception):
-        """
-        Exception raised when a provider is missed.
-        """
-
-        pass
-
-    class OutOfOrderError(MissedProviderError):
-        """
-        Exception raised when interventions are defined out of order.
-        """
-
-        pass
-
-    class Value:
-
-        def __init__(self):
-            self.value = None
-            self.lock = _thread.allocate_lock()
-            self.lock.acquire()
-            self.has_value = False
-
-        def get(self):
-
-            value = self.value
-            self.value = None
-
-            self.has_value = False
-
-            return value
-
-        def wait(self):
-            self.lock.acquire()
-
-        def put(self, value: Any):
-            self.restore(value)
-
-            self.lock.release()
-
-        def restore(self, value: Any):
-            self.value = value
-            self.has_value = True
 
     def __init__(
         self,
-        intervention: Callable,
-        info: "Tracer.Info",
-        name: Optional[str] = None,
-        batch_group: Optional[List[int]] = None,
-        stop: Optional[int] = None,
+        code: Any,
+        glbls: dict,
+        lcls: dict,
+        copy: bool = False,
+        node: Any = None,
+        shared: dict | None = None,
     ) -> None:
+        # The captured block to run and the scope it runs against (see
+        # :class:`~nnsight.tracing.util.Scope` for how a block reaches names).
+        # ``shared`` is the live locals of the frame the block was written in, so
+        # blocks written together see each other's binds; a block with no siblings
+        # (a deserialized edit, replayed with no frame at all) shares nothing.
+        # ``copy`` (edits, which are stored and replayed on every future trace)
+        # execs against a fresh copy each run so a replay doesn't accumulate the
+        # block's own mutations; otherwise (a one-shot trace/invoke body) it execs
+        # against the stored scope so push_result can read back the values it saved.
+        self.code = code
+        self.glbls = glbls
+        self.lcls = Scope(lcls, {} if shared is None else shared, glbls)
+        self.copy = copy
+        # The block's AST node, kept so the mediator can serialize (edits ride with
+        # the model to a remote server): __getstate__ reduces it to source + the vars
+        # it references, exactly like the traced block. None for a mediator built
+        # server-side from already-reduced source (it isn't re-serialized).
+        self.node = node
+        # Batch scoping (see intervention/batching.py): the interleaver this worker
+        # runs under (its `batcher` owns the narrow/widen logic), and this worker's
+        # row range in the combined batch. `interleaver` is set in `start`;
+        # `batch_group` is None for a whole-batch worker (an edit or empty invoke).
+        self.interleaver: Any = None
+        self.batch_group: list | None = None
+        self.worker: greenlet | None = None
+        # The event the worker is currently parked on, waiting to be served (e.g.
+        # (Event.VALUE, "model.h.0.output.i0")), or None when it isn't parked.
+        self.pending: tuple | None = None
+        # Which occurrence of a location the worker is currently asking for (or
+        # None when relaxed), and a per-location tally of how many times the model
+        # has reached it. See `handle` for how the two are matched up.
+        self.iteration: int | None = 0
+        self.iterations: dict[str, int] = defaultdict(int)
+        # Caches created by this worker's `tracer.cache()`. They observe every
+        # location this run reaches (post-intervention); see Interleaver.handle.
+        self.caches: list = []
+        # A one-shot write-back bound by an eproperty read whose value was a
+        # reshaped view (see eproperty.transform): fired once, right after this
+        # worker's read on a location, to splice the edited view back in `handle`.
+        self.transform: Optional[Callable] = None
+        # The exception this worker raised, if any — a tracer.stop()'s
+        # EarlyStopException or a genuine error in intervention code. Set only under
+        # a deferring interleaver (see Interleaver.defer_exceptions): a driver that
+        # keeps running past a worker's error (vLLM, whose engine schedules the next
+        # step itself) reads this to end the request and, for a real error, carry it
+        # back to the trace that wrote it.
+        self.exception: Optional[BaseException] = None
+
+    def _run(self) -> None:
+        """Execute the captured block (the worker greenlet's body).
+
+        The scope is ``exec``'s globals as well as its locals, so a ``lambda`` or
+        nested ``def`` in the block can reach the block's own names (see
+        :class:`~nnsight.tracing.util.Scope`).
         """
-        Initialize a Mediator with an intervention function.
+        exec(self.code, self.lcls.copy() if self.copy else self.lcls)
 
-        Args:
-            intervention: The intervention function
-            info: Information about the tracing context
-            name: Optional name for the mediator
-            stop: Optional number of times to execute this mediator
+    def __getstate__(self) -> dict:
+        # Ships with the model (an edit rides in envoy._edits to a remote server).
+        # Reduce the block to source + the vars it references — cross-version safe,
+        # exactly like the traced block — and drop the compiled code and all run
+        # state (worker/pending/interleaver/batch_group can't and shouldn't travel).
+        from .serialization import reduce_block
+
+        return {"reduced": reduce_block(self.node, self.glbls, self.lcls), "copy": self.copy}
+
+    def __setstate__(self, state: dict) -> None:
+        source, glbls, lcls = state["reduced"]
+        self.__init__(compile(source, "<edit>", "exec"), glbls, lcls, copy=state["copy"])
+
+    @classmethod
+    def current(cls, what: str) -> "Mediator":
+        """The mediator whose worker is running now.
+
+        Only intervention code has one, and intervention code only runs while
+        interleaving — so no worker means ``what`` was asked for outside a run,
+        and there is nothing to park on and nothing to answer with.
+
+        Raised as a :class:`ValueError` rather than the ``AttributeError`` that
+        reaching for the absent worker gives: from a property like
+        :attr:`~nnsight.intervention.envoy.Envoy.output`, an ``AttributeError`` is
+        taken for "no such attribute" and comes back out of ``__getattr__`` as one,
+        naming the property instead of the reason.
         """
-        self.intervention = intervention
+        mediator = getattr(getcurrent(), "mediator", None)
+        if mediator is None:
+            raise ValueError(f"Cannot access `{what}` outside of interleaving")
+        return mediator()
 
-        self.name = name if name else f"Mediator{id(self)}"
-        self.idx = None
-        self.info = info
-        self.batch_group = batch_group
+    @classmethod
+    def event(cls, event: Event, location: str, *rest: Any) -> Any:
+        """Raise an event from inside a worker and return what's sent back.
 
-        self.interleaver = None
+        Called on the *worker* side (from intervention code): switch to the parent
+        greenlet — the interleaver driving the model — handing it the event tuple,
+        and block until the parent switches a value back in. This is the
+        counterpart to :meth:`switch`, which drives the worker from the parent.
 
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
+        ``location`` is tagged ``.i{n}`` with the occurrence the worker wants, so
+        :meth:`handle` can bind it with a single match. When pinned
+        (:attr:`iteration` is an int), that's the pinned step. When relaxed
+        (``None``), it's the mediator's current count for this location — the next
+        occurrence the model hasn't handled yet — so the request follows the model
+        sequentially.
+        """
+        mediator = cls.current(location)
+        worker = getcurrent()
+        iteration = (
+            mediator.iteration
+            if mediator.iteration is not None
+            else mediator.iterations[location]
+        )
+        return worker.parent.switch((event, f"{location}.i{iteration}", *rest))
 
-        self.worker = None
+    @classmethod
+    def value(cls, location: str) -> Any:
+        """Read the value at ``location`` from inside a worker.
 
-        self.skip_container = None
+        Parks until the interleaver reaches ``location`` — a module input/output
+        path (e.g. ``"model.h.0.output"``) or the run's ``"result"`` — then returns
+        the value produced there.
+        """
+        return cls.event(Event.VALUE, location)
 
-        self.history = set()
-        self.user_cache: List["Cache"] = list()
-        self.hooks: List[Any] = list()
-        self.iteration_tracker = defaultdict(int)
-        self.iteration = 0
-        # The live iter-loop handle list while this mediator is iterating
-        # (set by IteratorTracer); lets a `.source` first touched mid-loop
-        # register its op counters into the loop. None when not iterating.
-        self._active_iter_handles: Optional[List] = None
-        self.all_stop: Optional[int] = stop
-        self.args = list()
-        self.cross_invoker = None
+    @classmethod
+    def swap(cls, location: str, value: Any) -> None:
+        """Replace the value at ``location`` from inside a worker.
 
-        self.original_globals = {}
+        Parks like :meth:`value`, but when the interleaver reaches ``location`` it
+        substitutes ``value`` for what the model produced (see :meth:`handle`), then
+        resumes the worker. Reading then swapping the same location works — both
+        events are drained in one :meth:`handle`.
+        """
+        cls.event(Event.SWAP, location, value)
 
-        # Set by ``handle_exception_event`` when the interleaver is in
-        # defer mode (vLLM); collected by the model runner from each
-        # mediator and shipped back to the client as
-        # ``saves["__nnsight_exceptions__"][base_id]``.
-        self.deferred_exception = None
-        # Metadata captured at deferral time for server-side serialization.
-        # See ``_store_deferred_exception`` and ``intervention.errors``.
-        self._deferred_type_name: Optional[str] = None
-        self._deferred_traceback: Optional[str] = None
-        self._deferred_is_control_flow: bool = False
+    @classmethod
+    def skip(cls, location: str, value: Any) -> None:
+        """Skip the computation gated at ``location``, using ``value`` as its result.
 
-        self._prev = None
+        Parks like :meth:`swap`, but targets a ``.skip`` gate that a module's (or
+        op's) forward wrapper queries *before* running — so ``value`` is returned
+        in place of running the computation, not after. A distinct event from SWAP
+        so skip-specific behavior can hang off it later.
+        """
+        cls.event(Event.SKIP, location, value)
 
-        # One-shot transform callback for the next value event. Set by
-        # :meth:`eproperty.__get__` when an eproperty with a registered
-        # ``transform`` is accessed (already bound to the preprocessed value
-        # via ``functools.partial``); consumed and cleared by
-        # :meth:`handle_value_event` after the value is delivered to the
-        # worker.
-        self.transform = None
+    @classmethod
+    def barrier(cls) -> None:
+        """Park until another block releases this worker.
 
-        self.lock = 0
+        Unlike :meth:`value` / :meth:`swap` / :meth:`skip`, this parks on nothing
+        the model produces: it waits on the other *blocks*, and the last of them
+        to arrive is what resumes it (see
+        :class:`~nnsight.intervention.barrier.Barrier`). Its pending event carries
+        no location, so the model side never serves it.
+        """
+        getcurrent().parent.switch((Event.BARRIER, None))
 
     @property
-    def alive(self):
+    def alive(self) -> bool:
+        """Whether the worker exists and still has intervention code left to run.
 
-        return self.worker is not None
-
-    def __enter__(self):
-
-        # Store the previous mediator to be restored after this mediator is done as there might be nested mediators.
-        self._prev = self.interleaver.current
-        # Set the current mediator that is running to this mediator.
-        self.interleaver.current = self
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-
-        # Restore the previous mediator to be running after this mediator is done.
-        self.interleaver.current = self._prev
-
-    def start(self, interleaver: Interleaver):
+        ``False`` before :meth:`start` (no worker yet) and after the worker
+        finishes — a greenlet is falsy once it has run to completion — so this is
+        only ``True`` while the worker is parked mid-intervention.
         """
-        Start the mediator's intervention thread.
+        return bool(self.worker)
 
-        Args:
-            interleaver (Interleaver): The interleaver managing this mediator
+    def start(self, interleaver: "Interleaver" = None) -> None:
+        """Create the worker greenlet and run it up to its first park.
+
+        Switching into a fresh greenlet runs the captured block until it first
+        parks on a location (or finishes). Whatever it parks on becomes
+        :attr:`pending`, ready for :meth:`handle` to serve once the model reaches
+        that location. Per-run counters are reset here so a stored edit mediator,
+        replayed on a later trace, starts clean. ``interleaver`` is the run this
+        worker belongs to (it reads batch scoping from ``interleaver.batcher``).
         """
         self.interleaver = interleaver
-
-        self.transform = None
-
-        # Only copy globals that the intervention code actually references.
-        all_globals = self.intervention.__globals__
-        co_names = self.intervention.__code__.co_names
-        self.original_globals = {
-            k: all_globals[k] for k in co_names if k in all_globals
-        }
-
-        self.cross_invoker = (
-            len(self.interleaver.mediators) > 1 and CONFIG.APP.CROSS_INVOKER
-        )
-
-        # Capture the current CUDA stream so the worker thread uses it.
-        # Worker threads default to the NULL stream (stream 0), but
-        # vLLM (and other frameworks) run on a non-default stream.
-        # PyTorch creates non-default streams with cudaStreamNonBlocking,
-        # which disables implicit synchronization with the NULL stream.
-        # Without propagating the stream, worker-thread CUDA ops (clone,
-        # fill) race with main-thread ops on the compute stream.
-        if torch.cuda.is_available():
-            _caller_stream = torch.cuda.current_stream()
-        else:
-            _caller_stream = None
-
-        _intervention = self.intervention
-        _args = (self, self.info, *self.args)
-
-        def _worker_target():
-            if _caller_stream is not None:
-                torch.cuda.set_stream(_caller_stream)
-            _intervention(*_args)
-
-        # Start the worker thread.
-        self.worker = Thread(
-            target=_worker_target,
-            daemon=True,
-            name=self.name,
-        )
-
-        self.interleaver.current = self
-        self.worker.start()
-        self.event_queue.wait()
-
-        # Handle the first event for each mediator to clear mediators that already ended.
-        try:
-            self.handle()
-        except EarlyStopException:
-            pass
-
-        self.interleaver.current = None
-
-    ### Provider Methods ###
-
-    def cancel(self):
-        """Cancel the intervention thread and its ephemeral state."""
-
-        self.history = set()
-        self.iteration_tracker = defaultdict(int)
         self.iteration = 0
-        self.worker = None
+        self.iterations = defaultdict(int)
+        self.caches = []
+        self.transform = None
+        self.worker = greenlet(run=self._run)
+        # Let intervention code reach its own mediator from inside the worker via
+        # getcurrent().mediator() — to tag a park with the current iteration
+        # (:meth:`event`) or move it (`tracer.iter`). A weakref so the worker
+        # doesn't hold the mediator (which holds the worker) alive in a cycle.
+        self.worker.mediator = weakref.ref(self)
+        self.pending = self.switch()
 
-        if self.event_queue.has_value:
-            self.handle()
-            if self.event_queue.has_value:
-                self.event_queue.get()
-                self.response_queue.put(Cancelation())
-                self.event_queue.get()
+    def switch(self, *args: Any) -> Any:
+        """Resume the worker with ``args``; return the next event it parks on.
 
-    def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
-        """Process a provided value against this mediator's pending event.
+        Switches control into the worker greenlet, handing it ``args`` as the
+        return value of whatever park call it was blocked in, and blocks until
+        the worker parks again (returning its new event tuple) or finishes
+        (returning ``None``). If the worker raises, its traceback is stashed on
+        the exception as ``__intervention_tb__`` — a clean, intervention-only
+        trace captured before the re-raise unwinds the model/hook stack on top —
+        and the exception propagates, halting the run.
 
-        Called directly by one-shot hooks (see ``hooks.py``) or by
-        :meth:`Interleaver.handle` for source operations.  This method
-        saves and restores the interleaver's ``current`` mediator and the
-        batcher's ``current_value`` / ``current_provider``, so it is safe
-        to call from within any hook without corrupting shared state.
-
-        Depending on the pending event, this will:
-        - **VALUE**: Deliver the value to the worker thread.
-        - **SWAP**: Replace the value in the batcher.
-        - **SKIP**: Inject ``__nnsight_skip__`` into kwargs so
-          ``nnsight_forward`` bypasses the module.
-        - **BARRIER**: Synchronize participating mediators.
-        - **END**: Cancel the mediator (intervention finished).
-        - **EXCEPTION**: Re-raise the exception from the worker thread.
-
-        Args:
-            provider: The provider string (e.g. ``"model.layer.0.output.i0"``).
-            value: The value being provided (e.g. the module's output tensor).
-
-        Returns:
-            The (potentially modified) value from ``batcher.current_value``.
+        Re-point the worker's parent at whoever is switching in *now*, so both its
+        return paths — parking (``worker.parent.switch(...)``) and finishing (a
+        greenlet auto-returns to its parent) — go back here rather than to a fixed
+        greenlet. This keeps the chain correct when a worker is served from inside
+        another worker's greenlet, e.g. an ``Envoy.__call__(hook=True)`` adapter
+        run whose submodule hooks serve a second worker mid-call.
         """
+        self.worker.parent = getcurrent()
+        try:
+            return self.worker.switch(*args)
+        except BaseException as exception:
+            # The worker raised. Its traceback right now holds only the
+            # intervention frames; stash it before the re-raise unwinds the
+            # model/hook stack on top, so the top can restore a clean trace.
+            # The exception still propagates, stopping execution immediately.
+            if not hasattr(exception, "__intervention_tb__"):
+                exception.__intervention_tb__ = exception.__traceback__
+            raise
 
-        prev_current = self.interleaver.current
-        prev_value = self.interleaver.batcher.current_value
-        prev_provider = self.interleaver.batcher.current_provider
+    def handle(self, provider: str, value: Any) -> Any:
+        """Drain the worker's events parked on this visit to ``provider``; return the value.
 
-        self.interleaver.current = self
-        self.interleaver.batcher.current_value = value
-        self.interleaver.batcher.current_provider = provider
+        A read (:attr:`Event.VALUE`) is served ``value``; a swap
+        (:attr:`Event.SWAP`) replaces ``value`` with the worker's. The worker may
+        do both in turn (read a location, then assign it), so loop until it parks
+        somewhere else or finishes. The returned value flows back up through
+        :meth:`Interleaver.handle` to the hook, which substitutes it into the run.
 
-        # Check to see if this mediator has an unprocessed eventto start.
-        process = self.event_queue.has_value
-
-        # Continue processing events until there are no more events to process.
-        # Means we can move on to the next mediator and continue the model execution.
-        while process:
-
-            event, data = self.event_queue.get()
-
-            if event == Events.VALUE:
-                process = self.handle_value_event(data, provider)
-            elif event == Events.SWAP:
-                process = self.handle_swap_event(provider, *data)
-            elif event == Events.EXCEPTION:
-                process = self.handle_exception_event(data)
-            elif event == Events.SKIP:
-                process = self.handle_skip_event(provider, *data)
-            elif event == Events.BARRIER:
-                process = self.handle_barrier_event(provider, data)
-            elif event == Events.END:
-                process = self.handle_end_event()
-
-        value = self.interleaver.batcher.current_value
-
-        self.interleaver.current = prev_current
-        self.interleaver.batcher.current_value = prev_value
-        self.interleaver.batcher.current_provider = prev_provider
-
+        A location can be reached many times in one run — e.g. a module revisited
+        on every step of a generation loop. This visit is the
+        ``iterations[provider]``-th, so it serves requests tagged for that
+        occurrence: ``{provider}.i{n}``. A worker parks already carrying the tag
+        it wants (see :meth:`event`) — pinned to a step, or resolved to the next
+        occurrence when relaxed — so this is a single string match: a request
+        pinned to a later step doesn't match yet and waits while earlier visits
+        pass by. With no ``tracer.iter`` the tag is always ``.i0``, so every
+        request binds to the first visit — the original behavior. Once a pinned
+        non-zero step is hit, the mediator is relaxed to ``None`` so the rest of
+        that step's requests follow the model sequentially rather than re-forcing
+        the index.
+        """
+        location = f"{provider}.i{self.iterations[provider]}"
+        # The batcher (if this run is batching) scopes a value to this worker's rows.
+        batcher = None if self.interleaver is None else self.interleaver.batcher
+        while self.pending is not None and self.pending[1] == location:
+            # First hit of an explicit iter[n] (n > 0): drop the pin so the
+            # remaining requests this step follow the model sequentially (event
+            # resolves them to the current count). 0 and None don't relax (0 is
+            # "unpinned"; None already is).
+            if self.iteration:
+                self.iteration = None
+            if self.pending[0] is Event.VALUE:  # serve this worker only its rows
+                served = value if batcher is None else batcher.narrow(value, self.batch_group)
+                self.pending = self.switch(served)
+                # If that read bound a write-back (an eproperty whose preprocess
+                # returned a view), the worker has since edited the view — fire it
+                # and splice the mapped-back result in, exactly like a swap.
+                if self.transform is not None:
+                    mapped = self.transform()
+                    value = (
+                        mapped
+                        if batcher is None
+                        else batcher.widen(value, self.batch_group, mapped)
+                    )
+                    self.transform = None
+            elif self.pending[0] is Event.SWAP:  # splice its edit back into the batch
+                if batcher is None:
+                    value = self.pending[2]
+                else:
+                    value = batcher.widen(value, self.batch_group, self.pending[2])
+                self.pending = self.switch()
+            elif self.pending[0] is Event.SKIP:  # gather per-invoke replacements
+                if batcher is None:
+                    value = self.pending[2]
+                else:
+                    value = batcher.gather_skip(
+                        value, self.batch_group, self.pending[2]
+                    )
+                self.pending = self.switch()
+        # Record that the model has now passed this occurrence of the location, so
+        # the next visit is tagged as the following one.
+        self.iterations[provider] += 1
         return value
 
-    def handle_value_event(self, requester: Any, provider: Any) -> bool:
+
+class Interleaver:
+    """Drives the model side of interleaving: model hooks in, workers served.
+
+    An interleaver owns the PyTorch hooks that turn a model's forward pass into a
+    stream of :meth:`handle` calls, and the list of :class:`Mediator` workers
+    those calls feed. One interleaver is shared across an :class:`Envoy` tree, so
+    every module's hooks report into the same set of workers.
+
+    Lifecycle of a run (see :meth:`Envoy.interleave`):
+
+    1. A :class:`Mediator` is appended to :attr:`mediators` for each intervention
+       block and each registered edit.
+    2. Entering the interleaver (``with interleaver:``) flips
+       :attr:`interleaving` on and :meth:`~Mediator.start`\\ s every worker so each
+       parks on its first requested location.
+    3. The model runs. Each module hook installed by :meth:`instrument` calls
+       :meth:`handle`, serving reads and applying swaps for any worker parked
+       there, and returns the (possibly edited) value into the forward pass.
+    4. :meth:`check_dangling_mediators` surfaces any worker still waiting for a
+       location the model never reached (:class:`OutOfOrderError`), and
+       :meth:`cancel` clears the workers so the next run starts clean.
+
+    Attributes:
+        handles: Module path -> the PyTorch hook handles installed for it, so
+            they can be removed on re-instrument or teardown.
+        mediators: The workers to serve this run.
+        batcher: The :class:`~nnsight.intervention.batching.Batcher` for this run,
+            which assembled the combined input and owns the row scoping
+            :meth:`Mediator.handle` applies — or ``None`` when not batching.
+            Cleared by :meth:`cancel`.
+        interleaving: ``True`` between ``__enter__`` and ``__exit__``. Hooks pass
+            values straight through when it is ``False``, so an instrumented
+            model runs normally outside a trace.
+        sourced: Op-location -> the instrumented callable a worker drilled into
+            (see :mod:`nnsight.intervention.source`), or ``None`` while one is
+            requested but not yet built. Per-run; cleared on entry.
+    """
+
+    def __init__(self) -> None:
+        self.handles: dict[str, list[torch.utils.hooks.RemovableHandle]] = {}
+        self.mediators: list[Mediator] = []
+        # The batcher for the current run (combined-input assembly + narrow/widen),
+        # or None when not batching. Owned by the tracer and registered here for the
+        # run by `Envoy.interleave` (see intervention/envoy.py); each mediator reads
+        # it for its row scoping. Cleared by cancel().
+        self.batcher: Any = None
+        self.interleaving = False
+        # Recursive source (see intervention/source.py). Maps an op-location path a
+        # worker asked to drill into to its instrumented callable + Compiled, or to
+        # `None` while requested-but-not-yet-built: `None` tells the model side to
+        # hand the live callable to the parked worker over a `{path}.fn` location;
+        # the built entry is then reused by later fires this run (e.g. generation
+        # steps). Per-run — cleared on entry.
+        self.sourced: dict[str, tuple | None] = {}
+        # When True, a worker's exception is caught and recorded on its mediator
+        # rather than raised out of the hook. A driver whose forward is one step of
+        # a run it doesn't control (vLLM) sets this so one worker's error ends only
+        # its own request instead of tearing down the shared engine.
+        self.defer_exceptions = False
+
+    def __enter__(self) -> Interleaver:
+        """Begin interleaving: arm the hooks and start each not-yet-started worker.
+
+        Only a worker with no greenlet yet (``worker is None``) is started; one that
+        already has a worker is left as is — parked mid-run on a re-entered interleaver.
+        The gate tests ``worker`` rather than :attr:`~Mediator.alive` so that a worker
+        whose block has *finished* is also left alone: a finished greenlet is falsy, so
+        an ``alive`` gate would take it for never-started and rerun its whole block.
         """
-        Handle a value event by providing the requested value or recording a missed provider.
+        self.interleaving = True
+        self.sourced.clear()
+        try:
+            for mediator in self.mediators:
+                if mediator.worker is not None:
+                    continue
+                mediator.start(self)
+        except BaseException:
+            # A worker that errors on start (e.g. invoking mid-run) means __exit__
+            # won't run to clear the flag, so reset it here or it leaks to the next run.
+            self.interleaving = False
+            raise
+        return self
 
-        Args:
-            requester (str): The identifier of the requester
-            provider (str): The identifier of the provider
-        Returns:
-            bool: Indicating whether the request was fulfilled by this processor, If so, continue processing events.
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+        """End interleaving, swallowing an intentional early stop.
+
+        Returning ``True`` for :class:`EarlyStopException` suppresses it: an
+        intervention asked to halt the run and has already unwound the model, so
+        it is not an error. Any other exception propagates.
         """
+        self.interleaving = False
+        # An EarlyStopException means an intervention asked to halt the run; it
+        # has done its job unwinding the model, so swallow it here.
+        return exc_type is EarlyStopException
 
-        # If fulfilled by this processor, respond with the value and continue processing events.
-        if provider == requester:
+    def instrument(self, envoy: Envoy) -> None:
+        """Install this interleaver's forward hooks on an envoy's module.
 
-            # Potentially only select a slice of the value if this mediator is part of a batch group.
-            value = self.interleaver.batcher.narrow(self.batch_group)
+        Registers a pre-forward and a forward hook that, while
+        :attr:`interleaving`, route the module's input and output through
+        :meth:`handle` under the locations ``"{path}.input"`` and
+        ``"{path}.output"``. Because both hooks *return* the handled value,
+        interventions can edit the module's input or output in place. Outside
+        interleaving the hooks pass everything through untouched.
 
-            self.respond(value)
-
-            # If the eproperty had a `transform` callback registered, fire it
-            # now and swap the result back into the model. The preprocessed
-            # value was bound into `self.transform` via `partial` at request
-            # time (see `eproperty.__get__`), so any in-place mutations the
-            # worker made between `respond` and now are visible inside the
-            # transform's closure. Cleared after firing — transforms are
-            # one-shot per value access.
-            if self.transform:
-                value = self.transform()
-
-                self.interleaver.batcher.swap(self.batch_group, value)
-
-                self.transform = None
-        else:
-            # If the requester has been seen before, respond with an out of order error.
-            if requester in self.history:
-                self.respond(
-                    Mediator.OutOfOrderError(
-                        f"Value was missed for {requester}. Did you call an Envoy out of order?"
-                    )
-                )
-            else:
-                # If the requester has not been seen before, add it to the history and put the value event back in the event queue to be processed later.
-                self.history.add(provider)
-                self.event_queue.restore((Events.VALUE, requester))
-
-                return False
-
-        return True
-
-    def handle_swap_event(self, provider: Any, requester: Any, swap_value: Any):
+        Also installs the source/skip controller and registers this interleaver on
+        the module (see :func:`~nnsight.intervention.source.install_skip`), so a
+        module can be skipped or source-drilled by this trace — and by another envoy
+        sharing the module at the same time.
         """
-        Handle a swap event by swapping the value if the provider matches the requester.
+        from .source import install_skip  # lazy: source imports this module
 
-        Args:
-            requester (str): The identifier of the requester
-            provider (str): The identifier of the provider
-            swap_value (Any): The value to swap in
+        # Register the source/skip controller for this interleaver up front, so the
+        # module's forward is the controller before nn.Module.__call__ binds it
+        # (which happens before pre-hooks run) — needed when a skip's replacement is
+        # read from the module's own input first.
+        install_skip(envoy)
 
-        Returns:
-            bool: Indicating whether the swap was fulfilled by this processor, If so, continue processing events.
+        path = envoy.path
+
+        # Drop any existing hooks for this path before re-adding.
+        self.remove(path)
+
+        def pre_forward(module: torch.nn.Module, args: Any, kwargs: Any) -> Any:
+            if not self.interleaving:
+                return None
+            # Returning (args, kwargs) lets an intervention edit the module input.
+            return self.handle(f"{path}.input", (args, kwargs))
+
+        def forward(module: torch.nn.Module, args: Any, kwargs: Any, output: Any) -> Any:
+            if not self.interleaving:
+                return None
+            # Returning a value lets an intervention edit the module output.
+            return self.handle(f"{path}.output", output)
+
+        self.handles[path] = [
+            envoy._module.register_forward_pre_hook(pre_forward, with_kwargs=True),
+            envoy._module.register_forward_hook(forward, with_kwargs=True),
+        ]
+
+    def handle(self, provider: str, value: Any) -> Any:
+        """Offer ``value`` at ``provider`` to every mediator; return it, edited if
+        any intervention wrote to this location.
+
+        After the mediators run, the (now post-intervention) value is offered to
+        any active caches, so ``tracer.cache()`` records the values interventions
+        actually produced. A cache belongs to one worker, so it sees that worker's
+        own rows of the batch — narrowed the same way the worker's reads are.
+        Caches select which locations to keep themselves.
         """
-        # If fulfilled by this processor, swap the value and respond with the value and continue processing events.
-        if provider == requester:
-            # Swap the value in the batcher. Might only replace a slice of the value if this mediator is part of a batch group.
-            self.interleaver.batcher.swap(self.batch_group, swap_value)
+        for mediator in self.mediators:
+            try:
+                value = mediator.handle(provider, value)
+            except Exception as exception:
+                # Record the worker's exception on its mediator — a stop's
+                # EarlyStopException or a real error, treated the same here.
+                mediator.exception = exception
+                if not self.defer_exceptions:
+                    # Not deferring: let it propagate, so a local run unwinds the
+                    # forward (a stop is swallowed at the top; an error surfaces).
+                    raise
+                # Deferring: this worker is done; carry on serving the others, and
+                # leave it to the driver to end this worker's request.
+        # A batched skip left its invokes' replacements gathered rather than one
+        # value; concatenate them into the combined output (see Batcher.gather_skip).
+        if self.batcher is not None:
+            value = self.batcher.assemble_skip(value)
+        for mediator in self.mediators:
+            if not mediator.caches:
+                continue
+            served = (
+                value
+                if self.batcher is None
+                else self.batcher.narrow(value, mediator.batch_group)
+            )
+            for cache in mediator.caches:
+                cache.observe(provider, served)
+        return value
 
-            self.respond()
+    def check_dangling_mediators(self) -> None:
+        """Surface any worker still parked after the run.
 
-            return True
+        Called once the model has finished. A worker that is still :attr:`alive`
+        was waiting for a location the model never reached. There are two cases:
 
-        else:
-            # If the requester has been seen before, respond with an out of order error.
-            if requester in self.history:
-                self.respond(
+        * **Out of order** — a plain request (``iteration == 0``) for a location
+          the model already ran past, or never called. This is a real error, so
+          throw :class:`OutOfOrderError` into the worker, making the traceback
+          point at the line that was waiting.
+        * **Iterated past the end** — a worker inside a ``tracer.iter`` loop
+          (``iteration != 0``) asked for a step the model never ran, e.g. ``for
+          step in tracer.iter[:]`` continuing past the last generated token. That
+          is expected, not an error: throw into the worker anyway (to unwind it —
+          running its ``finally`` blocks — so it's cleaned up), but catch the
+          error and warn instead of raising. Values from steps that *were* reached
+          have already been saved.
+        """
+        for mediator in self.mediators:
+            if not mediator.alive:
+                continue
+            requester = mediator.pending[1]
+            if mediator.pending[0] is Event.BARRIER:
+                # Waiting on blocks that never all arrived — fewer of them reached
+                # the barrier than it was built for, so it was never going to
+                # release. Point at the line that waited.
+                mediator.worker.throw(
                     ValueError(
-                        f"Setting {requester} is out of scope for scope {provider}. Did you call an Envoy out of order?"
+                        "A barrier was never reached by every block it waits for; "
+                        "check the count it was created with"
                     )
                 )
-            else:
-                # If the requester has not been seen before, add it to the history and put the swap event back in the event queue to be processed later.
-                self.history.add(provider)
-                self.event_queue.restore((Events.SWAP, (requester, swap_value)))
-
-                return False
-
-        return True
-
-    def handle_exception_event(self, exception: Exception):
-        """
-        Handle an exception event by raising the exception.
-
-        Args:
-            exception (Exception): The exception to raise
-
-        Returns:
-            bool: Flag to stop processing events.
-        """
-
-        self.cancel()
-
-        # Cancelation is okay
-        if not isinstance(exception, Cancelation):
-
-            # In vLLM mode, defer the exception so the engine stays
-            # alive.  The mediator is already cancelled (above), so
-            # subsequent hooks will skip it.  Other mediators keep
-            # running and the model runner ships this exception back to
-            # the client alongside any saves that were already collected.
-            #
-            # Capture metadata BEFORE ``wrap_exception`` rewrites the type
-            # and traceback — the dynamic ``NNsightException`` subclass and
-            # rebuilt traceback are useful for the local-raise path but
-            # lose information across the server boundary, where the
-            # client only sees what we serialize.  ``_store_deferred_exception``
-            # also records ``deferred_exception`` itself, so the assignment
-            # below the wrap_exception call replaces it with the wrapped
-            # form for any downstream consumer that wants the rich type.
-            if self.interleaver.defer_exceptions:
-                _store_deferred_exception(self, exception)
-
-            # because of the defered execution of NNsight, we need to rebuild where the execption was in the original user code instead of this execption.
-            exception = wrap_exception(exception, self.info)
-
-            if self.interleaver.defer_exceptions:
-                self.cancel()
-                self.deferred_exception = exception
-                return False
-
-            raise exception
-
-        return False
-
-    def handle_barrier_event(self, provider: Any, participants: Set[str]):
-        """
-        Handle a barrier event by setting a barrier.
-
-        Propagates each participant's nested handle return value back
-        into ``batcher.current_value``.  Without this, a SWAP fired in
-        a participant's body during the barrier walk produces a new
-        tensor (concat path) that ``Mediator.handle``'s ``prev_value``
-        restore immediately discards — making cross-invoke transfers
-        of swapped values silently no-op.  The nested handle's return
-        value is the post-restore value (captured before the restore
-        runs in :meth:`Mediator.handle`), so re-assigning it here
-        carries the swap forward to the outer handle context.
-        """
-
-        if participants is not None:
-
-            prev_current = self.interleaver.current
-
-            for mediator in self.interleaver.mediators:
-
-                if mediator.name in participants:
-
-                    self.interleaver.current = mediator
-
-                    mediator.respond()
-
-                    result = mediator.handle(
-                        provider, self.interleaver.batcher.current_value
+                continue
+            error = OutOfOrderError(
+                f"'{requester}' was requested but the model already ran past it"
+            )
+            if mediator.iteration != 0:
+                # Inside an iteration loop that outran the model — unwind and warn.
+                try:
+                    mediator.worker.throw(error)
+                except OutOfOrderError:
+                    warnings.warn(
+                        f"'{requester}' was never reached: the model ran fewer "
+                        f"iterations than the loop requested. Values from reached "
+                        f"iterations are kept."
                     )
-
-                    self.interleaver.batcher.current_value = result
-
-            self.interleaver.current = prev_current
-
-        return False
-
-    def handle_end_event(self):
-        """
-        Handle an end event by stopping the mediator.
-        """
-        self.cancel()
-
-        return False
-
-    def handle_skip_event(self, provider: Any, requester: Any, value: Any):
-        """Handle a skip event by appending the replacement value into kwargs.
-
-        Instead of raising a ``SkipException`` (as in the old permanent-hook
-        approach), each mediator's replacement value is appended to a list
-        under ``kwargs["__nnsight_skip__"]`` along with that mediator's
-        ``batch_group``.  The ``nnsight_forward`` wrapper installed by
-        :meth:`Interleaver.wrap_module` consumes the list, sorts by batch
-        start, and concats along dim 0 so multi-invoke skips produce a
-        full-batch tensor that downstream modules can consume.
-
-        This approach works with the one-shot hook system because the input
-        hook has access to ``(args, kwargs)`` via the batcher and can
-        modify kwargs in-place before the forward call.
-        """
-
-        if provider == requester:
-
-            _, kwargs = self.interleaver.batcher.current_value
-
-            entries = kwargs.setdefault("__nnsight_skip__", [])
-            entries.append((self.batch_group, value))
-
-            self.respond()
-
-            return True
-
-        else:
-            if requester in self.history:
-                self.respond(
-                    Mediator.OutOfOrderError(
-                        f"Value was missed for {requester}. Did you call an Envoy out of order?"
-                    )
-                )
-
-                return True
             else:
-                self.history.add(provider)
-                self.event_queue.restore((Events.SKIP, (requester, value)))
+                mediator.worker.throw(error)
 
-                return False
+    def cancel(self) -> None:
+        """Drop all mediators and the batcher so the next run starts clean.
 
-    def respond(self, value: Optional[Any] = None):
+        Each mediator's worker greenlet is released too, so a stored edit mediator
+        replayed on a later trace is seen as never-started (``worker is None``) and
+        restarts fresh rather than being skipped for still holding its finished
+        greenlet. Surfacing dangling mediators is a separate concern (see
+        :meth:`check_dangling_mediators`), handled by the driver after a run.
         """
-        Respond from the interleaver (main thread) to the mediator (worker thread) the value for a pending event.
+        for mediator in self.mediators:
+            mediator.worker = None
+        self.mediators.clear()
+        self.batcher = None
 
-        Args:
-            value (Optional[Any]): The value to provide
-        """
-
-        # Respond and resume the mediator thread.
-        self.response_queue.put(value)
-        self.event_queue.wait()
-
-    ### Requester Methods ###
-
-    def send(self, event: Events, requester: Any):
-        """
-        Send an event to interleaver (main thread) from this mediator (worker thread), and wait for it to be processed by the interleaver.
-
-        Args:
-            event (Events): The event to send
-            requester (Any): The identifier of the requester, plus any additional data for the event.
-
-        Returns:
-            Any: The response from the provider
-        """
-
-        # In multi invoke scenarios, one invoke might reference variables from another invoke. So we need to push and pull the variables to the shared state to make them available to the other invoke.
-        # TODO find a way to only push if there are multiple invokers AND they share the same parent frame
-        if self.cross_invoker:
-            self.push()
-
-        # Send the event
-        self.event_queue.put((event, requester))
-
-        # Wait for the interleaver to process the event and respond with the value.
-        self.response_queue.wait()
-        response = self.response_queue.get()
-
-        # If the response is an exception, raise it.
-        if isinstance(response, Exception):
-            raise response
-
-        if self.cross_invoker:
-            self.pull()
-
-        return response
-
-    def request(self, requester: str):
-        """
-        Request a value from a specific provider.
-
-        Args:
-            requester (str): The identifier of the provider to request a value from
-
-        Returns:
-            Any: The requested value
-        """
-
-        return self.send(Events.VALUE, requester)
-
-    def swap(self, requester: str, value: Any):
-        """
-        Send a swap event to replace the value of a provider.
-
-        Args:
-            requester (str): The identifier of the requester
-            value (Any): The value to swap in
-        """
-
-        self.send(Events.SWAP, (requester, value))
-
-    def stop(self):
-        """Stop the execution of the model by raising an EarlyStopException."""
-
-        self.push()
-
-        raise EarlyStopException()
-
-    def skip(self, requester: Any, value: Any):
-
-        self.send(Events.SKIP, (requester, value))
-
-    def end(self):
-        """Signal that execution should continue without further intervention."""
-
-        self.push()
-
-        self.event_queue.put((Events.END, None))
-
-    def exception(self, exception: Exception):
-        """
-        Signal that an exception occurred during intervention.
-
-        Args:
-            exception: The exception that occurred
-        """
-        self.event_queue.put((Events.EXCEPTION, exception))
-
-    @property
-    def frame(self) -> FrameType:
-        """
-        Get the frame of the intervention function.
-
-        Returns:
-            The frame of the intervention function
-        """
-
-        frame = get_non_nnsight_frame()
-
-        return frame
-
-    def push(self):
-        """Push local variables to the interleaver state."""
-
-        if self.info.frame is None:
-            return
-
-        state = {
-            k: v
-            for k, v in self.frame.f_locals.items()
-            if not k.startswith(NNSIGHT_PREFIX)
-            and (v is not self.original_globals.get(k, None))
-        }
-
-        if isinstance(self.info.frame, FrameType):
-
-            # this does not handle the case of a fn thats called in an invoker. this will push vars directly to where the invoke was called not the fn. really we need to grad the f_back of the <nnsight> frame. If its in threading.py, then we use info.frame
-            push_variables(self.info.frame, state)
-
-        else:
-
-            self.info.frame.f_locals.update(state)
-
-    def pull(self):
-        """Pull variables from the interleaver state to the frame globals."""
-
-        if self.info.frame is None:
-            return
-
-        state = self.info.frame.f_locals
-
-        state = {k: v for k, v in state.items() if not k.startswith(NNSIGHT_PREFIX)}
-
-        for key in {**state}:
-            if key in self.frame.f_locals:
-                del state[key]
-            elif key in self.original_globals:
-                state[key] = self.original_globals[key]
-
-        push_variables(self.frame, state)
-
-    def set_user_cache(self, cache: "Cache"):
-        """
-        Set the user cache for this mediator.
-
-        Args:
-            cache: The cache to set
-        """
-
-        self.user_cache.append(cache)
-
-    def remove_hooks(self):
-        """Remove every hook registered on behalf of this mediator.
-
-        Drains ``self.hooks`` — the single list that tracks module one-shot
-        hooks, cache hooks, operation hooks, gradient hooks, and iter-tracker
-        hooks. ``.remove()`` is idempotent on every handle type used here, so
-        calling this is safe even if some hooks have already self-removed
-        after firing.
-        """
-        for handle in self.hooks:
+    def remove(self, path: str) -> None:
+        """Remove the forward hooks installed for ``path``."""
+        for handle in self.handles.pop(path, []):
             handle.remove()
-        self.hooks.clear()
 
-    ### Serialization ###
+    def clear(self) -> None:
+        """Remove every forward hook this interleaver has installed."""
+        for path in list(self.handles):
+            self.remove(path)
 
-    def __getstate__(self):
-        """Get the state of the mediator for serialization."""
-
-        return {
-            "name": self.name,
-            "idx": self.idx,
-            "info": self.info,
-            "batch_group": self.batch_group,
-            "intervention": self.intervention,
-            "all_stop": self.all_stop,
-            "iteration_tracker": self.iteration_tracker,
-        }
-
-    def __setstate__(self, state):
-        """Set the state of the mediator for deserialization."""
-        self.name = state["name"]
-        self.idx = state["idx"]
-        self.info = state["info"]
-        self.batch_group = state["batch_group"]
-        self.intervention = state["intervention"]
-        self.all_stop = state["all_stop"]
-        self.iteration_tracker = state["iteration_tracker"]
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
-
-        self.worker = None
-        self.interleaver = None
-        self.history = set()
-        self.user_cache: "Cache" = list()
-        self.hooks: List[Any] = list()
-        self.iteration = 0
-        self._active_iter_handles: Optional[List] = None
-        self.args = list()
-        self.original_globals = {}
-        self.cross_invoker = None
-        self.deferred_exception = None
-        self._deferred_type_name = None
-        self._deferred_traceback = None
-        self._deferred_is_control_flow = False
+    def __del__(self) -> None:
+        # Drop the module hooks when the interleaver is garbage-collected.
+        self.clear()

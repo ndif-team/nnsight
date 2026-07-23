@@ -6,121 +6,95 @@ tags: [reference, glossary]
 
 # Glossary
 
-Short definitions of terms used throughout the nnsight codebase and docs. For deeper architectural context, see [`NNsight.md`](https://github.com/ndif-team/nnsight/blob/main/NNsight.md).
+Short definitions of terms used throughout the nnsight codebase and docs.
 
 ## Backend
 
-A pluggable execution target for a `Tracer`. The backend receives the compiled intervention function plus a `Tracer` and is responsible for actually running it — locally on the wrapped model, on NDIF (`RemoteBackend`), or against a vLLM async loop (`AsyncVLLMBackend`). See [../developing/backends.md](../developing/backends.md).
+What actually runs a captured `with` block on `Tracer.__exit__`. The default `Backend` (`src/nnsight/tracing/backend.py`) runs it in place; `RemoteBackend` / `AsyncRemoteBackend` ship it to NDIF; `LocalSimulationBackend` serializes/deserializes it and runs it in-process (a `remote="local"` dry run). Passed via the `backend=` kwarg or selected by `remote=`.
 
-## Batcher / Batch group
+## Batcher / batch group
 
-The `Batcher` class is responsible for stacking the inputs of multiple invokes into a single batched forward pass and slicing values back out for each invoke. A **batch group** is a `(start, size)` pair stored on each `Mediator`; `narrow(group)` extracts that mediator's slice from the full batched tensor and `swap(group, value)` writes a new value into the slice. `LanguageModel`, `VLLM`, and `DiffusionModel` each provide their own subclass (`VLLMBatcher`, `DiffusionBatcher`, …). See [../concepts/batching-and-invokers.md](../concepts/batching-and-invokers.md).
+The `Batcher` (`src/nnsight/intervention/batching.py`) combines several invokes' inputs into one batched forward and slices values back out per invoke. A **batch group** is a `[start, size]` row range stored on each `Mediator`; `narrow(value, group)` extracts that worker's rows from a batched tensor and `widen(...)` / `gather_skip(...)` splice an edit or skip back in. Models that batch (`TransformersModel`, `VLLM`, `DiffusionModel`) supply the input-assembly logic via `_batch_size` / `_batch`.
 
-## eproperty
+## Dispatch
 
-A custom descriptor (`nnsight.intervention.interleaver.eproperty`) used to define hookable properties on `IEnvoy` objects. Each `eproperty` issues a blocking `request()` to the interleaver on `__get__` and a `swap()` on `__set__`. The decorated *stub method* is never executed for its return value — its purpose is to carry pre-setup decorators (e.g. `@requires_output`) and donate its `__name__`/`__doc__`. The descriptor also supports `preprocess`, `postprocess`, and `transform` hooks for custom subclasses. See [../concepts/envoy-and-eproperty.md](../concepts/envoy-and-eproperty.md).
+Loading a model's real weights. A model built without `dispatch=True` sits on the **meta device** (structure only, no weights); the weights load lazily the first time a trace actually runs (`Meta.dispatch`). `scan` deliberately does not dispatch — it runs under fake tensors.
 
 ## Envoy
 
-The user-facing proxy class (`nnsight.intervention.envoy.Envoy`) that wraps a single `torch.nn.Module`. Provides `.output`, `.input`, `.inputs`, `.source`, `.skip()`, ad-hoc `__call__()`, and transparent attribute delegation to the underlying module. The Envoy tree mirrors the model's module hierarchy and is built eagerly at construction. See [../concepts/envoy-and-eproperty.md](../concepts/envoy-and-eproperty.md).
+The user-facing proxy (`src/nnsight/intervention/envoy.py`) wrapping a single `torch.nn.Module`. The envoy tree mirrors the model's module hierarchy, reachable by the same attribute paths (`model.transformer.h[0].mlp`). Exposes `.input`, `.inputs`, `.output`, `.source`, `.skip()`, ad-hoc `__call__()`, and delegates unknown attributes to the underlying module. `NNsight` and the model wrappers are `Envoy` subclasses.
 
-## IEnvoy
+## eproperty
 
-A `runtime_checkable` `Protocol` that any object using `eproperty` descriptors must satisfy: it must expose an `interleaver` attribute and a `path` string. Both `Envoy` and `OperationEnvoy` satisfy `IEnvoy`. See [../concepts/envoy-and-eproperty.md](../concepts/envoy-and-eproperty.md).
+The descriptor (`src/nnsight/intervention/eproperty.py`) behind a hookable value on an interleaving host (`Envoy`, `SourceEnvoy`, the tracer, `VLLM`): reading it parks the worker until the model reaches `"{host.path}.{key}"` and returns the value there; writing it fires a `SWAP`. Defined by decorating a stub with `@eproperty` (or `@eproperty(key=..., description=...)`) — the stub **is** the *preprocess*, mapping the served value to what the user reads (identity is just `return value`). Optional callbacks refine it: `.postprocess` (transform a written value before the swap), `.transform` (write an edited preprocess *view* back to the model's layout, spliced in like a swap after the read), and `.provide(obj, value)` (serve the value from the model side via `interleaver.handle`). `key` defaults to the method name and may be shared to give different views of one location. A `description=` surfaces it in the Envoy repr as `(name): description`. `Envoy.input` / `.inputs` / `.output`, `tracer.result`, and `VLLM.logits` / `.samples` are all eproperties.
+
+## Event (VALUE / SWAP / SKIP / BARRIER)
+
+The `Event` enum (`src/nnsight/intervention/interleaver.py`) — what a parked worker is asking its parent for:
+
+- `VALUE` — read the value at a location: `(VALUE, location)`.
+- `SWAP` — replace the value at a location: `(SWAP, location, value)`.
+- `SKIP` — bypass a gated computation, using a replacement: `(SKIP, location, value)`.
+- `BARRIER` — wait on the other blocks, not on the model: `(BARRIER, None)`.
+
+(The old `END` / `EXCEPTION` events are gone — a worker finishing or raising is handled by the greenlet switch itself.)
+
+## greenlet
+
+A cooperative, single-threaded coroutine (`greenlet` package). nnsight interleaves intervention code and the forward pass with greenlets, **not** OS threads: each block runs in its own worker greenlet that switches control back to the model side whenever it parks on a location. Because only one greenlet runs at a time, there are no locks or queues.
 
 ## Interleaver
 
-The orchestrator class (`nnsight.intervention.interleaver.Interleaver`) that runs on the **main thread** alongside the model forward pass. It wraps modules with a skippable forward and a sentinel hook, manages the set of active `Mediator`s, tracks per-provider iteration counts, and brokers `wrap_operation` value broadcasts. See [../concepts/interleaver-and-hooks.md](../concepts/interleaver-and-hooks.md).
+The model-side driver (`Interleaver`, `src/nnsight/intervention/interleaver.py`). Installs the forward pre/post hooks on every module (via `instrument`), holds the list of `Mediator` workers, and — as the forward reaches each location — calls `handle(location, value)`, offering the value to every parked worker and returning the possibly-edited value back into the run. One interleaver is shared across an envoy tree.
 
-## Invoker / Invoke
+## Invoker / invoke
 
-`Invoker` is the context manager returned by `tracer.invoke(...)`. Each "invoke" defines a separate intervention function whose code is captured and compiled into a `Mediator`. Invokes execute serially in definition order, each on its own worker thread. An empty `tracer.invoke()` (no positional args) is special — it operates on the full batch produced by previous input invokes and does not trigger `_batch()`. See [../usage/invoke-and-batching.md](../usage/invoke-and-batching.md).
+`Invoker` (`src/nnsight/intervention/tracer.py`) is the context manager from `tracer.invoke(...)`. Each `with tracer.invoke(x):` contributes its input as one batch group and its body runs as a worker scoped to those rows. An empty `tracer.invoke()` sees the whole batch. Invokes are collected first, then their inputs are combined into a single batched forward.
 
-## Iteration tracker
+## Iteration / occurrence
 
-A counter that disambiguates multiple calls to the same module within a single trace (common in multi-token generation). The `Interleaver` increments a counter per provider string and appends `.i0`, `.i1`, … to provider strings (`model.transformer.h.0.output.i2` = third call to layer 0). The `Mediator` maintains a parallel `iteration` cursor that selects which call to wait for; `tracer.iter[...]`, `tracer.next()`, and `tracer.all()` move it. See [../usage/generate.md](../usage/generate.md).
+A location can be reached many times in one run (each step of a generation loop). Each visit is an **occurrence**, tagged `.i0`, `.i1`, … The `Mediator` tracks a per-location count and an `iteration` cursor selecting which occurrence a request binds to; `tracer.iter[...]` / `tracer.all()` move that cursor. Requesting a location out of order raises `OutOfOrderError`; iterating past the model's last step warns rather than errors.
 
-## Lazy hook
+## Location / provider string
 
-The hook-execution model nnsight uses since the refactor/transform branch. Modules are not given permanent input/output hooks; instead, a sentinel forward hook is installed once (so PyTorch always takes the hook-dispatch path), and **one-shot hooks** are registered on demand by each mediator when intervention code first reads `.output`/`.input`. Modules no mediator touches incur effectively zero hook overhead. See [../concepts/interleaver-and-hooks.md](../concepts/interleaver-and-hooks.md).
+The string that names a value in a run — a module path plus a handle (`"model.transformer.h.0.output"`, `"model.transformer.h.0.input"`), the run's `"result"`, or a model-specific one (`"logits"`, `"samples"`). Occurrence-tagged `.i{n}` when matched. The interleaver's hook fires a location; a worker parks on the one it wants; `Mediator.handle` matches them.
 
 ## Mediator
 
-The per-invoke object (`nnsight.intervention.interleaver.Mediator`) that runs intervention code on a **worker thread** and communicates with the `Interleaver` via single-item `event_queue` and `response_queue` queues. Owns its `batch_group`, iteration cursor, history of seen providers (for out-of-order detection), and any pending `transform` callback. See [../concepts/interleaver-and-hooks.md](../concepts/interleaver-and-hooks.md).
+The per-block worker object (`Mediator`, `src/nnsight/intervention/interleaver.py`). Wraps one captured block (a trace/invoke body, or a stored edit) and runs it in a greenlet, parking on a location whenever the block reads or writes one. Owns its `batch_group`, iteration cursor, per-location counts, and any `tracer.cache()` caches. Its classmethods `value` / `swap` / `skip` / `barrier` are the API the `Envoy` properties call to park.
 
-## Mediator events (VALUE / SWAP / SKIP / BARRIER / END / EXCEPTION)
+## Meta device
 
-The event vocabulary the worker thread sends to the main thread:
+Where an undispatched model lives — module structure with no real weight data (`MetaDevice`, `src/nnsight/modeling/mixins/meta.py`). Lets nnsight build a model's envoy tree and run `scan` without loading gigabytes of weights.
 
-- `VALUE` — request the value at a provider string (e.g. `model.layer.output.i0`).
-- `SWAP` — replace the value at a provider with a new one (used by `eproperty.__set__`).
-- `SKIP` — bypass a module's forward, returning a replacement.
-- `BARRIER` — wait at a `tracer.barrier(n)` synchronization point.
-- `END` — intervention function finished normally.
-- `EXCEPTION` — intervention function raised; the exception is forwarded to the main thread.
+## OutOfOrderError
 
-See [../concepts/interleaver-and-hooks.md](../concepts/interleaver-and-hooks.md).
-
-## One-shot hook vs persistent hook
-
-A **one-shot** hook self-removes after firing once; nnsight uses these for `.output`/`.input` access and for source-tracing operation hooks. A **persistent** hook stays registered for the full trace; nnsight uses these for `tracer.cache(...)` (must persist across all generation steps) and for the sentinel output hook installed by `wrap_module`. See `nnsight/intervention/hooks.py`.
+Raised when intervention code asks for a location the model already ran past (or never reached). Workers must request locations in the order the model produces them.
 
 ## Persistent object (serialization)
 
-An object marked as **persistent** is **not pickled by value**. Instead, when nnsight's pickler hits it, only an opaque ID (a "stub" / key / string) is written into the byte stream. On the receiving side, the unpickler looks the ID up in a dict it was given at construction time and substitutes the **actual** object that lives in that process.
+An object marked persistent is **not** pickled by value — only an opaque id is written into the stream, and the receiver swaps in the real object it already holds. Used for NDIF: a model's `nn.Module`s already live on the server, so a remote request ships their ids (`"Module:<path>"`, `"Interleaver"`, tokenizer ids, ...) rather than re-pickling the model. Set via `obj._persistent_id = "<id>"`; resolved from the `_remoteable_persistent_objects()` map server-side.
 
-The mechanism is built on Python's standard `pickle` `persistent_id` / `persistent_load` protocol:
+## Scope
 
-- **On the sender:** `CustomCloudPickler.persistent_id(obj)` (`src/nnsight/intervention/serialization.py:888`) returns `obj.__dict__["_persistent_id"]` if present. That string is written into the serialized stream in place of the object's contents.
-- **On the receiver:** `CustomCloudUnpickler` is constructed with a `persistent_objects: dict[str, Any]` mapping IDs to concrete objects (`serialization.py:946`). When `persistent_load(pid)` is called by pickle for a persistent reference, it looks up `pid` in that dict and returns the matching object. Unknown IDs raise `pickle.UnpicklingError`.
+The namespace a captured block runs in (`Scope`, `src/nnsight/tracing/util.py`). A `dict` subclass layering three sources: a snapshot of the frame's locals at capture time, the frame's live locals shared with sibling blocks, and the frame's globals. Passed as `exec`'s globals so nested `def`/`lambda` in a block can reach the block's own names, and so values assigned in one invoke are visible to later ones.
 
-So the meaning of "persistent" is: "I know this object already lives on the remote side and I want it swapped in for my ID — don't ship its bytes, just ship the ID."
+## skip
 
-The main real-world use case is **NDIF**: the actual `nn.Module`s of the deployed model already exist on the NDIF server. When a user submits a trace, nnsight does not re-pickle the entire model into the request — it tags those modules as persistent, ships only their IDs, and NDIF's unpickler swaps in the live model modules on its end. The same pattern applies to anything else that "already exists" on the server: shared caches, buffers, registered helper objects.
+Bypass a module's (or operation's) forward, using a replacement as its output — `envoy.skip(replacement)` or `source_envoy.skip(replacement)`. Implemented as the `SKIP` event against a gate installed on every module's forward.
 
-To mark an object as persistent, set `obj.__dict__["_persistent_id"] = "<some-id>"`. To resolve them on the other side, pass `loads(data, persistent_objects={"<some-id>": real_obj, ...})`.
+## source (source tracing)
 
-See [../developing/serialization.md](../developing/serialization.md) for the full pickling pipeline (also covers source-based function serialization for cross-Python-version compatibility, which is a separate but related topic).
+Operation-level access inside a module's forward. `envoy.source` returns a `Source` (`src/nnsight/intervention/source.py`) that decomposes the forward into named operations `{callable}_{occurrence}` (`fc1_0`, `relu_0`, `relu_1`, ...). Indexing one (`envoy.source.relu_0`) gives a `SourceEnvoy` with the same `.input` / `.inputs` / `.output` / `.skip` / `.source` interface as an `Envoy` — one level finer. `print(envoy.source)` renders the forward with each op labelled; `.source` on a `SourceEnvoy` drills recursively into a called function. Requesting an op on an unrecoverable forward raises `SourceNotAvailable`.
 
-## Pymount
+## Tracer
 
-A C extension (`src/nnsight/_c/py_mount.c`) that injects methods directly into CPython's `PyBaseObject_Type.tp_dict` so that **every** Python object has a `.save()` (and `.stop()`) method while a trace is active. This enables the legacy `tensor.save()` / `[1, 2, 3].save()` syntax inherited from nnsight 0.4. As of v0.6, pymount is mounted once at import and never unmounted (no per-trace `PyType_Modified` overhead). Disable via `CONFIG.APP.PYMOUNT = False` and use `nnsight.save(obj)` instead. See [../usage/save.md](../usage/save.md).
-
-## Requester / Provider strings
-
-A pair of strings used to match worker requests to model values. The **provider string** is built by the model's hook when a module fires (e.g. `model.transformer.h.0.output.i0`). The **requester string** is built by an `eproperty` when intervention code accesses a value. The `Mediator.handle()` method matches them and either delivers the value, defers the request, or raises `OutOfOrderError`. See [../concepts/interleaver-and-hooks.md](../concepts/interleaver-and-hooks.md).
-
-## Sentinel hook
-
-The empty `register_forward_hook` that `Interleaver.wrap_module` installs on every wrapped module. It returns `output` unchanged. Its purpose is purely structural: PyTorch's `Module.__call__` fast-paths around hook dispatch when no hooks are registered, so the sentinel ensures the hook-dispatch path is always taken — letting one-shot hooks register dynamically and still fire. See [../concepts/interleaver-and-hooks.md](../concepts/interleaver-and-hooks.md).
-
-## Source tracing / SourceAccessor / OperationAccessor
-
-Source tracing (`module.source`) lets you intervene on **intermediate operations** inside a module's forward, not just its boundaries. nnsight parses the forward's AST, wraps every call with `wrap_operation`, and replaces the forward with the instrumented version. A `SourceAccessor` is the global, per-fn cache of the rewritten code and the per-call-site `OperationAccessor`s. Each `OperationAccessor` owns the live hook lists (`pre_hooks`, `post_hooks`, `fn_hooks`, `fn_replacement`) for one operation across all Envoys / Interleavers that ever touched it. See [../usage/source.md](../usage/source.md).
-
-## SourceEnvoy / OperationEnvoy
-
-User-facing proxies for source tracing. A `SourceEnvoy` is what `module.source` returns — printing it shows the forward with operation names highlighted. Each operation in the forward is exposed as an `OperationEnvoy` with the same `.input`, `.inputs`, `.output`, and `.source` interface as a regular `Envoy`. See [../usage/source.md](../usage/source.md).
-
-## Trace / Tracer
-
-A **trace** is a single `with model.trace(...):` block — one execution of the model with a set of interventions captured and run alongside it. A **`Tracer`** is the class that orchestrates capture → parse → compile → execute for that block. Subclasses include `InterleavingTracer` (the default), `BackwardsTracer` (for `tensor.backward()`), `ScanningTracer` (for `model.scan`), and `EditingTracer` (for `model.edit`). See [../concepts/deferred-execution.md](../concepts/deferred-execution.md).
+The class that turns a `with` block into deferred, controlled execution: capture the block's source → parse → compile its body → run it via a backend (`src/nnsight/tracing/tracer.py`). Subclasses: `InterleavingTracer` (`model.trace` / `.generate` / `.pipe`), `ScanningTracer` (`model.scan`, under fake tensors), `EditingTracer` (`model.edit`), `Iterations` (`tracer.iter`), and a plain `Tracer` for a session. `Invoker` is a tracer for one `invoke` block.
 
 ## Tracing context
 
-A `with` block whose context manager is one of `model.trace`, `model.generate`, `model.scan`, `model.session`, `model.edit`, or `tensor.backward()`. Inside any tracing context, intervention code is captured (not executed inline), and `.save()` / `nnsight.save()` is required to persist values past the context boundary.
-
-## Worker thread
-
-Each invoke runs its compiled intervention function on its own `threading.Thread`. The main thread (running the model) and the worker thread communicate via two single-item queues, creating a strict ping-pong execution pattern: only one thread runs at a time, eliminating the need for explicit data locks. See [../concepts/interleaver-and-hooks.md](../concepts/interleaver-and-hooks.md).
+Any `with` block whose context manager is `model.trace` / `generate` / `pipe` / `scan` / `session` / `edit` or `tensor.backward()`. Inside it, the body is captured (not run inline) and executed by a backend; values you want to keep past the block must be marked with `.save()` / `nnsight.save(...)`.
 
 ## WrapperModule
 
-A trivial `torch.nn.Module` subclass (`nnsight.util.WrapperModule`) whose forward is `lambda x: x`. nnsight uses `WrapperModule` instances as hook anchors — extra modules added to a model so that values produced outside the natural module boundaries (a HuggingFace `.generate()` return, a vLLM logit tensor, a sampled token id) can be exposed as `.output` of a regular `Envoy`. Notable instances:
-
-- `model.generator` (on `LanguageModel`) — wraps the final output of HuggingFace `.generate()`.
-- `model.generator.streamer` (on `LanguageModel`) — fires per-token during generation.
-- `model.logits` (on `VLLM`) — exposes per-step logit tensors.
-- `model.samples` (on `VLLM`) — exposes per-step sampled token ids.
-
-See [../models/](../models/).
+A trivial `nn.Module` whose forward returns its input unchanged. Used as a hook anchor to expose a value not produced by a real submodule. Instances: `model.generator` / `model.generator.streamer` on `TransformersModel` (generation output / per-step tokens).

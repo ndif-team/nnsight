@@ -1,13 +1,4 @@
+# Compiled C extension (built from src/nnsight/_c/*.c by setup.py; see build_ext)
+src/nnsight/_c/*.so
 build/
-dist/
-public/
 *.egg-info/
-.installed.cfg
-.vscode
-__pycache__/
-.DS_Store
-**/.DS_Store
-.nfs*
-nnsight.log
-src/nnsight/_c/**.so
-src/nnsight/_version.py
