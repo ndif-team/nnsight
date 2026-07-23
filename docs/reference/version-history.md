@@ -22,7 +22,7 @@ The worker/model event protocol is `VALUE` / `SWAP` / `SKIP` / `BARRIER` (the `E
 
 - `NNsight(module)` — base wrapper for any `torch.nn.Module`.
 - `TransformersModel("repo/id", task=...)` — the **primary** HuggingFace class, backed by a `transformers.pipeline`; supports any task.
-- `DiffusionModel` — was `DiffusionModel` (renamed).
+- `DiffusionModel` — any `diffusers` pipeline (UNet- or transformer-based).
 - `VLLM(..., mode="sync"|"async")` — vLLM-backed, interventions run inside the engine worker.
 - `LanguageModel` / `VisionLanguageModel` — now **deprecated** thin subclasses that warn on construction; use `TransformersModel(task=...)`.
 
