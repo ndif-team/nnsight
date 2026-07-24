@@ -617,6 +617,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
         return output
 
     def sample_tokens(self, *args: Any, **kwargs: Any) -> Any:
+        # PP: a worker that forced an upstream value mid-block may still be
+        # parked on its pull (the end-of-forward serve is non-blocking). Its
+        # next park is often this step's logits — which are offered exactly
+        # once, below — so complete the pull NOW. Blocking is safe here:
+        # sampling runs on the last stage, every other stage is upstream, and
+        # their values for this step already exist; the wait is transfer only.
+        if self.nnsight_pp:
+            self.nnsight_model.interleaver.serve_pulls(block=True)
         if self.execute_model_state is not None:
             original = self.execute_model_state.logits
             # Stays `original` if a tracer.stop() unwinds the handle before it
@@ -646,6 +654,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
         return output
 
     def _sample(self, *args: Any, **kwargs: Any) -> Any:
+        # Same as sample_tokens: a worker may have forced a pull between the
+        # logits and samples offers; complete it before samples fire.
+        if self.nnsight_pp:
+            self.nnsight_model.interleaver.serve_pulls(block=True)
         sampler_output = super()._sample(*args, **kwargs)
 
         with self._still_running():
