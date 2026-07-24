@@ -76,4 +76,16 @@ class Barrier:
         # the same trip it would make from the model side.
         waiting, self._waiting = self._waiting[:-1], []
         for other in waiting:
-            other.pending = other.switch()
+            try:
+                other.pending = other.switch()
+            except BaseException as exception:
+                # The released block raised (its exception surfaces out of the
+                # switch, here). Record it on the block that raised it. Under a
+                # deferring driver, release the rest and carry on — only the
+                # raiser's request ends. Otherwise re-raise; the raiser's
+                # traceback is already stashed by Mediator.switch.
+                other.pending = None
+                other.exception = exception
+                interleaver = other.interleaver
+                if interleaver is None or not interleaver.defer_exceptions:
+                    raise
