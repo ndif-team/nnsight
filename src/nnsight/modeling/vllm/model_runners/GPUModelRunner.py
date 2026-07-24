@@ -85,10 +85,14 @@ class Requests:
             if "nnsight_mediator" not in extra_args:
                 continue
             try:
-                self.mediators[request.req_id] = loads(
+                mediator = loads(
                     extra_args["nnsight_mediator"],
                     persistent_objects=persistent_objects,
                 )
+                # The request this worker rides, read by the PP interleaver to
+                # scope cross-stage pulls (and publishes) to this request.
+                mediator.pp_req_id = request.req_id
+                self.mediators[request.req_id] = mediator
             except Exception as exception:
                 self.errored[request.req_id] = capture_exception(exception)
 
@@ -304,14 +308,28 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         batcher = VLLMBatcher()
 
+        # Pipeline parallelism: this rank holds only its stage's layers, so the
+        # envoy tree is built over a PP-aware interleaver that answers reads of
+        # other stages' modules with lazy handles and pulls their values over a
+        # dedicated gloo group (see pp_interleaver.py). Built BEFORE the envoy
+        # tree so instrumentation registers on it.
+        self.nnsight_pp = get_pp_group().world_size > 1
+        interleaver = self._build_pp_interleaver() if self.nnsight_pp else None
+
         # An Envoy tree over the real module. Passing a loaded module builds it
         # directly, so no weights are read twice and the paths match the ones the
         # client's meta tree gave the user. Building it here is also what walks
         # every module past `VLLMFragments.instrument`, so the tree comes back
         # already knowing which of its values are one rank's piece — on one rank
-        # it finds nothing and stays inert.
+        # it finds nothing and stays inert. Under PP the PP-aware interleaver
+        # takes its place (and its hooks bracket the cross-stage pulls).
         self.nnsight_model: VLLM = VLLM(
-            self.model, interleaver=Interleaver(fragments=VLLMFragments())
+            self.model,
+            interleaver=(
+                interleaver
+                if interleaver is not None
+                else Interleaver(fragments=VLLMFragments())
+            ),
         )
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
 
@@ -329,6 +347,154 @@ class NNsightGPUModelRunner(GPUModelRunner):
         self.nnsight_persistent_objects = (
             self.nnsight_model._remoteable_persistent_objects()
         )
+
+    def _build_pp_interleaver(self) -> Any:
+        """Assemble the PP machinery for this rank: ownership, listener, interleaver.
+
+        Runs after ``super().load_model`` (the module tree and PP groups exist)
+        and before the envoy tree is built (the tree instruments the returned
+        interleaver). The pull traffic rides its own gloo group — separate from
+        vLLM's PP groups so the listener thread's recv never conflicts with
+        vLLM's own communication. ``new_group`` is collective (every rank must
+        call it identically), so groups are created for every TP column and
+        this rank keeps its own.
+        """
+        import atexit
+        import threading
+
+        import torch.distributed as dist
+
+        from ..pp import PPModuleMap
+        from ..pp_interleaver import PPInterleaver
+        from ..pp_listener import PPListener
+
+        pp_group = get_pp_group()
+        pp_world_size = pp_group.world_size
+
+        # vLLM's LlamaForCausalLM gates ``logits_processor`` inside
+        # ``if get_pp_group().is_last_rank:`` with no else-branch stub — unlike
+        # Qwen2/GPT2/OPT/Bloom/Gemma2, which construct it unconditionally. On a
+        # non-last rank the attribute is then absent, so a request serialized
+        # against the client's full meta tree ships a
+        # ``Module:model.logits_processor`` persistent id this rank cannot
+        # resolve. Insert the stub (before the envoy walk) so the id resolves;
+        # the forward returns early on non-last ranks before its call site, so
+        # it is functionally inert.
+        from vllm.model_executor.models.llama import LlamaForCausalLM
+        from vllm.model_executor.models.utils import PPMissingLayer
+
+        if isinstance(self.model, LlamaForCausalLM) and not hasattr(
+            self.model, "logits_processor"
+        ):
+            self.model.logits_processor = PPMissingLayer()
+
+        # Architecture-agnostic ownership: a module's owning stage is wherever
+        # it is REAL, per the load-time exchange. The only non-derivable cases
+        # are the build-everywhere, fire-on-last modules — real on every rank,
+        # so ambiguous in the exchange — whose stage is structural (sampling
+        # runs on the last rank). ``setdefault`` keeps a derived entry.
+        module_meta, owners = self._exchange_pp_module_meta()
+        last_stage = pp_world_size - 1
+        for structural in ("logits", "samples", "logits_processor"):
+            owners.setdefault(structural, last_stage)
+        module_map = PPModuleMap(pp_world_size)
+        module_map.set_derived_owners(owners)
+        self.pp_module_map = module_map
+
+        # One pull group per TP column: pulls flow between the same-TP-offset
+        # member of each PP stage.
+        tp_size = get_tp_group().world_size
+        pull_group = None
+        for tp_offset in range(tp_size):
+            column = [
+                pp_rank * tp_size + tp_offset for pp_rank in range(pp_world_size)
+            ]
+            group = dist.new_group(ranks=column, backend="gloo")
+            if dist.get_rank() in column:
+                pull_group = group
+
+        buffer: dict = {}
+        condition = threading.Condition()
+        listener = PPListener(
+            buffer=buffer,
+            condition=condition,
+            pull_group=pull_group,
+            local_rank=pp_group.rank_in_group,
+            device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+        )
+        listener.start()
+        # Belt-and-braces shutdown: a worker torn down without the graceful
+        # collect path leaves the daemon listener busy-looping on a dead dist
+        # context at 100% CPU; the stop flag breaks it out.
+        atexit.register(listener.stop)
+        self.pp_listener = listener
+
+        return PPInterleaver(
+            module_map, listener, pp_group.rank_in_group, module_meta
+        )
+
+    def _exchange_pp_module_meta(self) -> tuple:
+        """Allgather per-module dtype across PP ranks AND derive ownership.
+
+        Each rank contributes ``{path: {dtype}}`` for its local
+        (non-PPMissing) modules; dtype comes from the module's own parameters
+        (no forward needed — probing shapes with a fake-mode forward over the
+        TP-sharded model collides with vLLM's parameter ``__torch_function__``
+        and never completes). The merged map is identical on every rank and
+        provides the dtype hint stamped on lazy placeholders; pull replies
+        carry their own shape and true dtype.
+
+        Returns ``(merged_meta, owners)``: a module real on exactly one stage
+        is owned by it; one real on several (containers, build-everywhere
+        modules) is ambiguous and dropped.
+        """
+        import torch.distributed as dist
+
+        from ..pp import is_pp_missing
+
+        pp_group = get_pp_group()
+
+        local_meta = {}
+        for name, module in self.model.named_modules():
+            if not is_pp_missing(module):
+                param = next(module.parameters(recurse=False), None)
+                dtype = param.dtype if param is not None else self.model_config.dtype
+                local_meta[name] = {"dtype": dtype}
+
+        local_bytes = pickle.dumps(local_meta)
+        local_tensor = torch.tensor(list(local_bytes), dtype=torch.uint8, device="cpu")
+        size_tensor = torch.tensor([len(local_bytes)], dtype=torch.int64)
+
+        all_sizes = [
+            torch.zeros(1, dtype=torch.int64) for _ in range(pp_group.world_size)
+        ]
+        dist.all_gather(all_sizes, size_tensor, group=pp_group.cpu_group)
+
+        max_size = max(s.item() for s in all_sizes)
+        padded = torch.zeros(max_size, dtype=torch.uint8)
+        padded[: len(local_bytes)] = local_tensor
+
+        all_padded = [
+            torch.zeros(max_size, dtype=torch.uint8)
+            for _ in range(pp_group.world_size)
+        ]
+        dist.all_gather(all_padded, padded, group=pp_group.cpu_group)
+
+        merged = {}
+        owners: dict = {}
+        ambiguous = set()
+        for pp_rank, (buf, size) in enumerate(zip(all_padded, all_sizes)):
+            rank_meta = pickle.loads(buf[: size.item()].numpy().tobytes())
+            merged.update(rank_meta)
+            for name in rank_meta:
+                if name in owners and owners[name] != pp_rank:
+                    ambiguous.add(name)
+                else:
+                    owners[name] = pp_rank
+        for name in ambiguous:
+            owners.pop(name, None)
+
+        return merged, owners
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         super()._update_states(scheduler_output)
@@ -371,6 +537,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
             _saves().clear()
 
         interleaver = self.nnsight_model.interleaver
+        # PP: workers still parked on a cross-stage pull from the previous step
+        # (typically a downstream-owned value, produced only after this rank's
+        # execute_model returned) are resumed now, before this step's forward —
+        # blocking is safe here, the whole pipeline finished that step.
+        if self.nnsight_pp:
+            interleaver.serve_pulls(block=True)
         # The scheduler picks this step's requests partway through the forward, so
         # there is nothing to register yet. Entering empty leaves the interleaver
         # with no worker to start — `Requests.scope` starts them as they appear.
@@ -380,6 +552,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
             output = super().execute_model(scheduler_output, intermediate_tensors)
             # The forward is done; what follows it is per-request, not per-token.
             self.nnsight_requests.unflatten(self.nnsight_model)
+            # PP: serve whatever pulls have already landed — NON-blocking: a
+            # downstream stage's value is produced only after this method
+            # returns and lets the next stage run, so waiting here would
+            # deadlock the pipeline. Stragglers resume at the next step's
+            # blocking serve (above) or at collect.
+            if self.nnsight_pp:
+                interleaver.serve_pulls(block=False)
+                interleaver.step += 1
         return output
 
     def sample_tokens(self, *args: Any, **kwargs: Any) -> Any:
@@ -481,12 +661,31 @@ class NNsightGPUModelRunner(GPUModelRunner):
             finished_request_ids: Those that are done, whose workers are wound up
                 and forgotten afterwards.
         """
+        requests = self.nnsight_requests
+        finished = set(finished_request_ids or [])
+
+        # PP finalize, on EVERY rank (collect_nnsight arrives via
+        # collective_rpc): resume workers still parked on a pull — blocking is
+        # safe, the requests being collected have finished generating — then
+        # hold the drain barrier so no rank clears its published buffer while
+        # a peer's pull is still in flight, then clear only the finished
+        # requests' entries (a blanket clear would strand concurrent
+        # requests' pulls; still-parked pulls for the cleared ids get error
+        # replies instead of hanging their consumers).
+        if self.nnsight_pp:
+            interleaver = self.nnsight_model.interleaver
+            interleaver.serve_pulls(block=True)
+            self.pp_listener.drain_barrier()
+            finished_worker_ids = [
+                worker_id for _, worker_id in requests.match(finished)
+            ]
+            if finished_worker_ids:
+                self.pp_listener.clear_buffer(req_ids=finished_worker_ids)
+
         # Only one rank holds the sampled output; the others have nothing to say.
         if get_pp_group().rank != 0:
             return None
 
-        requests = self.nnsight_requests
-        finished = set(finished_request_ids or [])
         matched = requests.match(set(request_ids) | finished)
 
         # A worker still parked when its request finishes was waiting on a location the

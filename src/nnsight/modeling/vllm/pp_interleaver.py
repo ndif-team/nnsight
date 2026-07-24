@@ -202,16 +202,20 @@ class PPInterleaver(Interleaver):
     # Driver side: the serve point
     # ------------------------------------------------------------------
 
-    def serve_pulls(self) -> None:
-        """Resume every worker parked on a completed (or completable) pull.
+    def serve_pulls(self, block: bool = True) -> None:
+        """Resume workers parked on pulls.
 
-        Called at a serve point: after the local forward, and again before the
-        next step's forward. Each parked worker's in-flight pull is completed
-        (blocking this thread only for values whose transfer hasn't finished —
-        the issue-at-park discipline means most already have) and the worker is
-        switched back in with the value. A resumed worker may immediately force
-        another lazy: its intercept issues the new pull and re-parks, so the
-        loop drains until no worker waits on a pull.
+        Called at serve points. ``block=True`` (collect/finalize, and the start
+        of a step for the previous step's stragglers) completes every parked
+        worker's pull, waiting for in-flight transfers. ``block=False`` (the
+        end of a step, while the pipeline is still moving) serves only pulls
+        whose value has already arrived: blocking there would deadlock the
+        pipeline, because a downstream stage's value is produced only after
+        this rank's ``execute_model`` returns and lets the next stage run.
+
+        A resumed worker may immediately force another lazy: its intercept
+        issues the new pull and re-parks, so the loop drains until no worker
+        waits on a (servable) pull.
         """
         progressed = True
         while progressed:
@@ -224,9 +228,13 @@ class PPInterleaver(Interleaver):
                 untagged = _strip_park_tag(mediator.pending[1])
                 if not untagged.startswith(PULL_LOCATION_PREFIX):
                     continue
-                pull = self._pulls.pop((id(mediator), untagged), None)
+                key = (id(mediator), untagged)
+                pull = self._pulls.get(key)
                 if pull is None:
                     continue
+                if not block and not pull.ready:
+                    continue
+                del self._pulls[key]
                 try:
                     value = pull.complete()
                     mediator.pending = mediator.switch(value)
