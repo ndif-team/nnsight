@@ -18,7 +18,6 @@ import ast
 import asyncio
 import io
 import logging
-import pickle
 import uuid
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -154,9 +153,11 @@ async def generate(request: Request) -> Response:
                 "collect_nnsight", args=([request_id], [request_id])
             )
             collected = True
-            payload = next((result for result in results if result is not None), None)
-            if payload is not None:
-                entry = pickle.loads(payload).get(request_id)
+            from ..collect import merge_collected
+
+            merged = merge_collected(results)
+            if merged is not None:
+                entry = merged.get(request_id)
                 if entry is not None:
                     return entry["saves"], entry["error"]
             return {}, None

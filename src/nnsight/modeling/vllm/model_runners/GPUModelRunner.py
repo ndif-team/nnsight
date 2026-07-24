@@ -280,13 +280,30 @@ class Requests:
             else:
                 mediator.nnsight_error = capture_exception(thrown)
 
-    def saves(self, worker_id: str) -> dict:
-        """This request's block-scope names that were marked with ``.save()``."""
+    def saves(self, worker_id: str, pp: bool = False) -> dict:
+        """This request's block-scope names that were marked with ``.save()``.
+
+        Under PP (``pp=True``), lazies inside saved values strip to
+        NOT_ON_THIS_RANK sentinels for the engine-side merge, and a name whose
+        value is *purely* owned by another stage is skipped entirely — the
+        owning rank ships the real data.
+        """
         mediator = self.mediators.get(worker_id)
         if mediator is None:
             return {}
         saved = getattr(mediator, "nnsight_saved", set())
-        return {name: mediator.lcls[name] for name in saved if name in mediator.lcls}
+        values = {name: mediator.lcls[name] for name in saved if name in mediator.lcls}
+        if not pp:
+            return values
+        from ..collect import strip_lazy
+
+        shipped = {}
+        for name, value in values.items():
+            stripped, has_real, has_lazy = strip_lazy(value)
+            if has_lazy and not has_real:
+                continue
+            shipped[name] = stripped
+        return shipped
 
     def error(self, worker_id: str) -> Optional[dict]:
         """This request's deferred exception, captured for the client, or None."""
@@ -682,8 +699,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if finished_worker_ids:
                 self.pp_listener.clear_buffer(req_ids=finished_worker_ids)
 
-        # Only one rank holds the sampled output; the others have nothing to say.
-        if get_pp_group().rank != 0:
+        # Who ships: under PP every stage's TP-rank-0 (each holds its own
+        # stage's slots; the engine merges); otherwise the single PP rank.
+        if self.nnsight_pp:
+            if get_tp_group().rank_in_group != 0:
+                return None
+        elif get_pp_group().rank != 0:
             return None
 
         matched = requests.match(set(request_ids) | finished)
@@ -696,7 +717,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         collected = {
             engine_id: {
-                "saves": requests.saves(worker_id),
+                "saves": requests.saves(worker_id, pp=self.nnsight_pp),
                 "error": requests.error(worker_id),
             }
             for engine_id, worker_id in matched

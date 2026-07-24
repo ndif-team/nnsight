@@ -38,7 +38,6 @@ a ``step()`` to hook, it happens here, in the stream.
 
 from __future__ import annotations
 
-import pickle
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
@@ -141,11 +140,13 @@ class AsyncVLLMBackend(Backend):
         results = await self.model.vllm_entrypoint.collective_rpc(
             "collect_nnsight", args=([request_id], [request_id])
         )
-        # Only the rank holding the sampled output returns anything.
-        payload = next((result for result in results if result is not None), None)
-        if payload is None:
+        # Under PP every stage ships its own slots; merge them.
+        from .collect import merge_collected
+
+        collected = merge_collected(results)
+        if collected is None:
             return
-        entry = pickle.loads(payload).get(request_id)
+        entry = collected.get(request_id)
         if entry is not None:
             output.saves = entry["saves"]
             raise_deferred(entry["error"])
