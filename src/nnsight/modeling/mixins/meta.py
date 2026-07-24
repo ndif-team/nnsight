@@ -157,20 +157,26 @@ class Meta(Loadable):
         dispatch: bool = False,
         rename: Any = None,
         envoys: Any = None,
+        interleaver: Any = None,
         **kwargs: Any,
     ) -> None:
         self.dispatched = False
 
-        # rename/envoys thread to the Envoy but stay out of self.kwargs, so they
-        # aren't replayed into _load on dispatch; aliases survive dispatch anyway
-        # because _update re-points the same envoy objects the aliases reference.
+        # rename/envoys/interleaver thread to the Envoy but stay out of
+        # self.kwargs, so they aren't replayed into _load on dispatch; aliases
+        # survive dispatch anyway because _update re-points the same envoy
+        # objects the aliases reference.
         if (args and isinstance(args[0], torch.nn.Module)) or dispatch:
             self.dispatched = True
-            super().__init__(*args, rename=rename, envoys=envoys, **kwargs)
+            super().__init__(
+                *args, rename=rename, envoys=envoys, interleaver=interleaver, **kwargs
+            )
         else:
             with MetaDevice():
                 model = self._load_meta(*args, **kwargs)
-            Envoy.__init__(self, model, rename=rename, envoys=envoys)
+            Envoy.__init__(
+                self, model, rename=rename, envoys=envoys, interleaver=interleaver
+            )
 
         self.args = args
         self.kwargs = kwargs

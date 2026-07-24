@@ -20,11 +20,17 @@ class Loadable(Envoy):
     """
 
     def __init__(
-        self, *args: Any, rename: Any = None, envoys: Any = None, **kwargs: Any
+        self,
+        *args: Any,
+        rename: Any = None,
+        envoys: Any = None,
+        interleaver: Any = None,
+        **kwargs: Any,
     ) -> None:
-        # rename/envoys are Envoy concerns, not load args — keep them out of _load.
+        # rename/envoys/interleaver are Envoy concerns, not load args — keep
+        # them out of _load.
         model = self._load(*args, **kwargs)
-        super().__init__(model, rename=rename, envoys=envoys)
+        super().__init__(model, rename=rename, envoys=envoys, interleaver=interleaver)
 
     def _load(self, *args: Any, **kwargs: Any) -> torch.nn.Module:
         """Build and return the module to wrap.

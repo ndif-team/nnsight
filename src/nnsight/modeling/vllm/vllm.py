@@ -224,7 +224,13 @@ class VLLM(Remotable):
     # the worker needs no transport of its own.
     _WORKER_CLS = "nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker"
 
-    def _load(self, repo_id: str, **kwargs: Any) -> "Module":
+    def _load(self, repo_id: "str | Module", **kwargs: Any) -> "Module":
+        # A ready module (the worker-side runner wrapping the module vLLM
+        # already loaded): nothing to build — no engine, no meta tree; the
+        # caller sets the tokenizer.
+        if isinstance(repo_id, torch.nn.Module):
+            return repo_id
+
         meta_model = self._load_meta(repo_id, **kwargs)
 
         # The real engine brings up its own process group; the one __init__ made
