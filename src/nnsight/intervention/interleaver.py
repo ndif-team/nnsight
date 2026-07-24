@@ -290,6 +290,15 @@ class Mediator:
         sequentially.
         """
         mediator = cls.current(location)
+        # A distributed run may own only part of the model: give the interleaver a
+        # look at the raw event before the worker parks on it. Serving here (a
+        # remote-owned read answered with a lazy handle, a remote-owned write
+        # absorbed) keeps the worker off a location no local hook will ever fire.
+        # A mediator started bare (no interleaver) has no one to consult.
+        if mediator.interleaver is not None:
+            intercepted = mediator.interleaver.intercept(mediator, event, location, rest)
+            if intercepted is not None:
+                return intercepted[0]
         worker = getcurrent()
         iteration = (
             mediator.iteration
@@ -606,6 +615,24 @@ class Interleaver:
             if any(cache.wants(provider) for cache in mediator.caches):
                 return True
         return False
+
+    def intercept(
+        self, mediator: Mediator, event: Event, location: str, rest: tuple
+    ) -> tuple | None:
+        """Look at a worker's event before it parks; optionally serve it in place.
+
+        Called from :meth:`Mediator.event` on the worker greenlet, with the raw
+        (untagged) ``location``. Returning ``None`` lets the worker park normally.
+        Returning a 1-tuple ``(value,)`` serves the event immediately: the worker
+        gets ``value`` back without parking and keeps running. The tuple wrapper is
+        what lets an intercept serve ``None`` itself (an absorbed write).
+
+        The base interleaver owns every location, so it never intercepts. A
+        distributed interleaver overrides this to answer reads of locations owned
+        by another rank (with a lazy handle resolved later) and to absorb writes to
+        them (the owning rank performs the same write locally).
+        """
+        return None
 
     def instrument(self, envoy: Envoy) -> None:
         """Install this interleaver's forward hooks on an envoy's module.
