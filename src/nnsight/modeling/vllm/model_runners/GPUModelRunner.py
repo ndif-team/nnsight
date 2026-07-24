@@ -350,6 +350,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
         )
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
 
+        # Under PP, graft the meta model's children onto each PPMissingLayer
+        # stub's envoy: sub-stub paths (``model.layers.5.attn`` on a non-owning
+        # rank) then resolve at request deserialization and answer with lazies
+        # like any other remote-owned location. The meta tree was built by the
+        # worker before the real groups existed (see GPUWorker).
+        if self.nnsight_pp:
+            meta_model = self.__dict__.pop("_pp_meta_model", None)
+            if meta_model is not None:
+                self._graft_pp_missing_envoys(meta_model)
+
         interleaver = self.nnsight_model.interleaver
         interleaver.mediators = []
         interleaver.batcher = batcher
@@ -449,6 +459,33 @@ class NNsightGPUModelRunner(GPUModelRunner):
         return PPInterleaver(
             module_map, listener, pp_group.rank_in_group, module_meta
         )
+
+    def _graft_pp_missing_envoys(self, meta_model: torch.nn.Module) -> None:
+        """Graft the meta model's children onto each PPMissingLayer envoy.
+
+        A stub has no children, so the envoy tree is missing every sub-module
+        of a non-local layer. ``_wrap_envoy`` builds and attaches each child
+        (recursively, via Envoy's own construction), handling shadowed names;
+        the grafted envoys wrap meta-device modules that never run — reads on
+        them resolve by ownership to lazies exactly like the stub itself.
+        """
+        from ..pp import is_pp_missing
+
+        meta_modules = {
+            f"{self.nnsight_model.path}.{name}": module
+            for name, module in meta_model.named_modules()
+        }
+
+        def graft(envoy: Any) -> None:
+            if is_pp_missing(envoy._module):
+                meta_module = meta_modules.get(envoy.path)
+                if meta_module is not None:
+                    for name, child in meta_module.named_children():
+                        envoy._wrap_envoy(name, child)
+            for child_envoy in list(envoy._children):
+                graft(child_envoy)
+
+        graft(self.nnsight_model)
 
     def _exchange_pp_module_meta(self) -> tuple:
         """Allgather per-module dtype across PP ranks AND derive ownership.
