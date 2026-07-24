@@ -258,9 +258,11 @@ class Requests:
         for mediator in self.mediators.values():
             if mediator.batch_group is None:
                 continue
+            # Saves marked in this process, plus names the sending process
+            # marked before serialization (Mediator.presaved).
             mediator.nnsight_saved = {
                 name for name, value in mediator.lcls.items() if id(value) in saved
-            }
+            } | mediator.presaved
             # An error (or stop) is captured on the workers' own thread too, for the
             # same reason saves are — the collect thread cannot read the exception's
             # intervention traceback off this greenlet. Captured once: an erred worker

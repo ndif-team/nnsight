@@ -441,11 +441,23 @@ class VLLM(Remotable):
         """
         from ...intervention.errors import raise_deferred
         from ...tracing.tracer import mark
+        from .collect import merge_shared_saves
 
+        per_request_saves = []
         for mediator, output in zip(mediators, outputs):
-            for name, value in getattr(output, "saves", {}).items():
+            saves = getattr(output, "saves", {})
+            per_request_saves.append(saves)
+            for name, value in saves.items():
                 mark(value)  # marking results after the run; no trace active to guard
                 mediator.lcls[name] = value
+
+        # A name saved above the invoke blocks ships back once per request,
+        # each copy carrying that request's writes. Merge the copies
+        # element-wise so the result reads as if every invoke had mutated one
+        # shared object (the local semantics). The merged containers are new
+        # objects; mark them saved so the result push keeps them.
+        for value in merge_shared_saves(mediators, per_request_saves).values():
+            mark(value)
 
         for output in outputs:
             raise_deferred(getattr(output, "nnsight_error", None))

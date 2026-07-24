@@ -203,6 +203,10 @@ class Mediator:
         # step itself) reads this to end the request and, for a real error, carry it
         # back to the trace that wrote it.
         self.exception: Optional[BaseException] = None
+        # Names whose values were `.save()`d in the process that serialized
+        # this worker (see __getstate__); a receiving driver unions them into
+        # its own saved-name collection.
+        self.presaved: set[str] = set()
 
     def _run(self) -> None:
         """Execute the captured block (the worker greenlet's body).
@@ -218,13 +222,23 @@ class Mediator:
         # Reduce the block to source + the vars it references — cross-version safe,
         # exactly like the traced block — and drop the compiled code and all run
         # state (worker/pending/interleaver/batch_group can't and shouldn't travel).
+        from ..tracing.tracer import _saves
         from .serialization import reduce_block
 
-        return {"reduced": reduce_block(self.node, self.glbls, self.lcls), "copy": self.copy}
+        reduced = reduce_block(self.node, self.glbls, self.lcls)
+        # Saved-ness travels by NAME: `.save()` marks object ids, which are
+        # local to this process, so the receiving driver gets the names of the
+        # captured variables that were saved (e.g. a container bound and saved
+        # above the invoke blocks).
+        presaved = {
+            name for name, value in reduced[2].items() if id(value) in _saves()
+        }
+        return {"reduced": reduced, "copy": self.copy, "presaved": presaved}
 
     def __setstate__(self, state: dict) -> None:
         source, glbls, lcls = state["reduced"]
         self.__init__(compile(source, "<edit>", "exec"), glbls, lcls, copy=state["copy"])
+        self.presaved = state["presaved"]
 
     @classmethod
     def current(cls, what: str) -> "Mediator":

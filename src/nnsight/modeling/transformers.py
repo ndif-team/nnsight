@@ -653,7 +653,13 @@ class TransformersModel(HuggingFaceModel):
         which calling `Pipeline.preprocess` directly would otherwise skip.
         Returns ``None`` when ``data`` isn't chat messages.
         """
-        from transformers.pipelines.base import Chat, is_valid_message
+        try:
+            from transformers.pipelines.base import Chat, is_valid_message
+        except ImportError:
+            # transformers before the chat-pipeline refactor has neither
+            # helper: treat everything as not-chat and let the pipeline's own
+            # input handling take it from here.
+            return None
 
         if not isinstance(data, (list, tuple)) or not data:
             return None
