@@ -75,11 +75,13 @@ class Cache:
         detach: bool = True,
         include_output: bool = True,
         include_inputs: bool = False,
+        non_blocking: bool = True,
     ) -> None:
         self.model = model
         self.device = device
         self.dtype = dtype
         self.detach = detach
+        self.non_blocking = non_blocking
         self.include_output = include_output
         self.include_inputs = include_inputs
         # None => every module; else the exact set of paths to keep.
@@ -129,7 +131,9 @@ class Cache:
         if self.device is not None or self.dtype is not None:
             value = apply(
                 value,
-                lambda t: t.to(device=self.device, dtype=self.dtype, non_blocking=True),
+                lambda t: t.to(
+                    device=self.device, dtype=self.dtype, non_blocking=self.non_blocking
+                ),
                 torch.Tensor,
             )
         return value

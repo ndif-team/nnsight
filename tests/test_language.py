@@ -514,6 +514,19 @@ class TestCache:
         assert cache["model.transformer.h.0"].inputs is None
 
     @torch.no_grad()
+    def test_cache_non_blocking_flag(self, gpt2):
+        # non_blocking is a device-transfer speed flag; either setting yields the
+        # same captured values (the default True is safe under single-stream runs).
+        with gpt2.trace(PROMPT) as tracer:
+            fast = tracer.cache(modules=[gpt2.transformer.h[0]], non_blocking=True)
+        with gpt2.trace(PROMPT) as tracer:
+            sync = tracer.cache(modules=[gpt2.transformer.h[0]], non_blocking=False)
+        assert torch.equal(
+            fast["model.transformer.h.0"].output,
+            sync["model.transformer.h.0"].output,
+        )
+
+    @torch.no_grad()
     def test_cache_output_and_inputs(self, gpt2):
         with gpt2.trace(PROMPT) as tracer:
             cache = tracer.cache(include_inputs=True)

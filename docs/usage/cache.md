@@ -85,8 +85,16 @@ with model.trace("Hello") as tracer:
         detach=True,                 # detach from autograd (default)
         include_output=True,
         include_inputs=False,
+        non_blocking=True,           # async device transfer (default); set False to
+                                     # synchronize the copy (see note below)
     )
 ```
+
+`non_blocking=True` (the default) makes the move to `device` asynchronous, which is
+faster and safe under nnsight's single-stream execution — captured values are read
+after the run (and any Python read syncs anyway). Set `non_blocking=False` only if
+you move captured tensors across CUDA streams yourself and need the copy finished
+before another stream reads them.
 
 ### Cache across generation steps
 
@@ -155,6 +163,7 @@ tracer.cache(
     detach=True,
     include_output=True,
     include_inputs=False,
+    non_blocking=True,            # async device transfer; False synchronizes it
 )
 ```
 
