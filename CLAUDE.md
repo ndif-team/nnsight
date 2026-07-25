@@ -122,6 +122,7 @@ Read at least the first two if the user is asking "why is my code blocking / out
 
 ## For developers / contributors
 
+- **Base PRs on the `dev` branch, not `main`.**
 - [docs/developing/index.md](docs/developing/index.md) — top of the developer tree
 - [docs/developing/architecture-overview.md](docs/developing/architecture-overview.md) — how everything fits (Tracer → Backend → Interleaver → Mediator → hooks → Envoy)
 - [docs/developing/tracing-pipeline.md](docs/developing/tracing-pipeline.md) — capture → parse → build → compile → execute
