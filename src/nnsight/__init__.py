@@ -62,9 +62,6 @@ from .tracing.hint import Object  # noqa: F401
 # nnsight.NNsight(module): wrap an arbitrary torch.nn.Module for tracing.
 from .modeling.base import NNsight  # noqa: F401
 
-# nnsight.login(): store your NDIF API key (prompts if not given), HF-style.
-from .login import login  # noqa: F401
-
 # Model classes are exposed lazily so importing nnsight doesn't pull in
 # transformers/diffusers model machinery until one is actually constructed
 # (and an optional dep like diffusers only errors when its model is used).
@@ -105,9 +102,11 @@ __all__ = [
 from .ndif import (  # noqa: F401
     compare,
     is_model_running,
+    login,
     ndif_status,
     register,
     status,
+    whoami,
 )
 
 # Mount `.save()` on every object (so `value.save()` works, not just

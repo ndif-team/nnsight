@@ -114,12 +114,18 @@ _DEPLOYED_LEVELS = {"HOT", "WARM"}
 _STATE_COLOR = {"RUNNING": "green", "DEPLOYING": "yellow", "UNHEALTHY": "red"}
 
 
-def _get(path: str, timeout: tuple[float, float] = (5.0, 30.0)) -> dict:
+def _get(
+    path: str,
+    timeout: tuple[float, float] = (5.0, 30.0),
+    headers: Optional[dict] = None,
+) -> dict:
     import httpx  # lazy: only for actual NDIF calls
 
     connect, read = timeout
     response = httpx.get(
-        f"{CONFIG.API.HOST}{path}", timeout=httpx.Timeout(connect, read=read)
+        f"{CONFIG.API.HOST}{path}",
+        timeout=httpx.Timeout(connect, read=read),
+        headers=headers,
     )
     response.raise_for_status()
     return response.json()
@@ -274,6 +280,90 @@ def is_model_running(repo_id: str, revision: str = "main") -> bool:
         if value.get("repo_id") == repo_id and (value.get("revision") or "main") == revision:
             return value.get("application_state") == "RUNNING"
     return False
+
+
+# --- authentication --------------------------------------------------------
+
+
+def whoami(api_key: Optional[str] = None) -> dict:
+    """Resolve the identity NDIF associates with an API key.
+
+    Calls the service's ``/whoami`` endpoint and returns ``{"email": ..., "tags":
+    [...]}``. ``email`` is ``None`` when the key is unrecognized (or the server has
+    key validation disabled). Uses the configured key (``CONFIG.API.APIKEY``) when
+    ``api_key`` isn't given.
+
+    Args:
+        api_key: The key to resolve; defaults to the configured one.
+
+    Returns:
+        The ``/whoami`` identity dict, ``{"email": str | None, "tags": list}``.
+    """
+    key = api_key or CONFIG.API.APIKEY
+    return _get("/whoami", headers={"ndif-api-key": key} if key else None)
+
+
+def login(api_key: Optional[str] = None) -> None:
+    """Store your NDIF API key so future sessions can use it (HuggingFace-style).
+
+    Prompts for the key with ``getpass`` (never echoed) when not given, verifies it
+    against the service via :func:`whoami`, then persists it with
+    ``CONFIG.set_default_api_key`` (which writes ``config.yaml``). Verification is
+    best-effort — the key is still saved if the service can't be reached or doesn't
+    recognize it, with a note — so a typo is surfaced without blocking login.
+
+    Args:
+        api_key: The NDIF API key. Prompted for (hidden) when not given; empty input
+            is a no-op that saves nothing.
+
+    Examples:
+        >>> from nnsight import login
+        >>> login()
+        Enter your NDIF API key:
+        NDIF API key saved — logged in as you@example.com.
+    """
+    from getpass import getpass
+
+    if api_key is None:
+        api_key = getpass("Enter your NDIF API key: ")
+    api_key = (api_key or "").strip()
+    if not api_key:
+        print("No API key provided. Nothing was saved.")
+        return
+
+    email = None
+    try:
+        email = whoami(api_key).get("email")
+    except Exception as error:  # unreachable host, 404 on an older service, 503, ...
+        print(f"Could not verify the key against {CONFIG.API.HOST} ({error}).")
+
+    CONFIG.set_default_api_key(api_key)
+    if email:
+        print(f"NDIF API key saved — logged in as {email}.")
+    else:
+        print("NDIF API key saved (unverified).")
+
+
+def main() -> None:
+    """Console entry point for the ``nnsight`` command (``login`` / ``whoami``)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="nnsight", description="Command line tools for nnsight."
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("login", help="Store your NDIF API key.")
+    subparsers.add_parser("whoami", help="Show the identity for the stored API key.")
+
+    args = parser.parse_args()
+
+    if args.command == "login":
+        login()
+    elif args.command == "whoami":
+        email = whoami().get("email")
+        print(email if email else "Not logged in (no recognized API key).")
+    else:
+        parser.print_help()
 
 
 # --- local vs remote environment comparison --------------------------------

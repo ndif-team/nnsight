@@ -62,7 +62,7 @@ serve = [
 ]
 
 [project.scripts]
-nnsight = "nnsight.login:main"
+nnsight = "nnsight.ndif:main"
 nnsight-serve = "nnsight.modeling.vllm.serve.cli:main"
 
 [project.urls]

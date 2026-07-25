@@ -39,15 +39,19 @@ CONFIG.set_default_api_key("...")    # writes the user config file
 ```
 
 Or, HuggingFace-style, use the `login` helper — it prompts for the key with
-`getpass` (never echoed) and persists it the same way:
+`getpass` (never echoed), verifies it against the service (best-effort — the key is
+still saved, with a note, if the service can't be reached or doesn't recognize it),
+and persists it:
 
 ```python
-from nnsight import login
+from nnsight import login, whoami
 login()                              # prompts; or login("YOUR_KEY") to skip the prompt
+whoami()                             # {"email": ..., "tags": [...]} for the stored key
 ```
 
 ```bash
 nnsight login                        # the same, from a terminal
+nnsight whoami
 ```
 
 ### Option 2: environment variable
