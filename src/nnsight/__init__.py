@@ -51,6 +51,7 @@ except PackageNotFoundError:
 
 from .intervention.tracing.globals import save
 from .ndif import *
+from .login import login
 
 # Detect IPython without importing it — if IPython isn't already in sys.modules,
 # we are not running under IPython and there's no need to pay its import cost.

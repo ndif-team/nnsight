@@ -65,6 +65,9 @@ vllm = [
 
 all = ["nnsight[test,diffusers,vllm]"]
 
+[project.scripts]
+nnsight = "nnsight.login:main"
+
 [project.urls]
 Homepage = "https://github.com/ndif-team/nnsight"
 Website = "https://nnsight.net/"
