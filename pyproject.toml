@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "nnsight"
-version = "0.8.0"
+dynamic = ["version"]
 description = "Interpreting and manipulating the internals of neural networks."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -82,3 +82,9 @@ nnsight = ["config.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Version is derived from the git tag at build time (e.g. tag `v0.8.0` -> `0.8.0`);
+# between tags it's the next dev version. fallback_version is used only when there's
+# no git metadata and no sdist PKG-INFO to read (e.g. a bare source copy).
+[tool.setuptools_scm]
+fallback_version = "0.8.0"
