@@ -115,7 +115,13 @@ class Globals:
 
     cache = TracingCache()
 
+    # Maps a convert()-compiled function's synthetic "<nnsight {key}>" filename to
+    # its (co_filename, co_firstlineno, co_name), so tracebacks for exceptions in
+    # converted code can be mapped back to the real source (see util.py).
+    converted_fn_files = {}
+
     @staticmethod
     def clear():
         Globals.saves.clear()
         Globals.cache.clear()
+        Globals.converted_fn_files.clear()

@@ -80,6 +80,7 @@ from .hooks import (
     hooked_operation_output,
 )
 from .interleaver import IEnvoy, Interleaver
+from .tracing.globals import Globals
 
 if sys.version_info >= (3, 9):
     _ast_to_source = ast.unparse
@@ -191,7 +192,17 @@ def convert(fn: Callable, wrap: Callable, name: str):
     global_namespace.update(module_globals)
     global_namespace["wrap"] = wrap
 
-    filename = "<nnsight>"
+    metadata_key = hash((
+        fn.__code__.co_filename,
+        fn.__code__.co_firstlineno,
+        fn.__code__.co_name,
+    ))
+    filename = f"<nnsight {metadata_key}>"
+    Globals.converted_fn_files[filename] = (
+        fn.__code__.co_filename,
+        fn.__code__.co_firstlineno,
+        fn.__code__.co_name
+    )
 
     if isinstance(tree, ast.Module):
         code_obj = compile(tree, filename, "exec")
