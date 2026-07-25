@@ -643,27 +643,32 @@ class Envoy:
 
         Args:
             fn: The callable to run, or a method name resolved against the module.
-            *args: Positional inputs to ``fn``. Tensors are moved to
-                :attr:`device` first. Omitted when ``batcher`` is given (the inputs
-                come from assembling it).
+            *args: Positional inputs for a direct (untraced) call. They're wrapped as
+                a single implicit invoke and assembled like a one-invoke trace
+                (tokenized/collated), then moved to :attr:`device`. Ignored when
+                ``batcher`` is given (the inputs come from assembling it).
             batcher: The per-invoke inputs to combine into one call. When given, it's
                 assembled into ``(args, kwargs)`` and registered on the interleaver so
                 :meth:`~nnsight.intervention.interleaver.Interleaver.handle` can
                 narrow each worker to its own rows; any ``kwargs`` passed alongside
                 (trace-level params like ``max_new_tokens``) override the assembled
                 ones.
-            **kwargs: Keyword inputs to ``fn``.
+            **kwargs: Keyword inputs — part of the direct call's single invoke when no
+                ``batcher`` is given, else trace-level params for the assembled call.
 
         Returns:
             Any: Whatever ``fn`` returned (typically the module's forward output).
         """
-        # A batcher holds the per-invoke inputs: assemble them into the combined
-        # call and register it so handle() can narrow per worker. Trace-level kwargs
-        # passed alongside win over the assembled ones.
-        if batcher is not None:
-            self.interleaver.batcher = batcher
-            args, assembled = batcher.assemble(fn)
-            kwargs = {**assembled, **kwargs}
+        # Add the passed (args, kwargs) as one more input set, then assemble the
+        # combined call and register the batcher so handle() can narrow per worker.
+        # A direct (untraced) call has no batcher: create one. Either way the add is
+        # uniform — a direct call's input contributes a row; a trace's forward params
+        # (max_new_tokens, no data rows) fold into the assembled call.
+        if batcher is None:
+            batcher = self._batcher_class(self, kwargs)
+        self.interleaver.batcher = batcher
+        batcher.add(*args, **kwargs)
+        args, kwargs = batcher.assemble(fn)
         # Move input tensors onto the model's device so the user doesn't have to.
         device = self.device
         if device is not None:

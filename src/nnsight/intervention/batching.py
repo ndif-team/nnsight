@@ -81,10 +81,12 @@ class Batcher:
         # The trace's forward kwargs (num_images_per_prompt, ...), for subclasses
         # whose row math depends on them; the base layout ignores them.
         self.kwargs = kwargs or {}
-        # Per invoke: its raw (inputs, kwargs), and its [start, size] group (or
-        # None for an empty invoke that contributes no rows).
+        # The row-contributing input sets, in order — each an (inputs, kwargs) that
+        # :meth:`_batch` stacks into the combined forward.
         self.invokes: list[tuple] = []
-        self.groups: list[BatchGroup] = []
+        # Params-only adds (zero rows, e.g. max_new_tokens) fold their kwargs here;
+        # assemble() lays them over the combined call.
+        self.extra_kwargs: dict = {}
         self.total = 0
 
     def narrow(self, value: Any, group: BatchGroup) -> Any:
@@ -196,15 +198,20 @@ class Batcher:
         return concat([replacement for _, replacement in parts])
 
     def add(self, *inputs: Any, **kwargs: Any) -> BatchGroup:
-        """Record one invoke's input; return its ``[start, size]`` group (or None)."""
+        """Record one added input set; return its ``[start, size]`` row group.
+
+        A set that contributes no rows — params only (e.g. ``max_new_tokens=``) or an
+        empty ``invoke()`` — returns ``None`` (a groupless, whole-batch worker) and
+        folds its kwargs into :attr:`extra_kwargs`, so :meth:`assemble` lays them onto
+        the combined call.
+        """
         size = self.envoy._batch_size(*inputs, **kwargs)
         if not size:
-            self.groups.append(None)
+            self.extra_kwargs.update(kwargs)
             return None
         group = [self.total, size]
         self.total += size
         self.invokes.append((inputs, kwargs))
-        self.groups.append(group)
         return group
 
     @property
@@ -213,5 +220,7 @@ class Batcher:
         return len(self.invokes) > 1
 
     def assemble(self, fn: Any) -> tuple:
-        """Build the combined ``(args, kwargs)`` for ``fn`` from the collected invokes."""
-        return self.envoy._batch(self.invokes, fn)
+        """Build the combined ``(args, kwargs)`` for ``fn`` from the collected input
+        sets; params-only kwargs (:attr:`extra_kwargs`) are laid on top and win."""
+        args, kwargs = self.envoy._batch(self.invokes, fn)
+        return args, {**kwargs, **self.extra_kwargs}

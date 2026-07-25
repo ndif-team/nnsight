@@ -43,7 +43,6 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from ..intervention.envoy import Envoy, traceable
-from ..util import apply
 from .huggingface import HuggingFaceModel
 
 if TYPE_CHECKING:
@@ -459,14 +458,6 @@ class TransformersModel(HuggingFaceModel):
         Returns:
             The generated token ids, as a ``[batch, seq]`` tensor.
         """
-        if inputs:
-            # Raw input on a direct call — no batcher assembled it, so assemble here
-            # and place it (interleave already moved whatever it was handed).
-            inputs, kwargs = self._batch_generate([(inputs, kwargs)])
-            if self.device is not None:
-                inputs, kwargs = apply(
-                    (inputs, kwargs), lambda tensor: tensor.to(self.device), torch.Tensor
-                )
         kwargs.setdefault("streamer", self.generator.streamer._module)
         output = self.pipeline.model.generate(*inputs, **kwargs)
         # Pass the output through the generator module so a worker parked on
