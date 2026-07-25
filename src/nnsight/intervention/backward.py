@@ -62,6 +62,35 @@ def _grad_property(
             return
         seen.add(location)
 
+        # A batched invoke reads a *view* of the full-batch activation (marked by
+        # Batcher._narrow_tensor). That view is not in the loss graph — the model ran
+        # on the full batch — so a hook on it never fires and the block would hang on
+        # its gradient. Redirect the hook to the view's storage-owning base (which is
+        # in the graph), recover exactly this view's elements from the base gradient
+        # by its own strided geometry, and splice any edit back. Using the base (not a
+        # stored parent tensor) keeps the marked view cheap to serialize.
+        if getattr(tensor, "_nnsight_batch", False) and tensor._base is not None:
+            base = tensor._base
+            geometry = (tensor.shape, tensor.stride(), tensor.storage_offset())
+
+            def hook(grad: torch.Tensor) -> torch.Tensor:
+                try:
+                    sliced = grad.as_strided(*geometry)
+                    served = interleaver.handle(f"{location}.grad", sliced)
+                    # A pure read returns the slice unchanged; an edit (swap) returns
+                    # a new tensor to write back into the base gradient.
+                    if served is sliced:
+                        return grad
+                    updated = grad.clone()
+                    updated.as_strided(*geometry).copy_(served)
+                    return updated
+                finally:
+                    handle.remove()
+
+            handle = base.register_hook(hook)
+            hooks.append(handle)
+            return
+
         def hook(grad: torch.Tensor) -> torch.Tensor:
             # Serve (and maybe replace) the gradient, then stop intercepting this
             # tensor — one gradient flows per backward.

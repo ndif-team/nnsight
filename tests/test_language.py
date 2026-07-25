@@ -349,6 +349,49 @@ class TestGradients:
         assert g1.shape[-1] == 768
         assert torch.equal(g1 * 2, g2)
 
+    def test_grad_with_multiple_invokers(self, gpt2):
+        """A gradient requested inside a batched invoke (two+ invokes).
+
+        Each invoke's module output is a storage-sharing view of the full batch,
+        which is not in the loss graph — a naive hook on it never fires. The grad
+        must be provided and match the same input's single-invoke gradient.
+        """
+        # Reference: one invoke, no batching.
+        with gpt2.trace() as tracer:
+            with tracer.invoke(PROMPT):
+                ref_x = gpt2.transformer.h[5].attn.c_proj.output
+                with gpt2.lm_head.output.sum().backward():
+                    ref_grad = ref_x.grad.save()
+
+        # Two invokes -> invoke 2's activation is a batch-slice view.
+        with gpt2.trace() as tracer:
+            with tracer.invoke(PROMPT):
+                gpt2.lm_head.output.save()
+            with tracer.invoke(PROMPT):
+                batched_x = gpt2.transformer.h[5].attn.c_proj.output
+                with gpt2.lm_head.output.sum().backward():
+                    batched_grad = batched_x.grad.save()
+
+        assert batched_grad is not None
+        assert batched_grad.shape == ref_grad.shape
+        # Relative error (the summed-logit gradients are large, so an absolute
+        # tolerance is meaningless; batched vs single differ only by fp noise).
+        rel = (ref_grad - batched_grad).norm() / ref_grad.norm()
+        assert rel < 1e-3, rel.item()
+
+    def test_grad_edit_with_multiple_invokers(self, gpt2):
+        """Editing a gradient inside a batched invoke is spliced back and re-read."""
+        with gpt2.trace() as tracer:
+            with tracer.invoke(PROMPT):
+                gpt2.lm_head.output.save()
+            with tracer.invoke(PROMPT):
+                x = gpt2.transformer.h[5].attn.c_proj.output
+                with gpt2.lm_head.output.sum().backward():
+                    before = x.grad.clone().save()
+                    x.grad = x.grad * 3.0
+                    after = x.grad.save()
+        assert torch.allclose(after, before * 3.0, atol=1e-4)
+
 
 class TestAdhocModules:
     @torch.no_grad()

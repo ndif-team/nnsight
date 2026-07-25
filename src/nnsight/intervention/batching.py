@@ -109,7 +109,14 @@ class Batcher:
         """
         start, size = group
         if tensor.shape[0] == self.total:
-            return tensor.narrow(0, start, size)
+            view = tensor.narrow(0, start, size)
+            # Mark the slice so a `.backward()` gradient hook can tell it apart from a
+            # user-made view: it isn't in the loss graph (the model runs on the full
+            # batch), so its hook must redirect to the storage-owning base that is
+            # (see intervention/backward.py). A bare marker — not the parent tensor —
+            # keeps saved activations cheap to serialize.
+            view._nnsight_batch = True
+            return view
         return tensor
 
     def widen(self, full: Any, group: BatchGroup, edited: Any) -> Any:
