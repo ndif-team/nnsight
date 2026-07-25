@@ -182,10 +182,18 @@ class _Instrument(ast.NodeTransformer):
         self.lines[label] = node.lineno
 
         # fn(*args, **kwargs)  ->  __nnsight_op__("source.<label>", fn, *args, **kwargs)
-        return ast.Call(
-            func=ast.Name(id=OP, ctx=ast.Load()),
-            args=[ast.Constant(value=f"source.{label}"), node.func, *node.args],
-            keywords=node.keywords,
+        # Copy the original call's source location onto the wrapper so an exception
+        # raised inside the instrumented forward points at the real line. Without it
+        # the wrapper has no lineno, and increment_lineno (which does
+        # `lineno = getattr(node, "lineno", 0) + n`) would stamp it with the raw
+        # offset instead of the real line.
+        return ast.copy_location(
+            ast.Call(
+                func=ast.Name(id=OP, ctx=ast.Load()),
+                args=[ast.Constant(value=f"source.{label}"), node.func, *node.args],
+                keywords=node.keywords,
+            ),
+            node,
         )
 
 

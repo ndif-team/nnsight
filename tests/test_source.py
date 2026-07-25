@@ -544,3 +544,55 @@ class TestRecursiveIntegration:
         assert saved[0].shape[1] > 1
         assert saved[1].shape[1] == 1
         assert saved[2].shape[1] == 1
+
+
+def _raises_boom(x):
+    raise ValueError("boom in instrumented forward")
+
+
+class RaisesInForward(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(8, 8)
+
+    def forward(self, x):
+        h = self.fc(x)
+        h = _raises_boom(h)  # the call that raises
+        return h
+
+
+class TestExceptionLineNumbers:
+    """An exception inside a `.source`-instrumented forward keeps the real line."""
+
+    def test_instrumented_forward_exception_reports_real_line(self):
+        import inspect
+        import traceback
+
+        # The real file line of `h = _raises_boom(h)` in RaisesInForward.forward.
+        src_lines, start = inspect.getsourcelines(RaisesInForward.forward)
+        expected_line = start + next(
+            i for i, line in enumerate(src_lines) if "_raises_boom(h)" in line
+        )
+
+        model = Envoy(RaisesInForward())
+        _ = model.source  # install the AST instrumentation on forward
+
+        try:
+            with model.trace(torch.randn(2, 8)):
+                nnsight.save(model.output)
+        except ValueError as error:
+            frames = [
+                frame
+                for frame in traceback.extract_tb(error.__traceback__)
+                if frame.name == "forward" and frame.filename == __file__
+            ]
+            assert frames, "no forward frame from this file in the traceback"
+            # The instrumented forward's frame points at the real raising line,
+            # not a drifted one (regression: it reported the raw lineno offset).
+            assert frames[-1].lineno == expected_line, (
+                frames[-1].lineno,
+                expected_line,
+            )
+            assert frames[-1].line and "_raises_boom(h)" in frames[-1].line
+        else:
+            pytest.fail("expected ValueError from the instrumented forward")
