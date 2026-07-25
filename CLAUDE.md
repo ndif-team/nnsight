@@ -193,3 +193,7 @@ Agents must not propose any of the following patterns when writing new nnsight c
 ## Open questions log
 
 Writer agents that produced these docs flagged judgment calls / unresolved questions in [docs/questions.md](docs/questions.md). Read it if you're confused about a behavior — your confusion may already be on the list.
+
+## Contributing
+
+PRs should be based on the `dev` instead of the `main` branch.

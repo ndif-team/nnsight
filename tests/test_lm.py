@@ -277,6 +277,51 @@ class TestGradients:
 
         assert not torch.all(hidden_states_grad1.eq(hidden_states_grad2))
 
+    def test_backward_with_multiple_invokers(self, gpt2: nnsight.LanguageModel):
+        """Regression for #664: a gradient requested inside a batched invoke.
+
+        With two or more invokes sharing an input, each invoke's module output
+        is a storage-sharing view of the full batch; a backward hook on that view
+        never fires, raising MissedProviderError. The grad must (a) be provided
+        and (b) match the gradient computed for the same input in a single invoke.
+        """
+        prompt = "The quick brown fox jumps"
+
+        # Reference: single invoke, no batching.
+        with gpt2.trace() as tracer:
+            with tracer.invoke(prompt):
+                ref_x = gpt2.transformer.h[5].attn.c_proj.output
+                with gpt2.lm_head.output.sum().backward():
+                    ref_grad = ref_x.grad.save()
+
+        # Two invokes share the input -> batching views in invoke 2.
+        with gpt2.trace() as tracer:
+            with tracer.invoke(prompt):
+                gpt2.lm_head.output.save()
+            with tracer.invoke(prompt):
+                batched_x = gpt2.transformer.h[5].attn.c_proj.output
+                with gpt2.lm_head.output.sum().backward():
+                    batched_grad = batched_x.grad.save()
+            _test_serialize(tracer)
+
+        assert batched_grad is not None
+        assert torch.allclose(ref_grad, batched_grad, atol=1e-5)
+
+    def test_grad_edit_with_multiple_invokers(self, gpt2: nnsight.LanguageModel):
+        """Editing a gradient inside a batched invoke must be applied (#664)."""
+        prompt = "The quick brown fox jumps"
+        with gpt2.trace() as tracer:
+            with tracer.invoke(prompt):
+                gpt2.lm_head.output.save()
+            with tracer.invoke(prompt):
+                x = gpt2.transformer.h[5].attn.c_proj.output
+                with gpt2.lm_head.output.sum().backward():
+                    grad_before = x.grad.clone().save()
+                    x.grad = x.grad * 3.0
+                    grad_after = x.grad.save()
+
+        assert torch.allclose(grad_after, grad_before * 3.0, atol=1e-5)
+
     def test_external_tensors(self, gpt2: nnsight.LanguageModel):
         """Test using external tensors in trace."""
         device = next(gpt2.parameters())

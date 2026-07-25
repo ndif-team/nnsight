@@ -272,7 +272,13 @@ class Batcher:
         batch_start, batch_size = batch_group
 
         if acts.shape[0] == self.total_batch_size:
-            return acts.narrow(0, batch_start, batch_size)
+            view = acts.narrow(0, batch_start, batch_size)
+            # Tag the view so a backward hook registered on it can be redirected
+            # to the full-batch parent tensor, which is the tensor actually in
+            # the loss graph. Without this, gradients for batched invokes are
+            # never computed for the view (see wrap_grad in tracing/backwards.py).
+            view._nnsight_batch_group = (batch_start, batch_size)
+            return view
 
         return acts
 
