@@ -46,10 +46,10 @@ philosophy tells you what to do. The load-bearing points:
 
 ## Branches
 
-`main` is the release-stable branch; PRs target it unless told otherwise. Branch
-from the latest `main` for your change. Interactive git flags (`git rebase -i`,
-`git add -i`) aren't used here — prefer new commits over force-pushes during
-review; the reviewer squashes on merge.
+Base PRs on `dev`, not `main` — branch from the latest `dev` for your change.
+`main` is release-stable. Interactive git flags (`git rebase -i`, `git add -i`)
+aren't used here — prefer new commits over force-pushes during review; the
+reviewer squashes on merge.
 
 ## Commits
 

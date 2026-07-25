@@ -35,10 +35,13 @@ small subclass of `property` (`eproperty.py:44`) with two ends:
   value to a parked worker and returning it, edited if the worker wrote back.
 
 The location is `"{obj.path}.{key}"`, or just `key` when the host has no `path` (as
-for the tracer's `result`). `Mediator.value` / `Mediator.swap` park the intervention
-greenlet until the interleaver reaches that location, then hand back the value (or
-substitute one). Reading then swapping the same location in one trace works — both
-events drain in a single `handle`.
+for the tracer's `result`). A host is anything satisfying the `IEnvoy` protocol
+(`eproperty.py`): it exposes an `interleaver` and an optional `path` — `path` is read
+via `getattr(obj, "path", "")`, so a tracer host that omits it falls back to the bare
+`key`. `Mediator.value` / `Mediator.swap` park the intervention greenlet until the
+interleaver reaches that location, then hand back the value (or substitute one).
+Reading then swapping the same location in one trace works — both events drain in a
+single `handle`.
 
 ## Defining an eproperty
 

@@ -115,13 +115,23 @@ combined output is built from the invokes' replacements alone:
   `Interleaver.handle` calls `assemble_skip` once, after the mediator loop
   (`interleaver.py:591`-`592`).
 
-### assemble — building the combined forward input
+### add / assemble — building the combined forward input
 
-`Batcher.assemble(fn)` (`batching.py:188`) hands the collected `invokes` to
-`Envoy._batch(invokes, fn)`, which produces the actual `(args, kwargs)` for the run.
-For `TransformersModel` this is where `input_ids` are concatenated and re-padded and
-a combined attention mask is built. The row math above is dim-0 only; `_batch`
-equalizes everything else (e.g. sequence length) when it builds the combined input.
+`Batcher.add(*inputs, **kwargs)` records one input set and returns its `batch_group`.
+A set with no rows — params only (e.g. `max_new_tokens=`) or an empty `invoke()` —
+returns `None` (a groupless, whole-batch worker) and folds its kwargs into
+`extra_kwargs`.
+
+`Batcher.assemble(fn)` hands the row-contributing `invokes` to
+`Envoy._batch(invokes, fn)`, which produces the `(args, kwargs)` for the run — for
+`TransformersModel`, where `input_ids` are concatenated and re-padded and a combined
+attention mask is built — then lays `extra_kwargs` on top. The row math above is
+dim-0 only; `_batch` equalizes everything else (e.g. sequence length).
+
+`Envoy.interleave` uses this uniformly for direct and traced calls: it always `add`s
+the call's `(args, kwargs)` to a batcher and then `assemble`s. A direct (untraced)
+call's input becomes a row; a trace's forward params (passed alongside the batcher)
+fold in as `extra_kwargs` — so there is no separate merge step.
 
 ### Subclassing the Batcher
 

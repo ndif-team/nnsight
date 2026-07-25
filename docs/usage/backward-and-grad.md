@@ -76,6 +76,25 @@ with model.trace("Hello world"):
 # g2 == 2 * g1
 ```
 
+### Gradients inside a batched invoke
+
+Reading `.grad` on an activation captured in a `tracer.invoke(...)` block works even
+when several invokes share the forward — each invoke sees the gradient for *its* rows:
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke("The Eiffel Tower is in"):
+        model.output.logits.save()
+    with tracer.invoke("The Great Wall is in"):
+        hidden = model.transformer.h[-1].output
+        with model.output.logits.sum().backward():
+            grad = hidden.grad.save()   # this invoke's rows only
+```
+
+The activation an invoke reads is a slice-view of the full batch (not itself in the
+loss graph), so nnsight redirects the gradient hook to the full-batch tensor and
+recovers this invoke's rows — no extra work on your part.
+
 ### Standalone backward (plain tensors)
 
 `with tensor.backward():` works on its own for tensors whose autograd graph is

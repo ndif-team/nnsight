@@ -97,8 +97,11 @@ forwards it can't safely instrument, raising `SourceNotAvailable` (`:67`) for:
   supported")`. Unlike the old code, it does not strip decorators and proceed; a
   decorator is load-bearing and dropping it would change behavior.
 
-It then `ast.increment_lineno`s to file coordinates (correct tracebacks), compiles
-the module, and lifts the child code object whose `co_name == func.__name__`. The
+Each rewritten call copies the original call's source location onto its wrapper node
+(`ast.copy_location`), so `ast.increment_lineno` then shifts everything to file
+coordinates and an exception inside an instrumented forward reports the real line
+(without the copy, the locationless wrapper would take the raw offset). It then
+compiles the module and lifts the child code object whose `co_name == func.__name__`. The
 result is a `Compiled` NamedTuple (`:71`): `code`, `names` (op labels in execution
 order), `lines` (label → 1-based line, for the repr), and `source`.
 
