@@ -38,6 +38,18 @@ from nnsight import CONFIG
 CONFIG.set_default_api_key("...")    # writes the user config file
 ```
 
+Or, HuggingFace-style, use the `login` helper — it prompts for the key with
+`getpass` (never echoed) and persists it the same way:
+
+```python
+from nnsight import login
+login()                              # prompts; or login("YOUR_KEY") to skip the prompt
+```
+
+```bash
+nnsight login                        # the same, from a terminal
+```
+
 ### Option 2: environment variable
 
 ```bash
