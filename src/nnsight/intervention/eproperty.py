@@ -36,9 +36,36 @@ served and returns what the user reads, so an identity view is just
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
-from .interleaver import Mediator
+from .interleaver import Interleaver, Mediator
+
+
+@runtime_checkable
+class IEnvoy(Protocol):
+    """Interface for objects that host :class:`eproperty` descriptors.
+
+    An eproperty reads and writes its value through the interleaver at a location
+    derived from the host, so a host must provide:
+
+    Attributes:
+        interleaver: The :class:`~nnsight.intervention.interleaver.Interleaver`
+            managing execution flow (used by :meth:`eproperty.provide` to serve a
+            value from the model side).
+        path: Optional location prefix used to build the eproperty's location
+            (``"{path}.{key}"``). May be ``None`` / empty — :meth:`eproperty._location`
+            then falls back to the key alone. This is how tracer-level eproperties
+            such as :attr:`InterleavingTracer.result` work without a path prefix.
+
+    Notes:
+        Hosts with no meaningful path (e.g. tracers) need not declare ``path`` at
+        all — :meth:`eproperty._location` uses ``getattr(obj, "path", "")``, so a
+        missing attribute is treated the same as ``None`` / ``""``. It is declared
+        ``Optional[str]`` here only for type clarity.
+    """
+
+    interleaver: Interleaver
+    path: Optional[str]
 
 
 class eproperty(property):
@@ -94,11 +121,11 @@ class eproperty(property):
         self._transform = func
         return self
 
-    def _location(self, obj: Any) -> str:
+    def _location(self, obj: IEnvoy) -> str:
         path = getattr(obj, "path", "")
         return f"{path}.{self.key}" if path else self.key
 
-    def __get__(self, obj: Any, owner: Any = None) -> Any:
+    def __get__(self, obj: Optional[IEnvoy], owner: Any = None) -> Any:
         if obj is None:
             return self
         location = self._location(obj)
@@ -112,12 +139,12 @@ class eproperty(property):
             Mediator.current(location).transform = partial(self._transform, obj, value)
         return value
 
-    def __set__(self, obj: Any, value: Any) -> None:
+    def __set__(self, obj: IEnvoy, value: Any) -> None:
         if self._postprocess is not None:
             value = self._postprocess(obj, value)
         Mediator.swap(self._location(obj), value)
 
-    def provide(self, obj: Any, value: Any) -> Any:
+    def provide(self, obj: IEnvoy, value: Any) -> Any:
         """Serve this eproperty's value into the run from the model side.
 
         The counterpart to a worker reading it: hands ``value`` to the interleaver at
