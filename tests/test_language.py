@@ -650,6 +650,27 @@ class TestRename:
             out = gpt2.transformer.layers[1].mlp.output.save()
         assert out.shape[-1] == 768
 
+    @torch.no_grad()
+    def test_forward_call_via_alias(self):
+        # Calling an aliased module runs the same forward as calling it by name.
+        gpt2 = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True,
+            rename={"transformer.h.0.mlp": "my_mlp"},
+        )
+        hidden = torch.randn(1, 4, 768)
+        assert torch.equal(gpt2.my_mlp(hidden), gpt2.transformer.h[0].mlp(hidden))
+
+    @torch.no_grad()
+    def test_input_via_alias(self):
+        # Reading `.input` through an alias matches reading it through the name.
+        gpt2 = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True, rename={"mlp": "ffn"}
+        )
+        with gpt2.trace(PROMPT):
+            via_alias = gpt2.transformer.h[0].ffn.input.save()
+            via_name = gpt2.transformer.h[0].mlp.input.save()
+        assert torch.equal(via_alias, via_name)
+
 
 @pytest.fixture(scope="module")
 def gpt2_meta():
