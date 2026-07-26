@@ -373,36 +373,43 @@ class TransformersModel(HuggingFaceModel):
         self._sync()
         return model
 
-    def _load(self, repo_id: Any, *args: Any, **kwargs: Any) -> torch.nn.Module:
+    def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import pipeline
 
         top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
-        if isinstance(repo_id, str):
-            # From a repo id: the pipeline loads the model and infers every
-            # preprocessor; only forward the ones the user explicitly supplied.
-            provided = {
-                attr: getattr(self, attr)
-                for attr in _PREPROCESSORS
-                if getattr(self, attr) is not None
-            }
-            self.pipeline = pipeline(
-                self.task,
-                model=repo_id,
-                revision=self.revision,
-                **provided,
-                **top_level,
-                model_kwargs=model_kwargs,
-            )
-        else:
-            # From a pre-loaded module: the factory can't infer the task or the
-            # preprocessors from an instance, so infer the task and source the
-            # preprocessors from what was passed in or the model's name_or_path
-            # (captured as self.repo_id).
-            if self.task is None:
-                self.task = _infer_task(repo_id)
-            self.pipeline = pipeline(
-                self.task, model=repo_id, **self._preprocessor_sources(), **top_level
-            )
+        # The pipeline loads the model and infers every preprocessor; only
+        # forward the ones the user explicitly supplied.
+        provided = {
+            attr: getattr(self, attr)
+            for attr in _PREPROCESSORS
+            if getattr(self, attr) is not None
+        }
+        self.pipeline = pipeline(
+            self.task,
+            model=repo_id,
+            revision=self.revision,
+            **provided,
+            **top_level,
+            model_kwargs=model_kwargs,
+        )
+        return self._finalize_pipeline()
+
+    def _wrap(self, module: torch.nn.Module, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        from transformers import pipeline
+
+        top_level, _ = _split_pipeline_kwargs(kwargs)
+        # The pipeline factory can't infer the task or the preprocessors from a
+        # module instance, so infer the task and source the preprocessors from
+        # what was passed in or the model's name_or_path (captured as
+        # self.repo_id).
+        if self.task is None:
+            self.task = _infer_task(module)
+        self.pipeline = pipeline(
+            self.task, model=module, **self._preprocessor_sources(), **top_level
+        )
+        return self._finalize_pipeline()
+
+    def _finalize_pipeline(self) -> torch.nn.Module:
         if self.peft is not None:
             # The pipeline loaded the base weights; wrap them with the adapter's
             # real weights so the dispatched model runs with the adapter applied.

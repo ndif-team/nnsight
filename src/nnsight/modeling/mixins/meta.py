@@ -37,7 +37,7 @@ from torch.overrides import TorchFunctionMode
 
 from ...intervention.envoy import Envoy
 from ...intervention.tracer import ScanningTracer
-from .loadable import Loadable
+from .loadable import Loadable, split_envoy_kwargs
 
 # Legacy ``Tensor.type("torch.cuda.FloatTensor")`` strings, keyed by their
 # trailing class name, mapped to the dtype they denote (the device is dropped).
@@ -155,31 +155,25 @@ class Meta(Loadable):
         self,
         *args: Any,
         dispatch: bool = False,
-        rename: Any = None,
-        envoys: Any = None,
-        interleaver: Any = None,
         **kwargs: Any,
     ) -> None:
         self.dispatched = False
 
-        # rename/envoys/interleaver thread to the Envoy but stay out of
-        # self.kwargs, so they aren't replayed into _load on dispatch; aliases
-        # survive dispatch anyway because _update re-points the same envoy
-        # objects the aliases reference.
+        # Envoy's kwargs thread to the Envoy and stay out of self.kwargs, so
+        # they aren't replayed into _load on dispatch; aliases survive dispatch
+        # anyway because _update re-points the same envoy objects the aliases
+        # reference.
+        envoy_kwargs, load_kwargs = split_envoy_kwargs(kwargs)
         if (args and isinstance(args[0], torch.nn.Module)) or dispatch:
             self.dispatched = True
-            super().__init__(
-                *args, rename=rename, envoys=envoys, interleaver=interleaver, **kwargs
-            )
+            super().__init__(*args, **envoy_kwargs, **load_kwargs)
         else:
             with MetaDevice():
-                model = self._load_meta(*args, **kwargs)
-            Envoy.__init__(
-                self, model, rename=rename, envoys=envoys, interleaver=interleaver
-            )
+                model = self._load_meta(*args, **load_kwargs)
+            Envoy.__init__(self, model, **envoy_kwargs)
 
         self.args = args
-        self.kwargs = kwargs
+        self.kwargs = load_kwargs
 
     def _load_meta(self, *args: Any, **kwargs: Any) -> torch.nn.Module:
         """Build the model's structure on the meta device (no weights loaded).

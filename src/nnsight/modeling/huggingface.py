@@ -54,9 +54,7 @@ class HuggingFaceModel(Remotable):
         config = AutoConfig.from_pretrained(repo_id, revision=self.revision)
         return self._auto().from_config(config)
 
-    def _load(self, repo_id: Any, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        if isinstance(repo_id, torch.nn.Module):
-            return repo_id
+    def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         return self._auto().from_pretrained(repo_id, revision=self.revision, **kwargs)
 
     def _remoteable_model_key(self) -> str:
