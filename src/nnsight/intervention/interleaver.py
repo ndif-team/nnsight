@@ -236,8 +236,21 @@ class Mediator:
         return {"reduced": reduced, "copy": self.copy, "presaved": presaved}
 
     def __setstate__(self, state: dict) -> None:
+        import linecache
+
         source, glbls, lcls = state["reduced"]
-        self.__init__(compile(source, "<edit>", "exec"), glbls, lcls, copy=state["copy"])
+        # Register the block's source under a unique filename so source
+        # introspection works on the receiving side: a nested
+        # ``with tensor.backward():`` captures its body from linecache, and
+        # tracebacks resolve to real lines.
+        filename = f"<edit-{id(self)}>"
+        linecache.cache[filename] = (
+            len(source),
+            None,
+            source.splitlines(keepends=True),
+            filename,
+        )
+        self.__init__(compile(source, filename, "exec"), glbls, lcls, copy=state["copy"])
         self.presaved = state["presaved"]
 
     @classmethod

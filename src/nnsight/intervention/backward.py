@@ -170,6 +170,26 @@ class BackwardTracer(Tracer):
         """
         frame = self.info.frame
 
+        # A tensor that doesn't require grad is outside autograd entirely — no
+        # graph behind it, not itself an accumulation point — so no gradient
+        # can flow from it to anything the block reads. (A requires-grad leaf
+        # passes: grad_fn is None there too, but autograd still fires its
+        # hook with the incoming gradient.)
+        if not self.tensor.requires_grad:
+            raise NotImplementedError(
+                "This tensor does not require grad, so a backward session "
+                "cannot produce gradients: nothing the block reads can ever "
+                "receive one."
+                + (
+                    " This backend's forward runs under torch.inference_mode, "
+                    "so gradients are unavailable here."
+                    if torch.is_inference_mode_enabled()
+                    else " The forward ran without gradient tracking (e.g. "
+                    "under torch.no_grad()), or the tensor was created "
+                    "without requires_grad=True."
+                )
+            )
+
         interleaver = Interleaver()
         mediator = Mediator(
             code, frame.f_globals, dict(frame.f_locals), shared=frame.f_locals
