@@ -6,6 +6,11 @@ logits as running it alone (this also exercises the mask-derived position_ids).
 """
 
 
+import os
+import subprocess
+import sys
+import textwrap
+
 import pytest
 import torch
 import torch.nn as nn
@@ -658,3 +663,57 @@ class TestBatchedIteration:
                 for _ in tracer.iter[:3]:
                     b.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
         assert all(not torch.equal(x, y) for x, y in zip(a, b))
+
+
+class TestCppBacktraceGuard:
+    """A torch op that raises inside an interleaving greenlet must surface as a
+    normal Python exception, not crash the process.
+
+    In a batched trace each invoke runs in its own greenlet; once a worker has
+    parked on a read, a c10 error thrown afterwards used to make torch's error
+    constructor walk the greenlet's (stack-sliced) C stack via glibc backtrace()
+    and segfault. ``CONFIG.APP.DISABLE_CPP_BACKTRACE`` neutralizes that call.
+    Run in a subprocess so a regression is a clean failure here, not a crashed
+    test session.
+    """
+
+    _SCRIPT = textwrap.dedent(
+        """
+        import torch
+        from nnsight.modeling.transformers import TransformersModel
+        model = TransformersModel("gpt2", dispatch=True)
+        with model.trace() as tracer:
+            with tracer.invoke("The Eiffel Tower is in the city of"):
+                _ = model.transformer.h[5].output      # park the worker on a read
+                torch.ones(3) @ torch.ones(4)          # then a c10 RuntimeError
+            with tracer.invoke("The Colosseum is in the city of"):
+                pass
+        """
+    )
+
+    def _run(self, env_extra):
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": "", **env_extra}
+        return subprocess.run(
+            [sys.executable, "-c", self._SCRIPT],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    def test_guard_on_surfaces_python_exception(self):
+        result = self._run({})  # guard on by default
+        # Not a crash signal (SIGSEGV is returncode -11 / 139); the torch error
+        # came out as a normal Python exception.
+        assert result.returncode not in (-11, 139), result.stderr[-2000:]
+        assert "RuntimeError" in result.stderr, result.stderr[-2000:]
+
+    def test_guard_off_reproduces_the_segfault(self):
+        # Turning the guard off should bring the crash back — proof the guard is
+        # what's doing the work, not incidental. Only glibc/x86-64 Linux crashes;
+        # elsewhere the guard is a no-op, so the process exits cleanly either way.
+        if sys.platform != "linux" or __import__("platform").machine() != "x86_64":
+            pytest.skip("segfault only reproduces on glibc/x86-64 Linux")
+        result = self._run({"NNSIGHT_DISABLE_CPP_BACKTRACE": "0"})
+        assert result.returncode in (-11, 139), (
+            f"expected a segfault with the guard off, got {result.returncode}"
+        )

@@ -121,3 +121,10 @@ if CONFIG.APP.PYMOUNT:
         mount(save, "save")
     except Exception:  # noqa: BLE001 — extension optional; save(value) still works
         pass
+
+# Neutralize glibc backtrace() so a torch C++ error raised inside an interleaving
+# greenlet surfaces as a Python exception instead of segfaulting the process.
+if CONFIG.APP.DISABLE_CPP_BACKTRACE:
+    from ._c import install_backtrace_guard
+
+    install_backtrace_guard()

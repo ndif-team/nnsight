@@ -37,6 +37,12 @@ class AppConfig(BaseModel):
     #: ``nnsight.save(value)`` instead. Mounting adds ``.save`` to all objects
     #: process-wide, so anything checking ``hasattr(x, "save")`` will see it.
     PYMOUNT: bool = True
+    #: Whether to neutralize glibc ``backtrace()`` at import so a torch C++ error
+    #: raised inside an interleaving greenlet propagates as a normal Python
+    #: exception instead of segfaulting the process (see
+    #: :mod:`nnsight._c.backtrace`). Only glibc/x86-64 Linux is affected. Turn off
+    #: with ``NNSIGHT_DISABLE_CPP_BACKTRACE=0``.
+    DISABLE_CPP_BACKTRACE: bool = True
 
 
 def _read_yaml(path: Any) -> dict:
@@ -122,6 +128,18 @@ class Config(BaseModel):
 
         if os.environ.get("NNSIGHT_DEBUG"):
             self.APP.DEBUG = True
+
+        # Default-on guard; set NNSIGHT_DISABLE_CPP_BACKTRACE to a falsy value to
+        # keep torch's C++ backtrace capture (and the greenlet segfault risk).
+        cpp_backtrace = os.environ.get("NNSIGHT_DISABLE_CPP_BACKTRACE")
+        if cpp_backtrace is not None:
+            self.APP.DISABLE_CPP_BACKTRACE = cpp_backtrace.strip().lower() not in (
+                "0",
+                "false",
+                "no",
+                "off",
+                "",
+            )
 
     def _from_cli(self) -> None:
         # `-v`/`--verbose` on the launching command turns on debug mode (verbose
