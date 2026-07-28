@@ -1,13 +1,13 @@
 """Low-level, process-wide helpers nnsight installs at import.
 
-- :mod:`py_mount` — a small C extension that writes a method into ``object``'s
+- [`py_mount`][nnsight._c.py_mount] — a small C extension that writes a method into ``object``'s
   type dict (bypassing its read-only ``mappingproxy``), so it appears on *all*
   objects. nnsight uses it to add ``.save()`` universally. Optional: if it didn't
   build, ``mount``/``unmount`` are ``None`` and callers fall back to
   ``nnsight.save(value)``.
-- :mod:`backtrace` — neutralizes glibc ``backtrace()`` so a torch C++ error
+- [`backtrace`][nnsight._c.backtrace] — neutralizes glibc ``backtrace()`` so a torch C++ error
   raised inside an interleaving greenlet surfaces as a normal Python exception
-  instead of segfaulting the process (see :func:`backtrace.install`).
+  instead of segfaulting the process (see [`backtrace.install`][nnsight._c.backtrace.install]).
 """
 
 from .backtrace import install as install_backtrace_guard  # noqa: F401

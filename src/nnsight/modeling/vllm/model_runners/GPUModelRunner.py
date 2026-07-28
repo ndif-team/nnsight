@@ -1,7 +1,7 @@
 """Run interventions inside vLLM's worker, against the real weights.
 
 This is where a trace written in another process actually happens. The runner
-builds its own :class:`~nnsight.modeling.vllm.vllm.VLLM` over the module vLLM
+builds its own [`VLLM`][nnsight.modeling.vllm.vllm.VLLM] over the module vLLM
 loaded, so the module tree here has the same paths the client wrote against; a
 worker arriving on a request then resolves straight onto the real modules.
 
@@ -65,7 +65,7 @@ def _watch_parallel_linears(module: torch.nn.Module, batcher: VLLMBatcher) -> No
     both firing in registration order — these run first: the value is gathered by
     the time a worker reads it. There is no ordered-hook machinery to arrange this;
     it falls out of building the Envoy tree (which registers the interleaver's
-    hooks) after this call and before :func:`_release_parallel_linears`.
+    hooks) after this call and before `_release_parallel_linears`.
     """
     for linear in _parallel_linears(module):
         linear.register_forward_pre_hook(
@@ -120,7 +120,7 @@ class Requests:
         """Take the worker off each new request that carries one.
 
         A request with no nnsight payload is another tenant of the same engine and
-        is left alone — it still occupies tokens in the batch, so :meth:`scope`
+        is left alone — it still occupies tokens in the batch, so [`scope`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.scope]
         counts it, but nothing runs for it. Most steps (every decode step) bring no
         new requests, so this returns immediately then.
 
@@ -275,11 +275,11 @@ class Requests:
     def finish_dangling(self, worker_id: str) -> None:
         """Surface a worker still parked when its request has finished.
 
-        A worker still :attr:`alive` at the end was waiting on a location the model
-        never reached — the interleaver's :meth:`check_dangling_mediators`, but for a
+        A worker still [`alive`][nnsight.intervention.interleaver.Mediator.alive] at the end was waiting on a location the model
+        never reached — the interleaver's [`check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators], but for a
         single request as it retires here rather than after a whole local run. Two
         cases, both unwound by throwing into the worker (so its ``finally`` blocks run):
-        a plain read past the model's point is a real :class:`OutOfOrderError` kept as
+        a plain read past the model's point is a real [`OutOfOrderError`][nnsight.intervention.interleaver.OutOfOrderError] kept as
         the request's deferred error so it reaches the client; a ``tracer.iter`` loop
         that outran generation is expected, so it only warns.
 
@@ -483,11 +483,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
         request is retired by forcing its sampled token to end-of-sequence: the
         scheduler's stop check then finishes it and schedules it no more. Whether the
         exception was an intentional stop or a real error only decides if it is
-        re-raised at the client (see :mod:`nnsight.intervention.errors`). A worker that
+        re-raised at the client (see [`nnsight.intervention.errors`][nnsight.intervention.errors]). A worker that
         raised is no longer alive, so it is found on the tracked requests rather than
         among the still-running interleaver mediators; its row in this step's output is
         its ``batch_group`` (an erred worker is kept scheduled — see
-        :meth:`Requests.scope` — so :meth:`Requests.unflatten` gives it one every step).
+        [`Requests.scope`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.scope] — so [`Requests.unflatten`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.unflatten] gives it one every step).
 
         The forced token is re-applied every step the request survives, because the
         scheduler's stop check can defer it: ``min_tokens`` holds the request open
@@ -590,7 +590,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         A leak gauge: it should return to zero once every request has finished or
         been aborted. A number that only grows across requests means workers are
-        outliving their requests — a finished one is freed in :meth:`collect_nnsight`,
+        outliving their requests — a finished one is freed in `collect_nnsight`,
         an aborted one when its stream is closed (see the async and serve backends).
         """
         return len(self.nnsight_requests.mediators)

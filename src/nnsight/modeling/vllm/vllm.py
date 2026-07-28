@@ -5,7 +5,7 @@ alongside it the way it does for a local ``nn.Module``: this process holds only 
 meta-device copy of the module tree, with no weights to hook. The intervention
 therefore travels *to* the model. Each invoke's worker is serialized into its
 request's ``SamplingParams.extra_args`` and rides vLLM's own request pipeline into
-the worker, where :class:`~nnsight.modeling.vllm.model_runners.GPUModelRunner`
+the worker, where [`GPUModelRunner`][nnsight.modeling.vllm.model_runners.GPUModelRunner]
 deserializes it, runs it against the real module, and ships saved values back.
 
 Two consequences shape everything here. Interventions are scoped to a *request*,
@@ -13,7 +13,7 @@ so each invoke carries exactly one prompt — batching several prompts means sev
 ``tracer.invoke(...)`` blocks, not a list. And because the engine decides when a
 request runs, an activation arrives as a flat ``[total_tokens, hidden]`` slab of
 whatever the scheduler packed into that step rather than a padded ``[batch, seq]``
-stack; :class:`~nnsight.modeling.vllm.batching.VLLMBatcher` is what maps a worker
+stack; [`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher] is what maps a worker
 onto its own tokens within it.
 """
 
@@ -156,7 +156,7 @@ class VLLM(Remotable):
 
     @eproperty(description="token ids drawn from logits this step")
     def samples(self, value: Any) -> Any:
-        """The token ids the sampler drew from :attr:`logits` for this step.
+        """The token ids the sampler drew from [`logits`][nnsight.modeling.vllm.vllm.VLLM.logits] for this step.
 
         Read or edit them inside a trace; setting them replaces the tokens the engine
         continues generation from — force a token::
@@ -402,7 +402,7 @@ class VLLM(Remotable):
         return super().trace(*inputs, **kwargs)
 
     def generate(self, *inputs: Any, **kwargs: Any) -> Any:
-        """Alias for :meth:`trace`, for parity with other models' ``generate``.
+        """Alias for `trace`, for parity with other models' ``generate``.
 
         vLLM generation is driven by ``max_tokens`` (``trace`` rewrites
         ``max_new_tokens`` to it), so there is no forward/generate distinction to draw.
@@ -498,11 +498,11 @@ class VLLM(Remotable):
     def interleave(self, fn: Callable, *args: Any, **kwargs: Any) -> Any:
         """Dispatch the trace to the engine instead of running it here.
 
-        Overrides :meth:`~nnsight.intervention.envoy.Envoy.interleave`, which starts
+        Overrides [`interleave`][nnsight.intervention.envoy.Envoy.interleave], which starts
         each worker in this process alongside the model's forward. There is no
         forward to run here — the weights live in the engine's worker — so the
         workers are not started; they are serialized onto the requests by
-        :meth:`_call` and started by the model runner on the other side.
+        `_call` and started by the model runner on the other side.
         """
         if not self.dispatched:
             self.dispatch()

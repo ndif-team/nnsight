@@ -17,7 +17,7 @@ whose gradients you want are the real tensors produced during the run::
 
 Gradients flow in the reverse of the forward pass, so ``.grad`` must be requested
 in reverse-forward order — requesting an earlier-forward tensor's gradient before
-a later one raises :class:`~.interleaver.OutOfOrderError`.
+a later one raises `OutOfOrderError`.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def _grad_property(
 ) -> property:
     """Build the ``Tensor.grad`` replacement property for one backward trace.
 
-    The returned :class:`property` is installed on ``torch.Tensor`` for the
+    The returned `property` is installed on ``torch.Tensor`` for the
     duration of a single backward run. Reading ``t.grad`` registers a
     self-removing autograd hook on ``t`` (at most once per tensor) and parks the
     block until autograd produces that gradient; assigning ``t.grad = v`` replaces
@@ -50,7 +50,7 @@ def _grad_property(
         seen: Set of tensor ids already given a hook, used to avoid registering a
             second hook on the same tensor.
         hooks: List that collects the registered hook handles so
-            :meth:`BackwardTracer.execute` can remove them when the trace ends.
+            [`BackwardTracer.execute`][nnsight.intervention.backward.BackwardTracer.execute] can remove them when the trace ends.
 
     Returns:
         property: A ``getter``/``setter`` property to bind to ``torch.Tensor.grad``.
@@ -146,7 +146,7 @@ class BackwardTracer(Tracer):
             fn: The real, unpatched ``Tensor.backward`` to call during execution.
             *args: Positional arguments forwarded to ``fn`` (e.g. ``gradient``).
             backend: Optional execution backend passed to the base
-                :class:`~..tracing.tracer.Tracer`.
+                `Tracer`.
             **kwargs: Keyword arguments forwarded to ``fn`` (e.g. ``retain_graph``).
         """
         super().__init__(backend=backend)
@@ -159,11 +159,11 @@ class BackwardTracer(Tracer):
         """Run the real backward, serving the block's ``.grad`` reads and writes.
 
         Compiles the ``with`` block into an intervention mediator, installs the
-        :func:`_grad_property` on ``torch.Tensor``, and drives the real backward
+        `_grad_property` on ``torch.Tensor``, and drives the real backward
         under an interleaver: as autograd produces each gradient, its hook hands
         the value to the block, which may read or replace it. Cleans up the patched
         property and every registered hook afterwards, then pushes the results back
-        with save-gating (see :meth:`Tracer.execute`).
+        with save-gating (see [`Tracer.execute`][nnsight.tracing.tracer.Tracer.execute]).
 
         Args:
             code: Compiled code object for the body of the ``with`` block.
@@ -204,9 +204,9 @@ _original_backward = torch.Tensor.backward
 def _backward(tensor: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
     """Patched ``Tensor.backward`` that traces only when used as a context manager.
 
-    ``with t.backward():`` returns a :class:`BackwardTracer` whose ``__enter__``
+    ``with t.backward():`` returns a [`BackwardTracer`][nnsight.intervention.backward.BackwardTracer] whose ``__enter__``
     captures the following block. A bare ``t.backward()`` has no ``with`` block, so
-    capture raises :class:`~..tracing.tracer.WithBlockNotFoundError` and this falls
+    capture raises `WithBlockNotFoundError` and this falls
     through to the real backward — leaving ordinary usage unchanged.
 
     Args:
@@ -215,7 +215,7 @@ def _backward(tensor: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
         **kwargs: Keyword arguments for ``backward`` (e.g. ``retain_graph``).
 
     Returns:
-        A :class:`BackwardTracer` when used as ``with t.backward():``, otherwise
+        A [`BackwardTracer`][nnsight.intervention.backward.BackwardTracer] when used as ``with t.backward():``, otherwise
         the return value of the real ``Tensor.backward`` (``None``).
     """
     tracer = BackwardTracer(tensor, _original_backward, *args, **kwargs)
@@ -229,7 +229,7 @@ def _backward(tensor: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
 def install() -> None:
     """Patch ``Tensor.backward`` so ``with t.backward():`` enters a BackwardTracer.
 
-    Idempotent: replaces ``torch.Tensor.backward`` with :func:`_backward` only if it
+    Idempotent: replaces ``torch.Tensor.backward`` with `_backward` only if it
     isn't already installed. Called once at import time so the context-manager form
     is available everywhere, while plain ``t.backward()`` keeps working unchanged.
     """

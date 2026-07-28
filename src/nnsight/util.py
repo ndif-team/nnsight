@@ -72,12 +72,12 @@ def apply(data: Any, fn: Callable[[Any], Any], cls: type, n: int = 0) -> Any:
 
 
 def to_import_path(obj: type) -> str:
-    """The dotted ``module.QualName`` path that :func:`from_import_path` resolves."""
+    """The dotted ``module.QualName`` path that [`from_import_path`][nnsight.util.from_import_path] resolves."""
     return f"{obj.__module__}.{obj.__qualname__}"
 
 
 def from_import_path(path: str) -> Any:
-    """Resolve a dotted ``module.QualName`` path (as produced by :func:`to_import_path`)."""
+    """Resolve a dotted ``module.QualName`` path (as produced by [`to_import_path`][nnsight.util.to_import_path])."""
     module_path, _, qualname = path.rpartition(".")
     module = importlib.import_module(module_path)
     obj = module

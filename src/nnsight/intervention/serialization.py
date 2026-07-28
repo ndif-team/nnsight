@@ -7,11 +7,11 @@ can parse the syntax (client and server need not match).
 
 Two mechanisms layer on top of cloudpickle:
 
-* :func:`code_reduce` — reduces a block of source plus its scope to a filtered
+* [`code_reduce`][nnsight.intervention.serialization.code_reduce] — reduces a block of source plus its scope to a filtered
   ``(source, globals, locals)`` tuple (only the names the source references, and
   the code as text). ``RequestModel.serialize`` ships the traced block as one of
   these tuples, and the function reducer runs a dynamic ``def``'s source/globals
-  through it too; :func:`_load_function` compiles the source back to a code
+  through it too; `_load_function` compiles the source back to a code
   object on the far side.
 * Persistent ids — objects carrying a ``_persistent_id`` in their ``__dict__``
   are written as that id and resolved on the other side from a
@@ -150,11 +150,11 @@ def code_reduce(source: str, globals: dict, locals: dict) -> tuple:
     Returns ``(source, used_globals, used_locals)`` — the code as text (so it
     recompiles on any Python version) plus only the globals/locals the source
     references, so the whole enclosing scope isn't shipped. Shared by both the
-    traced-block payload and the dynamic-function reducer; :func:`_load_function`
+    traced-block payload and the dynamic-function reducer; `_load_function`
     (or the eventual block executor) compiles the source back into a code object.
 
     Names are looked up by subscript rather than by iterating ``.items()`` so a
-    :class:`~nnsight.tracing.util.Scope` globals resolves through its fallback
+    [`Scope`][nnsight.tracing.util.Scope] globals resolves through its fallback
     chain: a nested block (a ``tracer.invoke(...)`` body) runs with a Scope as its
     globals, whose iteration yields only the block's own names, leaving a module
     global it references (e.g. ``torch``) out of the payload.
@@ -178,7 +178,7 @@ def reduce_block(node: Any, globals: dict, locals: dict) -> tuple:
 
     Unparses the block *body* to source — padded with leading blank lines so the
     statements keep their original line numbers (a remote traceback then points at
-    the right line) — and :func:`code_reduce`\\ s it against its scope. Shared by the
+    the right line) — and [`code_reduce`][nnsight.intervention.serialization.code_reduce]\\ s it against its scope. Shared by the
     request payload (the traced block) and edit-mediator serialization.
     """
     import ast
@@ -197,11 +197,11 @@ def _load_function(
     origin_filename: str,
     origin_line: int,
 ) -> types.FunctionType:
-    """Rebuild a dynamic function from a :func:`code_reduce` tuple's source.
+    """Rebuild a dynamic function from a [`code_reduce`][nnsight.intervention.serialization.code_reduce] tuple's source.
 
     Compiles the source and lifts out the function's code object rather than
     executing the ``def``, so defaults/annotations aren't re-evaluated against
-    incomplete globals. The function starts with empty globals; :func:`_fill`
+    incomplete globals. The function starts with empty globals; `_fill`
     populates them after pickle has memoized it (so recursive references resolve).
 
     The code is padded so its line numbers match the original file, and compiled
@@ -243,7 +243,7 @@ def _load_function(
 def _fill(func: types.FunctionType, globals: dict) -> None:
     """Populate a reconstructed function's globals after it's been memoized.
 
-    Deferring this (rather than passing globals to :func:`_load_function`) is
+    Deferring this (rather than passing globals to `_load_function`) is
     what lets a function's own name — present in its globals for recursion —
     resolve to the already-memoized function instead of recursing during pickling.
     """

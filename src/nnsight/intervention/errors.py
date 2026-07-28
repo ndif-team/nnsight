@@ -1,12 +1,12 @@
 """Carry a deferred worker exception back to the trace that wrote it.
 
-A deferring interleaver (:attr:`~nnsight.intervention.interleaver.Interleaver.defer_exceptions`)
+A deferring interleaver ([`defer_exceptions`][nnsight.intervention.interleaver.Interleaver.defer_exceptions])
 records a worker's exception on its mediator instead of raising it out of the
 hook, so the driver can end just that worker's request. The error still has to
 reach the client that wrote the intervention — which may be another process — so
 it is reduced to a plain, picklable dict in the worker and re-raised at the client.
 
-A ``tracer.stop()`` raises :class:`~nnsight.intervention.interleaver.EarlyStopException`,
+A ``tracer.stop()`` raises [`EarlyStopException`][nnsight.intervention.interleaver.EarlyStopException],
 which travels the same path but is control flow, not an error: it is marked and
 never re-raised.
 """
@@ -30,7 +30,7 @@ def capture_exception(exception: BaseException) -> DeferredError:
     """Reduce a worker's exception to a wire-safe dict.
 
     Uses the intervention-only traceback stashed by
-    :meth:`~nnsight.intervention.interleaver.Mediator.switch` when present, so the
+    [`switch`][nnsight.intervention.interleaver.Mediator.switch] when present, so the
     surfaced trace points at the user's line rather than the model/hook stack.
     """
     tb = getattr(exception, "__intervention_tb__", None) or exception.__traceback__

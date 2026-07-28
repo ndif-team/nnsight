@@ -5,11 +5,11 @@ lets you record a block of interventions once and have it replayed automatically
 on every future trace of that envoy — no need to repeat it each time. Think of an
 edit as a permanent patch to the model's behavior.
 
-By default :meth:`Envoy.edit` leaves the original envoy clean and returns an
+By default [`Envoy.edit`][nnsight.intervention.envoy.Envoy.edit] leaves the original envoy clean and returns an
 edited copy, so you opt into the edited behavior through the copy that
 ``with model.edit() as (tracer, edited):`` binds. Pass ``inplace=True`` to edit
 the envoy itself, in which case only the tracer is bound. Stored edits can be
-removed with :meth:`Envoy.clear_edits`.
+removed with [`Envoy.clear_edits`][nnsight.intervention.envoy.Envoy.clear_edits].
 
 Example:
     >>> import torch.nn as nn
@@ -48,12 +48,12 @@ if TYPE_CHECKING:
 class EditingTracer(InterleavingTracer):
     """Record a block of interventions and replay it on every future trace.
 
-    Returned by :meth:`Envoy.edit`. An edit block is written like a
+    Returned by [`Envoy.edit`][nnsight.intervention.envoy.Envoy.edit]. An edit block is written like a
     ``with envoy.trace():`` block, but instead of running once it is stored and
     replayed automatically on every later trace of the envoy. With
     ``inplace=False`` (default) the original envoy is left clean and an edited copy
     is returned alongside the tracer; ``inplace=True`` edits the envoy itself and
-    binds only the tracer. Edits stack and persist until :meth:`Envoy.clear_edits`.
+    binds only the tracer. Edits stack and persist until [`Envoy.clear_edits`][nnsight.intervention.envoy.Envoy.clear_edits].
 
     Being a trace block, it carries the tracer's ``iter`` API — use it to re-apply
     an edit at every occurrence of a location, e.g. each generation step.
@@ -116,7 +116,7 @@ class EditingTracer(InterleavingTracer):
         """Store the block instead of running it.
 
         Overrides the base trace behavior: rather than executing ``code`` against a
-        live model run, append it to ``envoy._edits`` so :meth:`Envoy.interleave`
+        live model run, append it to ``envoy._edits`` so [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave]
         replays it on every later trace.
         """
         # Store the captured block as a mediator (code + scope), don't run it.

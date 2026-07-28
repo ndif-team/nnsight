@@ -13,7 +13,7 @@ def first_input(args: tuple, kwargs: dict) -> Any:
 
 
 def replace_first_input(args: tuple, kwargs: dict, value: Any) -> tuple:
-    """``(args, kwargs)`` with :func:`first_input` swapped for ``value``."""
+    """``(args, kwargs)`` with [`first_input`][nnsight.intervention.util.first_input] swapped for ``value``."""
     if args:
         return ((value, *args[1:]), kwargs)
     key = next(iter(kwargs))

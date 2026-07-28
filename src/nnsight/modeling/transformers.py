@@ -17,7 +17,7 @@ this module leans on the pipeline rather than re-deriving any of it:
   ``_sanitize_parameters`` splitting preprocess from forward kwargs), and the
   per-invoke encodings are padded together by the pipeline's ``pad_collate_fn``.
 * **Padding**: which side to pad is the model's business, not the task's, so it
-  follows :meth:`TransformersModel._is_causal` — decoders left-pad and get
+  follows `TransformersModel._is_causal` — decoders left-pad and get
   mask-derived ``position_ids``; encoders keep right padding.
 
 Three ways in, and the difference matters:
@@ -167,7 +167,7 @@ class Generator(WrapperModule):
     """Passthrough for the generation output.
 
     Generation output is passed through this module so it is readable/editable at
-    ``model.generator.output`` inside a trace. Its :class:`Streamer` submodule
+    ``model.generator.output`` inside a trace. Its [`Streamer`][nnsight.modeling.transformers.Generator.Streamer] submodule
     receives tokens as they are decoded (HuggingFace's ``streamer`` protocol), so
     ``model.generator.streamer.output`` gives per-step token access.
 
@@ -196,8 +196,8 @@ class TransformersModel(HuggingFaceModel):
 
     See the module docstring for what the pipeline is leaned on for. ``task`` picks
     the pipeline (inferred from the checkpoint when unset). There are three ways to
-    run it: :meth:`trace` runs one forward, :meth:`generate` generates through the
-    model and returns token ids, and :meth:`pipe` runs the whole pipeline and
+    run it: `trace` runs one forward, `generate` generates through the
+    model and returns token ids, and [`pipe`][nnsight.modeling.transformers.TransformersModel.pipe] runs the whole pipeline and
     returns what it postprocesses to (decoded text, labels, ...).
 
     The pipeline and its preprocessors are exposed as attributes, so the
@@ -435,12 +435,12 @@ class TransformersModel(HuggingFaceModel):
         ``tracer.iter`` to target a particular step. Calling it directly just
         generates. The output is the whole prompt plus completion as token ids.
 
-        Generating goes through the model, not the task's pipeline (see :meth:`pipe`
+        Generating goes through the model, not the task's pipeline (see [`pipe`][nnsight.modeling.transformers.TransformersModel.pipe]
         for that): the model takes the same inputs a forward does — text, token ids,
         a tensor, or an encoding — and generates the way calling it would, with the
         checkpoint's own settings rather than the ``task_specific_params`` a pipeline
         would fold in. Read the ids off ``tracer.result``; they also pass through
-        :attr:`generator`, whose ``model.generator.streamer.output`` gives per-step
+        [`generator`][nnsight.modeling.transformers.TransformersModel.generator], whose ``model.generator.streamer.output`` gives per-step
         access (reading the finished ids at ``model.generator.output`` is deprecated
         in favor of ``tracer.result``).
 
@@ -451,7 +451,7 @@ class TransformersModel(HuggingFaceModel):
             >>> print(model.tokenizer.batch_decode(ids))
 
         Args:
-            *inputs: What to generate from — the same forms :meth:`trace` takes.
+            *inputs: What to generate from — the same forms `trace` takes.
             **kwargs: Passed to the model's ``generate``, e.g. ``max_new_tokens``.
                 ``streamer`` defaults to this model's; pass it to override.
 
@@ -469,7 +469,7 @@ class TransformersModel(HuggingFaceModel):
     def pipe(self, *inputs: Any, **kwargs: Any) -> Any:
         """Run the task's pipeline end to end, returning what it postprocesses to.
 
-        Where :meth:`generate` goes through the model and returns token ids, this
+        Where `generate` goes through the model and returns token ids, this
         runs the whole pipeline — decoded-text records for text-generation, labels
         for a classifier, and so on — the pipeline tokenizing and collating its own
         input. Traced like the others: the block sees every forward the pipeline
@@ -505,7 +505,7 @@ class TransformersModel(HuggingFaceModel):
         """The per-request environment this model wants applied server-side.
 
         Returned client-side and carried with a remote request; the server
-        applies it via :meth:`_remoteable_set_env` before running. Only the PEFT
+        applies it via `_remoteable_set_env` before running. Only the PEFT
         adapter is transported — the base model is identified by the model key.
         """
         return {} if self.peft is None else {"peft": self.peft}
@@ -649,8 +649,8 @@ class TransformersModel(HuggingFaceModel):
     def _as_chats(data: Any) -> Optional[list]:
         """Chat message(s) -> a list of ``Chat`` inputs (one per conversation).
 
-        Mirrors the chat detection :meth:`Pipeline.__call__` does before preprocess,
-        which calling :meth:`Pipeline.preprocess` directly would otherwise skip.
+        Mirrors the chat detection `Pipeline.__call__` does before preprocess,
+        which calling `Pipeline.preprocess` directly would otherwise skip.
         Returns ``None`` when ``data`` isn't chat messages.
         """
         from transformers.pipelines.base import Chat, is_valid_message
@@ -672,8 +672,8 @@ class TransformersModel(HuggingFaceModel):
         ``pipe`` runs the whole pipeline, so text prompts are handed to it as a list
         with ``batch_size`` (it preprocesses and collates them itself). ``generate``
         and ``trace`` run the model, so their input is assembled into model inputs
-        here (see :meth:`_batch_forward`): each invoke's text/image is turned into
-        model inputs by :meth:`Pipeline.preprocess` and the per-invoke encodings are
+        here (see `_batch_forward`): each invoke's text/image is turned into
+        model inputs by `Pipeline.preprocess` and the per-invoke encodings are
         padded together by the pipeline's own ``pad_collate_fn``; pre-tokenized ids
         and raw feature tensors bypass preprocessing.
         """
@@ -688,7 +688,7 @@ class TransformersModel(HuggingFaceModel):
         """Assemble invokes into model inputs for ``generate``.
 
         Generating through the model takes the same model inputs a forward does, so
-        this is :meth:`_batch_forward` — overridden by models whose generate input
+        this is `_batch_forward` — overridden by models whose generate input
         needs different handling (a VLM runs its processor first).
         """
         return self._batch_forward(invokes)

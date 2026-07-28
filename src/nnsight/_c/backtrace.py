@@ -2,7 +2,7 @@
 an interleaving greenlet.
 
 nnsight runs intervention code in greenlets (see
-:mod:`nnsight.intervention.interleaver`). greenlet time-shares one OS thread
+[`nnsight.intervention.interleaver`][nnsight.intervention.interleaver]). greenlet time-shares one OS thread
 stack by copying stack *slices* in and out of the heap on every switch. When a
 torch op raises a ``c10`` error while a worker greenlet is running, torch's
 ``c10::Error`` constructor eagerly captures a C++ backtrace via glibc

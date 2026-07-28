@@ -1,20 +1,20 @@
 """Helpers for the tracer: frame serialization, traceback cleanup, and writing
 variables back into a live frame.
 
-These support two jobs that the :class:`~nnsight.tracing.tracer.Tracer` can't do
+These support two jobs that the [`Tracer`][nnsight.tracing.tracer.Tracer] can't do
 inline:
 
 - **Serialization** — a real Python frame can't be pickled, so
-  :class:`SerializedFrame` stands in for one when a trace is shipped to a remote
+  [`SerializedFrame`][nnsight.tracing.util.SerializedFrame] stands in for one when a trace is shipped to a remote
   worker, keeping just the code metadata needed for tracebacks.
 - **Traceback surgery** — user intervention code runs deep inside the model's
   forward pass, so exceptions come back wrapped in nnsight frames.
-  :func:`clean_traceback` strips nnsight internals away so the error points at
+  [`clean_traceback`][nnsight.tracing.util.clean_traceback] strips nnsight internals away so the error points at
   the user's own code (across whatever files it spans).
-- **Frame write-back** — :func:`push` copies the results of an executed block
+- **Frame write-back** — [`push`][nnsight.tracing.util.push] copies the results of an executed block
   back into the frame the ``with`` statement lived in, so assignments made inside
   the block are visible afterwards.
-- **Block scope** — :class:`Scope` is the namespace a captured block runs in, and
+- **Block scope** — [`Scope`][nnsight.tracing.util.Scope] is the namespace a captured block runs in, and
   the reason a block can read the names around it even though it runs later, and
   somewhere else, than the line it was written on.
 """
@@ -40,22 +40,22 @@ class Scope(dict):
        captured. A name the block only reads means what it meant *where the block
        was written*: a ``for prompt in prompts:`` variable has moved on (or gone)
        by the time the block runs, so the snapshot is what keeps it right.
-    2. :attr:`shared` — the live locals of the frame the block was written in.
+    2. [`shared`][nnsight.tracing.util.Scope.shared] — the live locals of the frame the block was written in.
        A name bound by a *sibling* block (an earlier ``tracer.invoke(...)``) isn't
        in the snapshot, because nothing had bound it when this block was captured.
        Blocks written in one frame share these; blocks written in different
        functions have different frames, so they stay as separate as their code.
-    3. :attr:`glbls` — the frame's globals, reached by fallback rather than copied.
+    3. `glbls` — the frame's globals, reached by fallback rather than copied.
 
     Passing this as ``exec``'s *globals* (not just its locals) is what lets a
     ``lambda`` or nested ``def`` inside a block reach the block's own names: their
     free variables compile to ``LOAD_GLOBAL``, which never consults a locals
     mapping — but does honor ``__missing__`` on a dict subclass.
 
-    Writes land here *and* in :attr:`shared`, so the block sees its own
+    Writes land here *and* in [`shared`][nnsight.tracing.util.Scope.shared], so the block sees its own
     assignments and so do the blocks written beside it. Because only the snapshot
     and the block's writes are ever stored, iterating a scope yields the block's
-    own names — what :func:`push` and the block reducers want — and never the
+    own names — what [`push`][nnsight.tracing.util.push] and the block reducers want — and never the
     whole global namespace.
     """
 
@@ -114,7 +114,7 @@ def filter_traceback(
 
     Tracebacks are immutable and singly linked, so we can't delete entries in
     place — we collect the ones to keep and re-link a fresh chain (from the tail
-    up, since each :class:`TracebackType` points to the *next* frame).
+    up, since each `TracebackType` points to the *next* frame).
 
     Args:
         traceback: The head of the traceback chain to filter (may be ``None``).

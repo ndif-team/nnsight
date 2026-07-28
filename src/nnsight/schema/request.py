@@ -16,7 +16,7 @@ class RequestModel(BaseModel):
     """The JSON routing envelope for a remote request.
 
     The execution payload (the interventions plus how to invoke the model) is
-    not stored here; :meth:`serialize` builds it from a tracer on demand. The
+    not stored here; [`serialize`][nnsight.schema.request.RequestModel.serialize] builds it from a tracer on demand. The
     model itself is never carried — it's identified by ``model_key``.
     """
 
@@ -38,7 +38,7 @@ class RequestModel(BaseModel):
     def serialize(cls, tracer: Any, compress: bool = False) -> bytes:
         """Turn a tracer into the binary execution payload.
 
-        Reduces the traced block with :func:`~nnsight.intervention.serialization.reduce_block`
+        Reduces the traced block with [`reduce_block`][nnsight.intervention.serialization.reduce_block]
         — its source (unparsed from the tracer's AST) plus only the globals/locals
         it references — so it ships as text rather than version-fragile bytecode,
         and hands that tuple, with the tracer (which carries the model

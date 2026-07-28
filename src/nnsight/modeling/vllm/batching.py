@@ -7,9 +7,9 @@ on prefill, a single token per decode step — and which requests are in that sl
 changes from step to step as they arrive and finish.
 
 So a worker's group is a *token span*, recomputed every step by
-:class:`~nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner`
+[`NNsightGPUModelRunner`][nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner]
 rather than assigned once up front. The row math itself is unchanged from
-:class:`~nnsight.intervention.batching.Batcher`: dim 0 is the token axis, so
+[`Batcher`][nnsight.intervention.batching.Batcher]: dim 0 is the token axis, so
 narrowing to ``[start, size]`` selects exactly a request's tokens.
 
 Under tensor parallelism a second correction is needed. vLLM splits its linear
@@ -30,7 +30,7 @@ from ...util import apply
 
 
 class VLLMBatcher(Batcher):
-    """A :class:`~nnsight.intervention.batching.Batcher` over vLLM's flat token axis.
+    """A [`Batcher`][nnsight.intervention.batching.Batcher] over vLLM's flat token axis.
 
     Attributes:
         module: The parallel linear currently running, or None outside one.
@@ -76,7 +76,7 @@ class VLLMBatcher(Batcher):
 
         Only the parallel linears shard anything, so everywhere else this is the
         value itself. The result is kept for the rest of the module's turn: workers
-        read and edit this one tensor in place, and :meth:`release` reshards it back
+        read and edit this one tensor in place, and [`release`][nnsight.modeling.vllm.batching.VLLMBatcher.release] reshards it back
         to the model afterwards. Keeping it also means each rank takes part in the
         gather collective once per value rather than once per worker — several
         workers reading the same value would otherwise deadlock the ranks.
@@ -159,7 +159,7 @@ class VLLMBatcher(Batcher):
         If the value was gathered, the workers read and edited *that* whole tensor,
         so what vLLM continues from is a fresh shard of it — not the shard it
         produced, which the workers never saw. An edit rebuilds the whole through
-        :meth:`widen`, which writes it back onto ``gathered``, so re-sharding
+        `widen`, which writes it back onto ``gathered``, so re-sharding
         ``gathered`` carries the edit; a read leaves ``gathered`` as the plain
         assembly. When nothing gathered (the common, unsharded case) the value
         passes straight through.

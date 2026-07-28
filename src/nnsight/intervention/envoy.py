@@ -1,12 +1,12 @@
-"""The :class:`Envoy` — nnsight's window into a running PyTorch model.
+"""The [`Envoy`][nnsight.intervention.envoy.Envoy] — nnsight's window into a running PyTorch model.
 
-An :class:`Envoy` wraps a :class:`torch.nn.Module` and mirrors its submodule
+An [`Envoy`][nnsight.intervention.envoy.Envoy] wraps a `torch.nn.Module` and mirrors its submodule
 tree, so every module in the model has a matching envoy reachable by the same
 attribute path (``model.transformer.h[0].mlp``). Envoys are the objects you
 interact with when tracing: they expose each module's live ``input``/``output``
 during a forward pass, let you overwrite those values, read gradients, skip
 whole modules, and reach individual operations inside a forward via
-:attr:`~Envoy.source`.
+[`source`][nnsight.intervention.envoy.Envoy.source].
 
 You open a trace with ``with model.trace(x):`` and, inside the block, read or
 write envoy attributes as if the forward pass had paused at each module for you.
@@ -39,7 +39,7 @@ earlier in the forward — you can edit gradients too:
 
 Locations must be read in execution order: asking for an earlier module's output
 after a later one has already run raises
-:class:`~nnsight.intervention.interleaver.OutOfOrderError`.
+[`OutOfOrderError`][nnsight.intervention.interleaver.OutOfOrderError].
 """
 
 from __future__ import annotations
@@ -105,11 +105,11 @@ def _addindent(text: str, spaces: int) -> str:
 
 
 class Envoy:
-    """Wraps a :class:`torch.nn.Module` to expose and edit its values during a trace.
+    """Wraps a `torch.nn.Module` to expose and edit its values during a trace.
 
     One envoy mirrors one module and reads or overwrites that module's live
     ``input``/``output`` (and gradients) as the forward pass runs, driving those
-    interventions through a shared :class:`~nnsight.intervention.interleaver.Interleaver`.
+    interventions through a shared [`Interleaver`][nnsight.intervention.interleaver.Interleaver].
     The child envoys mirror the module's submodule tree, so the whole model is
     reachable by attribute path from the root envoy. See the module docstring for
     the mental model.
@@ -118,11 +118,11 @@ class Envoy:
         path: The module's dotted location in the tree, e.g. ``"model.transformer.h.0"``.
             Every location the interleaver reads (``{path}.output``, ``{path}.skip``)
             is derived from it.
-        interleaver: The :class:`~nnsight.intervention.interleaver.Interleaver`
+        interleaver: The [`Interleaver`][nnsight.intervention.interleaver.Interleaver]
             shared across the whole tree; it installs the hooks and routes values.
-        _module: The wrapped :class:`torch.nn.Module`.
-        _edits: Default interventions registered by :meth:`edit`, replayed on every
-            trace (a list of :class:`~nnsight.intervention.interleaver.Mediator`).
+        _module: The wrapped `torch.nn.Module`.
+        _edits: Default interventions registered by [`edit`][nnsight.intervention.envoy.Envoy.edit], replayed on every
+            trace (a list of [`Mediator`][nnsight.intervention.interleaver.Mediator]).
         _children: The direct child envoys, in module order.
     """
 
@@ -144,7 +144,7 @@ class Envoy:
         # Default interventions registered via .edit(), replayed on every trace.
         self._edits: list[Mediator] = []
 
-        # Module-name aliases (see `rename` / :meth:`_bind_aliases`). `_rename` is
+        # Module-name aliases (see `rename` / `_bind_aliases`). `_rename` is
         # the raw spec, inherited by children; `_aliases` maps each alias bound on
         # *this* envoy to the real path it resolved from (used by `__repr__`).
         self._rename = rename
@@ -152,7 +152,7 @@ class Envoy:
 
         # Optional map choosing a custom Envoy subclass per child module (by module
         # type or path suffix); inherited by children so it applies all the way
-        # down. See :meth:`_resolve_envoy_class`.
+        # down. See `_resolve_envoy_class`.
         self._envoys = envoys
 
         self._children: list[Envoy] = []
@@ -230,12 +230,12 @@ class Envoy:
         it resolves (each block that has one), while a multi-component path like
         ``"transformer.h.3.mlp"`` binds only on the envoy it resolves from. A
         leading dot is a no-op — path components are matched by name (an empty
-        first component is skipped, mirroring :func:`nnsight.util.fetch_attr`).
+        first component is skipped, mirroring `nnsight.util.fetch_attr`).
 
         Aliases are ordinary attributes referencing the *same* child object (not
-        copies, and not added to :attr:`_children`), so ``__getattr__`` needs no
+        copies, and not added to `_children`), so ``__getattr__`` needs no
         alias branch, iteration doesn't double-count, and re-pointing the tree on
-        dispatch (:meth:`_update`, in place) keeps them valid with no rebuild.
+        dispatch (`_update`, in place) keeps them valid with no rebuild.
         """
         if not self._rename:
             return
@@ -257,13 +257,13 @@ class Envoy:
         return self._wrap_envoy(name, module)
 
     def _resolve_envoy_class(self, module: torch.nn.Module, path: str) -> type["Envoy"]:
-        """The :class:`Envoy` class to wrap ``module`` (at ``path``) with.
+        """The [`Envoy`][nnsight.intervention.envoy.Envoy] class to wrap ``module`` (at ``path``) with.
 
-        Consults the :attr:`_envoys` map (``None`` -> the base :class:`Envoy`): a
+        Consults the `_envoys` map (``None`` -> the base [`Envoy`][nnsight.intervention.envoy.Envoy]): a
         single class wraps every child with it; a dict's keys are either a
         ``torch.nn.Module`` subclass (matched against the module's MRO, tried
         first) or a string dotted path-suffix (``"attn"``, ``"transformer.h"``).
-        Falls back to the base :class:`Envoy` when nothing matches — so a model can
+        Falls back to the base [`Envoy`][nnsight.intervention.envoy.Envoy] when nothing matches — so a model can
         give, e.g., its attention modules a subclass exposing a ``.heads`` eproperty.
         """
         mapping = self._envoys
@@ -343,12 +343,12 @@ class Envoy:
         Args:
             *args: Arguments to pass to the tracer
             tracer_cls: Tracer class to construct instead of the default
-                :class:`~nnsight.intervention.tracer.InterleavingTracer` — an
+                [`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer] — an
                 extension point for a custom tracer.
             trace: If ``False``, bypass tracing — run the module directly on the
                 inputs and return its output. A one-shot forward with no
                 intervention: input prep, dispatch, and device placement still
-                happen (via :meth:`interleave`), but no ``with`` block is captured.
+                happen (via `interleave`), but no ``with`` block is captured.
             **kwargs: Keyword arguments to pass to the tracer
 
         Returns:
@@ -370,7 +370,7 @@ class Envoy:
 
         The block is not executed against a live forward; instead the interventions
         it captures are stored and replayed on every later trace of the (edited)
-        model. Clear them with :meth:`clear_edits`.
+        model. Clear them with [`clear_edits`][nnsight.intervention.envoy.Envoy.clear_edits].
 
         Examples:
             >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
@@ -393,7 +393,7 @@ class Envoy:
             backend: Backend for the underlying trace.
 
         Returns:
-            An :class:`~nnsight.intervention.editing.EditingTracer`. Entering it
+            An [`EditingTracer`][nnsight.intervention.editing.EditingTracer]. Entering it
                 binds the tracer — for its ``iter`` API — and, when
                 ``inplace=False``, the edited copy as well:
                 ``with model.edit() as (tracer, edited):``. With ``inplace=True``
@@ -417,7 +417,7 @@ class Envoy:
         model.trace(...)`` blocks and pass values between them — a value read in
         one trace is available in a later trace *without* an explicit ``.save()``,
         because the session (not each individual trace) is the save boundary. Only
-        values marked with :func:`nnsight.save` survive past the session itself.
+        values marked with `nnsight.save` survive past the session itself.
         Ordinary Python — loops, conditionals, building lists — runs natively in
         the session body.
 
@@ -433,11 +433,11 @@ class Envoy:
             backend: What runs the captured session block. Defaults to running it
                 in place (which executes the nested traces as it reaches them).
             tracer_cls: Tracer class to construct instead of the default
-                :class:`~nnsight.tracing.tracer.Tracer` — an extension point for a
+                [`Tracer`][nnsight.tracing.tracer.Tracer] — an extension point for a
                 custom session tracer.
 
         Returns:
-            A :class:`~nnsight.tracing.tracer.Tracer` acting as the session scope.
+            A [`Tracer`][nnsight.tracing.tracer.Tracer] acting as the session scope.
         """
         # A plain Tracer already captures the block, execs it as real Python (so
         # nested traces run as reached), and gates saves at its own — outermost —
@@ -469,7 +469,7 @@ class Envoy:
     def input(self, value: Any) -> Object:
         """The module's first forward input (first positional, else first keyword).
 
-        A convenience view over :attr:`inputs`; writing it repacks into the full
+        A convenience view over `inputs`; writing it repacks into the full
         ``(args, kwargs)`` the model expects::
 
             with model.trace("Hello World"):
@@ -558,7 +558,7 @@ class Envoy:
             ...     attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
 
         Returns:
-            A :class:`Source` exposing operation-level access.
+            A [`Source`][nnsight.intervention.source.Source] exposing operation-level access.
         """
         # Intermediate operations inside this module's forward, addressable as
         # source.{name}_{occurrence} (e.g. source.relu_0.output). A class-level
@@ -601,9 +601,9 @@ class Envoy:
         """The set of devices the module's parameters live on (empty if it has none)."""
         return {parameter.device for parameter in self._module.parameters()}
 
-    #: The :class:`~nnsight.intervention.batching.Batcher` class to batch with.
-    #: Base default is the plain dim-0-stack :class:`Batcher`; a model whose batch
-    #: layout differs (e.g. :class:`~nnsight.modeling.diffusion.DiffusionBatcher`
+    #: The [`Batcher`][nnsight.intervention.batching.Batcher] class to batch with.
+    #: Base default is the plain dim-0-stack [`Batcher`][nnsight.intervention.batching.Batcher]; a model whose batch
+    #: layout differs (e.g. [`DiffusionBatcher`][nnsight.modeling.diffusion.DiffusionBatcher]
     #: for classifier-free-guidance doubling) overrides it with its subclass.
     _batcher_class: type["Batcher"] = Batcher
 
@@ -611,7 +611,7 @@ class Envoy:
         """Number of batch rows an invoke's input contributes (0 if it has none).
 
         Base default: any input is a single row. Models that batch (e.g.
-        :class:`~nnsight.modeling.transformers.TransformersModel`) override this to
+        [`TransformersModel`][nnsight.modeling.transformers.TransformersModel]) override this to
         report the true row count of a prompt / list / tensor.
         """
         return 1 if (inputs or kwargs) else 0
@@ -621,7 +621,7 @@ class Envoy:
 
         ``invokes`` is a list of ``(inputs, kwargs)``. Base default: pass a single
         invoke straight through; batching two or more requires a model that
-        overrides this (:class:`~nnsight.modeling.transformers.TransformersModel`).
+        overrides this ([`TransformersModel`][nnsight.modeling.transformers.TransformersModel]).
         """
         if not invokes:
             return tuple(), {}
@@ -636,7 +636,7 @@ class Envoy:
     ) -> Any:
         """Run ``fn`` interleaved with the interleaver's registered workers.
 
-        This is the low-level driver behind :meth:`trace`; you rarely call it
+        This is the low-level driver behind `trace`; you rarely call it
         directly. The workers (edits + per-invoke interventions, with their batch
         groups) are set up on the interleaver first; this runs ``fn(*args, **kwargs)``
         alongside them and clears them afterward.
@@ -645,11 +645,11 @@ class Envoy:
             fn: The callable to run, or a method name resolved against the module.
             *args: Positional inputs for a direct (untraced) call. They're wrapped as
                 a single implicit invoke and assembled like a one-invoke trace
-                (tokenized/collated), then moved to :attr:`device`. Ignored when
+                (tokenized/collated), then moved to `device`. Ignored when
                 ``batcher`` is given (the inputs come from assembling it).
             batcher: The per-invoke inputs to combine into one call. When given, it's
                 assembled into ``(args, kwargs)`` and registered on the interleaver so
-                :meth:`~nnsight.intervention.interleaver.Interleaver.handle` can
+                [`handle`][nnsight.intervention.interleaver.Interleaver.handle] can
                 narrow each worker to its own rows; any ``kwargs`` passed alongside
                 (trace-level params like ``max_new_tokens``) override the assembled
                 ones.
@@ -789,8 +789,8 @@ class Envoy:
         """Iterate over this envoy's direct children.
 
         Yields each immediate child envoy — e.g. the blocks of a
-        :class:`~torch.nn.ModuleList`, so ``for layer in model.model.layers:``
-        walks the layers. This is *not* recursive; use :meth:`modules` to walk the
+        `ModuleList`, so ``for layer in model.model.layers:``
+        walks the layers. This is *not* recursive; use [`modules`][nnsight.intervention.envoy.Envoy.modules] to walk the
         whole subtree.
 
         Yields:
@@ -805,7 +805,7 @@ class Envoy:
         return iter(self._children)
 
     def __getitem__(self, key: Any) -> Envoy:
-        """Index into direct child envoys, e.g. for a :class:`~torch.nn.ModuleList`.
+        """Index into direct child envoys, e.g. for a `ModuleList`.
 
         Args:
             key: Any index the underlying child list accepts (an int, or a slice).
@@ -837,7 +837,7 @@ class Envoy:
             path: A ``.``-separated attribute path relative to this envoy.
 
         Returns:
-            The resolved child :class:`Envoy`, or the live value when ``path``
+            The resolved child [`Envoy`][nnsight.intervention.envoy.Envoy], or the live value when ``path``
             ends in an intervention attribute during a trace.
         """
         obj: Any = self
@@ -858,7 +858,7 @@ class Envoy:
             names: If ``True``, yield ``(path, envoy)`` tuples instead of envoys.
 
         Returns:
-            A list of :class:`Envoy` (or ``(path, Envoy)`` tuples when ``names``).
+            A list of [`Envoy`][nnsight.intervention.envoy.Envoy] (or ``(path, Envoy)`` tuples when ``names``).
         """
         # Flatten the envoy tree (children first, then self), optionally filtered
         # by include_fn and paired with each envoy's path when names=True.
@@ -872,7 +872,7 @@ class Envoy:
     def named_modules(
         self, include_fn: Callable[[Envoy], bool] | None = None
     ) -> list[tuple[str, Envoy]]:
-        """Flatten the subtree into ``(path, envoy)`` tuples: :meth:`modules` with ``names=True``.
+        """Flatten the subtree into ``(path, envoy)`` tuples: [`modules`][nnsight.intervention.envoy.Envoy.modules] with ``names=True``.
 
         Args:
             include_fn: Optional predicate on an envoy; only those it returns

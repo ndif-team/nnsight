@@ -164,15 +164,15 @@ class DiffusionModel(HuggingFaceModel):
 
     A diffusion pipeline orchestrates several modules (unet/transformer, vae,
     text_encoder, ...) around a denoising loop. This wraps the whole pipeline as one
-    nnsight model: the pipeline is exposed as :attr:`pipeline`, each of its module
+    nnsight model: the pipeline is exposed as `pipeline`, each of its module
     components as an envoy (``model.unet``, ``model.vae``, ...), and interventions
     apply to any component along the way.
 
-    Both :meth:`trace` and :meth:`generate` run the whole pipeline, with
+    Both `trace` and `generate` run the whole pipeline, with
     interventions firing on every component the denoising loop invokes;
     ``model.output`` (and ``tracer.result``) is the pipeline's output object. They
-    differ only in the default step count: :meth:`trace` defaults to a single
-    denoising step (a fast one-step pass), :meth:`generate` uses the pipeline's own
+    differ only in the default step count: `trace` defaults to a single
+    denoising step (a fast one-step pass), `generate` uses the pipeline's own
     default. To run one component's forward on its own, trace that envoy directly —
     ``with model.unet.trace(sample, timestep, encoder_hidden_states=...):``.
 
@@ -278,7 +278,7 @@ class DiffusionModel(HuggingFaceModel):
     def trace(self, *inputs: Any, **kwargs: Any):
         """Trace the whole pipeline, defaulting to a single denoising step.
 
-        Like :meth:`generate` but with ``num_inference_steps=1`` unless overridden —
+        Like `generate` but with ``num_inference_steps=1`` unless overridden —
         a fast one-step pass for inspecting or editing activations. ``model.output``
         is the pipeline's output object.
 

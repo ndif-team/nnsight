@@ -1,9 +1,9 @@
-"""A vision-language name over :class:`TransformersModel` (deprecated).
+"""A vision-language name over [`TransformersModel`][nnsight.modeling.transformers.TransformersModel] (deprecated).
 
-:class:`~nnsight.modeling.transformers.TransformersModel` generates through the
+[`TransformersModel`][nnsight.modeling.transformers.TransformersModel] generates through the
 model and returns token ids. A vision-language model is the same story with images
 alongside the text, so prefer ``TransformersModel(repo_id,
-task="image-text-to-text")`` directly. :class:`VisionLanguageModel` is kept for
+task="image-text-to-text")`` directly. [`VisionLanguageModel`][nnsight.modeling.vlm.VisionLanguageModel] is kept for
 backwards compatibility — it pins the task and runs the processor over the prompt
 *and* images before the model's own ``generate`` — and warns on construction.
 
@@ -29,7 +29,7 @@ from .language import LanguageModel
 
 
 class VisionLanguageModel(LanguageModel):
-    """Deprecated: a :class:`~nnsight.modeling.transformers.TransformersModel`
+    """Deprecated: a [`TransformersModel`][nnsight.modeling.transformers.TransformersModel]
     pinned to the image-text-to-text task.
 
     Use ``TransformersModel(repo_id, task="image-text-to-text")`` instead. Its

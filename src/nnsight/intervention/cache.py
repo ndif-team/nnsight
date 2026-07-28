@@ -11,10 +11,10 @@ cache captures *every* selected module across the whole run — every layer, and
     cache.transformer.h[0].output                    # or by navigation
 
 Because the interleaver already funnels every module input/output through
-:meth:`~nnsight.intervention.interleaver.Interleaver.handle` (applying
+[`handle`][nnsight.intervention.interleaver.Interleaver.handle] (applying
 interventions first), a cache is just a post-intervention observer: it needs no
 per-module hooks. Navigation and alias/index resolution are delegated to the
-model's :class:`~nnsight.intervention.envoy.Envoy` tree, so a :class:`CacheView`
+model's [`Envoy`][nnsight.intervention.envoy.Envoy] tree, so a [`CacheView`][nnsight.intervention.cache.CacheView]
 stays thin and aliases / ``ModuleList`` indexing work for free.
 """
 
@@ -36,7 +36,7 @@ class Entry:
     """One visit to a module: its output and/or its inputs.
 
     A module visited more than once in a run (e.g. a generation loop) produces
-    one :class:`Entry` per visit; see :class:`CacheView`.
+    one [`Entry`][nnsight.intervention.cache.Entry] per visit; see [`CacheView`][nnsight.intervention.cache.CacheView].
     """
 
     output: Any = None
@@ -54,14 +54,14 @@ class Entry:
 class Cache:
     """Records selected modules' activations as the run reaches them.
 
-    Created by :meth:`~nnsight.intervention.tracer.InterleavingTracer.cache` and
-    registered on the calling mediator, so :meth:`observe` is fed every location
+    Created by [`cache`][nnsight.intervention.tracer.InterleavingTracer.cache] and
+    registered on the calling mediator, so [`observe`][nnsight.intervention.cache.Cache.observe] is fed every location
     the run reaches (post-intervention). Values for the selected module paths are
-    stored in :attr:`entries` — one list of :class:`Entry` per module path, an
+    stored in [`entries`][nnsight.intervention.cache.Cache.entries] — one list of [`Entry`][nnsight.intervention.cache.Entry] per module path, an
     entry appended per visit.
 
     Attributes:
-        model: The root envoy, used to resolve paths / aliases for :class:`CacheView`.
+        model: The root envoy, used to resolve paths / aliases for [`CacheView`][nnsight.intervention.cache.CacheView].
         targets: The module paths to keep, or ``None`` to keep every module.
         entries: Recorded values, ``{module_path: [Entry, ...]}``.
     """
@@ -150,7 +150,7 @@ class Cache:
 
 
 class CacheView:
-    """Path- and attribute-addressable view over a :class:`Cache`'s entries.
+    """Path- and attribute-addressable view over a [`Cache`][nnsight.intervention.cache.Cache]'s entries.
 
     The object returned by ``tracer.cache()``. Read a module's captured value
     with ``.output`` / ``.inputs`` / ``.input`` after selecting it, either by path

@@ -5,16 +5,16 @@ never leaves the server: the block is serialized source-and-all, POSTed, and the
 model is named by a ``model_key`` rather than pickled. The backends here differ
 only in *how the client waits* for the job to finish and collect its saves:
 
-- :class:`RemoteBackend` blocking -- one ``/subscribe`` websocket, streamed
+- [`RemoteBackend`][nnsight.intervention.backends.remote.RemoteBackend] blocking -- one ``/subscribe`` websocket, streamed
   status updates, result on COMPLETED (``model.trace(..., remote=True)``).
-- :class:`RemoteBackend` non-blocking (``blocking=False``) -- submit over HTTP
+- [`RemoteBackend`][nnsight.intervention.backends.remote.RemoteBackend] non-blocking (``blocking=False``) -- submit over HTTP
   and poll the server's stored status until the result lands.
-- :class:`AsyncRemoteBackend` -- the blocking stream, awaited on an asyncio event
+- [`AsyncRemoteBackend`][nnsight.intervention.backends.remote.AsyncRemoteBackend] -- the blocking stream, awaited on an asyncio event
   loop so a job runs without tying up a thread.
 
 Status updates render through
-:class:`~nnsight.intervention.backends.display.StatusDisplay`; a failed job
-surfaces as :class:`RemoteError`.
+[`StatusDisplay`][nnsight.intervention.backends.display.StatusDisplay]; a failed job
+surfaces as [`RemoteError`][nnsight.intervention.backends.remote.RemoteError].
 """
 
 from __future__ import annotations
@@ -65,11 +65,11 @@ class RemoteBackend(Backend):
     - ``blocking=True`` (default): hold one ``/subscribe`` websocket open, stream
       status updates until COMPLETED, then download the saves and push them back
       into the caller's frame so its ``h = ...save()`` variables populate.
-    - ``blocking=False``: :meth:`submit` the job over plain HTTP (no websocket)
-      and store its :attr:`job_id`; the server records each status to the object
-      store, and each later call :meth:`poll`\\ s until the result is ready.
+    - ``blocking=False``: [`submit`][nnsight.intervention.backends.remote.RemoteBackend.submit] the job over plain HTTP (no websocket)
+      and store its [`job_id`][nnsight.intervention.backends.remote.RemoteBackend.job_id]; the server records each status to the object
+      store, and each later call [`poll`][nnsight.intervention.backends.remote.RemoteBackend.poll]\\ s until the result is ready.
 
-    :class:`AsyncRemoteBackend` runs the same blocking stream on an asyncio event
+    [`AsyncRemoteBackend`][nnsight.intervention.backends.remote.AsyncRemoteBackend] runs the same blocking stream on an asyncio event
     loop instead.
     """
 
@@ -154,7 +154,7 @@ class RemoteBackend(Backend):
         """Render a status update, raise on ERROR, and report whether it's final.
 
         The shared status handling for every update, however it arrived (websocket,
-        poll): update the display, raise :class:`RemoteError` on ERROR, and return
+        poll): update the display, raise [`RemoteError`][nnsight.intervention.backends.remote.RemoteError] on ERROR, and return
         whether the status is COMPLETED (so the caller knows to fetch the result).
         """
         self.display.update(response)
@@ -293,8 +293,8 @@ class RemoteBackend(Backend):
         """Submit a non-blocking job: POST without a websocket and store the job id.
 
         No `/subscribe`, so the request carries no session id; the server saves
-        each status response to the object store for :meth:`poll` to read. Returns
-        None — call :meth:`poll` (or the backend again) to fetch the result.
+        each status response to the object store for [`poll`][nnsight.intervention.backends.remote.RemoteBackend.poll] to read. Returns
+        None — call [`poll`][nnsight.intervention.backends.remote.RemoteBackend.poll] (or the backend again) to fetch the result.
         """
         blob = self._serialize(tracer)
         request = RequestModel(
@@ -366,9 +366,9 @@ class RemoteBackend(Backend):
 
 
 class AsyncRemoteBackend(RemoteBackend):
-    """A :class:`RemoteBackend` whose waiting is async, over the same websocket.
+    """A [`RemoteBackend`][nnsight.intervention.backends.remote.RemoteBackend] whose waiting is async, over the same websocket.
 
-    :meth:`__call__` fires the request the way the blocking parent does — subscribe
+    `__call__` fires the request the way the blocking parent does — subscribe
     to the ``/subscribe`` websocket, take the session id, POST the payload — and
     returns without consuming any status updates. That initial connection is
     synchronous; only the waiting is async. Await the backend for the saves dict —
@@ -388,8 +388,8 @@ class AsyncRemoteBackend(RemoteBackend):
             else:
                 print(update.status)            # you decide what to do with each
 
-    The websocket ``recv`` is blocking, so :meth:`receive` runs it through
-    :func:`asyncio.to_thread` to keep the event loop free while a job runs. Only
+    The websocket ``recv`` is blocking, so [`receive`][nnsight.intervention.backends.remote.AsyncRemoteBackend.receive] runs it through
+    `asyncio.to_thread` to keep the event loop free while a job runs. Only
     that waiting differs from the parent — the connect, serialization, POST, and the
     decompress/load reuse the parent's synchronous methods.
 
@@ -446,8 +446,8 @@ class AsyncRemoteBackend(RemoteBackend):
     async def stream(self) -> AsyncIterator[Any]:
         """Yield each raw status update as it lands, then the saves dict last.
 
-        Unlike :meth:`resolve`, this doesn't touch the display or raise on ERROR —
-        it hands you each :class:`ResponseModel` as-is to do with as you like. The
+        Unlike [`resolve`][nnsight.intervention.backends.remote.AsyncRemoteBackend.resolve], this doesn't touch the display or raise on ERROR —
+        it hands you each [`ResponseModel`][nnsight.schema.response.ResponseModel] as-is to do with as you like. The
         final item (after COMPLETED) is the downloaded saves dict; an ERROR update
         just ends the stream (inspect it and raise yourself if you want).
         """
@@ -469,7 +469,7 @@ class AsyncRemoteBackend(RemoteBackend):
         return ResponseModel.model_validate_json(message)
 
     async def download(self, url: Optional[str]) -> Optional[RESULT]:
-        """Async :meth:`download_result`: stream the blob with an async client, then
+        """Async [`download_result`][nnsight.intervention.backends.remote.RemoteBackend.download_result]: stream the blob with an async client, then
         hand it to the parent's shared decompress/load."""
         if not url:
             return None

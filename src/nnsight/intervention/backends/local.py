@@ -1,7 +1,7 @@
 """Local-simulation backend: exercise the remote path without a server.
 
 ``model.trace(..., remote="local")`` runs the trace here instead of shipping it
-to NDIF. It serializes the trace exactly as :class:`~nnsight.intervention.backends.remote.RemoteBackend`
+to NDIF. It serializes the trace exactly as [`RemoteBackend`][nnsight.intervention.backends.remote.RemoteBackend]
 would, then deserializes it *with local (non-installed) modules hidden* — mimicking
 a server where the user's own source files don't exist — and runs the deserialized
 block locally against the real model.

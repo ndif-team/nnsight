@@ -4,12 +4,12 @@ Loading a large model's weights is slow and memory-hungry, but most of what
 nnsight needs to plan a trace — the module tree and the shapes that flow through
 it — is fixed by the model's *structure*, not its weights. So a model is built
 lazily: every module is constructed on the *meta* device, which records a
-tensor's shape and dtype but allocates no storage. The envoy tree, :meth:`scan`,
+tensor's shape and dtype but allocates no storage. The envoy tree, `scan`,
 and remote-key resolution all work against this weightless skeleton.
 
-:class:`MetaDevice` is the mechanism — a torch function mode that forces every
+[`MetaDevice`][nnsight.modeling.mixins.meta.MetaDevice] is the mechanism — a torch function mode that forces every
 tensor created (or moved) within it onto meta, however it was created.
-:class:`Meta` is the policy — it does the meta build up front and *dispatches*
+[`Meta`][nnsight.modeling.mixins.meta.Meta] is the policy — it does the meta build up front and *dispatches*
 (loads real weights and swaps them into the same envoy tree) the first time the
 model actually has to run.
 
@@ -20,7 +20,7 @@ model actually has to run.
     with model.trace("Hello"):    # dispatches real weights on first run
         ...
 
-The meta build reconstructs structure only, so a subclass's :meth:`Meta._load_meta`
+The meta build reconstructs structure only, so a subclass's `Meta._load_meta`
 drops weight- and placement-related kwargs (``device_map``, ``max_memory``, ...):
 they mean nothing on storageless meta tensors and take effect only at dispatch.
 """
@@ -62,7 +62,7 @@ class MetaDevice(TorchFunctionMode):
     this also rewrites explicit ``device=`` arguments, so tensors land on meta
     no matter how they are created.
 
-    :meth:`real` opens a nested window where this forcing is suspended, for the
+    [`real`][nnsight.modeling.mixins.meta.MetaDevice.real] opens a nested window where this forcing is suspended, for the
     parts of a lazy build that need genuine tensors (e.g. a component whose
     constructor moves a buffer with ``.to(...)``, which a meta tensor can't do).
     """
@@ -110,7 +110,7 @@ class MetaDevice(TorchFunctionMode):
         # become no-ops on meta, letting a constructor that relocates a buffer
         # during init just work. Value-dependent ops (``.item()``, ``.numpy()``,
         # data-dependent branching) can't be faked this way; build those
-        # components under :meth:`real` instead.
+        # components under [`real`][nnsight.modeling.mixins.meta.MetaDevice.real] instead.
         if kwargs.get("device") is not None:
             kwargs["device"] = self._META
         if func is torch.Tensor.to:
@@ -143,9 +143,9 @@ class MetaDevice(TorchFunctionMode):
 class Meta(Loadable):
     """A model wrapper that builds on meta and dispatches real weights on demand.
 
-    Extends :class:`~nnsight.modeling.mixins.loadable.Loadable` with a two-phase
-    build: :meth:`_load_meta` constructs the weightless skeleton up front, and
-    :meth:`dispatch` (triggered on the first :meth:`interleave` that isn't a scan)
+    Extends [`Loadable`][nnsight.modeling.mixins.loadable.Loadable] with a two-phase
+    build: `_load_meta` constructs the weightless skeleton up front, and
+    [`dispatch`][nnsight.modeling.mixins.meta.Meta.dispatch] (triggered on the first `interleave` that isn't a scan)
     loads real weights via ``_load`` and swaps them into the existing envoy tree.
     Passing a ready module, or ``dispatch=True``, skips the meta phase and loads
     eagerly.
@@ -179,7 +179,7 @@ class Meta(Loadable):
         """Build the model's structure on the meta device (no weights loaded).
 
         Base default: not implemented. Subclasses (e.g.
-        :class:`~nnsight.modeling.transformers.TransformersModel`) build the module
+        [`TransformersModel`][nnsight.modeling.transformers.TransformersModel]) build the module
         tree from config so shapes are known without any weights in memory.
         """
         raise NotImplementedError()
@@ -188,7 +188,7 @@ class Meta(Loadable):
         """Load real weights via ``_load`` and swap them into the envoy tree.
 
         Idempotent — a no-op once dispatched. Triggered automatically on the first
-        real (non-scan) :meth:`interleave`; call it directly to load eagerly.
+        real (non-scan) `interleave`; call it directly to load eagerly.
         """
         if self.dispatched:
             return
@@ -201,7 +201,7 @@ class Meta(Loadable):
     ) -> ScanningTracer:
         """Inspect activation shapes without loading real weights or computing.
 
-        Just like :meth:`~nnsight.intervention.envoy.Envoy.trace`, but the forward
+        Just like [`trace`][nnsight.intervention.envoy.Envoy.trace], but the forward
         runs under a fake-tensor mode so only tensor metadata (shapes, dtypes)
         propagates — the model is never dispatched, so this works on a
         meta-initialized model with no weights in memory:
@@ -221,7 +221,7 @@ class Meta(Loadable):
             **kwargs: Keyword inputs forwarded to the forward pass.
 
         Returns:
-            A :class:`~nnsight.intervention.tracer.ScanningTracer` for this model.
+            A [`ScanningTracer`][nnsight.intervention.tracer.ScanningTracer] for this model.
         """
         if fn is None:
             fn = "__call__"

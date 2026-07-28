@@ -8,13 +8,13 @@ a sequence, and it is fine as long as they don't need anything from each other.
 They need a meeting point as soon as one hands something to another. A block that
 reads an activation and puts it somewhere the next block takes it from is only
 correct if the read happens first, and neither block can see the other's progress
-to know. A :class:`Barrier` is that meeting point: every block that holds one
+to know. A [`Barrier`][nnsight.intervention.barrier.Barrier] is that meeting point: every block that holds one
 calls it, each waits, and the last to arrive releases them all — so everything
 written above a barrier has happened before anything written below one.
 
 Here two invokes share one value: the first reads a prompt's embeddings, the
 second generates from them, and the barrier pins the read before the write so the
-receiver isn't a :class:`NameError` waiting to happen.
+receiver isn't a `NameError` waiting to happen.
 
 .. code-block:: python
 
@@ -49,7 +49,7 @@ from .interleaver import Mediator
 class Barrier:
     """A meeting point for the blocks of one trace.
 
-    Built by :meth:`~nnsight.intervention.tracer.InterleavingTracer.barrier` with
+    Built by [`barrier`][nnsight.intervention.tracer.InterleavingTracer.barrier] with
     the number of blocks that will call it. Calling it parks the block until that
     many have arrived; the last one through releases the rest and none of them
     waits again. A barrier fewer blocks reach than it was built for never

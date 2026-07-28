@@ -9,7 +9,7 @@ Examples::
 
 The host defaults to ``127.0.0.1`` — the server runs serialized client code, so it
 is loopback-only unless ``--host 0.0.0.0`` is passed deliberately. Unrecognized
-flags are forwarded to :class:`~nnsight.modeling.vllm.vllm.VLLM` as engine args.
+flags are forwarded to [`VLLM`][nnsight.modeling.vllm.vllm.VLLM] as engine args.
 """
 
 from __future__ import annotations

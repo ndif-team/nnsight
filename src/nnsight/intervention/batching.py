@@ -4,11 +4,11 @@
 blocks. Their inputs are combined into a single batched forward, and each block's
 interventions see only *its* rows of every activation.
 
-A :class:`Batcher` (one per trace) collects each invoke's input and assigns it a
+A [`Batcher`][nnsight.intervention.batching.Batcher] (one per trace) collects each invoke's input and assigns it a
 ``batch_group`` — a ``[start, size]`` row range in the combined batch. At run time
-:meth:`Batcher.narrow` slices a full batched activation down to a block's rows when
-it reads, and :meth:`Batcher.widen` splices an edit back into the full tensor. The row math
-is dim-0 only; the model's :meth:`_batch` equalizes everything else (e.g. sequence
+[`Batcher.narrow`][nnsight.intervention.batching.Batcher.narrow] slices a full batched activation down to a block's rows when
+it reads, and [`Batcher.widen`][nnsight.intervention.batching.Batcher.widen] splices an edit back into the full tensor. The row math
+is dim-0 only; the model's `_batch` equalizes everything else (e.g. sequence
 length) when it builds the combined input.
 
 Batching only actually narrows when there are two or more non-empty invokes — a
@@ -36,7 +36,7 @@ class SkipParts:
     ``.skip()`` bypasses a module's body and substitutes a value for its output.
     In a batched forward there is no body output to splice into — the body didn't
     run — so the combined output is built from the invokes' replacements alone
-    (see :meth:`Batcher.gather_skip` / :meth:`Batcher.assemble_skip`). Each entry
+    (see [`Batcher.gather_skip`][nnsight.intervention.batching.Batcher.gather_skip] / [`Batcher.assemble_skip`][nnsight.intervention.batching.Batcher.assemble_skip]). Each entry
     is a ``(group, replacement)`` pair.
     """
 
@@ -66,14 +66,14 @@ def concat(structures: list) -> Any:
 class Batcher:
     """Collects invoke inputs for one trace and builds the combined forward input.
 
-    Each :meth:`add` records an invoke's input and returns its ``batch_group``.
-    :meth:`assemble` hands the collected invokes to the model's :meth:`_batch` to
-    produce the actual ``(args, kwargs)`` for the run. :meth:`narrow`/:meth:`widen`
+    Each `add` records an invoke's input and returns its ``batch_group``.
+    [`assemble`][nnsight.intervention.batching.Batcher.assemble] hands the collected invokes to the model's `_batch` to
+    produce the actual ``(args, kwargs)`` for the run. `narrow`/`widen`
     scope a batched activation to a group's rows and splice an edit back; a model
     whose batch layout isn't a plain dim-0 stack overrides the per-tensor
-    :meth:`_narrow_tensor`/:meth:`_widen_tensor` (e.g. diffusion's
+    `_narrow_tensor`/`_widen_tensor` (e.g. diffusion's
     classifier-free-guidance doubling) and picks its subclass via
-    :meth:`~nnsight.intervention.envoy.Envoy._batcher_class`.
+    `_batcher_class`.
     """
 
     def __init__(self, envoy: "Envoy", kwargs: Optional[dict] = None) -> None:
@@ -82,7 +82,7 @@ class Batcher:
         # whose row math depends on them; the base layout ignores them.
         self.kwargs = kwargs or {}
         # The row-contributing input sets, in order — each an (inputs, kwargs) that
-        # :meth:`_batch` stacks into the combined forward.
+        # `_batch` stacks into the combined forward.
         self.invokes: list[tuple] = []
         # Params-only adds (zero rows, e.g. max_new_tokens) fold their kwargs here;
         # assemble() lays them over the combined call.
@@ -92,7 +92,7 @@ class Batcher:
     def narrow(self, value: Any, group: BatchGroup) -> Any:
         """Slice every batched tensor in ``value`` down to ``group``'s rows.
 
-        A tensor is batched only when its leading dim equals :attr:`total` (the
+        A tensor is batched only when its leading dim equals [`total`][nnsight.intervention.batching.Batcher.total] (the
         combined batch size), so non-batched tensors pass through untouched. Returns
         the whole value when not actually batching or for a groupless (empty) invoke.
         """
@@ -103,7 +103,7 @@ class Batcher:
     def _narrow_tensor(self, tensor: torch.Tensor, group: list) -> torch.Tensor:
         """Slice one batched tensor down to ``group``'s rows.
 
-        Base layout: a tensor whose leading dim is :attr:`total` is a dim-0 stack of
+        Base layout: a tensor whose leading dim is [`total`][nnsight.intervention.batching.Batcher.total] is a dim-0 stack of
         every invoke's rows, so narrow it to ``[start, start + size)``; anything else
         isn't batched and passes through. Overridden for non-stacked layouts.
         """
@@ -124,7 +124,7 @@ class Batcher:
 
         Walks ``full`` and ``edited`` in parallel; for each batched tensor in
         ``full`` writes the corresponding ``edited`` tensor into the group's rows via
-        :meth:`_widen_tensor`. Returns ``edited`` unchanged when not batching or for
+        `_widen_tensor`. Returns ``edited`` unchanged when not batching or for
         a groupless invoke.
         """
         if not self.batching or group is None:
@@ -154,7 +154,7 @@ class Batcher:
     def _widen_tensor(self, full: torch.Tensor, group: list, edited: torch.Tensor) -> torch.Tensor:
         """Write ``edited`` into ``full``'s ``group`` rows (base dim-0-stack layout).
 
-        A tensor is batched only when its leading dim is :attr:`total`; otherwise it
+        A tensor is batched only when its leading dim is [`total`][nnsight.intervention.batching.Batcher.total]; otherwise it
         passes through. Overridden for non-stacked layouts.
         """
         if full.shape[0] != self.total:
@@ -172,7 +172,7 @@ class Batcher:
         A lone invoke *is* the whole batch, so its replacement is the output
         outright. With two or more, there's no body output to splice into — the
         skip fires before the body runs — so accumulate the replacements and let
-        :meth:`assemble_skip` build the combined output once every invoke's is in.
+        [`assemble_skip`][nnsight.intervention.batching.Batcher.assemble_skip] build the combined output once every invoke's is in.
         """
         if not self.batching or group is None:
             return replacement
@@ -184,7 +184,7 @@ class Batcher:
     def assemble_skip(self, running: Any) -> Any:
         """Concatenate collected skip replacements into the full-batch output.
 
-        A no-op unless ``running`` is the :class:`SkipParts` a batched skip built.
+        A no-op unless ``running`` is the [`SkipParts`][nnsight.intervention.batching.SkipParts] a batched skip built.
         The replacements must tile the whole batch: every invoke has to skip the
         module, since a shared forward can't run for only the rows that didn't.
         """
@@ -209,7 +209,7 @@ class Batcher:
 
         A set that contributes no rows — params only (e.g. ``max_new_tokens=``) or an
         empty ``invoke()`` — returns ``None`` (a groupless, whole-batch worker) and
-        folds its kwargs into :attr:`extra_kwargs`, so :meth:`assemble` lays them onto
+        folds its kwargs into [`extra_kwargs`][nnsight.intervention.batching.Batcher.extra_kwargs], so [`assemble`][nnsight.intervention.batching.Batcher.assemble] lays them onto
         the combined call.
         """
         size = self.envoy._batch_size(*inputs, **kwargs)
@@ -228,6 +228,6 @@ class Batcher:
 
     def assemble(self, fn: Any) -> tuple:
         """Build the combined ``(args, kwargs)`` for ``fn`` from the collected input
-        sets; params-only kwargs (:attr:`extra_kwargs`) are laid on top and win."""
+        sets; params-only kwargs ([`extra_kwargs`][nnsight.intervention.batching.Batcher.extra_kwargs]) are laid on top and win."""
         args, kwargs = self.envoy._batch(self.invokes, fn)
         return args, {**kwargs, **self.extra_kwargs}

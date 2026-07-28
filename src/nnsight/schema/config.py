@@ -16,7 +16,7 @@ class ApiConfig(BaseModel):
     #: Base URL of the NDIF API. Overridden by the ``NDIF_HOST`` env var.
     HOST: str = "https://api.ndif.us"
     #: NDIF API key for remote requests. Set via ``NDIF_API_KEY`` (or a Colab
-    #: secret of that name), or persisted with :meth:`Config.set_default_api_key`.
+    #: secret of that name), or persisted with [`Config.set_default_api_key`][nnsight.schema.config.Config.set_default_api_key].
     APIKEY: Optional[str] = None
     #: Whether to zstd-compress the request payload; also tells the server to
     #: compress the result blob it returns.
@@ -40,7 +40,7 @@ class AppConfig(BaseModel):
     #: Whether to neutralize glibc ``backtrace()`` at import so a torch C++ error
     #: raised inside an interleaving greenlet propagates as a normal Python
     #: exception instead of segfaulting the process (see
-    #: :mod:`nnsight._c.backtrace`). Only glibc/x86-64 Linux is affected. Turn off
+    #: [`nnsight._c.backtrace`][nnsight._c.backtrace]). Only glibc/x86-64 Linux is affected. Turn off
     #: with ``NNSIGHT_DISABLE_CPP_BACKTRACE=0``.
     DISABLE_CPP_BACKTRACE: bool = True
 
@@ -88,11 +88,11 @@ def _merge(base: dict, override: dict) -> dict:
 
 
 class Config(BaseModel):
-    """The nnsight config, exposed as the module-level singleton :data:`CONFIG`.
+    """The nnsight config, exposed as the module-level singleton [`CONFIG`][nnsight.schema.config.CONFIG].
 
     Loaded once at import with the precedence shipped defaults < user config file
     < environment. The user file lives at ``$XDG_CONFIG_HOME/nnsight/config.yaml``
-    (or ``NNSIGHT_CONFIG`` if set); :meth:`save` writes the current values back to
+    (or ``NNSIGHT_CONFIG`` if set); `save` writes the current values back to
     it. Environment overrides: ``NDIF_HOST``, ``NDIF_API_KEY``, ``NNSIGHT_DEBUG``.
     """
 

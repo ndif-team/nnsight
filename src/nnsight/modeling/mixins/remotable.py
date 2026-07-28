@@ -3,17 +3,17 @@
 A remote run doesn't ship the model — the server already has it loaded. What
 travels is a request that names *which* model to run against: a fully-qualified
 **model key** of the form ``"import.path.ClassName:model_key"``. The import path
-(resolved with :func:`~nnsight.util.from_import_path`) tells the server which
+(resolved with [`from_import_path`][nnsight.util.from_import_path]) tells the server which
 wrapper class to reconstruct; the model-specific suffix (e.g. a HuggingFace repo
 id and revision) tells it which checkpoint.
 
-:class:`Remotable` adds that identity to a model wrapper: :meth:`to_model_key`
-mints the key, :meth:`from_model_key` reconstructs a wrapper from one, and the
-``remote=`` argument to :meth:`trace` / :meth:`session` routes a run through a
+[`Remotable`][nnsight.modeling.mixins.remotable.Remotable] adds that identity to a model wrapper: [`to_model_key`][nnsight.modeling.mixins.remotable.Remotable.to_model_key]
+mints the key, [`from_model_key`][nnsight.modeling.mixins.remotable.Remotable.from_model_key] reconstructs a wrapper from one, and the
+``remote=`` argument to `trace` / `session` routes a run through a
 remote (or local-simulation) backend keyed by it. Subclasses supply the two
-model-specific halves — :meth:`_remoteable_model_key` and
-:meth:`_remoteable_from_model_key` — and may carry per-request state across with
-:meth:`_remoteable_get_env` / :meth:`_remoteable_set_env`.
+model-specific halves — `_remoteable_model_key` and
+`_remoteable_from_model_key` — and may carry per-request state across with
+`_remoteable_get_env` / `_remoteable_set_env`.
 """
 
 from __future__ import annotations
@@ -29,9 +29,9 @@ class Remotable(Meta):
     """A model wrapper carrying the identity a remote server needs to run it.
 
     See the module docstring for the model-key scheme. Subclasses implement
-    :meth:`_remoteable_model_key` (the model-specific suffix) and
-    :meth:`_remoteable_from_model_key` (reconstruct from it), and may override
-    :meth:`_remoteable_class` when a wrapper should be keyed as another class.
+    `_remoteable_model_key` (the model-specific suffix) and
+    `_remoteable_from_model_key` (reconstruct from it), and may override
+    `_remoteable_class` when a wrapper should be keyed as another class.
     """
 
     def trace(
@@ -97,7 +97,7 @@ class Remotable(Meta):
     def _remoteable_get_env(self) -> dict:
         """Per-request environment to apply to the model server-side before it runs.
 
-        Carried with a remote request and handed to :meth:`_remoteable_set_env` on
+        Carried with a remote request and handed to `_remoteable_set_env` on
         the server. Empty by default; subclasses override to supply model-specific
         settings (e.g. a PEFT adapter to swap in).
         """
@@ -106,7 +106,7 @@ class Remotable(Meta):
     def _remoteable_set_env(self, env: dict) -> None:
         """Apply a per-request environment on the server side.
 
-        Called server-side with the dict :meth:`_remoteable_get_env` produced,
+        Called server-side with the dict `_remoteable_get_env` produced,
         before the request runs. No-op by default; subclasses override to mutate
         the loaded model (e.g. swap a PEFT adapter).
         """
@@ -124,20 +124,20 @@ class Remotable(Meta):
         return objects
 
     def _remoteable_model_key(self) -> str:
-        """The model-specific suffix of :meth:`to_model_key`.
+        """The model-specific suffix of [`to_model_key`][nnsight.modeling.mixins.remotable.Remotable.to_model_key].
 
         Base default: not implemented. Subclasses return a stable identifier for the
-        checkpoint (e.g. :class:`~nnsight.modeling.huggingface.HuggingFaceModel`
+        checkpoint (e.g. [`HuggingFaceModel`][nnsight.modeling.huggingface.HuggingFaceModel]
         returns its repo id and revision as JSON).
         """
         raise NotImplementedError()
 
     @classmethod
     def _remoteable_from_model_key(cls, model_key: str, **kwargs: Any) -> Remotable:
-        """Rebuild a model wrapper from the suffix :meth:`_remoteable_model_key` made.
+        """Rebuild a model wrapper from the suffix `_remoteable_model_key` made.
 
-        Base default: not implemented. The inverse of :meth:`_remoteable_model_key`,
-        called by :meth:`from_model_key` once it has resolved the wrapper class.
+        Base default: not implemented. The inverse of `_remoteable_model_key`,
+        called by [`from_model_key`][nnsight.modeling.mixins.remotable.Remotable.from_model_key] once it has resolved the wrapper class.
         """
         raise NotImplementedError()
 
@@ -154,20 +154,20 @@ class Remotable(Meta):
     def to_model_key(self) -> str:
         """This model's remote key: ``"import.path.ClassName:model_key"``.
 
-        The import path names :meth:`_remoteable_class` — the concrete class, or the
+        The import path names `_remoteable_class` — the concrete class, or the
         canonical class a deprecated alias stands in for, so a model wrapped as
         ``TransformersModel`` or as its ``LanguageModel`` alias produces the one key
-        the server knows it by. The suffix is :meth:`_remoteable_model_key`. Inverse
-        of :meth:`from_model_key`.
+        the server knows it by. The suffix is `_remoteable_model_key`. Inverse
+        of [`from_model_key`][nnsight.modeling.mixins.remotable.Remotable.from_model_key].
         """
         return f"{to_import_path(self._remoteable_class())}:{self._remoteable_model_key()}"
 
     @classmethod
     def from_model_key(cls, model_key: str, **kwargs: Any) -> Remotable:
-        """Reconstruct a model wrapper from a key produced by :meth:`to_model_key`.
+        """Reconstruct a model wrapper from a key produced by [`to_model_key`][nnsight.modeling.mixins.remotable.Remotable.to_model_key].
 
         Splits off the class import path, resolves it to the wrapper class, and
-        defers to that class's :meth:`_remoteable_from_model_key` to rebuild from the
+        defers to that class's `_remoteable_from_model_key` to rebuild from the
         model-specific suffix. ``kwargs`` are forwarded to the reconstruction.
         """
         import_path, model_key = model_key.split(":", 1)

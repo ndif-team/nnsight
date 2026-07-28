@@ -1,6 +1,6 @@
 """A descriptor for a value the interleaver serves during a trace.
 
-An :class:`eproperty` turns a plain attribute — ``model.h[0].output``,
+An `eproperty` turns a plain attribute — ``model.h[0].output``,
 ``tracer.result``, a source op's ``.input`` — into a hook into the run: reading it
 parks the worker until the model reaches that location and returns the value there;
 writing it swaps the worker's value in. The location is ``"{obj.path}.{key}"`` (or
@@ -10,9 +10,9 @@ The decorated stub *is* the **preprocess**: it takes the raw value the interleav
 served and returns what the user reads, so an identity view is just
 ``def output(self, value): return value``. Two more callbacks refine it:
 
-* :meth:`~eproperty.postprocess` — runs on a written value before it's swapped in
+* [`postprocess`][nnsight.intervention.eproperty.eproperty.postprocess] — runs on a written value before it's swapped in
   (e.g. repack a lone ``input`` back into the ``(args, kwargs)`` the model wants).
-* :meth:`~eproperty.transform` — the write-back half of :meth:`preprocess`. When
+* [`transform`][nnsight.intervention.eproperty.eproperty.transform] — the write-back half of `preprocess`. When
   preprocess hands back a reshaped/sliced *view*, the user's in-place edits to it
   are invisible to the model (which still holds the original). A transform maps the
   edited view back to the model's layout; it fires once, after the block is done
@@ -43,23 +43,23 @@ from .interleaver import Interleaver, Mediator
 
 @runtime_checkable
 class IEnvoy(Protocol):
-    """Interface for objects that host :class:`eproperty` descriptors.
+    """Interface for objects that host `eproperty` descriptors.
 
     An eproperty reads and writes its value through the interleaver at a location
     derived from the host, so a host must provide:
 
     Attributes:
-        interleaver: The :class:`~nnsight.intervention.interleaver.Interleaver`
-            managing execution flow (used by :meth:`eproperty.provide` to serve a
+        interleaver: The [`Interleaver`][nnsight.intervention.interleaver.Interleaver]
+            managing execution flow (used by [`eproperty.provide`][nnsight.intervention.eproperty.eproperty.provide] to serve a
             value from the model side).
         path: Optional location prefix used to build the eproperty's location
-            (``"{path}.{key}"``). May be ``None`` / empty — :meth:`eproperty._location`
+            (``"{path}.{key}"``). May be ``None`` / empty — `eproperty._location`
             then falls back to the key alone. This is how tracer-level eproperties
-            such as :attr:`InterleavingTracer.result` work without a path prefix.
+            such as [`InterleavingTracer.result`][nnsight.intervention.tracer.InterleavingTracer.result] work without a path prefix.
 
     Notes:
         Hosts with no meaningful path (e.g. tracers) need not declare ``path`` at
-        all — :meth:`eproperty._location` uses ``getattr(obj, "path", "")``, so a
+        all — `eproperty._location` uses ``getattr(obj, "path", "")``, so a
         missing attribute is treated the same as ``None`` / ``""``. It is declared
         ``Optional[str]`` here only for type clarity.
     """
@@ -72,9 +72,9 @@ class eproperty(property):
     """A hookable value on an interleaving host (Envoy, SourceEnvoy, tracer, ...).
 
     Define one by decorating a stub with ``@eproperty`` (or ``@eproperty(key=...)``);
-    the stub is the :meth:`preprocess`. The host only needs a ``path`` attribute (and
-    an ``interleaver`` for :meth:`provide`); the value is read/written through
-    :class:`~nnsight.intervention.interleaver.Mediator`, which raises outside a trace.
+    the stub is the `preprocess`. The host only needs a ``path`` attribute (and
+    an ``interleaver`` for [`provide`][nnsight.intervention.eproperty.eproperty.provide]); the value is read/written through
+    [`Mediator`][nnsight.intervention.interleaver.Mediator], which raises outside a trace.
 
     Args:
         key: The location suffix appended to the host's ``path`` (``"{path}.{key}"``).

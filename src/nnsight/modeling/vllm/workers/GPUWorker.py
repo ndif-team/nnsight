@@ -3,7 +3,7 @@
 vLLM builds its model runner by looking the class up on the module at construction
 time, so rebinding that name before ``Worker.__init__`` resolves it is what puts an
 nnsight runner in the worker at all. Everything else in this package follows from
-the runner installed here; :meth:`~nnsight.modeling.vllm.vllm.VLLM._load` names this
+the runner installed here; `_load` names this
 class as vLLM's ``worker_cls``, which is a supported engine argument, so no part of
 vLLM's own startup is patched.
 """

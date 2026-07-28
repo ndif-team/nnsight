@@ -1,10 +1,10 @@
 """A tracer whose workers can be built without running the model.
 
-The base :class:`~nnsight.intervention.tracer.InterleavingTracer` builds a trace's
+The base [`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer] builds a trace's
 workers and, in the same step, runs the forward. An async vLLM trace instead hands
 the request to the engine and streams the outputs, so it needs the worker-building
-step on its own, before any forward. :class:`VLLMTracer` factors that step into
-:meth:`prepare`; the synchronous path (:meth:`execute`) still runs it and then the
+step on its own, before any forward. [`VLLMTracer`][nnsight.modeling.vllm.tracer.VLLMTracer] factors that step into
+[`prepare`][nnsight.modeling.vllm.tracer.VLLMTracer.prepare]; the synchronous path (`execute`) still runs it and then the
 forward, exactly as the base does. Keeping this in the vLLM package leaves the base
 tracer untouched.
 """
@@ -22,16 +22,16 @@ from ...tracing.util import Scope
 
 
 class VLLMTracer(InterleavingTracer):
-    """An :class:`InterleavingTracer` whose worker-building is callable on its own."""
+    """An [`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer] whose worker-building is callable on its own."""
 
     def prepare(self, code: CodeType) -> tuple:
         """Build the trace's workers and combined call input, without running the model.
 
-        The first half of :meth:`execute`: collect the invoke workers (or the single
+        The first half of `execute`: collect the invoke workers (or the single
         direct-input worker) onto the interleaver and assemble the batched call
         input, then return the workers alongside it. The async backend uses this to
         get the workers to serialize and the input to submit, in place of
-        :meth:`~nnsight.intervention.envoy.Envoy.interleave`.
+        [`interleave`][nnsight.intervention.envoy.Envoy.interleave].
 
         Returns:
             ``(workers, args, kwargs)`` — the workers to read results from, and the

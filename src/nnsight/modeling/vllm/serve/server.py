@@ -1,6 +1,6 @@
 """A local HTTP server that runs nnsight traces on a vLLM engine.
 
-The server holds one dispatched async :class:`~nnsight.modeling.vllm.vllm.VLLM`.
+The server holds one dispatched async [`VLLM`][nnsight.modeling.vllm.vllm.VLLM].
 A client with only a meta model (no GPU) writes a trace as usual and sends it here
 with ``model.trace(..., serve=url)``; the server deserializes it, builds and submits
 the request to its engine, collects the saved values, and returns them. The trace
@@ -60,7 +60,7 @@ def set_model(model: "VLLM") -> None:
 def _build_tracer(body: bytes, compress: bool) -> Any:
     """Rebuild a runnable tracer from a serialized trace, bound to this model.
 
-    Mirrors :meth:`RequestModel.deserialize` — recompile the block from its source
+    Mirrors [`RequestModel.deserialize`][nnsight.schema.request.RequestModel.deserialize] — recompile the block from its source
     onto the tracer — but also restores the tracer's AST node. Deserialize drops it
     (server-side mediators normally just run in place), yet here they are
     re-serialized onto the engine's requests, which needs the AST; parsing the

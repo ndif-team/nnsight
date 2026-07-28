@@ -1,10 +1,10 @@
 """The tracer behind ``with model.trace(...):``.
 
-:class:`InterleavingTracer` is the context manager a user gets from
-:meth:`Envoy.trace`. It captures the body of the ``with`` block instead of
+[`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer] is the context manager a user gets from
+[`Envoy.trace`][nnsight.intervention.envoy.Envoy.trace]. It captures the body of the ``with`` block instead of
 running it inline, then — on exit — runs that body as intervention code
 interleaved with the model's forward pass (see
-:mod:`nnsight.intervention.interleaver`).
+[`nnsight.intervention.interleaver`][nnsight.intervention.interleaver]).
 
 Concretely, the tracer turns::
 
@@ -16,10 +16,10 @@ into: run ``envoy(x)`` while a worker executes the block, parking on
 resuming with that value. Saved values survive once the ``with`` exits.
 
 The capture/compile/execute plumbing lives in the base
-:class:`~nnsight.tracing.tracer.Tracer`; this module only overrides
-:meth:`~InterleavingTracer.execute` to drive the interleaver, and adds the
-trace-body API (:meth:`~InterleavingTracer.stop`,
-:attr:`~InterleavingTracer.result`).
+[`Tracer`][nnsight.tracing.tracer.Tracer]; this module only overrides
+[`execute`][nnsight.intervention.tracer.InterleavingTracer.execute] to drive the interleaver, and adds the
+trace-body API ([`stop`][nnsight.intervention.tracer.InterleavingTracer.stop],
+[`result`][nnsight.intervention.tracer.InterleavingTracer.result]).
 """
 
 from __future__ import annotations
@@ -49,22 +49,22 @@ if TYPE_CHECKING:
 class InterleavingTracer(Tracer):
     """Runs a ``with`` block as interventions interleaved with a model call.
 
-    Constructed by :meth:`Envoy.trace`; the ``fn`` and forward-pass arguments are
+    Constructed by [`Envoy.trace`][nnsight.intervention.envoy.Envoy.trace]; the ``fn`` and forward-pass arguments are
     remembered here and only executed when the ``with`` block exits, at which
-    point :meth:`execute` hands the captured body to :meth:`Envoy.interleave` to
+    point `execute` hands the captured body to [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave] to
     run alongside ``fn(*args, **kwargs)`` (usually the model's forward).
 
-    Inside the block, code reads and edits activations through :class:`Envoy`
+    Inside the block, code reads and edits activations through [`Envoy`][nnsight.intervention.envoy.Envoy]
     properties (``envoy.l1.output``, ``envoy.l2.input``, ...) and can use the
     tracer's own members:
 
-    * :attr:`result` — the value ``fn`` returned (e.g. the model's output).
-    * :meth:`stop` — halt the model run early.
+    * [`result`][nnsight.intervention.tracer.InterleavingTracer.result] — the value ``fn`` returned (e.g. the model's output).
+    * `stop` — halt the model run early.
 
     Attributes:
-        envoy: The :class:`Envoy` whose interleaver and hooks this trace runs on.
+        envoy: The [`Envoy`][nnsight.intervention.envoy.Envoy] whose interleaver and hooks this trace runs on.
         fn: The callable to run interleaved, or its name on the module. A name
-            is left unresolved until :meth:`Envoy.interleave` binds it against the
+            is left unresolved until [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave] binds it against the
             live module (e.g. after a lazy dispatch swaps in real weights).
         args: Positional arguments forwarded to ``fn`` (typically the input).
         kwargs: Keyword arguments forwarded to ``fn``.
@@ -107,7 +107,7 @@ class InterleavingTracer(Tracer):
     def result(self, value: Any) -> Any:
         """The value the traced call returned — e.g. the model's output.
 
-        For :meth:`~nnsight.intervention.envoy.Envoy.generate` this is the token
+        For `generate` this is the token
         ids, so read it inside the block and ``.save()`` it to keep it::
 
             with model.generate("Madison Square Garden is in", max_new_tokens=3) as tracer:
@@ -129,7 +129,7 @@ class InterleavingTracer(Tracer):
                 for step in tracer.iter[:3]:
                     hidden = model.transformer.h[0].output.save()  # steps 0, 1, 2
 
-        See :class:`Iterations` for how the range is selected.
+        See [`Iterations`][nnsight.intervention.iterator.Iterations] for how the range is selected.
         """
         return Iterations()
 
@@ -158,7 +158,7 @@ class InterleavingTracer(Tracer):
                 ends.
 
         Returns:
-            A :class:`~nnsight.intervention.barrier.Barrier` to call from each of
+            A [`Barrier`][nnsight.intervention.barrier.Barrier] to call from each of
                 those blocks.
         """
         return Barrier(n)
@@ -186,7 +186,7 @@ class InterleavingTracer(Tracer):
     ) -> CacheView:
         """Record activations of many modules at once during the run.
 
-        Returns a :class:`~nnsight.intervention.cache.CacheView` that fills in as
+        Returns a [`CacheView`][nnsight.intervention.cache.CacheView] that fills in as
         the model runs; read captured values from it after the trace::
 
             with model.trace(prompt) as tracer:
@@ -256,9 +256,9 @@ class InterleavingTracer(Tracer):
           body); their inputs are combined into one batched forward and each
           sub-block runs as a worker scoped to its rows.
 
-        Either way the workers are handed to :meth:`Envoy.interleave` to run
+        Either way the workers are handed to [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave] to run
         alongside ``fn(*combined_input)``, then results are pushed back with
-        save-gating (see :meth:`Tracer.execute`).
+        save-gating (see [`Tracer.execute`][nnsight.tracing.tracer.Tracer.execute]).
         """
         frame = self.info.frame
         glbls = frame.f_globals
@@ -310,7 +310,7 @@ class InterleavingTracer(Tracer):
     def traceback(self, exception: BaseException) -> TracebackType | None:
         """Return a clean traceback for an error raised inside the trace body.
 
-        When a worker raises, :meth:`Mediator.switch` stashes the intervention-only
+        When a worker raises, [`Mediator.switch`][nnsight.intervention.interleaver.Mediator.switch] stashes the intervention-only
         traceback on the exception as ``__intervention_tb__`` before the model and
         hook frames pile on top during unwinding. Prefer that stashed trace, fall
         back to the live one, and filter nnsight's own frames out so the user sees
@@ -323,16 +323,16 @@ class InterleavingTracer(Tracer):
 
 
 class ScanningTracer(InterleavingTracer):
-    """Like :class:`InterleavingTracer`, but runs the forward under fake tensors.
+    """Like [`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer], but runs the forward under fake tensors.
 
-    Constructed by :meth:`~nnsight.modeling.mixins.meta.Meta.scan`. The block
-    still reads activations through :class:`Envoy` properties, but the model runs
-    inside a :class:`~torch._subclasses.fake_tensor.FakeTensorMode`, so operations
+    Constructed by [`scan`][nnsight.modeling.mixins.meta.Meta.scan]. The block
+    still reads activations through [`Envoy`][nnsight.intervention.envoy.Envoy] properties, but the model runs
+    inside a `FakeTensorMode`, so operations
     only propagate tensor *metadata* (shape/dtype/device) — no real compute, no
     real weights. This lets you inspect activation shapes on an undispatched
-    (meta-weight) model without loading it: :meth:`Meta.interleave` sees the active
+    (meta-weight) model without loading it: [`Meta.interleave`][nnsight.modeling.mixins.meta.Meta.interleave] sees the active
     fake mode and skips dispatch, leaving parameters on the meta device, and
-    :meth:`Envoy.interleave` moves the inputs onto that same device so shapes
+    [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave] moves the inputs onto that same device so shapes
     propagate consistently.
 
     The values read inside a scan are fake tensors, valid only within the block.
@@ -341,12 +341,12 @@ class ScanningTracer(InterleavingTracer):
     """
 
     def execute(self, code: CodeType) -> None:
-        """Run :meth:`InterleavingTracer.execute` under a fake-tensor mode.
+        """Run [`InterleavingTracer.execute`][nnsight.intervention.tracer.InterleavingTracer.execute] under a fake-tensor mode.
 
         Deferring to ``super().execute`` means scan goes through the same
         ``_batch_size``/``_batch`` preprocessing as trace (a string prompt is
         tokenized, invokes are batched); wrapping it in a
-        :class:`~torch._subclasses.fake_tensor.FakeTensorMode` makes the forward
+        `FakeTensorMode` makes the forward
         propagate only shapes/dtypes — no real compute, no dispatch.
         ``assume_static_by_default`` keeps shapes concrete rather than symbolic, and
         ``allow_non_fake_inputs`` lets the meta-device parameters take part without
@@ -363,8 +363,8 @@ class Invoker(Tracer):
     """One ``with tracer.invoke(x):`` block inside a ``with model.trace() as tracer:``.
 
     Captures its body and registers it — together with the batch group its input
-    occupies — on the parent :class:`InterleavingTracer`, which combines all
-    invokes into a single batched forward (see :meth:`InterleavingTracer.execute`).
+    occupies — on the parent [`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer], which combines all
+    invokes into a single batched forward (see [`InterleavingTracer.execute`][nnsight.intervention.tracer.InterleavingTracer.execute]).
     """
 
     def __init__(self, tracer: "InterleavingTracer", *args: Any, **kwargs: Any) -> None:
@@ -378,9 +378,9 @@ class Invoker(Tracer):
     def execute(self, code: CodeType) -> None:
         """Register this invoke's input and body, deferring the run to the parent.
 
-        Adds the input to the parent tracer's :attr:`~InterleavingTracer.batcher`
+        Adds the input to the parent tracer's [`batcher`][nnsight.intervention.tracer.InterleavingTracer.batcher]
         (claiming a batch group) and appends the captured body as a worker on the
-        interleaver. The parent's :meth:`InterleavingTracer.execute` runs them all
+        interleaver. The parent's [`InterleavingTracer.execute`][nnsight.intervention.tracer.InterleavingTracer.execute] runs them all
         together once every invoke has been collected.
         """
         frame = self.info.frame

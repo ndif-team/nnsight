@@ -1,7 +1,7 @@
 """In-place status line for a remote NDIF job, in a terminal or a notebook.
 
 A remote job moves through a lifecycle (RECEIVED -> QUEUED -> ... -> RUNNING ->
-COMPLETED/ERROR); :class:`StatusDisplay` renders that progress as a single
+COMPLETED/ERROR); [`StatusDisplay`][nnsight.intervention.backends.display.StatusDisplay] renders that progress as a single
 color-coded line that updates in place -- a spinner while a stage is active, the
 final icon when it ends. The same line is built with ANSI escapes for a TTY and
 re-emitted as HTML for a notebook cell, so one renderer serves both.
@@ -67,7 +67,7 @@ _TERMINAL = {Status.COMPLETED, Status.ERROR}
 class StatusDisplay:
     """In-place, color-coded status line for a remote job (terminal or notebook).
 
-    Active states animate a spinner (advanced by :meth:`refresh` between
+    Active states animate a spinner (advanced by [`refresh`][nnsight.intervention.backends.display.StatusDisplay.refresh] between
     messages); terminal states end the line. LOG messages print on their own
     line and don't replace the current lifecycle status.
     """

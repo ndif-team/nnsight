@@ -8,13 +8,13 @@ from ...intervention.envoy import Envoy
 
 
 class Loadable(Envoy):
-    """An :class:`~nnsight.intervention.envoy.Envoy` that loads its own module.
+    """An [`Envoy`][nnsight.intervention.envoy.Envoy] that loads its own module.
 
-    Every construction goes through :meth:`_load`, which returns the module to wrap.
+    Every construction goes through `_load`, which returns the module to wrap.
     The base default returns a ready ``torch.nn.Module`` as-is (so ``Loadable(mod)``
     wraps it directly) and otherwise isn't implemented; subclasses override it to
     build from load arguments and to decide what a pre-loaded module means for them
-    (e.g. :class:`~nnsight.modeling.transformers.TransformersModel` wraps one in a
+    (e.g. [`TransformersModel`][nnsight.modeling.transformers.TransformersModel] wraps one in a
     ``transformers.pipeline``). The ``rename`` spec is an Envoy concern, so it is
     kept out of the load path.
     """

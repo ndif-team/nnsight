@@ -1,20 +1,20 @@
 """Expose, edit, and skip a module's ``forward`` at the operation level.
 
 Module ``input``/``output`` are the only two locations the forward *hooks*
-(:mod:`nnsight.intervention.interleaver`) surface. Everything in between — the
+([`nnsight.intervention.interleaver`][nnsight.intervention.interleaver]) surface. Everything in between — the
 individual operations a ``forward`` performs — is invisible to them because it
 isn't a submodule with its own hook.
 
 This module makes those intermediates observable, editable, and skippable without
 the interleaver knowing anything about source. The interleaver runs on one
-primitive: a provider-location string and :meth:`Interleaver.handle`, which
+primitive: a provider-location string and [`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle], which
 serves a value to interventions and returns it back edited if one wrote to that
 location. Inputs/outputs are just the two locations hooks emit; here we add more,
 mid-forward:
 
 1. Parse the module's ``forward`` and rewrite every call ``fn(*args, **kwargs)``
    into ``__nnsight_op__("source.{name}_{n}", fn, *args, **kwargs)``. At run time
-   :func:`_make_op` brackets the call with :meth:`Interleaver.handle` on its
+   `_make_op` brackets the call with [`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle] on its
    ``.input`` (before) and ``.output`` (after) — both readable/replaceable — and a
    ``.skip`` gate that can bypass the call entirely.
 2. ``name`` is the called function's dotted path joined with ``_``
@@ -24,15 +24,15 @@ mid-forward:
    the order the interleaver serves values.
 
 Installation is lazy and permanent. The first time a module is sourced or skipped
-its ``forward`` is replaced by a :func:`_make_controller` closure that reads a
-single per-module :class:`_State` (see :data:`_STATE`): it gates on ``.skip``, then
+its ``forward`` is replaced by a `_make_controller` closure that reads a
+single per-module `_State` (see `_STATE`): it gates on ``.skip``, then
 runs the *body* — the original forward, or the source-instrumented one once
 ``.source`` is used. The controller is inert outside a trace and stays installed,
 so later runs work regardless of request order, and source and skip compose on one
 wrapper. Because the ``_State`` is rebound on each access, a module wrapped by
 several Envoys/Interleavers reports to whichever touched it most recently.
 
-An :class:`Envoy` exposes operations as ``envoy.source.{name}_{n}``, whose
+An [`Envoy`][nnsight.intervention.envoy.Envoy] exposes operations as ``envoy.source.{name}_{n}``, whose
 ``.input``/``.inputs``/``.output``/``.skip`` mirror an Envoy's own, one level finer.
 """
 
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 #: Global name the instrumented forward calls to bracket each operation.
 OP = "__nnsight_op__"
 
-#: Attribute holding a module's :class:`_State` once it has been sourced/skipped.
+#: Attribute holding a module's `_State` once it has been sourced/skipped.
 _STATE = "__nnsight__"
 
 #: Sentinel returned by the skip gate when no skip is pending for a location.
@@ -74,7 +74,7 @@ class Compiled(NamedTuple):
 
     code: CodeType  #: the instrumented forward's code object
     names: tuple[str, ...]  #: operation labels, in execution order
-    lines: dict[str, int]  #: label -> 1-based line within :attr:`source`
+    lines: dict[str, int]  #: label -> 1-based line within `source`
     source: str  #: dedented source text of the original forward
 
 
@@ -85,17 +85,17 @@ class _State:
     read it live on every call, so re-wrapping — or wrapping the same module in more
     than one Envoy at once — just registers another interleaver here.
 
-    :attr:`interleavers` maps each interleaver that instrumented this module to the
-    path it addresses the module by; :meth:`active` picks the one whose trace is
+    [`interleavers`][nnsight.intervention.source._State.interleavers] maps each interleaver that instrumented this module to the
+    path it addresses the module by; [`active`][nnsight.intervention.source._State.active] picks the one whose trace is
     currently running (there is at most one, exactly as each of a module's stacked
     input/output hooks fires only while its own interleaver is interleaving).
 
     Because this state lives on the module (``module.__dict__[_STATE]``), it holds
     neither the module nor its interleavers *strongly* — the module would sit in a
     reference cycle and never be freed by refcounting. The interleavers are held in
-    a :class:`weakref.WeakKeyDictionary` (a finished local wrapper's interleaver
+    a `weakref.WeakKeyDictionary` (a finished local wrapper's interleaver
     drops out on its own; a server's persistent interleaver stays, so the same
-    module serves request after request), and :attr:`body` is the *unbound* forward
+    module serves request after request), and [`body`][nnsight.intervention.source._State.body] is the *unbound* forward
     (a plain function taking ``self``) rather than a bound method that would pin it.
     """
 
@@ -120,7 +120,7 @@ class _State:
 
 
 #: Instrumented forwards, memoized per original ``forward`` code object. Value is a
-#: :class:`Compiled`, or a :class:`SourceNotAvailable` (cached so a forward we
+#: [`Compiled`][nnsight.intervention.source.Compiled], or a [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable] (cached so a forward we
 #: can't instrument isn't re-parsed on every access).
 _FORWARD_CACHE: dict[CodeType, "Compiled | SourceNotAvailable"] = {}
 
@@ -133,7 +133,7 @@ _FORWARD_CACHE: dict[CodeType, "Compiled | SourceNotAvailable"] = {}
 class _Instrument(ast.NodeTransformer):
     """Rewrite every call into an ``__nnsight_op__(location, fn, *args, **kwargs)``.
 
-    Numbers occurrences in execution order: :meth:`generic_visit` descends into a
+    Numbers occurrences in execution order: `generic_visit` descends into a
     call's arguments (running inner calls first) *before* this node is assigned
     its counter, so ``f(f(x))`` gives the inner ``f`` ``f_0`` and the outer ``f_1``.
     """
@@ -201,7 +201,7 @@ def _compile_instrumented(func: Callable) -> Compiled:
     """Parse, instrument, and compile a Python ``func`` (a ``forward`` or a drilled-into
     callable), or raise.
 
-    Raises :class:`SourceNotAvailable` for callables we can't safely rewrite:
+    Raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable] for callables we can't safely rewrite:
     non-Python ones (builtins/C functions have no ``__code__``), those with free
     variables, no recoverable source, or a decorator (which is load-bearing and
     would be dropped by extracting the raw code object).
@@ -248,7 +248,7 @@ def _compile_instrumented(func: Callable) -> Compiled:
 
 
 def _compiled(func: Callable) -> Compiled:
-    """Cached :func:`_compile_instrumented`, keyed by ``func``'s code object."""
+    """Cached `_compile_instrumented`, keyed by ``func``'s code object."""
     key = getattr(func, "__code__", None)
     if key is None:
         # Builtins / C functions have no code object to key on or parse.
@@ -273,7 +273,7 @@ def _compiled(func: Callable) -> Compiled:
 
 
 def _skipped(interleaver: Any, location: str) -> Any:
-    """Query the skip gate at ``location``; return the replacement or :data:`_NO_SKIP`."""
+    """Query the skip gate at ``location``; return the replacement or `_NO_SKIP`."""
     return interleaver.handle(f"{location}.skip", _NO_SKIP)
 
 
@@ -285,9 +285,9 @@ def _run_op(
     Reports/replaces ``.input``, honors a ``.skip`` gate, and reports/replaces
     ``.output`` — the same three handles a module hook emits, one level finer.
     Between them, if a worker asked to drill into this op (``base`` is a key in
-    :attr:`Interleaver.sourced`), the raw ``fn`` is offered over ``{base}.fn`` so
+    [`Interleaver.sourced`][nnsight.intervention.interleaver.Interleaver.sourced]), the raw ``fn`` is offered over ``{base}.fn`` so
     the worker can hand back a source-instrumented copy (cached in
-    :attr:`Interleaver.sourced` for later fires); that copy runs in place of ``fn``,
+    [`Interleaver.sourced`][nnsight.intervention.interleaver.Interleaver.sourced] for later fires); that copy runs in place of ``fn``,
     making *its* operations addressable under ``{base}.source.*`` — recursively.
     """
     args, kwargs = interleaver.handle(f"{base}.input", (args, kwargs))
@@ -311,9 +311,9 @@ def _run_op(
 def _make_op(module: Any) -> Callable:
     """Build the ``__nnsight_op__`` the instrumented forward calls at each call site.
 
-    Anchored to the *module* (reads its live :class:`_State`), so re-wrapping and
+    Anchored to the *module* (reads its live `_State`), so re-wrapping and
     multiple wrappers just work. Outside a trace it calls straight through; inside
-    one it brackets the call via :func:`_run_op` under ``{path}.{location}`` for the
+    one it brackets the call via `_run_op` under ``{path}.{location}`` for the
     interleaver whose trace is running. Holds the module by weakref: this op lives in
     the instrumented forward's globals, which is the module's own ``body`` — a strong
     reference would cycle.
@@ -332,10 +332,10 @@ def _make_op(module: Any) -> Callable:
 def _make_nested_op(interleaver: Any, prefix: str) -> Callable:
     """Build the ``__nnsight_op__`` for a source-instrumented *called* function.
 
-    Like :func:`_make_op`, but the location namespace is fixed to ``prefix`` (the
+    Like `_make_op`, but the location namespace is fixed to ``prefix`` (the
     drilled-into op's path) rather than resolved from a module's live state — the
-    callable isn't a module and has no :class:`_State`. ``location`` already carries
-    the ``source.`` prefix (added by :class:`_Instrument`), so its operations land
+    callable isn't a module and has no `_State`. ``location`` already carries
+    the ``source.`` prefix (added by `_Instrument`), so its operations land
     under ``{prefix}.source.{label}``.
     """
 
@@ -350,8 +350,8 @@ def _make_nested_op(interleaver: Any, prefix: str) -> Callable:
 def _build_instrumented(fn: Callable, compiled: Compiled, op: Callable) -> Callable:
     """Materialize a source-instrumented copy of ``fn`` that calls ``op`` per call site.
 
-    ``compiled`` is ``fn``'s instrumented code (from :func:`_compiled`); ``op`` is the
-    :func:`_make_nested_op` to bind as its ``__nnsight_op__`` global. Bound methods
+    ``compiled`` is ``fn``'s instrumented code (from `_compiled`); ``op`` is the
+    `_make_nested_op` to bind as its ``__nnsight_op__`` global. Bound methods
     are rebuilt from their underlying function and re-bound to the same instance, so
     the recompiled body still receives ``self``.
     """
@@ -371,7 +371,7 @@ def _build_instrumented(fn: Callable, compiled: Compiled, op: Callable) -> Calla
 def _make_controller(module: Any) -> Callable:
     """Build the forward installed on an instrumented module: skip gate, then body.
 
-    Reads the module's live :class:`_State` each call, so it composes cleanly:
+    Reads the module's live `_State` each call, so it composes cleanly:
     ``body`` is the (unbound) original forward or, once sourced, the instrumented
     one, and a ``.skip`` bypasses it entirely (and, if sourced, all its ops).
 
@@ -400,11 +400,11 @@ def _make_controller(module: Any) -> Callable:
 
 def _ensure_controller(envoy: "Envoy") -> _State:
     """Install the controller forward on ``envoy``'s module once; (re)bind and return
-    its :class:`_State`.
+    its `_State`.
 
     Installed directly into the module's ``__dict__`` (shadowing the class method
     for ``__call__``) and left there permanently — inert outside a trace. The body
-    defaults to the original forward; :func:`install_source` upgrades it.
+    defaults to the original forward; [`install_source`][nnsight.intervention.source.install_source] upgrades it.
     """
     module = envoy._module
     state = module.__dict__.get(_STATE)
@@ -423,7 +423,7 @@ def _ensure_controller(envoy: "Envoy") -> _State:
 def install_source(envoy: "Envoy") -> Compiled:
     """Source-instrument ``envoy``'s module and install the controller.
 
-    Returns the module's :class:`Compiled`. Upgrades the controller's body to the
+    Returns the module's [`Compiled`][nnsight.intervention.source.Compiled]. Upgrades the controller's body to the
     instrumented forward (built once per module, from code cached per code object).
     """
     func = type(envoy._module).forward
@@ -456,20 +456,20 @@ def install_skip(envoy: "Envoy") -> None:
 class SourceEnvoy:
     """A single operation inside a module's ``forward``, e.g. ``source.torch_relu_0``.
 
-    You never construct one directly; you reach it by indexing a :class:`Source`
+    You never construct one directly; you reach it by indexing a [`Source`][nnsight.intervention.source.Source]
     with an operation's ``{callable}_{occurrence}`` name (``envoy.source.torch_relu_0``).
     It is the operation-level analogue of an
-    :class:`~nnsight.intervention.envoy.Envoy`: where an Envoy exposes a
+    [`Envoy`][nnsight.intervention.envoy.Envoy]: where an Envoy exposes a
     *submodule's* ``.input``/``.output``, a ``SourceEnvoy`` exposes those same
     handles for a *single call* the ``forward`` makes — one level finer.
 
     Inside a trace, each handle both reads and writes the live value:
 
-    * :attr:`output` — the operation's return value.
-    * :attr:`input` — the operation's first argument.
-    * :attr:`inputs` — the operation's full ``(args, kwargs)``.
-    * :meth:`skip` — bypass the call, substituting a value for its output.
-    * :attr:`source` — drill *into* the called function, exposing its own
+    * `output` — the operation's return value.
+    * `input` — the operation's first argument.
+    * `inputs` — the operation's full ``(args, kwargs)``.
+    * `skip` — bypass the call, substituting a value for its output.
+    * `source` — drill *into* the called function, exposing its own
       operations one level deeper (recursively).
 
     Reading returns the value; assigning replaces it for the rest of the forward.
@@ -514,7 +514,7 @@ class SourceEnvoy:
     def source(self) -> "Source":
         """Drill into the called function, exposing *its* operations recursively.
 
-        Returns a :class:`Source` over the function this operation calls, so its
+        Returns a [`Source`][nnsight.intervention.source.Source] over the function this operation calls, so its
         internal operations become addressable as
         ``...source.{name}.source.{inner}`` — with the same
         ``.input``/``.output``/``.inputs``/``.skip``/``.source`` handles, to any
@@ -523,7 +523,7 @@ class SourceEnvoy:
         Only available **inside a trace**: the called function is resolved from the
         live value flowing through the call at run time (a call target is often a
         local variable, e.g. an attention implementation, so it can't be found
-        statically). Raises :class:`SourceNotAvailable` if the target has no
+        statically). Raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable] if the target has no
         recoverable Python source (a builtin/C function) or is itself a submodule
         (call ``.source`` on that submodule directly instead).
 
@@ -575,7 +575,7 @@ class SourceEnvoy:
         """The operation's arguments as an ``(args, kwargs)`` pair.
 
         Use this when you need every argument (or the keyword arguments); for the
-        common case of a single leading argument, :attr:`input` is more direct.
+        common case of a single leading argument, `input` is more direct.
         Assigning a new ``(args, kwargs)`` pair replaces the arguments the call
         runs with.
 
@@ -590,7 +590,7 @@ class SourceEnvoy:
     def input(self, value: Any) -> Any:
         """The operation's first argument (first positional, else first keyword).
 
-        A convenience view over :attr:`inputs` for the usual single-argument call.
+        A convenience view over `inputs` for the usual single-argument call.
         Assigning replaces just that first argument, leaving any other arguments
         untouched.
 
@@ -674,7 +674,7 @@ class Source:
     occurrence counter is per name and runs in execution order (nested calls run
     inner-first, so the inner call gets ``_0``); two ``torch.relu(...)`` calls are
     therefore ``torch_relu_0`` and ``torch_relu_1``. Index in with that name to get
-    a :class:`SourceEnvoy`::
+    a [`SourceEnvoy`][nnsight.intervention.source.SourceEnvoy]::
 
         model.layer1.source.torch_relu_0    # -> SourceEnvoy for the relu call
 
@@ -685,10 +685,10 @@ class Source:
 
     Source values are only meaningful inside a trace, and ordinary inference is
     unaffected. Requesting an operation on a ``forward`` whose source can't be
-    recovered (e.g. a decorated ``forward``) raises :class:`SourceNotAvailable`.
+    recovered (e.g. a decorated ``forward``) raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable].
 
     A ``Source`` also decomposes a *called function* — reached as
-    ``some_op.source`` (see :attr:`SourceEnvoy.source`) — the same way, one level
+    ``some_op.source`` (see [`SourceEnvoy.source`][nnsight.intervention.source.SourceEnvoy.source]) — the same way, one level
     deeper. In that nested form the operations live under the drilled-into op's
     path rather than the module's ``forward``.
 
@@ -728,7 +728,7 @@ class Source:
         return self._compiled.names
 
     def _node(self, name: str) -> SourceEnvoy:
-        """A :class:`SourceEnvoy` for ``name``, carrying source text for its repr."""
+        """A [`SourceEnvoy`][nnsight.intervention.source.SourceEnvoy] for ``name``, carrying source text for its repr."""
         return SourceEnvoy(
             self._envoy,
             name,
@@ -738,9 +738,9 @@ class Source:
         )
 
     def __getattr__(self, name: str) -> SourceEnvoy:
-        """Resolve ``source.<name>`` to its :class:`SourceEnvoy`.
+        """Resolve ``source.<name>`` to its [`SourceEnvoy`][nnsight.intervention.source.SourceEnvoy].
 
-        Raises :class:`AttributeError` for an unknown operation, listing the
+        Raises `AttributeError` for an unknown operation, listing the
         available names so a mistyped or wrong-occurrence label is easy to fix.
 
         Examples:
@@ -757,7 +757,7 @@ class Source:
         return self._node(name)
 
     def __iter__(self) -> Iterator[SourceEnvoy]:
-        """Iterate the operations in execution order, yielding a :class:`SourceEnvoy` each.
+        """Iterate the operations in execution order, yielding a [`SourceEnvoy`][nnsight.intervention.source.SourceEnvoy] each.
 
         Examples:
             >>> [op.name for op in model.layer1.source]

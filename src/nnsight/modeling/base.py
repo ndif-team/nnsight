@@ -7,10 +7,10 @@ class NNsight(Envoy):
     """Wrap an arbitrary ``torch.nn.Module`` for tracing and intervention.
 
     The simplest entry point into nnsight: ``NNsight(module)`` builds a root
-    :class:`~nnsight.intervention.envoy.Envoy` mirroring the module's tree, so
+    [`Envoy`][nnsight.intervention.envoy.Envoy] mirroring the module's tree, so
     every submodule exposes its activations inside a ``with model.trace(...):``
     block (read them, edit them, capture gradients, ...). It is a thin, named
-    :class:`Envoy` — ``Envoy`` is the node type the tree is built from; ``NNsight``
+    [`Envoy`][nnsight.intervention.envoy.Envoy] — ``Envoy`` is the node type the tree is built from; ``NNsight``
     is the conventional name for wrapping a whole model, and the higher-level
     wrappers (``TransformersModel``, ``DiffusionModel``, ...) are specialized
     envoys that add loading/tokenization on top of the same behavior.

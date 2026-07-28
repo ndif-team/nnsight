@@ -1,11 +1,11 @@
 """Top-level NDIF helpers.
 
-- :func:`register` — ship a local module with a remote request (serialize by value).
-- :func:`status` / :func:`is_model_running` — query the NDIF service and its models.
-- :func:`compare` — diff the local Python environment against the remote one.
+- `register` — ship a local module with a remote request (serialize by value).
+- `status` / [`is_model_running`][nnsight.ndif.is_model_running] — query the NDIF service and its models.
+- [`compare`][nnsight.ndif.compare] — diff the local Python environment against the remote one.
 
 Tables render as plain text with optional ANSI color (matching
-:mod:`nnsight.intervention.backends.display`); no ``rich`` dependency. Network
+[`nnsight.intervention.backends.display`][nnsight.intervention.backends.display]); no ``rich`` dependency. Network
 libraries are imported lazily so importing nnsight stays light.
 """
 
@@ -203,15 +203,15 @@ class NdifStatus:
 def status(raw: bool = False) -> Union[dict, NdifStatus]:
     """Query the NDIF service and its deployed models.
 
-    Printing the returned :class:`NdifStatus` shows a table of the currently
+    Printing the returned [`NdifStatus`][nnsight.ndif.NdifStatus] shows a table of the currently
     deployed (HOT/WARM) models and their state.
 
     Args:
         raw: If ``True``, return the raw ``/status`` JSON instead of an
-            :class:`NdifStatus`.
+            [`NdifStatus`][nnsight.ndif.NdifStatus].
 
     Returns:
-        The raw dict (``raw=True``), else an :class:`NdifStatus` (empty, with a
+        The raw dict (``raw=True``), else an [`NdifStatus`][nnsight.ndif.NdifStatus] (empty, with a
         ``DOWN`` status, if the service is unreachable).
 
     Examples:
@@ -246,7 +246,7 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
 
 
 def ndif_status(raw: bool = False) -> Union[dict, NdifStatus]:
-    """Deprecated alias for :func:`status`."""
+    """Deprecated alias for `status`."""
     import warnings
 
     warnings.warn(
@@ -307,7 +307,7 @@ def login(api_key: Optional[str] = None) -> None:
     """Store your NDIF API key so future sessions can use it (HuggingFace-style).
 
     Prompts for the key with ``getpass`` (never echoed) when not given, verifies it
-    against the service via :func:`whoami`, then persists it with
+    against the service via [`whoami`][nnsight.ndif.whoami], then persists it with
     ``CONFIG.set_default_api_key`` (which writes ``config.yaml``). Verification is
     best-effort — the key is still saved if the service can't be reached or doesn't
     recognize it, with a note — so a typo is surfaced without blocking login.
@@ -418,8 +418,8 @@ def pull_env() -> None:
     """Auto-register local (non-installed) modules for serialize-by-value, once.
 
     The remote backend calls this before its first request: every module
-    :func:`get_local_env` discovers as ``"local"`` (importable from the working
-    tree, not a pip install) is passed to :func:`register`, so its source ships
+    [`get_local_env`][nnsight.ndif.get_local_env] discovers as ``"local"`` (importable from the working
+    tree, not a pip install) is passed to `register`, so its source ships
     with remote requests. Without it, remote code that imports a local module
     raises ``ModuleNotFoundError`` server-side. Cached via ``_PULLED_ENV`` so the
     (cheap but non-trivial) local-env scan runs only once per process.
@@ -526,7 +526,7 @@ def compare() -> EnvComparison:
     Package or Python-version drift between client and server can make
     interventions behave differently remotely than locally; this surfaces it.
 
-    Returns an :class:`EnvComparison` — ``print`` it for the table, or inspect
+    Returns an [`EnvComparison`][nnsight.ndif.EnvComparison] — ``print`` it for the table, or inspect
     ``.mismatches`` / ``.critical_mismatches`` / ``.python_matches``.
 
     Examples:

@@ -3,7 +3,7 @@
 A traced call can reach the same module more than once — most commonly a
 generation loop, where every module is revisited on each decoded step. Each
 visit produces a fresh *occurrence* of that module's locations (its
-``.input``/``.output``/...). :class:`Iterations`, reached as ``tracer.iter``,
+``.input``/``.output``/...). [`Iterations`][nnsight.intervention.iterator.Iterations], reached as ``tracer.iter``,
 lets a stretch of trace body bind its reads and writes to a chosen range of
 those occurrences:
 
@@ -14,9 +14,9 @@ those occurrences:
             hidden = model.transformer.h[0].output.save()  # steps 0, 1, 2
 
 The mechanism lives in the interleaver (see
-:mod:`nnsight.intervention.interleaver`): each visit to a location is tagged
+[`nnsight.intervention.interleaver`][nnsight.intervention.interleaver]): each visit to a location is tagged
 with its occurrence index, and a worker's request is tagged with the occurrence
-it wants — the running :class:`~nnsight.intervention.interleaver.Mediator`'s
+it wants — the running [`Mediator`][nnsight.intervention.interleaver.Mediator]'s
 ``iteration``. Looping over ``tracer.iter`` is what moves that pointer.
 """
 
@@ -39,11 +39,11 @@ if TYPE_CHECKING:
 class Iterations(Tracer):
     """Selects which occurrences of a location a stretch of trace body targets.
 
-    Returned by :attr:`~nnsight.intervention.tracer.InterleavingTracer.iter`. A
+    Returned by [`iter`][nnsight.intervention.tracer.InterleavingTracer.iter]. A
     module reached repeatedly in one run — once per step of a generation loop,
     say — produces a fresh occurrence of each of its locations every step.
     Looping over ``tracer.iter`` walks the running
-    :class:`~nnsight.intervention.interleaver.Mediator`'s ``iteration`` pointer
+    [`Mediator`][nnsight.intervention.interleaver.Mediator]'s ``iteration`` pointer
     across a range of those occurrences, so reads and writes inside the loop body
     bind to the matching step:
 
@@ -66,11 +66,11 @@ class Iterations(Tracer):
     step the model never runs, e.g. one past the last generated token) is simply
     left parked. The interleaver reports that dangling request as a warning rather
     than an error (see
-    :meth:`~nnsight.intervention.interleaver.Interleaver.check_dangling_mediators`),
+    [`check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators]),
     keeping the values from every step that did run.
 
     A ``with tracer.iter[...]:`` block does the same thing and is deprecated; the
-    loop moves inside :meth:`execute`, which re-runs the block per step. Prefer the
+    loop moves inside `execute`, which re-runs the block per step. Prefer the
     ``for`` form.
 
     Attributes:
@@ -113,7 +113,7 @@ class Iterations(Tracer):
 
         Before yielding each step, pin the mediator's ``iteration`` so the first
         request in the loop body binds to that occurrence (it then relaxes; see
-        :attr:`~nnsight.intervention.interleaver.Mediator.iteration`). An open end
+        [`iteration`][nnsight.intervention.interleaver.Mediator.iteration]). An open end
         (``stop is None``) keeps handing out steps indefinitely — the model
         stopping is what ends the loop, via a dangling final request. Whatever
         ``iteration`` was before the loop is restored on exit, so loops can nest.
@@ -138,12 +138,12 @@ class Iterations(Tracer):
         ``with tracer.iter[...]:`` predates ``for step in tracer.iter[...]:`` and
         does the same thing the long way: rather than the loop being the user's,
         it is here, re-running the captured block with the mediator's ``iteration``
-        pinned to each step (see :meth:`__iter__` for the same pinning). Prefer the
+        pinned to each step (see `__iter__` for the same pinning). Prefer the
         ``for`` form, which is a plain loop over the body written inline.
 
         Open-ended (``tracer.iter[:]``) ends the way the ``for`` form does: the
         step past the model's last parks, and the interleaver throws
-        :class:`~nnsight.intervention.interleaver.OutOfOrderError` into it once the
+        [`OutOfOrderError`][nnsight.intervention.interleaver.OutOfOrderError] into it once the
         run finishes — caught here, so the reached steps' saved values are kept.
         """
         warnings.warn(

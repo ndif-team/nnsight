@@ -7,17 +7,17 @@ The core trick: when the user writes
 
 we don't want the block's body to run normally. Instead we want to capture it,
 hand it to a backend, and execute it in a controlled environment (for nnsight,
-that means interleaved with a model's forward pass). :class:`Tracer` pulls this
+that means interleaved with a model's forward pass). [`Tracer`][nnsight.tracing.tracer.Tracer] pulls this
 off with a small dance across the context-manager protocol:
 
-1. **Capture** (:meth:`Tracer.capture`) — from the frame that ran the ``with``,
+1. **Capture** ([`Tracer.capture`][nnsight.tracing.tracer.Tracer.capture]) — from the frame that ran the ``with``,
    read the surrounding source, parse it, and find the ``with`` node at that
    line. Compile the block's *body* into a standalone code object. Results are
-   memoized per site (see :mod:`nnsight.tracing.globals`).
-2. **Skip** (:meth:`Tracer.__enter__` → :func:`skip_context`) — install a trace
-   function that raises :class:`ExitTracingException` the instant the body is
+   memoized per site (see [`nnsight.tracing.globals`][nnsight.tracing.globals]).
+2. **Skip** (`Tracer.__enter__` → [`skip_context`][nnsight.tracing.tracer.skip_context]) — install a trace
+   function that raises [`ExitTracingException`][nnsight.tracing.tracer.ExitTracingException] the instant the body is
    about to run, so the body never executes inline.
-3. **Execute** (:meth:`Tracer.__exit__`) — swallow that exception and instead run
+3. **Execute** (`Tracer.__exit__`) — swallow that exception and instead run
    the captured code through the backend.
 
 A block that contains only ``pass`` / a docstring has nothing to intercept, so
@@ -43,7 +43,7 @@ class ExitTracingException(Exception):
     """Control-flow signal: bail out of the ``with`` body before it runs inline.
 
     Raised by the installed trace function the moment execution reaches the
-    block, and caught in :meth:`Tracer.__exit__`, which then runs the captured
+    block, and caught in `Tracer.__exit__`, which then runs the captured
     code through the backend instead. Not an error — never surfaces to the user.
     """
 
@@ -56,7 +56,7 @@ def skip_context(tracer: Tracer) -> None:
     """Arm the trace function that skips the block body so the backend runs it.
 
     Sets a per-frame trace hook on the user's frame that raises
-    :class:`ExitTracingException` as soon as the body is about to execute. The
+    [`ExitTracingException`][nnsight.tracing.tracer.ExitTracingException] as soon as the body is about to execute. The
     global ``sys.settrace`` is set to a no-op so Python actually delivers
     per-frame trace events (it won't call ``f_trace`` otherwise).
 
@@ -132,8 +132,8 @@ def skippable(node: ast.With | ast.AsyncWith) -> bool:
 # ``nnsight.save``) marks a value to survive past the *outermost* trace. Inner
 # (nested) traces push all their locals up to the enclosing block, so values flow
 # freely; only the outermost trace — the boundary back into ordinary user code —
-# filters to just the saved values (:func:`push_result`). Depth is tracked around
-# the backend call in :meth:`Tracer.__exit__`. All state is per-thread, so
+# filters to just the saved values ([`push_result`][nnsight.tracing.tracer.push_result]). Depth is tracked around
+# the backend call in `Tracer.__exit__`. All state is per-thread, so
 # concurrent traces never share saved sets or nesting depth.
 
 _local = threading.local()
@@ -150,7 +150,7 @@ def _saves() -> set:
 def mark(value: Any) -> Any:
     """Add ``value`` to this thread's saved set (by identity), unconditionally.
 
-    The mechanism behind :func:`save`, without its in-a-trace guard — for internal
+    The mechanism behind `save`, without its in-a-trace guard — for internal
     callers that mark values to return *outside* a running trace (e.g. a remote
     backend recording the values a finished request sent back).
     """
@@ -203,7 +203,7 @@ def inc() -> None:
     """Enter a trace scope (increment this thread's nesting depth).
 
     Called around the point a trace actually runs its body — the backend call in
-    :meth:`Tracer.__exit__`. A nested trace's whole ``with`` runs inside that, so
+    `Tracer.__exit__`. A nested trace's whole ``with`` runs inside that, so
     it sees a depth greater than 1 and is treated as inner.
     """
     _local.depth = getattr(_local, "depth", 0) + 1
@@ -222,7 +222,7 @@ def push_result(frame: FrameType, variables: dict) -> None:
 
     An inner trace pushes everything, so values flow up to the enclosing block.
     The outermost trace — depth 1 here, since every nested trace has already left
-    — pushes only the values marked with :func:`save`.
+    — pushes only the values marked with `save`.
     """
     if getattr(_local, "depth", 0) == 1:
         saves = _saves()
@@ -234,8 +234,8 @@ class Tracer:
     """Context manager that captures a ``with`` block and runs it via a backend.
 
     See the module docstring for the capture → skip → execute flow. Subclasses
-    override the small steps (:meth:`parse`, :meth:`build`, :meth:`compile`,
-    :meth:`execute`) or supply a different :class:`~nnsight.tracing.backend.Backend`
+    override the small steps ([`parse`][nnsight.tracing.tracer.Tracer.parse], [`build`][nnsight.tracing.tracer.Tracer.build], [`compile`][nnsight.tracing.tracer.Tracer.compile],
+    `execute`) or supply a different [`Backend`][nnsight.tracing.backend.Backend]
     to change what "run the block" means.
     """
 
@@ -258,8 +258,8 @@ class Tracer:
 
     def __init__(self, backend: Backend | None = None) -> None:
         """Args:
-        backend: What actually runs the captured block in :meth:`__exit__`.
-            Defaults to a plain :class:`~nnsight.tracing.backend.Backend`, which
+        backend: What actually runs the captured block in `__exit__`.
+            Defaults to a plain [`Backend`][nnsight.tracing.backend.Backend], which
             just executes it in place.
         """
         self.info: Tracer.Info | None = None
@@ -271,7 +271,7 @@ class Tracer:
 
         Drops the backend (transport-side, may hold credentials), the AST node
         (only needed locally), and the batcher (per-run state, rebuilt by execute
-        server-side); :class:`Info` handles its own frame swap.
+        server-side); [`Info`][nnsight.tracing.tracer.Tracer.Info] handles its own frame swap.
         """
         state = self.__dict__.copy()
         state.pop("backend", None)
@@ -289,12 +289,12 @@ class Tracer:
         self.node = None
 
     def capture(self) -> None:
-        """Capture the ``with`` block at the call site into :attr:`info`.
+        """Capture the ``with`` block at the call site into [`info`][nnsight.tracing.tracer.Tracer.info].
 
-        Looks two frames up (past :meth:`__enter__`) to find the user's frame,
+        Looks two frames up (past `__enter__`) to find the user's frame,
         reads and parses its source, locates the ``with`` node at that line, and
         compiles the block body. The parsed node and compiled code are memoized
-        per site in :data:`~nnsight.tracing.globals.BLOCKS`, so re-entering the
+        per site in [`BLOCKS`][nnsight.tracing.globals.BLOCKS], so re-entering the
         same block is cheap.
 
         Idempotent: safe to call early (to sniff whether a ``with`` block exists)
@@ -332,7 +332,7 @@ class Tracer:
     def source(filename: str) -> str:
         """Return the source text for ``filename``, reading it at most once.
 
-        Cached in :data:`~nnsight.tracing.globals.SOURCES` and never
+        Cached in [`SOURCES`][nnsight.tracing.globals.SOURCES] and never
         re-validated, so a file edited mid-run is still traced as it was first
         seen (we deliberately skip ``linecache.checkcache``). Handles files,
         IPython/Jupyter cells, and ``python -c`` programs; see the inline notes.
@@ -375,7 +375,7 @@ class Tracer:
         statement there (the call site isn't a trace block).
 
         Parsing the whole file is O(its AST) and dominates a cold capture, so try
-        slicing just the block out first (:meth:`_parse_block`); parse the whole
+        slicing just the block out first (`_parse_block`); parse the whole
         file only if the slice can't be isolated cleanly.
         """
         node = self._parse_block(source, lineno)
@@ -400,7 +400,7 @@ class Tracer:
         Getting the bound wrong is safe: collecting *too much* just parses a few
         trailing statements past the block (``body[0]`` is still the ``with``);
         collecting too little makes the slice unparseable, which returns ``None``
-        and lets :meth:`parse` fall back to the whole file. It never returns a wrong
+        and lets [`parse`][nnsight.tracing.tracer.Tracer.parse] fall back to the whole file. It never returns a wrong
         node.
         """
         lines = source.splitlines(keepends=True)
@@ -453,14 +453,14 @@ class Tracer:
         """Run the captured body and write its results back to the user's frame.
 
         Executes the block against a copy of the caller's locals, then
-        :func:`~nnsight.tracing.tracer.push_result` writes results back — a nested
+        [`push_result`][nnsight.tracing.tracer.push_result] writes results back — a nested
         trace passes all its locals up to the enclosing block, while the outermost
-        trace returns only the values marked with :func:`nnsight.save`.
+        trace returns only the values marked with `nnsight.save`.
 
         Subclasses override this to change *how* the block runs (interleaved with a
         forward pass, a backward pass, ...), ending with the same
-        :func:`~nnsight.tracing.tracer.push_result`; the trace-scope depth it reads
-        is managed by :meth:`__exit__`.
+        [`push_result`][nnsight.tracing.tracer.push_result]; the trace-scope depth it reads
+        is managed by `__exit__`.
         """
         frame = self.info.frame
         scope = Scope(dict(frame.f_locals), frame.f_locals, frame.f_globals)
@@ -476,9 +476,9 @@ class Tracer:
         """Run the captured block through the backend, or propagate a real error.
 
         Tears down the trace hook, then — for the expected
-        :class:`ExitTracingException` (body was skipped) or a clean exit (nothing
+        [`ExitTracingException`][nnsight.tracing.tracer.ExitTracingException] (body was skipped) or a clean exit (nothing
         to skip) — invokes the backend. An exception from the backend is
-        re-raised with a :func:`~nnsight.tracing.util.clean_traceback` so nnsight
+        re-raised with a [`clean_traceback`][nnsight.tracing.util.clean_traceback] so nnsight
         internals are dropped, leaving the user's own frames (across any files).
         Any *other* exception from the body propagates normally (returns ``False``).
         """

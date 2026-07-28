@@ -1,4 +1,4 @@
-"""Process-wide caches shared by every :class:`~nnsight.tracing.tracer.Tracer`.
+"""Process-wide caches shared by every [`Tracer`][nnsight.tracing.tracer.Tracer].
 
 Tracing a ``with`` block means finding its source, parsing it to an AST, and
 compiling the block body — work that is identical every time the *same* block is
@@ -9,7 +9,7 @@ parsed, and compiled exactly once.
 Both grow with the number of distinct source files and trace sites seen during
 the process, which is bounded by the program's own source, so they are never
 evicted. Neither is re-validated against on-disk changes: a source edited
-mid-run is still traced as it was first seen (see :meth:`Tracer.source`).
+mid-run is still traced as it was first seen (see [`Tracer.source`][nnsight.tracing.tracer.Tracer.source]).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from ast import AST
 from types import CodeType
 
 #: Raw source text keyed by filename, read once and reused. Populated lazily by
-#: :meth:`~nnsight.tracing.tracer.Tracer.source`.
+#: [`source`][nnsight.tracing.tracer.Tracer.source].
 SOURCES: dict[str, str] = {}
 
 #: Parsed + compiled ``with`` blocks, memoized per trace site.

@@ -1,8 +1,8 @@
-"""A causal-language-model name over :class:`TransformersModel` (deprecated).
+"""A causal-language-model name over [`TransformersModel`][nnsight.modeling.transformers.TransformersModel] (deprecated).
 
-:class:`TransformersModel` already generates through the model and returns token
-ids (see its :meth:`~nnsight.modeling.transformers.TransformersModel.generate`),
-so :class:`LanguageModel` adds nothing of its own — it just pins the
+[`TransformersModel`][nnsight.modeling.transformers.TransformersModel] already generates through the model and returns token
+ids (see its [`generate`][nnsight.modeling.transformers.TransformersModel.generate]),
+so [`LanguageModel`][nnsight.modeling.language.LanguageModel] adds nothing of its own — it just pins the
 text-generation task and takes ``tokenizer_kwargs`` at load. Prefer
 ``TransformersModel(repo_id, task="text-generation")`` directly; this name is kept
 for backwards compatibility and warns on construction.
@@ -17,12 +17,12 @@ from .transformers import TransformersModel
 
 
 class LanguageModel(TransformersModel):
-    """Deprecated: a :class:`~nnsight.modeling.transformers.TransformersModel`
+    """Deprecated: a [`TransformersModel`][nnsight.modeling.transformers.TransformersModel]
     pinned to the text-generation task.
 
     Use ``TransformersModel(repo_id, task="text-generation")`` instead. Everything
     this class offered — ``generate`` returning token ids, ``pipe`` running the
-    pipeline, ``trace``, ``scan`` — lives on :class:`TransformersModel` now; the
+    pipeline, ``trace``, ``scan`` — lives on [`TransformersModel`][nnsight.modeling.transformers.TransformersModel] now; the
     only extra here is ``tokenizer_kwargs`` (apply the same settings to
     ``model.tokenizer`` yourself, ``padding_side`` being the usual one).
     """

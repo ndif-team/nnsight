@@ -6,7 +6,7 @@ activation — you can index it, call tensor methods on it, and ``.save()`` it t
 keep it past the block. At runtime that value simply *is* the activation (a real
 ``torch.Tensor``, tuple, ...) with ``.save()`` mounted on every object.
 
-:class:`Object` exists only to give that value a name for **type hints**: it looks
+[`Object`][nnsight.tracing.hint.Object] exists only to give that value a name for **type hints**: it looks
 like a ``torch.Tensor`` (so editors offer tensor methods and indexing) and carries
 a ``.save()`` returning itself. It is never really instantiated — annotate
 trace-time values with it (``def output(self) -> Object``) so callers get useful

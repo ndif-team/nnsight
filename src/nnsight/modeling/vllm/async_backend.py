@@ -31,7 +31,7 @@ which runs on ``aclose()`` — explicit, or when the generator is garbage-collec
 a bare ``break`` therefore defers the free to GC. To free promptly, ``aclose()`` it.
 
 Interventions run in the worker exactly as in the synchronous path — the same
-:class:`~nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner`,
+[`NNsightGPUModelRunner`][nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner],
 the same per-request scoping. Only the collection of saved values differs: without
 a ``step()`` to hook, it happens here, in the stream.
 """
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
 
 class AsyncVLLMBackend(Backend):
-    """Backend for a trace on an async :class:`~nnsight.modeling.vllm.vllm.VLLM`."""
+    """Backend for a trace on an async [`VLLM`][nnsight.modeling.vllm.vllm.VLLM]."""
 
     def __init__(self, model: "VLLM") -> None:
         self.model = model

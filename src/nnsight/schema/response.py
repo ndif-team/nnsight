@@ -1,9 +1,9 @@
 """The status message a remote job sends back to the client.
 
 Each update NDIF pushes for a job — whether streamed over a blocking websocket or
-saved to the object store and polled — arrives as a :class:`ResponseModel`. Its
-:class:`Status` names where the job is in its lifecycle; on ``COMPLETED`` the
-returned values ride in :attr:`~ResponseModel.data`.
+saved to the object store and polled — arrives as a [`ResponseModel`][nnsight.schema.response.ResponseModel]. Its
+`Status` names where the job is in its lifecycle; on ``COMPLETED`` the
+returned values ride in [`data`][nnsight.schema.response.ResponseModel.data].
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class ResponseModel(BaseModel):
     """One status update for a remote job, optionally carrying its result.
 
     Streamed over the websocket for a blocking job, or saved to the object store
-    and fetched by the client for a non-blocking one. :attr:`data` holds the
+    and fetched by the client for a non-blocking one. [`data`][nnsight.schema.response.ResponseModel.data] holds the
     saved values only on a ``COMPLETED`` response.
     """
 
@@ -58,6 +58,6 @@ class ResponseModel(BaseModel):
 
     @classmethod
     def unpickle(cls, data: bytes) -> ResponseModel:
-        """Rebuild a :class:`ResponseModel` from :meth:`pickle` bytes (onto CPU)."""
+        """Rebuild a [`ResponseModel`][nnsight.schema.response.ResponseModel] from [`pickle`][nnsight.schema.response.ResponseModel.pickle] bytes (onto CPU)."""
         with io.BytesIO(data) as file:
             return cls(**torch.load(file, map_location="cpu", weights_only=False))
