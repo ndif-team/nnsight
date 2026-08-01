@@ -177,18 +177,10 @@ def test_stage_local_write_parity():
     assert moved < 0.999, f"write had no effect (cosine to clean {moved:.6f})"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "a write that follows a forced cross-stage read loses its swap window "
-        "on the owning rank: the worker parks on the pull inside the target "
-        "layer's hook, pulls are only served at serve points outside the "
-        "forward, and by then the forward has passed the write site — the swap "
-        "raises OutOfOrderError. The 0.7 thread-based PP supported this "
-        "pattern (the hook blocked until the worker's pull completed)."
-    ),
-)
 def test_cross_stage_read_modify_write():
+    # The graft forces an upstream value while parked inside the late layer's
+    # hook on the owning rank; the intercept serves upstream pulls in place,
+    # so the swap that follows still lands before the forward moves on.
     reference = run(1, "write_cross")
     pipelined = run(2, "write_cross")
     similarity = cosine(reference["logits"], pipelined["logits"])

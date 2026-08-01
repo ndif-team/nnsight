@@ -8,9 +8,13 @@ visits its own stage's modules. This interleaver closes the gap in three moves:
   of a remote-owned location is answered immediately with a
   :class:`~.lazy_remote_tensor.LazyRemoteTensor` (no traffic, worker keeps
   running); a write to one is absorbed (the owning rank runs the same line
-  locally). A worker forcing a lazy parks on its encoded pull location — the
-  intercept issues the cross-stage pull at that exact moment (issue-at-park:
-  the transfer overlaps the rest of the forward) and lets the park stand.
+  locally). A worker forcing an *upstream*-owned lazy is served in place: the
+  value already exists (pipeline order), so the intercept blocks on the
+  transfer and returns it without parking, preserving the worker's ability to
+  write locations the forward has not reached yet. Forcing a *downstream*-owned
+  lazy parks on its encoded pull location — the intercept issues the
+  cross-stage pull at that exact moment (issue-at-park: the transfer overlaps
+  the rest of the forward) and lets the park stand.
 
 * **Publish** (producer side): as :meth:`handle` serves a location the rank
   owns, each request's rows of the post-intervention value are cloned into the
@@ -94,13 +98,30 @@ class PPInterleaver(Interleaver):
     def intercept(
         self, mediator: Mediator, event: Event, location: str, rest: tuple
     ) -> tuple | None:
-        # A forced lazy parking for its value: issue the pull NOW, on this
-        # worker's way into the park, so the transfer overlaps the remainder
-        # of the forward (issue-at-park; deferring the send to the serve point
-        # would serialize the wire time onto every step). The park itself
-        # stands — serve_pulls resumes the worker once the value has arrived.
+        # A forced lazy parking for its value.
         if location.startswith(PULL_LOCATION_PREFIX):
             source_rank, req_id, provider = decode_pull_location(location)
+            # An upstream-owned value already exists by the time this stage's
+            # forward runs (pipeline order: the earlier stage finished this
+            # step before ours started), so the wait is transfer only. Serve
+            # it in place — blocking the worker right here, inside whatever
+            # switched it in — instead of parking. Parking would surrender
+            # the swap window: the worker could only resume at a serve point
+            # outside the forward, after the model ran past every location
+            # the rest of the block might write (a write to the very module
+            # whose hook is live underneath this force raises OutOfOrderError
+            # once resumed late). An error or timeout raises here, on the
+            # worker, at the line that forced the value.
+            if source_rank < self.local_rank:
+                pull = self.listener.begin_pull(source_rank, provider, req_id)
+                return (pull.complete(),)
+            # Downstream-owned: the value is produced only after this rank's
+            # forward returns, so blocking here would deadlock the pipeline.
+            # Issue the pull NOW, on this worker's way into the park, so the
+            # transfer overlaps the remainder of the forward (issue-at-park;
+            # deferring the send to the serve point would serialize the wire
+            # time onto every step). The park stands — serve_pulls resumes
+            # the worker once the value has arrived.
             key = (id(mediator), location)
             if key not in self._pulls:
                 self._pulls[key] = self.listener.begin_pull(

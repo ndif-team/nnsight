@@ -95,11 +95,18 @@ def scenario_write_cross(model, args):
     # (stage 1). On the owning rank the graft forces a cross-stage pull while
     # parked inside the late layer's hook.
     with model.trace(args.prompt, temperature=0.0, max_tokens=1):
-        early_hidden = model.model.layers[EARLY].output[0]
+        # Clone at read time: holding the live activation across the layers
+        # between read and write lets vLLM's buffer reuse mutate it. The pull
+        # path clones at publish, so without this snapshot PP=1 (mutated
+        # buffer) and PP=2 (clean clone) graft different values.
+        early_hidden = model.model.layers[EARLY].output[0].clone()
         late_out = model.model.layers[LATE].output
         late_hidden = late_out[0]
+        # Scale to the residual's norm: on Qwen2 the layer tuple is
+        # (hidden, residual) and the residual carries the stream, so a
+        # perturbation at hidden's own scale barely moves the logits.
         graft = late_hidden + early_hidden * (
-            late_hidden.norm() / early_hidden.norm()
+            late_out[1].norm() / early_hidden.norm()
         )
         model.model.layers[LATE].output = (graft, *late_out[1:])
         logits = model.logits.save()
