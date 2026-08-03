@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Iterator
 from greenlet import getcurrent
 
 from ..tracing.tracer import Tracer, push_result
-from ..tracing.util import Scope
+from ..tracing.util import Scope, shared_locals
 from .interleaver import OutOfOrderError
 
 if TYPE_CHECKING:
@@ -155,7 +155,7 @@ class Iterations(Tracer):
         frame = self.info.frame
         mediator: Mediator = getcurrent().mediator()
         previous = mediator.iteration
-        scope = Scope(dict(frame.f_locals), frame.f_locals, frame.f_globals)
+        scope = Scope(dict(frame.f_locals), shared_locals(frame), frame.f_globals)
         try:
             for step in self._indices():
                 if step < 0:

@@ -34,6 +34,15 @@ def normalize(x):
     return x / x.norm(dim=-1, keepdim=True)
 
 
+# Telling apart two same-signature lambdas written on one line needs the column
+# information in `code.co_positions()`, which is 3.11+. Elsewhere (different
+# signatures, different lines) the source parse alone picks the right one.
+same_line_lambdas = pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="same-line, same-signature lambdas need code.co_positions (3.11+)",
+)
+
+
 class TestLambda:
     def test_simple_lambda(self):
         assert loads(dumps(lambda x: x * 2))(5) == 10
@@ -59,6 +68,7 @@ class TestLambda:
         f = loads(dumps(lambda x=lambda: 1: x()))
         assert f() == 1 and f(lambda: 42) == 42
 
+    @same_line_lambdas
     def test_multiple_lambdas_same_line(self):
         f, g = lambda x: x * 2, lambda x: x + 1
         assert loads(dumps(f))(5) == 10
@@ -77,10 +87,12 @@ class TestLambda:
         assert loads(dumps(c))(10) == 9
         assert loads(dumps(d))(10) == 20
 
+    @same_line_lambdas
     def test_lambda_in_list(self):
         funcs = loads(dumps([lambda x: x + 1, lambda x: x * 2, lambda x: x ** 2]))
         assert funcs[0](5) == 6 and funcs[1](5) == 10 and funcs[2](5) == 25
 
+    @same_line_lambdas
     def test_lambda_in_dict(self):
         ops = loads(dumps({"add": lambda x, y: x + y, "mul": lambda x, y: x * y}))
         assert ops["add"](10, 3) == 13 and ops["mul"](10, 3) == 30
@@ -515,6 +527,17 @@ class TestServerExecution:
         ):
             gpt2.transformer.h[0].output[0].save()
         assert backend.ran
+
+    def test_push_into_a_serialized_frame(self):
+        # A deserialized tracer's "frame" is a SerializedFrame, not a real one, so
+        # push must not hand it to PyFrame_LocalsToFast: that dereferences it as a
+        # PyFrameObject (SIGSEGV on 3.10, silent UB on 3.11/3.12). The plain dict
+        # update is the whole write-back here.
+        from nnsight.tracing.util import SerializedFrame, push
+
+        frame = SerializedFrame("<block>", 1, "blk")
+        push(frame, {"a": 1})
+        assert frame.f_locals == {"a": 1}
 
 
 def _seed_id_cache():

@@ -24,9 +24,71 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import threading
 import types
 from types import FrameType, TracebackType
 from typing import Any
+
+# Flushes a frame's f_locals dict into its fast-locals array; removed in 3.13,
+# where f_locals writes through on its own (PEP 667). Declared with an explicit
+# signature so ctypes doesn't have to guess at the call site. See `push`.
+if sys.version_info < (3, 13):
+    _locals_to_fast = ctypes.pythonapi.PyFrame_LocalsToFast
+    _locals_to_fast.argtypes = (ctypes.py_object, ctypes.c_int)
+    _locals_to_fast.restype = None
+else:
+    _locals_to_fast = None
+
+# Per-frame stores backing `shared_locals`: id(frame) -> (frame, store), cleared
+# when the outermost trace exits (`nnsight.tracing.tracer.dec`). Thread-local
+# because traces on different threads are independent, like the saved set and the
+# nesting depth.
+_shared = threading.local()
+
+
+def shared_locals(frame: FrameType) -> dict:
+    """The mapping blocks written in ``frame`` share.
+
+    A name bound by a *sibling* block — an earlier ``tracer.invoke(...)`` — has to
+    reach the ones beside it, but must not reach the frame itself: what escapes a
+    trace is what `save` marked, and [`push`][nnsight.tracing.util.push] is the
+    only thing that decides that.
+
+    This used to be ``frame.f_locals`` directly, which worked by accident. Before
+    3.13 that was one stable snapshot dict per frame — writes into it were visible
+    to sibling blocks but never reached the frame's fast locals. PEP 667 replaced
+    it with a fresh write-through proxy per access, so every assignment a block
+    made landed in the user's frame immediately and unsaved values escaped. Keeping
+    our own dict per frame makes the isolation explicit, and the same on every
+    version.
+
+    Args:
+        frame: The frame the blocks were written in.
+
+    Returns:
+        The dict those blocks share — the same object for the same frame, until
+        the outermost trace exits.
+    """
+    store = getattr(_shared, "store", None)
+    if store is None:
+        store = _shared.store = {}
+    entry = store.get(id(frame))
+    if entry is None:
+        # The frame is held alongside its store, not just keyed by. A helper that
+        # opens an invoke has already returned by the time the trace runs, so its
+        # frame would be freed and the next helper allocated at the same address —
+        # merging two scopes that the code keeps apart. Frames aren't weak
+        # referenceable, so a strong reference until the outermost trace exits is
+        # what keeps the id honest.
+        entry = store[id(frame)] = (frame, {})
+    return entry[1]
+
+
+def clear_shared_locals() -> None:
+    """Drop this thread's per-frame shared stores (the outermost trace has exited)."""
+    store = getattr(_shared, "store", None)
+    if store is not None:
+        store.clear()
 
 
 class Scope(dict):
@@ -40,11 +102,12 @@ class Scope(dict):
        captured. A name the block only reads means what it meant *where the block
        was written*: a ``for prompt in prompts:`` variable has moved on (or gone)
        by the time the block runs, so the snapshot is what keeps it right.
-    2. [`shared`][nnsight.tracing.util.Scope.shared] — the live locals of the frame the block was written in.
-       A name bound by a *sibling* block (an earlier ``tracer.invoke(...)``) isn't
-       in the snapshot, because nothing had bound it when this block was captured.
-       Blocks written in one frame share these; blocks written in different
-       functions have different frames, so they stay as separate as their code.
+    2. [`shared`][nnsight.tracing.util.Scope.shared] — the store the blocks written in that frame share
+       ([`shared_locals`][nnsight.tracing.util.shared_locals]). A name bound by a
+       *sibling* block (an earlier ``tracer.invoke(...)``) isn't in the snapshot,
+       because nothing had bound it when this block was captured. Blocks written in
+       one frame share these; blocks written in different functions have different
+       frames, so they stay as separate as their code.
     3. `glbls` — the frame's globals, reached by fallback rather than copied.
 
     Passing this as ``exec``'s *globals* (not just its locals) is what lets a
@@ -53,7 +116,8 @@ class Scope(dict):
     mapping — but does honor ``__missing__`` on a dict subclass.
 
     Writes land here *and* in [`shared`][nnsight.tracing.util.Scope.shared], so the block sees its own
-    assignments and so do the blocks written beside it. Because only the snapshot
+    assignments and so do the blocks written beside it — but not the frame, which
+    only [`push`][nnsight.tracing.util.push] writes to. Because only the snapshot
     and the block's writes are ever stored, iterating a scope yields the block's
     own names — what [`push`][nnsight.tracing.util.push] and the block reducers want — and never the
     whole global namespace.
@@ -166,12 +230,19 @@ def push(frame: FrameType, variables: dict[str, Any]) -> None:
     ``f_locals`` is a live write-through mapping (PEP 667) and the plain
     ``update`` is enough.
 
+    This is the *only* route from a block's namespace back into the frame — see
+    [`shared_locals`][nnsight.tracing.util.shared_locals], which keeps a block's
+    other writes out of it.
+
     Args:
-        frame: The frame to write into (the one the ``with`` block lived in).
+        frame: The frame to write into (the one the ``with`` block lived in), or a
+            [`SerializedFrame`][nnsight.tracing.util.SerializedFrame] standing in
+            for one, whose ``f_locals`` is an ordinary dict.
         variables: Names and values to set on that frame.
     """
     frame.f_locals.update(variables)
-    if sys.version_info < (3, 13):
-        ctypes.pythonapi.PyFrame_LocalsToFast(
-            ctypes.py_object(frame), ctypes.c_int(1)
-        )
+    # A SerializedFrame is not a PyFrameObject: its plain-dict update is the whole
+    # job, and handing it to the C API dereferences it as a frame (segfault on
+    # 3.10, silent undefined behavior on 3.11/3.12).
+    if _locals_to_fast is not None and isinstance(frame, FrameType):
+        _locals_to_fast(ctypes.py_object(frame), ctypes.c_int(1))

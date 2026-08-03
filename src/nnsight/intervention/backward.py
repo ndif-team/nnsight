@@ -29,6 +29,7 @@ from typing import Any, Callable
 import torch
 
 from ..tracing.tracer import Tracer, WithBlockNotFoundError, push_result
+from ..tracing.util import shared_locals
 from .interleaver import Interleaver, Mediator
 
 
@@ -192,7 +193,7 @@ class BackwardTracer(Tracer):
 
         interleaver = Interleaver()
         mediator = Mediator(
-            code, frame.f_globals, dict(frame.f_locals), shared=frame.f_locals
+            code, frame.f_globals, dict(frame.f_locals), shared=shared_locals(frame)
         )
         interleaver.mediators.append(mediator)
 

@@ -18,7 +18,7 @@ from ...intervention.batching import Batcher
 from ...intervention.interleaver import Mediator
 from ...intervention.tracer import InterleavingTracer
 from ...tracing.tracer import push_result
-from ...tracing.util import Scope
+from ...tracing.util import Scope, shared_locals
 
 
 class VLLMTracer(InterleavingTracer):
@@ -52,7 +52,7 @@ class VLLMTracer(InterleavingTracer):
                 glbls,
                 dict(frame.f_locals),
                 node=self.node,
-                shared=frame.f_locals,
+                shared=shared_locals(frame),
             )
             mediator.batch_group = self.batcher.add(*self.args, **self.kwargs)
             interleaver.mediators.append(mediator)
@@ -60,7 +60,7 @@ class VLLMTracer(InterleavingTracer):
         else:
             forward_kwargs = dict(self.kwargs)
             # Invokers append their workers as this runs.
-            exec(code, Scope(dict(frame.f_locals), frame.f_locals, glbls))
+            exec(code, Scope(dict(frame.f_locals), shared_locals(frame), glbls))
             if not interleaver.mediators:
                 raise ValueError(
                     "trace() needs an input, or at least one "

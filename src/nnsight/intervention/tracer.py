@@ -34,7 +34,7 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from ..tracing.backend import Backend
 from ..tracing.tracer import Tracer, push_result, save
-from ..tracing.util import Scope, clean_traceback
+from ..tracing.util import Scope, clean_traceback, shared_locals
 from .barrier import Barrier
 from .batching import Batcher
 from .cache import Cache, CacheView
@@ -279,7 +279,7 @@ class InterleavingTracer(Tracer):
                     glbls,
                     dict(frame.f_locals),
                     node=self.node,
-                    shared=frame.f_locals,
+                    shared=shared_locals(frame),
                 )
                 mediator.batch_group = self.batcher.add(*self.args, **self.kwargs)
                 interleaver.mediators.append(mediator)
@@ -287,7 +287,7 @@ class InterleavingTracer(Tracer):
             else:
                 forward_kwargs = dict(self.kwargs)
                 # Invokers append their workers as this runs.
-                exec(code, Scope(dict(frame.f_locals), frame.f_locals, glbls))
+                exec(code, Scope(dict(frame.f_locals), shared_locals(frame), glbls))
                 if not interleaver.mediators:
                     raise ValueError(
                         "trace() needs an input, or at least one "
@@ -390,7 +390,7 @@ class Invoker(Tracer):
             frame.f_globals,
             dict(frame.f_locals),
             node=self.node,
-            shared=frame.f_locals,
+            shared=shared_locals(frame),
         )
         mediator.batch_group = self.tracer.batcher.add(*self.args, **self.kwargs)
         interleaver.mediators.append(mediator)

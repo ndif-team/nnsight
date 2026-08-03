@@ -114,12 +114,23 @@ def _lambda_source(func: types.FunctionType) -> str:
     # tie by source span. Code positions are (line, end_line, col, end_col) in file
     # coordinates; keep only real, non-empty spans (a zero-width RESUME at column 0
     # points at no source and would fall outside every lambda).
-    positions = [
-        (line, end_line, col, end_col)
-        for line, end_line, col, end_col in func.__code__.co_positions()
-        if None not in (line, end_line, col, end_col)
-        and (end_line > line or end_col > col)
-    ]
+    #
+    # co_positions is 3.11+, and columns have no pre-3.11 substitute (3.10's dis
+    # carries line numbers only), so on 3.10 there is nothing to tie-break with:
+    # every candidate "encloses" an empty position list and the narrowest one wins.
+    # That still picks the inner lambda of a nested pair; two same-signature lambdas
+    # on one line are a coin flip there.
+    co_positions = getattr(func.__code__, "co_positions", None)
+    positions = (
+        [
+            (line, end_line, col, end_col)
+            for line, end_line, col, end_col in co_positions()
+            if None not in (line, end_line, col, end_col)
+            and (end_line > line or end_col > col)
+        ]
+        if co_positions is not None
+        else []
+    )
 
     def encloses(node: ast.Lambda) -> bool:
         # The node's file span must contain every one of the code's positions.

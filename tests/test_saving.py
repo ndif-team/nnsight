@@ -54,6 +54,18 @@ class TestSave:
         with pytest.raises(UnboundLocalError):
             tmp
 
+    def test_unsaved_value_does_not_reach_the_frame_at_all(self, x):
+        # Stronger than the UnboundLocalError above, which only proves the name
+        # never became a fast local: an unsaved value must not be in the frame's
+        # locals mapping either. Blocks write to their own shared store, and push
+        # is the only thing that writes to the frame.
+        envoy = Envoy(MLP())
+        with envoy.trace(x):
+            h = nnsight.save(envoy.fc1.output)
+            tmp = envoy.fc2.output  # not saved
+        assert isinstance(h, torch.Tensor)
+        assert "tmp" not in locals()
+
     def test_dict_capture_still_works_without_save(self, x):
         # Mutating an outer object is a side effect, independent of save/push.
         model = MLP()
