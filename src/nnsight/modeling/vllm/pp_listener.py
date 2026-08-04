@@ -554,8 +554,23 @@ class PPListener:
         try:
             tensors = list(value) if isinstance(value, (tuple, list)) else [value]
             cpu_tensors = [t.detach().contiguous().cpu() for t in tensors]
-            # ``cat`` validates same-dtype/numeric up front (a mixed-dtype
-            # tuple raises here, before any send).
+            # The data message is one flat tensor and the header carries one
+            # dtype (slot 1), so every element must share it. ``cat`` cannot
+            # enforce this: it silently promotes a mixed input, and the
+            # consumer would rebuild every element in the first tensor's
+            # dtype. A mixed container is real user-reachable data (a remote
+            # layer's ``.inputs`` bundles int64 positions with bf16 hidden
+            # states), so refuse it explicitly and let the error reply name
+            # the location. Supporting mixed containers instead would take a
+            # dtype code per tensor in the header plus a single uint8
+            # byte-blob data message (each tensor viewed as bytes).
+            dtypes = {t.dtype for t in cpu_tensors}
+            if len(dtypes) > 1:
+                raise ValueError(
+                    f"cross-stage value mixes dtypes "
+                    f"{sorted(str(d) for d in dtypes)}; a reply ships one "
+                    f"dtype, so read the elements separately"
+                )
             flat = torch.cat([t.contiguous().view(-1) for t in cpu_tensors])
             shape_meta = self._encode_shape_header(cpu_tensors)
         except Exception as exc:

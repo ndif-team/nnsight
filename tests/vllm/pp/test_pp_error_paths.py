@@ -116,29 +116,22 @@ def _run_wire_mixed_dtype(rank, world, rdv):
             )
     dist.barrier()
     if rank == 0:
+        # The header carries one dtype and torch.cat would silently promote,
+        # so a mixed-dtype tuple must come back as an error reply telling the
+        # user to read the elements separately.
         pull = listener.begin_pull(1, "model.h.0.output.i0")
         try:
             value = pull.complete(timeout=10.0)
-        except RuntimeError:
-            value = None  # the error reply is the intended behavior
-        assert value is None or value[1].dtype == torch.int64, (
-            f"mixed-dtype tuple came back silently reinterpreted: "
-            f"{[t.dtype for t in value]}"
-        )
+            raise AssertionError(
+                f"mixed-dtype tuple was delivered reinterpreted: "
+                f"{[t.dtype for t in value]}"
+            )
+        except RuntimeError as error:
+            assert "mixes dtypes" in str(error), error
 
     _drain_and_stop(listener, rank)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "a mixed-dtype tuple is neither error-replied nor faithfully "
-        "delivered: torch.cat promotes instead of raising (the same-dtype "
-        "validation _serve_reply's comment claims does not happen), the shape "
-        "header carries only the first tensor's dtype, and the consumer "
-        "rebuilds every element in it — the int64 element arrives as float32."
-    ),
-)
 def test_mixed_dtype_tuple_is_not_silently_reinterpreted(tmp_path=None):
     rdv = (
         str(tmp_path / "rdv") if tmp_path is not None
