@@ -29,15 +29,17 @@ sys.path.insert(
 import torch
 
 MODEL = "Qwen/Qwen2.5-0.5B"
-# Qwen2.5-0.5B has 24 layers; at PP=2 stage 0 holds 0-11, stage 1 holds 12-23.
-EARLY, LATE = 2, 20
+# Qwen2.5-0.5B has 24 layers; at PP=2 stage 0 holds 0-11, stage 1 holds 12-23;
+# at PP=3 the stages hold 0-7, 8-15, 16-23, so layers 2, 12, and 20 read one
+# value from each stage.
+EARLY, MIDDLE, LATE = 2, 12, 20
 
 
-def make_model(pp):
+def make_model(pp, tp=1):
     from nnsight.modeling.vllm import VLLM
 
     kwargs = dict(
-        tensor_parallel_size=1,
+        tensor_parallel_size=tp,
         gpu_memory_utilization=0.15,
         dispatch=True,
     )
@@ -72,6 +74,23 @@ def scenario_hidden(model, args):
     return {
         "early": _flat(early),
         "early_shape": list(early.shape),
+        "late": _flat(late),
+        "late_shape": list(late.shape),
+        "argmax": _argmax(logits),
+    }
+
+
+def scenario_hidden_three_stages(model, args):
+    with model.trace(args.prompt, temperature=0.0, max_tokens=1):
+        early = model.model.layers[EARLY].output[0].save()
+        middle = model.model.layers[MIDDLE].output[0].save()
+        late = model.model.layers[LATE].output[0].save()
+        logits = model.logits.save()
+    return {
+        "early": _flat(early),
+        "early_shape": list(early.shape),
+        "middle": _flat(middle),
+        "middle_shape": list(middle.shape),
         "late": _flat(late),
         "late_shape": list(late.shape),
         "argmax": _argmax(logits),
@@ -163,6 +182,7 @@ def scenario_concurrent(model, args):
 SCENARIOS = {
     "logits": scenario_logits,
     "hidden": scenario_hidden,
+    "hidden_three_stages": scenario_hidden_three_stages,
     "write_local": scenario_write_local,
     "write_cross": scenario_write_cross,
     "multigen": scenario_multigen,
@@ -174,6 +194,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", choices=sorted(SCENARIOS))
     parser.add_argument("--pp", type=int, required=True)
+    parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--prompt-b", dest="prompt_b", default=None)
     parser.add_argument("--max-tokens", dest="max_tokens", type=int, default=3)
@@ -181,7 +202,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        model = make_model(args.pp)
+        model = make_model(args.pp, args.tp)
         with torch.no_grad():
             result = SCENARIOS[args.scenario](model, args)
         result["status"] = "ok"
