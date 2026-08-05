@@ -535,20 +535,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
         dist.all_gather(all_padded, padded, group=pp_group.cpu_group)
 
         merged = {}
-        owners: dict = {}
-        ambiguous = set()
-        for pp_rank, (buf, size) in enumerate(zip(all_padded, all_sizes)):
+        rank_metas = []
+        for buf, size in zip(all_padded, all_sizes):
             rank_meta = pickle.loads(buf[: size.item()].numpy().tobytes())
             merged.update(rank_meta)
-            for name in rank_meta:
-                if name in owners and owners[name] != pp_rank:
-                    ambiguous.add(name)
-                else:
-                    owners[name] = pp_rank
-        for name in ambiguous:
-            owners.pop(name, None)
+            rank_metas.append(rank_meta)
 
-        return merged, owners
+        from ..pp import derive_owners
+
+        return merged, derive_owners(rank_metas)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         super()._update_states(scheduler_output)

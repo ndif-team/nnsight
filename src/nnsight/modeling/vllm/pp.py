@@ -65,6 +65,29 @@ def resolve_meta(meta_map: dict, path: str, root: str = "model"):
     return None
 
 
+def derive_owners(per_rank_meta: list) -> dict:
+    """Reduce per-rank real-module lists to a ``path → owning stage`` map.
+
+    ``per_rank_meta`` holds one dict per PP stage, keyed by the module paths
+    that are real (non-``PPMissingLayer``) on that stage; this is what the
+    load-time allgather collects. A path real on exactly one stage is owned by
+    it. A path real on several stages (containers, modules vLLM builds on
+    every rank) is ambiguous and dropped, so it resolves to ``None`` and
+    :meth:`PPModuleMap.is_local` treats it as local.
+    """
+    owners: dict = {}
+    ambiguous = set()
+    for pp_rank, rank_meta in enumerate(per_rank_meta):
+        for name in rank_meta:
+            if name in owners and owners[name] != pp_rank:
+                ambiguous.add(name)
+            else:
+                owners[name] = pp_rank
+    for name in ambiguous:
+        owners.pop(name, None)
+    return owners
+
+
 def is_pp_missing(module: nn.Module) -> bool:
     """Check whether *module* is a vLLM ``PPMissingLayer`` stub.
 
