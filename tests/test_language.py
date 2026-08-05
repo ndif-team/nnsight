@@ -717,6 +717,34 @@ class TestScan:
         assert real.device.type != "meta"
         assert torch.isfinite(real).all()
 
+    @pytest.mark.parametrize("key", ["dtype", "torch_dtype"])
+    @torch.no_grad()
+    def test_dtype_auto_builds_on_meta(self, key):
+        """`dtype="auto"` must not break the lazy build.
+
+        It means "read the dtype off the checkpoint weights", which only
+        from_pretrained can do — the meta build goes through from_config, where a
+        string dtype is resolved with `getattr(torch, dtype)` and "auto" raises.
+        It is a natural value to carry from a config file, and it works on the
+        dispatch path, so it would fail only when `dispatch` is flipped off.
+        """
+        model = TransformersModel("gpt2", task="text-generation", **{key: "auto"})
+        assert model.dispatched is False
+        # The architecture is there, on meta, with no weights loaded.
+        assert len(model.transformer.h) == model.config.n_layer
+        assert all(p.device.type == "meta" for p in model._module.parameters())
+        # "auto" must not survive onto the config either: from_config would take
+        # it as its default and hit the same getattr(torch, "auto").
+        assert model.config.dtype != "auto"
+
+    @torch.no_grad()
+    def test_explicit_dtype_still_reaches_the_meta_build(self):
+        """Dropping "auto" must not drop a real dtype."""
+        model = TransformersModel(
+            "gpt2", task="text-generation", dtype=torch.float16
+        )
+        assert all(p.dtype == torch.float16 for p in model._module.parameters())
+
 
 def _has_lora(model) -> bool:
     return any("lora" in name.lower() for name, _ in model._module.named_modules())

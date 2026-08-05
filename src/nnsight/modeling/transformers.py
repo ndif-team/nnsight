@@ -333,7 +333,21 @@ class TransformersModel(HuggingFaceModel):
         # Only architecture-shaping kwargs reach the meta build (see
         # _META_MODEL_KWARGS); AutoConfig.from_pretrained tolerates extras but
         # from_config does not, and placement kwargs don't apply to meta tensors.
-        arch = {k: v for k, v in kwargs.items() if k in _META_MODEL_KWARGS}
+        #
+        # `dtype="auto"` is dropped: it means "read the dtype off the checkpoint
+        # weights", which only from_pretrained can do — there are none on meta.
+        # from_config resolves a string dtype with `getattr(torch, dtype)`, so
+        # leaving it in raises AttributeError. Dropping it here also keeps it off
+        # AutoConfig, which would otherwise store the literal "auto" as
+        # `config.dtype` and hand from_config the same string by default. What
+        # remains is the checkpoint's own declared dtype — which is what "auto"
+        # resolves to first anyway.
+        arch = {
+            k: v
+            for k, v in kwargs.items()
+            if k in _META_MODEL_KWARGS
+            and not (k in ("dtype", "torch_dtype") and v == "auto")
+        }
 
         # pipeline can't from_config, so resolve the task's model classes and
         # build the meta model ourselves, then wrap it in a meta pipeline.
