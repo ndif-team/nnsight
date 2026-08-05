@@ -205,6 +205,20 @@ def test_multi_token_ids_and_late_hidden_match():
         assert similarity > 0.99, f"step {step} late-layer cosine {similarity:.6f}"
 
 
+def test_multi_token_forced_cross_stage_reads_match():
+    # Forces the late layer's value on every generation step, so the
+    # non-owning rank issues one pinned pull per round and re-parks on the
+    # next round's pull from inside the step-start serve. Deadlocked until
+    # the serve completed only already-produced rounds there.
+    reference = run(1, "multigen_forced", "--max-tokens", "3")
+    pipelined = run(2, "multigen_forced", "--max-tokens", "3")
+    assert reference["ids"] == pipelined["ids"], (
+        f"sampled ids diverge: {reference['ids']} vs {pipelined['ids']}"
+    )
+    for step, (ref, pp) in enumerate(zip(reference["norms"], pipelined["norms"])):
+        assert abs(ref - pp) / max(abs(ref), 1e-6) < 0.01, (step, ref, pp)
+
+
 def test_concurrent_requests_match_reference_per_invoke():
     reference = run(1, "concurrent", "--prompt-b", PROMPT_B)
     pipelined = run(2, "concurrent", "--prompt-b", PROMPT_B)

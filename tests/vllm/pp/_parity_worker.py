@@ -149,6 +149,27 @@ def scenario_multigen(model, args):
     }
 
 
+def scenario_multigen_forced(model, args):
+    # Unlike scenario_multigen, which appends lazies that ship as sentinels
+    # and pull nothing, the norm() here FORCES the cross-stage value on the
+    # non-owning rank at every step: one pinned pull per round, re-parked
+    # from inside the step-start serve. This is the pattern that deadlocked
+    # until the serve gained the produced-round gate.
+    import nnsight
+
+    n = args.max_tokens
+    with model.trace(args.prompt, temperature=0.0, max_tokens=n) as tracer:
+        step_ids = nnsight.save([])
+        step_norms = nnsight.save([])
+        for _ in tracer.iter[:n]:
+            step_norms.append(model.model.layers[LATE].output[0].float().norm())
+            step_ids.append(model.samples)
+    return {
+        "ids": [int(torch.as_tensor(s).flatten()[-1].item()) for s in step_ids],
+        "norms": [float(x) for x in step_norms],
+    }
+
+
 def scenario_concurrent(model, args):
     with model.trace(temperature=0.0, max_tokens=1) as tracer:
         with tracer.invoke(args.prompt):
@@ -186,6 +207,7 @@ SCENARIOS = {
     "write_local": scenario_write_local,
     "write_cross": scenario_write_cross,
     "multigen": scenario_multigen,
+    "multigen_forced": scenario_multigen_forced,
     "concurrent": scenario_concurrent,
 }
 

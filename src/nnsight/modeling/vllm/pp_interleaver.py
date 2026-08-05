@@ -88,6 +88,13 @@ class PPInterleaver(Interleaver):
         self.listener = listener
         self.local_rank = local_rank
         self.step = 0
+        # Completed forward rounds per request id, maintained by the runner.
+        # The pipeline schedule makes this the local ground truth for whether
+        # a pulled value exists yet: the engine schedules a request's round k
+        # only after round k-1 sampled, and sampling runs on the last stage
+        # after EVERY stage finished round k-1 — so when this rank opens
+        # round k, all stages have completed rounds 0..k-1 for the request.
+        self.rounds: dict = {}
         # In-flight pulls keyed by (id(mediator), untagged park location).
         self._pulls: dict[tuple[int, str], Any] = {}
 
@@ -223,20 +230,29 @@ class PPInterleaver(Interleaver):
     # Driver side: the serve point
     # ------------------------------------------------------------------
 
-    def serve_pulls(self, block: bool = True) -> None:
+    def serve_pulls(self, block: bool = True, drain: bool = True) -> None:
         """Resume workers parked on pulls.
 
-        Called at serve points. ``block=True`` (collect/finalize, and the start
-        of a step for the previous step's stragglers) completes every parked
-        worker's pull, waiting for in-flight transfers. ``block=False`` (the
-        end of a step, while the pipeline is still moving) serves only pulls
-        whose value has already arrived: blocking there would deadlock the
-        pipeline, because a downstream stage's value is produced only after
-        this rank's ``execute_model`` returns and lets the next stage run.
+        Called at serve points. ``block=True`` (collect/finalize, sampling)
+        completes every parked worker's pull, waiting for in-flight transfers.
+        ``block=False`` (the end of a step, while the pipeline is still moving)
+        serves only pulls whose value has already arrived.
+
+        ``drain=False`` (the start of a step) blocks only on pulls whose
+        target the pipeline has already produced: a pull's occurrence tag and
+        the requester's completed-round count share the sampling-round clock,
+        so ``occurrence < rounds`` means the producing round finished and the
+        wait is transfer only. A pull for the current or a later round is left
+        parked — its value is produced by forwards this serve point must not
+        delay; blocking on it inverts the pipeline order into a deadlock (a
+        worker chaining per-step forces under ``tracer.iter`` re-parks here on
+        the NEXT round's value). A worker several rounds behind still catches
+        up fully in one call: each chained pull it re-parks on is a past round
+        until it reaches the current one.
 
         A resumed worker may immediately force another lazy: its intercept
         issues the new pull and re-parks, so the loop drains until no worker
-        waits on a (servable) pull.
+        waits on a servable pull.
         """
         progressed = True
         while progressed:
@@ -255,6 +271,21 @@ class PPInterleaver(Interleaver):
                     continue
                 if not block and not pull.ready:
                     continue
+                if not drain and not pull.ready:
+                    _, req_id, provider = decode_pull_location(untagged)
+                    rounds = self.rounds.get(req_id)
+                    if rounds is not None:
+                        _, _, tag = provider.rpartition(".")
+                        occurrence = (
+                            int(tag[1:])
+                            if tag.startswith("i") and tag[1:].isdigit()
+                            else None
+                        )
+                        # An unparseable occurrence is treated as current-round
+                        # (left parked): its transfer is in flight and the next
+                        # boundary completes it, which is always safe.
+                        if occurrence is None or occurrence >= rounds:
+                            continue
                 del self._pulls[key]
                 try:
                     value = pull.complete()

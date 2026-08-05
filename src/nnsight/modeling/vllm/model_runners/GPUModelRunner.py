@@ -586,12 +586,19 @@ class NNsightGPUModelRunner(GPUModelRunner):
             _saves().clear()
 
         interleaver = self.nnsight_model.interleaver
-        # PP: workers still parked on a cross-stage pull from the previous step
-        # (typically a downstream-owned value, produced only after this rank's
-        # execute_model returned) are resumed now, before this step's forward —
-        # blocking is safe here, the whole pipeline finished that step.
+        # Round counts are per-request state; once nothing is tracked they
+        # cannot matter, same reasoning as the saves-set clear above.
+        if self.nnsight_pp and not requests.mediators and not requests.errored:
+            interleaver.rounds.clear()
+        # PP: workers parked on cross-stage pulls of already-produced rounds
+        # are resumed now, before this step's forward — for those the wait is
+        # transfer only. drain=False leaves pulls of the current and later
+        # rounds parked: their values are produced by forwards this serve must
+        # not delay (blocking on one deadlocks the pipeline until the pull
+        # deadline; a per-step force under tracer.iter re-parks on exactly
+        # such a pull).
         if self.nnsight_pp:
-            interleaver.serve_pulls(block=True)
+            interleaver.serve_pulls(block=True, drain=False)
         # The scheduler picks this step's requests partway through the forward, so
         # there is nothing to register yet. Entering empty leaves the interleaver
         # with no worker to start — `Requests.scope` starts them as they appear.
@@ -607,19 +614,26 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # deadlock the pipeline. Stragglers resume at the next step's
             # blocking serve (above) or at collect.
             if self.nnsight_pp:
+                # This forward completed one round for every request it
+                # carried; the counts feed the step-start serve's
+                # produced-round comparison.
+                rounds = interleaver.rounds
+                for req_id in requests.tokens:
+                    rounds[req_id] = rounds.get(req_id, 0) + 1
                 interleaver.serve_pulls(block=False)
                 interleaver.step += 1
         return output
 
     def sample_tokens(self, *args: Any, **kwargs: Any) -> Any:
-        # PP: a worker that forced an upstream value mid-block may still be
-        # parked on its pull (the end-of-forward serve is non-blocking). Its
-        # next park is often this step's logits — which are offered exactly
-        # once, below — so complete the pull NOW. Blocking is safe here:
-        # sampling runs on the last stage, every other stage is upstream, and
-        # their values for this step already exist; the wait is transfer only.
+        # PP: complete stragglers whose producing round has finished before
+        # the once-only logits offer below. vLLM calls this method on EVERY
+        # rank, so drain=False is required: a full drain here blocked a
+        # non-last rank on a pull for the round in flight, which cannot
+        # resolve until later stages run (upstream forces never park — the
+        # intercept serves them in place — so parked pulls are always
+        # downstream-sourced).
         if self.nnsight_pp:
-            self.nnsight_model.interleaver.serve_pulls(block=True)
+            self.nnsight_model.interleaver.serve_pulls(block=True, drain=False)
         if self.execute_model_state is not None:
             original = self.execute_model_state.logits
             # Stays `original` if a tracer.stop() unwinds the handle before it
@@ -649,10 +663,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
         return output
 
     def _sample(self, *args: Any, **kwargs: Any) -> Any:
-        # Same as sample_tokens: a worker may have forced a pull between the
-        # logits and samples offers; complete it before samples fire.
+        # Same as sample_tokens: complete produced-round stragglers before the
+        # samples offer; drain=False for the same every-rank reason.
         if self.nnsight_pp:
-            self.nnsight_model.interleaver.serve_pulls(block=True)
+            self.nnsight_model.interleaver.serve_pulls(block=True, drain=False)
         sampler_output = super()._sample(*args, **kwargs)
 
         with self._still_running():
