@@ -128,17 +128,31 @@ with model.trace() as tracer:
 
 ---
 
-## Avoid in-place slice-assign into a tuple-element view across a barrier
+## A tuple `.output` needs its elements edited, not reassigned
 
 ### Symptom
-A rare hard crash (segfault) when doing `h[5].output[0][:, -1, :] = x` where `.output[0]` is a tuple element view, with the write happening across a barrier in another invoke.
+`TypeError: 'tuple' object does not support item assignment` from
+`h[5].attn.output[0] = new_attn`.
 
 ### Cause
-The narrowed batch view spliced back through the batcher does not compose safely with an in-place slice-assign into a tuple element across the greenlet handoff.
+Some modules return a tuple (an attention block's `(output, weights)`), and
+Python tuples are immutable. The *tensors inside* the tuple are not — and
+`.output` hands back the live ones.
 
-### Mitigation
-- Assign the **whole** tensor instead of slicing a tuple-element view: capture, edit a clone, and set the whole value (e.g. `model.transformer.wte.output = edited`), or use `module.output = new_tuple`.
-- For block outputs (plain tensors) this doesn't arise; the risk is specifically tuple-element views mutated across a barrier.
+### Two ways to write
+```python
+out = model.transformer.h[5].attn.output
+
+# Edit the existing tensor in place — writes straight through, no assignment.
+out[0][:, -1, :] = clean
+
+# Put a *different* tensor in its place — rebuild the tuple and assign that.
+model.transformer.h[5].attn.output = (new_attn,) + tuple(out[1:])
+```
+
+Use the first when you are modifying the values that are there; use the second
+when the replacement is a new tensor (a reshape, a stack, an arithmetic result)
+that has to take the element's place.
 
 ---
 

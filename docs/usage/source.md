@@ -144,9 +144,13 @@ within one forward (e.g. an MoE expert loop) is indexed per fire.
   `.source` instead.
 - **Builtins / C functions have no recoverable source** — drilling into e.g.
   `torch.relu` raises `SourceNotAvailable`.
-- **Decorated forwards are rejected.** A `forward` (or drilled-into function) with a
-  decorator raises `SourceNotAvailable("decorated callable is not supported")` — the
-  decorator is load-bearing and can't be safely dropped.
+- **Decorated forwards are rejected**, and the message usually names the
+  decorator's *closure* rather than the decorator: a wrapped `forward` raises
+  `SourceNotAvailable("callable closes over free variables")`, because the
+  wrapper's free variables are checked before the source is parsed. An
+  undecorated-but-closing function raises the same thing. See
+  [below](#when-source-isnt-available) for which HuggingFace modules this hits,
+  and on which versions.
 - **Requesting an operation out of execution order deadlocks → `OutOfOrderError`.**
   Reading `self_fc2_0.output` then `self_fc1_0.output` (fc1 runs first) is late.
 - **Skipping a whole module drops its source ops.** A skipped module's body never
@@ -154,6 +158,40 @@ within one forward (e.g. an MoE expert loop) is indexed per fire.
   [skip.md](skip.md).
 - **Unknown operation names raise `AttributeError` listing the available names** —
   handy for fixing a mistyped or wrong-occurrence label.
+
+## When `.source` isn't available
+
+A `forward` that is decorated can't be source-instrumented, and on
+**transformers 4.x** several of the ones people most want are:
+
+| Module | transformers 4.57 | transformers 5 |
+|---|---|---|
+| `LlamaAttention` | unavailable | **available** |
+| `LlamaDecoderLayer` | unavailable | **available** |
+| `GPT2Attention` | unavailable | **available** |
+| `LlamaMLP`, `GPT2MLP` | available | available |
+
+On 4.x these carry `@deprecate_kwarg`, and the failure surfaces as
+`SourceNotAvailable("callable closes over free variables")` — the decorator's
+closure, not anything in the forward. **Transformers 5 dropped those decorators**,
+so `.source` on attention and decoder layers works there with no change on
+nnsight's side. If you are on 4.x and want attention internals, upgrading
+transformers is the fix.
+
+Where `.source` is unavailable, target a real submodule instead, which is often
+the value you wanted anyway and works on every version:
+
+```python
+attn = model.model.layers[0].self_attn
+
+attn.q_proj.output        # per-head queries, after unflattening
+attn.v_proj.output        # per-head values (KV-head space under GQA)
+attn.o_proj.input         # the per-head attention output, pre-projection
+model.model.layers[0].mlp.act_fn.output   # the MLP's activation
+```
+
+`print(module.source)` lists the op names when it works, and raises when it
+doesn't — the quickest way to check on your installed version.
 
 ## Related
 

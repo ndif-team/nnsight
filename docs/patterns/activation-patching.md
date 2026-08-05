@@ -91,11 +91,13 @@ Without it, invoke 2 tries to use `clean_hs` before invoke 1 has produced it —
 `NameError`. The barrier parks invoke 1 *after* it reads `clean_hs` and invoke 2
 *before* it writes, so the value crosses cleanly. See `docs/usage/barrier.md`.
 
-**Whole-tensor assign.** Read `output`, mutate the slice, then assign the whole
-tensor back (`model...output = hs`). Reading `.output` returns the live tensor, so
-the in-place slice write already propagates; the reassignment makes intent explicit
-and avoids in-place slice-assigns into tuple-element views (which can misbehave
-across a barrier).
+**The reassignment is optional here.** Reading `.output` returns the live tensor,
+so `hs[:, SUBJECT, :] = ...` has already propagated; `model...output = hs` just
+makes the intent explicit. You need a real assignment only when you have a
+*different* tensor to put in place of the old one — a reshape, a stack, an
+arithmetic result. For a tuple `.output`, assign the rebuilt tuple
+(`module.output = (new,) + tuple(out[1:])`), since a tuple's elements cannot be
+reassigned individually.
 
 ## Variations
 

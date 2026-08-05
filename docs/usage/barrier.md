@@ -107,6 +107,58 @@ with model.trace() as tracer:
 
 For different participant counts at different points, create separate barriers.
 
+## Several sites: one round each, and fence every read
+
+With more than one site in play, the rule is that **no worker may request a
+location past site *i* until everyone is done with site *i*** — requesting a
+later location is what drives the model forward. So each source's read has to
+sit *behind* the rounds for every earlier site, not up front:
+
+```python
+with model.trace() as tracer:
+    b = tracer.barrier(3)
+
+    with tracer.invoke(source_a):
+        a5 = model.transformer.h[5].output[0]   # site 1: mine, read it now
+        b()                                     # round 1
+        b()                                     # round 2: not mine, still attend
+
+    with tracer.invoke(source_b):
+        b()                                     # round 1: not mine — wait first
+        a8 = model.transformer.h[8].output[0]   # site 2: only now may I read
+        b()                                     # round 2
+
+    with tracer.invoke(base):
+        b()
+        h5 = model.transformer.h[5].output[0]   # site 1
+        h5[:, -1] = a5[:, -1]
+        b()
+        h8 = model.transformer.h[8].output[0]   # site 2
+        h8[:, -1] = a8[:, -1]
+        logits = model.lm_head.output[:, -1].save()
+```
+
+Every invoke calls the barrier in every round, including rounds for sites it
+does not touch — a round only releases once all `n` participants arrive.
+
+**The failure to avoid** is hoisting the reads. If `source_b` reads `h[8]`
+*before* the first round, the model is driven past `h[5]` before `base` has
+written there, and the write raises `OutOfOrderError`:
+
+```python
+    with tracer.invoke(source_a):
+        a5 = model.transformer.h[5].output[0]
+        b()
+    with tracer.invoke(source_b):
+        a8 = model.transformer.h[8].output[0]   # too early — advances past h[5]
+        b()
+```
+
+The base's write does not need its own round. Workers are greenlets and do not
+preempt each other: once a round releases, `base` runs its write at site *i* to
+completion before it parks on site *i+1*, so the write lands while the model is
+still at site *i*.
+
 ## Gotchas
 
 - **`n` must equal the number of invokes that call `barrier()`.** If fewer arrive,
@@ -120,6 +172,9 @@ For different participant counts at different points, create separate barriers.
 - **A barrier is per-trace.** Create it inside the `with model.trace()` block.
 - **An early `return` that skips a `barrier()` in one invoke hangs that round** —
   every participant must reach it.
+- **Reading a later site too early breaks an earlier one.** With several sites,
+  put each source's read *after* the rounds for every site before it; requesting
+  a location is what advances the model. See above.
 
 ## Related
 

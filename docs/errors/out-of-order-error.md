@@ -83,6 +83,24 @@ with model.trace() as tracer:
 - For backward passes, mirror forward order in reverse inside `with tensor.backward():`.
 - Split interleaving access patterns across multiple invokes.
 
+## Another cause: something removed nnsight's hooks
+
+`OutOfOrderError` also fires when the location was never served at all, because
+nnsight's forward hooks are gone from the module tree. nnsight installs a
+pass-through pre-hook and hook on every module and expects them to stay; another
+library that calls `remove()` broadly — some intervention frameworks clear
+*every* hook on teardown, not just their own — silently strips them, and the next
+trace reports a location the model "already ran past".
+
+The tell is that `.input` breaks while other things still work, and that it
+started after running code from another hooking library in the same process.
+Re-instrument by walking the tree:
+
+```python
+for envoy in [model, *model.modules()]:
+    envoy.interleaver.instrument(envoy)
+```
+
 ## Related
 
 - [value-was-not-provided.md](value-was-not-provided.md) — same class, the "module never fired / iter outran the model" flavor.

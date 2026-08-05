@@ -38,6 +38,12 @@ Each returns a tracer usable as `with model.<method>(...) as tracer:`. Called di
 | `with tensor.backward(...):` | any captured tensor | A backward pass; read `.grad` on tensors captured earlier in the forward. | — |
 
 Notes:
+- **Kwargs the tracer does not consume are forwarded to the underlying call**, and
+  its return value is what `tracer.result` carries. `model.generate(...,
+  return_dict_in_generate=True, output_scores=True)` therefore puts HF's full
+  generation output (with `.sequences` and per-step `.scores`) on `tracer.result`
+  instead of a bare id tensor; `model.trace(**kw)` forwards to the forward, and
+  `model.pipe(**kw)` to the pipeline's parameters.
 - `model.trace(...)` accepts a `trace=False` kwarg to bypass tracing (one-shot forward; only edits apply).
 - `VLLM` sampling params (`temperature`, `max_tokens`, `top_p`, ...) go to `trace`/`invoke`, not the constructor.
 
@@ -68,6 +74,7 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `.inputs` | `(args, kwargs)` | All inputs to the module's forward. |
 | `.source` | `Source` | Operation-level access to the module's forward internals (see below). |
 | `.device` / `.devices` | `torch.device` / `set` | Device(s) of the module's parameters. |
+| `._module` | `torch.nn.Module` | The wrapped module itself. Reach for it when you need the real object rather than the envoy — reading `config`, registering your own PyTorch hooks, `named_parameters()`, `requires_grad_(False)`. Not a copy: edits to it are edits to the model the tracer runs. |
 
 ## Envoy / module methods
 

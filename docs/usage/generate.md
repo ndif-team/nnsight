@@ -131,6 +131,33 @@ Without a `with`, `generate` just generates and still returns the ids:
 ids = model.generate("Hello", max_new_tokens=3)   # torch.Tensor
 ```
 
+## Extra kwargs go straight to the model's `generate`
+
+Anything you pass that is not consumed by the tracer is forwarded to
+`model.generate`, and whatever it returns is what lands on `tracer.result`. So
+the return type is yours to choose:
+
+```python
+# default: token ids
+with model.generate(prompt, max_new_tokens=3) as tracer:
+    ids = tracer.result.save()
+
+# ask HF for the full output object and you get it, scores included
+with model.generate(
+    prompt, max_new_tokens=3,
+    return_dict_in_generate=True, output_scores=True,
+) as tracer:
+    out = tracer.result.save()
+
+out.sequences        # [batch, prompt + new]
+out.scores           # one [batch, vocab] tensor per generated step
+```
+
+That is the way to get per-step logits out of a traced generation without
+reading `lm_head` under `tracer.iter`. Sampling controls (`do_sample`,
+`temperature`, `top_p`, ...), `num_return_sequences`, `generation_config`, and
+stopping criteria pass through the same way.
+
 ## Gotchas
 
 - **Unbounded iter eats trailing code**: `for step in tracer.iter[:]: ...` runs until the model stops; code after the loop in the same invoke may not run as expected. Use a bounded slice or a separate invoke. See `docs/gotchas/unbounded-iter.md`.

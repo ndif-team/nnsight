@@ -75,9 +75,11 @@ with model.trace(prompt):
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
-Rebuilding and assigning the whole tuple is the safe move: avoid in-place
-slice-assign into a tuple-element view (`attn.output[0][:, :, ...] = x`), which can
-misbehave.
+Here the whole tuple is rebuilt because `.view()` produces a *different* tensor
+that has to take the element's place, and a tuple's elements cannot be
+reassigned (`attn.output[0] = new_attn` raises). Editing the existing tensor in
+place needs no rebuild — `attn.output[0][:, :, HEAD, :] = 0` writes straight
+through, since `.output` hands back the live tensor.
 
 ## Pattern B: per-head straight from `.source`
 
