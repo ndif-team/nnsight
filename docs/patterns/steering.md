@@ -127,26 +127,56 @@ with model.trace(prompt):
 
 ### Steering during generation
 
-`model.generate(...)` returns generated **token ids** (read `tracer.result`); the
-trace body's addition fires on every generation step:
+`model.generate(...)` returns generated **token ids** (read `tracer.result`).
+
+A bare edit in the trace body fires **once, on the prefill** — the forward that
+encodes the prompt — and not on the decode steps that follow. That still changes
+the output, because it changes how the prompt was read, so it is easy to mistake
+for working. To keep the steering on while the model writes, put the edit in a
+**bounded** `tracer.iter[:N]`:
 
 ```python
 with model.generate(prompt, max_new_tokens=20, do_sample=False) as tracer:
-    model.transformer.h[LAYER].output[:, -1, :] += direction * coef
+    for _ in tracer.iter[:20]:                       # every step, prompt included
+        model.transformer.h[LAYER].output[:, -1, :] += direction * coef
     ids = tracer.result.save()
 
 print(model.tokenizer.decode(ids[0]))
 ```
 
-Steered vs. unsteered continuation of `"I went to the bakery and"`:
+Bounded, not `tracer.all()`: an open-ended loop unwinds every line after it, so
+`tracer.result.save()` would never run (see
+[iter-all-next.md](../usage/iter-all-next.md)).
+
+The two are easy to tell apart once you look: they agree on the **first**
+generated token — both steered the prefill — and diverge from the second onward,
+where only one is still adding anything. With the direction and `coef = 8.0`
+above, continuing `"I went to the bakery and"`:
 
 ```
-steered : I went to the bakery and I was like, 'Oh my God, I'm so sorry. I'm so sorry.' And
-baseline: I went to the bakery and bought a bag of cookies. I was so excited. I was so excited to get
+baseline     :  bought a bag of cookies. I was so excited. I
+prefill only :  I was like, 'Oh my God, I'm so
+every step   :  I was told that the bread was good. I was told
 ```
 
-For step-conditional steering (e.g. only the first 5 tokens), use `tracer.iter[...]`.
-See `docs/usage/iter-all-next.md`.
+Note that the prefill-only run *does* differ from the baseline — the prompt was
+encoded differently — which is why a missing per-step application reads as "the
+steering is working, the effect is just modest" rather than as a bug.
+
+#### `[:, -1, :]` means something different after the prefill
+
+With `use_cache=True` (the default), the prefill's activation covers the whole
+prompt, but each decode step's covers **only the token just produced** — sequence
+length 1. So `[:, -1, :]` is the last prompt token on step 0 and the new token on
+every step after, which is what you want here.
+
+An **absolute** index is not portable that way: `[:, 5, :]` addresses prompt
+position 5 during the prefill and is out of range from step 1 on. If you are
+steering a fixed prompt position rather than the running token, apply it outside
+the loop — or index from the end.
+
+For step-conditional steering (e.g. only the first 5 tokens), slice the range:
+`tracer.iter[:5]`. See [iter-all-next.md](../usage/iter-all-next.md).
 
 ### Refusal direction
 
