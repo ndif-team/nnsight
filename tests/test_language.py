@@ -555,8 +555,10 @@ class TestCache:
         cached_a = ca["model.transformer.h.0.mlp"].output
         cached_b = cb["model.transformer.h.0.mlp"].output
         assert cached_a.shape[0] == 1 and cached_b.shape[0] == 1
-        assert torch.equal(cached_a, a)
-        assert torch.equal(cached_b, b)
+        # `cache` moves values off the compute device by default (device="cpu"), so
+        # compare on CPU — otherwise this only passes on a CPU-only machine.
+        assert torch.equal(cached_a, a.cpu())
+        assert torch.equal(cached_b, b.cpu())
 
     @torch.no_grad()
     def test_cache_captures_intervention(self, gpt2):
@@ -657,7 +659,7 @@ class TestRename:
             "gpt2", task="text-generation", dispatch=True,
             rename={"transformer.h.0.mlp": "my_mlp"},
         )
-        hidden = torch.randn(1, 4, 768)
+        hidden = torch.randn(1, 4, 768, device=gpt2.device)
         assert torch.equal(gpt2.my_mlp(hidden), gpt2.transformer.h[0].mlp(hidden))
 
     @torch.no_grad()
