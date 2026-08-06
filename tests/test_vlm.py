@@ -247,3 +247,62 @@ class TestVisionLanguageModel:
 
     def test_task_is_image_text_to_text(self, vlm):
         assert vlm.task == "image-text-to-text"
+
+
+class TestProcessorInputs:
+    """``trace``/``scan`` accept processor-style input (a prompt plus ``images=``),
+    running the processor themselves the way ``generate`` always has.
+
+    Before this, such a call was forwarded to the model untouched and raised from
+    inside modeling code (``You must specify exactly one of input_ids or
+    inputs_embeds``), which pointed nowhere near the real problem.
+    """
+
+    def test_trace_with_positional_prompt_and_images(self, llava):
+        with llava.trace(_prompt(llava), images=[_image()]):
+            logits = llava.output.logits.save()
+
+        assert logits.shape[0] == 1
+        assert logits.shape[-1] == llava.config.text_config.vocab_size
+
+    def test_trace_with_text_keyword_and_images(self, llava):
+        with llava.trace(text=_prompt(llava), images=[_image()]):
+            logits = llava.output.logits.save()
+
+        assert logits.shape[0] == 1
+
+    def test_processor_input_matches_a_prebuilt_encoding(self, llava):
+        """The convenience form must produce exactly what the manual form does."""
+        with llava.trace(_prompt(llava), images=[_image()]):
+            from_processor = llava.output.logits.save()
+
+        with llava.trace(_encoding(llava)):
+            from_encoding = llava.output.logits.save()
+
+        assert torch.allclose(from_processor, from_encoding)
+
+    def test_interventions_apply_to_processor_input(self, llava):
+        with llava.trace(_prompt(llava), images=[_image()]):
+            projected = llava.model.multi_modal_projector.output.save()
+
+        assert projected.ndim == 3
+
+    def test_scan_with_images(self, llava):
+        """Featurizing an image needs numpy, which a fake-tensor mode refuses — the
+        processor has to run outside the scan's `FakeTensorMode`."""
+        with llava.scan(_prompt(llava), images=[_image()]):
+            logits = llava.output.logits.shape.save()
+
+        assert logits[0] == 1
+
+    def test_prompt_given_twice_is_rejected(self, llava):
+        with pytest.raises(ValueError, match="both positionally and as `text=`"):
+            with llava.trace(_prompt(llava), text=_prompt(llava), images=[_image()]):
+                pass
+
+    def test_text_only_trace_is_unaffected(self, llava):
+        """No media keyword means the ordinary tokenization path, not the processor."""
+        with llava.trace("just text, no image"):
+            logits = llava.output.logits.save()
+
+        assert logits.shape[0] == 1

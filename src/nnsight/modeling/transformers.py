@@ -624,6 +624,16 @@ class TransformersModel(HuggingFaceModel):
         {"input_ids", "attention_mask", "token_type_ids", "position_ids", "labels"}
     )
 
+    # Non-text arguments a task's *processor* takes. An invoke naming any of these is
+    # written in processor terms (``trace(prompt, images=[img])``) rather than model
+    # terms (``trace(input_ids=...)``), so the processor has to run over it first.
+    _PROCESSOR_MEDIA_KEYS = frozenset(
+        {"images", "image", "audio", "audios", "videos", "video"}
+    )
+    # ``text`` rides along with the media keys but never triggers the processor path on
+    # its own — text-only input is handled by the ordinary tokenization route.
+    _PROCESSOR_KEYS = _PROCESSOR_MEDIA_KEYS | {"text"}
+
     def _batch_size(self, *inputs: Any, **kwargs: Any) -> int:
         """Number of batch rows an invoke's input contributes.
 
@@ -775,6 +785,10 @@ class TransformersModel(HuggingFaceModel):
                     )
                 if data is not None and hasattr(data, "keys"):
                     return tuple(), {**dict(data), **kwargs}
+                # `forward_kwargs` is `kwargs` for a plain opaque input, and the
+                # processor's encoding when the invoke was written in processor terms.
+                if forward_kwargs is not kwargs:
+                    return tuple(), forward_kwargs
                 return inputs, kwargs
             items.extend(rows)
             forward.update(forward_kwargs)
@@ -789,6 +803,9 @@ class TransformersModel(HuggingFaceModel):
         Returns ``(None, kwargs)`` for an opaque input (a raw feature tensor or a
         multimodal encoding) that the caller passes through to the model untouched.
         """
+        media = self._as_processor_encoding(data, kwargs)
+        if media is not None:
+            return None, media
         if self._is_opaque(data, kwargs):
             return None, kwargs
         if self._is_pretokenized(data, kwargs):
@@ -803,6 +820,44 @@ class TransformersModel(HuggingFaceModel):
             inputs = list(data) if isinstance(data, (list, tuple)) else [data]
         rows = [self.pipeline.preprocess(one, **preprocess_params) for one in inputs]
         return rows, forward_params
+
+    def _as_processor_encoding(self, data: Any, kwargs: dict) -> Optional[dict]:
+        """Run the task's processor when an invoke is written in processor terms.
+
+        ``trace(prompt, images=[img])`` and ``trace(text=prompt, images=[img])`` name
+        the *processor's* arguments, not the model's. Without this they are handed to
+        the model untouched, which raises from deep inside modeling code
+        (``You must specify exactly one of input_ids or inputs_embeds``) — an error
+        that says nothing about the real problem. ``generate`` has always run the
+        processor for these; this makes ``trace``/``scan`` agree with it.
+
+        Returns the model-input encoding merged with any leftover forward kwargs, or
+        ``None`` when this isn't a processor call and the usual routing should apply.
+        """
+        if self.processor is None or not (set(kwargs) & self._PROCESSOR_MEDIA_KEYS):
+            return None
+
+        call = {key: value for key, value in kwargs.items() if key in self._PROCESSOR_KEYS}
+        forward = {
+            key: value for key, value in kwargs.items() if key not in self._PROCESSOR_KEYS
+        }
+
+        if data is not None:
+            if "text" in call:
+                raise ValueError(
+                    "Got the prompt both positionally and as `text=`; pass just one."
+                )
+            call["text"] = data
+
+        # Featurizing an image goes through numpy, which a fake-tensor mode refuses.
+        # `scan` runs the whole batch step under one, so step outside it here: the
+        # encoding is cheap, real, and `allow_non_fake_inputs` lets it into the
+        # faked forward.
+        from torch._subclasses.fake_tensor import unset_fake_temporarily
+
+        with unset_fake_temporarily():
+            encoding = self.processor(**call, return_tensors="pt")
+        return {**dict(encoding), **forward}
 
     def _collate(self, items: list) -> dict:
         """Pad per-invoke encodings into one batch of model-input tensors."""

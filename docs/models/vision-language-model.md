@@ -49,23 +49,34 @@ The prompt may be positional or `text=`; both are equivalent (`tests/test_vlm.py
 
 ### Doing the same with `TransformersModel`
 
-On a plain `TransformersModel(task="image-text-to-text")`, prefer `pipe` (runs the whole pipeline, returns decoded records) or `trace` on a pre-built encoding:
+On a plain `TransformersModel(task="image-text-to-text")`, `trace`/`scan`/`generate` all take the prompt plus `images=` directly — the processor runs for you:
 
 ```python
 model = TransformersModel(REPO, task="image-text-to-text", dispatch=True)
 
-# pipe: decoded records
-with model.pipe(text=prompt, images=img, max_new_tokens=3, do_sample=False) as tracer:
-    records = tracer.result.save()       # [{'generated_text': ...}]
-
-# trace: feed a processor encoding straight in (it's opaque, passed as-is)
-enc = model.processor(images=img, text=prompt, return_tensors="pt")
-with model.trace(**enc):
+with model.trace(prompt, images=[img]):          # or trace(text=prompt, images=[img])
     projected = model.model.multi_modal_projector.output.save()
     logits = model.output.logits.save()
 ```
 
+Any invoke naming a media argument (`images`, `audio`, `videos`, ...) is treated as a **processor call**: the processor runs over it and the resulting encoding goes to the model. Passing the prompt both positionally and as `text=` is an error. Anything else in the invoke (`output_hidden_states=True`, ...) is passed through to the forward.
+
+Running the processor yourself still works and is identical — useful when you want the encoding for other reasons (say, to read `input_ids` for position labels):
+
+```python
+enc = model.processor(images=img, text=prompt, return_tensors="pt")
+with model.trace(enc):                            # or trace(**enc)
+    logits = model.output.logits.save()
+```
+
 A multimodal encoding (carrying `pixel_values`) is routed to the model untouched rather than re-tokenized as text (`transformers.py:759`, `tests/test_vlm.py:148`).
+
+`pipe` remains the way to get the pipeline's decoded records rather than raw tensors:
+
+```python
+with model.pipe(text=prompt, images=img, max_new_tokens=3, do_sample=False) as tracer:
+    records = tracer.result.save()       # [{'generated_text': ...}]
+```
 
 ## What still works
 
