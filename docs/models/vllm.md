@@ -183,6 +183,17 @@ with model.trace("Hello", temperature=0.0):
 
 `VLLMBatcher` (`batching.py`) gathers a `ColumnParallelLinear`/`RowParallelLinear` shard into the full tensor before your intervention reads it and re-splits on write, so every rank runs the same code on the same complete tensor. Verified in `tests/vllm/test_tensor_parallel.py`.
 
+### Mixture-of-experts models and expert parallelism
+
+MoE models (Qwen-MoE, DeepSeek, Mixtral, ...) work with the same transparency, in both expert layouts vLLM offers on the same ranks:
+
+- **default** (`enable_expert_parallel=False`): every rank holds a slice of every expert's matrices (the dense-MLP TP sharding, fused across experts);
+- **expert parallel** (`enable_expert_parallel=True`): each rank holds `num_experts / world_size` whole experts.
+
+The router (`mlp.gate`, a `ReplicatedLinear`) is full and identical on every rank, so reading router logits or swapping them (expert steering / expert-masking ablation) needs no gathering at all. The fused-experts module (`mlp.experts`, a `FusedMoE`) is the one MoE-specific case the batcher handles: models that build it with `reduce_results=False` (the Qwen-MoE/DeepSeek pattern) make it return **per-rank partial sums** that the outer block all-reduces afterwards, so on access the batcher all-reduces the partials into the true value and on write-back divides by the group size so the block's own all-reduce reconstructs a swapped value exactly once. Verified in `tests/vllm/test_moe_batching.py` against an HF reference.
+
+Individual experts are **not** addressable as submodules: vLLM stacks all local experts into fused weight tensors consumed by one grouped kernel, so there is no `experts[3]` to hook at any parallelism level. To ablate an expert, mask its router logit to `-inf` in `mlp.gate.output` instead.
+
 ## Async mode
 
 Construct with `mode="async"`; a trace then streams `RequestOutput`s. Iterate `tracer.backend` (an attribute, not a call):
@@ -316,4 +327,4 @@ For GPT-2-style models: `model.transformer.h[i].attn.output`, `model.transformer
 - `src/nnsight/modeling/vllm/batching.py` — `VLLMBatcher` (TP gather/scatter)
 - `src/nnsight/modeling/vllm/async_backend.py` — `AsyncVLLMBackend`
 - `src/nnsight/modeling/vllm/serve/` — nnsight-serve backend / server / CLI
-- `tests/vllm/` — runnable examples (tracing, async, tensor parallelism, requests, serve)
+- `tests/vllm/` — runnable examples (tracing, async, tensor parallelism, mixture-of-experts, requests, serve)

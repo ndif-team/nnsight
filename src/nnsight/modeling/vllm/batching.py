@@ -17,6 +17,12 @@ layers across ranks, so the value at a ``ColumnParallelLinear`` or
 ``RowParallelLinear`` is one rank's shard of the real tensor. A user asked for the
 layer, not a shard of it, so those values are gathered before a worker sees them
 and re-split before vLLM's own forward carries on.
+
+A ``FusedMoE`` layer needs the same correction for a different reason: an MoE block
+that defers the combine (``reduce_results=False`` — Qwen-MoE, DeepSeek) returns
+per-rank partial sums that the *outer block* all-reduces afterwards, so the value at
+the experts module is a partial too. It is gathered and re-split on the same terms,
+with the group size taken from the expert layout rather than ``tp_size`` alone.
 """
 
 from __future__ import annotations
@@ -86,6 +92,7 @@ class VLLMBatcher(Batcher):
         if self.gathered is not None:
             return self.gathered
 
+        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.linear import (
             ColumnParallelLinear,
             RowParallelLinear,
@@ -102,6 +109,10 @@ class VLLMBatcher(Batcher):
         elif self.type == "input":
             # A row-parallel layer takes its input already split by feature.
             collective = tensor_model_parallel_all_gather
+        elif isinstance(self.module, FusedMoE):
+            # Each rank holds a partial sum of the experts' combined output —
+            # the same collective the outer block runs right afterwards.
+            collective = tensor_model_parallel_all_reduce
         else:
             # Row sharding splits the summed terms, so each rank holds a partial
             # sum and the whole is their total.
@@ -112,12 +123,24 @@ class VLLMBatcher(Batcher):
 
     def _shard(self, value: Any) -> Any:
         """This rank's piece of ``value``, as vLLM's own forward expects it."""
+        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.linear import (
             ColumnParallelLinear,
             split_tensor_along_last_dim,
         )
 
         module = self.module
+
+        if isinstance(module, FusedMoE):
+            # The block all-reduces this right after the module returns, so hand
+            # back an equal share rather than the whole: dividing by the
+            # collective's group size gives partials the block's own reduce sums
+            # back to the value exactly once instead of double-counting it.
+            # Expert parallelism reassigns the same ranks (the module-internal
+            # tp_size becomes 1 and ep_size becomes the group), so the product is
+            # the group size under both layouts.
+            group_size = module.tp_size * module.ep_size
+            return apply(value, lambda tensor: tensor / group_size, torch.Tensor)
 
         if isinstance(module, ColumnParallelLinear) or self.type == "input":
             return apply(
@@ -133,6 +156,7 @@ class VLLMBatcher(Batcher):
 
     def watch(self, module: torch.nn.Module, kind: str) -> None:
         """Note that ``module``'s ``kind`` is about to be served to workers."""
+        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.linear import (
             ColumnParallelLinear,
             RowParallelLinear,
@@ -150,6 +174,19 @@ class VLLMBatcher(Batcher):
                 self.parallel = module.input_is_parallel
             else:
                 self.parallel = not module.reduce_results
+        elif isinstance(module, FusedMoE):
+            # Only the output is ever a shard: the inputs (hidden states, router
+            # logits) are full replicated tensors under both expert layouts.
+            # `reduce_results=True` (Mixtral) reduces inside forward, and a combine
+            # kernel that already reduced across ranks
+            # (must_reduce_shared_expert_outputs) leaves nothing to gather —
+            # neither was ever exposed as a partial.
+            self.parallel = (
+                kind == "output"
+                and not module.reduce_results
+                and module.tp_size * module.ep_size > 1
+                and not module.must_reduce_shared_expert_outputs()
+            )
         else:
             self.parallel = False
 
