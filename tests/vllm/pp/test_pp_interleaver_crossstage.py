@@ -46,10 +46,15 @@ def run(rank: int, world: int, rdv: str) -> None:
     # note: the force comes AFTER both reads — a force before a local read
     # would park the worker past its local visit, the same local-after-remote
     # ordering error the 0.7 branch raises for.
+    # Operand order matters on the non-owning rank: the lazy must lead the
+    # expression (its own __add__ runs, plain Python) — with a real tensor on
+    # the left, torch's override protocol dispatches instead, and forcing a
+    # value inside that dispatch is forbidden (see the __torch_function__
+    # guard in lazy_remote_tensor.py).
     block = """
 a = Mediator.value("model.h.0.output")
 b = Mediator.value("model.h.1.output")
-c = (a * 2 + b).sum().item()
+c = (b + a * 2).sum().item()
 """
     lcls: dict = {}
     mediator = Mediator(

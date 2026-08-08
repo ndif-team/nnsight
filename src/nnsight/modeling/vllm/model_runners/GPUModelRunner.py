@@ -590,6 +590,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # cannot matter, same reasoning as the saves-set clear above.
         if self.nnsight_pp and not requests.mediators and not requests.errored:
             interleaver.rounds.clear()
+        if self.nnsight_pp:
+            from ..pp_tls_swap import active as _tls_swap_active, install as _tls_swap_install
+
+            # Prototype: per-greenlet torch state isolation, env-gated. Must
+            # install on THIS thread (the greenlets' thread); load_model may
+            # run on another.
+            if _tls_swap_active():
+                _tls_swap_install()
         # PP: workers parked on cross-stage pulls of already-produced rounds
         # are resumed now, before this step's forward — for those the wait is
         # transfer only. drain=False leaves pulls of the current and later
