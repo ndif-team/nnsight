@@ -52,6 +52,13 @@ Per-attention-head access.
 
 - [per-head-attention](per-head-attention.md) — Slice attention output into heads for per-head reading and editing.
 
+## Working at scale on NDIF
+
+One session per experiment, and as few bytes as possible in each direction.
+
+- [remote-dataset-sweep](remote-dataset-sweep.md) — Load the data on the server rather than shipping it, loop inside one session, bring back the reduction.
+- [remote-training](remote-training.md) — Fit a LoRA / steering vector / probe with the whole optimizer loop server-side.
+
 ## Other resources
 
 - [nnsight.net tutorials](https://nnsight.net/tutorials.html) — Notebook mirror of these patterns.

@@ -10,7 +10,9 @@ sources: [src/nnsight/intervention/backends/remote.py, src/nnsight/intervention/
 
 ## TL;DR
 - `.save()` is the **only** channel that transmits values back from NDIF. Unsaved values are dropped on the server.
-- An external list `.append`-ed inside a remote trace ends up empty — the appends happen server-side. Create the container **inside** the trace with `nnsight.save([])`.
+- An external list `.append`-ed inside a remote trace ends up empty — the appends happen server-side. Either create the container **inside** with `nnsight.save([])`, or save the outer one from inside the block.
+- A tensor you computed on the client arrives on the **CPU**, next to a model that is half-precision and possibly sharded. Take the device and dtype off an activation at run time.
+- A class you ship must call `super(MyClass, self).__init__()`; bare `super()` raises `super(): __class__ cell not found`.
 - `.detach().cpu()` before `.save()` to shrink the download.
 - Put `remote=True` on `model.session(...)`, **not** on the inner `model.trace(...)` calls — remote goes on the outermost context.
 - `print(...)` inside a remote trace comes back as `LOG` status, not local stdout (gated by `CONFIG.APP.REMOTE_LOGGING`).
@@ -83,7 +85,91 @@ print(captured)
 ```
 
 ### Mitigation
-- Any container you populate during a remote trace must be created inside it and saved.
+- Any container you populate during a remote trace has to be saved *inside* it. Creating it in the block is one way; saving the outer one from inside the block is the other, and it rebinds the client's name to the server's version:
+
+```python
+acc = []                                    # bound on the client
+with model.session(remote=True):
+    for prompt in prompts:
+        with model.trace(prompt):
+            value = model.transformer.h[0].output.sum().item()
+        acc.append(value)
+    nnsight.save(acc)                       # send this object home
+print(acc)                                  # [61.39, 46.88, 54.30]
+```
+
+Drop the `nnsight.save(acc)` and the client's `acc` is still `[]`.
+
+---
+
+## Client-side tensors arrive on the CPU, in the wrong dtype
+
+### Symptom
+`RuntimeError: Expected all tensors to be on the same device, but found at least
+two devices, cuda:1 and cpu`, or `expected mat2 to be ... but got ...`, from a
+line that works fine against a locally dispatched model.
+
+### Cause
+Every name your block reads is captured from the enclosing scope and pickled into
+the request ([serialization](../developing/serialization.md)), so a steering
+vector, a label tensor, or a set of adapter weights you built on the client does
+travel — but it lands as whatever it was locally: CPU, and usually float32. The
+server's model is in `bfloat16` and may be split across several GPUs, so there is
+no single right answer you could have hard-coded. `interleave` moves the inputs you
+pass to `trace`, not the tensors your block closes over.
+
+Client-side you can't look the answer up either: an undispatched model is on the
+`meta` device, so `model.device` is `meta` and `.to(model.device)` is worse than
+doing nothing.
+
+### Wrong / Right
+```python
+# wrong — vector is on the CPU, activations are on some cuda:N
+with model.trace(prompt, remote=True):
+    model.model.layers[20].output[:, -1, :] += direction * 2
+
+# right — take both off the activation, at run time
+with model.trace(prompt, remote=True):
+    hidden = model.model.layers[20].output
+    hidden[:, -1, :] += direction.to(hidden.device, hidden.dtype) * 2
+```
+
+The same applies to anything you construct *inside* a remote block: parameters
+built with `torch.randn(...)` default to CPU float32 even though the code is
+running next to the weights. Read the device off the envoy you're wrapping:
+
+```python
+with model.session(remote=True):
+    weight = torch.nn.Parameter(torch.randn(dim, rank).to(module.device))
+```
+
+### Mitigation
+- Never name a device or dtype literally in remote code; derive both from an
+  activation or an envoy inside the block.
+- With a sharded model, different layers sit on different cards — derive per use,
+  not once.
+
+---
+
+## Bare `super()` in a class you ship
+
+### Symptom
+`RuntimeError: super(): __class__ cell not found`, raised server-side from a class
+defined in your notebook.
+
+### Cause
+Zero-argument `super()` is compiler magic: compiling a method that mentions it adds
+a hidden `__class__` cell, created by the surrounding class body. Remote execution
+rebuilds your class from its source text alone, outside any class body, so the cell
+never exists and `super()` has nothing to read.
+
+### Wrong / Right
+```python
+class Adapter(torch.nn.Module):
+    def __init__(self, dim):
+        super().__init__()              # wrong — fails on the server
+        super(Adapter, self).__init__() # right — names the class explicitly
+```
 
 ---
 
