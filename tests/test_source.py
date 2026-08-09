@@ -40,7 +40,22 @@ class Nested(nn.Module):
 class Decorated(nn.Module):
     @torch.no_grad()
     def forward(self, x):
-        return x + 1
+        return torch.relu(x) + 1
+
+
+def _opaque(func):
+    """A decorator that doesn't use functools.wraps, so it can't be peeled."""
+
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+class OpaquelyDecorated(nn.Module):
+    @_opaque
+    def forward(self, x):
+        return torch.relu(x) + 1
 
 
 @pytest.fixture
@@ -90,8 +105,29 @@ class TestListing:
             envoy.source.nope_0
         assert "torch_relu_0" in str(exc.value)
 
-    def test_decorated_forward_rejected(self):
+    def test_decorated_forward_is_instrumented(self):
+        # transformers wraps nearly every forward, so rejecting decorated ones
+        # left .source unusable on real models. They are peeled and rebuilt now.
         envoy = Envoy(Decorated())
+        assert "torch_relu_0" in envoy.source._names
+
+    def test_rebuilt_decorator_still_applies(self, x):
+        # The decorator is load-bearing (@torch.no_grad); peeling without
+        # rebuilding would silently re-enable grad.
+        model = Decorated()
+        envoy = Envoy(model)
+        x = x.clone().requires_grad_(True)
+        with envoy.trace(x):
+            captured = envoy.source.torch_relu_0.output.save()
+            out = envoy.output.save()
+        assert not out.requires_grad
+        assert not captured.requires_grad
+        assert torch.allclose(out, model(x))
+
+    def test_unpeelable_decorated_forward_rejected(self):
+        # No functools.wraps means no __wrapped__ to follow, so the decorator
+        # can't be rebuilt and dropping it would change behaviour silently.
+        envoy = Envoy(OpaquelyDecorated())
         with pytest.raises(SourceNotAvailable):
             envoy.source
 

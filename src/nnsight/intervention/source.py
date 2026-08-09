@@ -43,7 +43,7 @@ import functools
 import inspect
 import textwrap
 import weakref
-from types import CodeType, FunctionType
+from types import CellType, CodeType, FunctionType
 from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple
 
 import torch
@@ -197,22 +197,96 @@ class _Instrument(ast.NodeTransformer):
         )
 
 
-def _compile_instrumented(func: Callable) -> Compiled:
+def _inner_cell(wrapper: Callable, wrapped: Callable) -> int | None:
+    """Index of the closure cell in ``wrapper`` holding ``wrapped``, or ``None``.
+
+    A decorator keeps the function it wraps in a closure cell, so re-pointing that
+    cell redirects the decorator at a different inner callable. Matching is by
+    identity against ``__wrapped__`` rather than by free-variable name, since the
+    name is the decorator author's choice (``func``, ``fn``, ...).
+    """
+    closure = getattr(wrapper, "__closure__", None)
+    if not closure:
+        return None
+    for index, cell in enumerate(closure):
+        try:
+            if cell.cell_contents is wrapped:
+                return index
+        except ValueError:  # empty cell
+            continue
+    return None
+
+
+def _decorator_chain(func: Callable) -> tuple[Callable, list[tuple[Callable, int]]]:
+    """Peel ``func``'s decorators, returning the innermost function and the chain.
+
+    Each chain entry is ``(wrapper, cell_index)``, outermost first, and is enough
+    to rebuild that wrapper around a different inner callable. Peeling stops at
+    the first decorator that doesn't set ``__wrapped__`` (i.e. didn't use
+    ``functools.wraps``) or whose inner callable isn't in a closure cell — such a
+    decorator can't be re-pointed, so it is treated as the innermost function and
+    the usual free-variable check rejects it.
+    """
+    chain: list[tuple[Callable, int]] = []
+    current = func
+    while True:
+        wrapped = getattr(current, "__wrapped__", None)
+        if wrapped is None:
+            return current, chain
+        index = _inner_cell(current, wrapped)
+        if index is None:
+            return current, chain
+        chain.append((current, index))
+        current = wrapped
+
+
+def _rewrap(chain: list[tuple[Callable, int]], innermost: Callable) -> Callable:
+    """Rebuild ``chain``'s decorators around ``innermost``, inside out.
+
+    Each wrapper is rebuilt with a fresh closure rather than having its cell
+    assigned: the wrapper is the *class*'s attribute, shared by every instance in
+    the process, so mutating its cell in place would redirect models nobody is
+    tracing.
+    """
+    result = innermost
+    for wrapper, index in reversed(chain):
+        cells = list(wrapper.__closure__)
+        cells[index] = CellType(result)
+        rebuilt = FunctionType(
+            wrapper.__code__,
+            wrapper.__globals__,
+            wrapper.__name__,
+            wrapper.__defaults__,
+            tuple(cells),
+        )
+        rebuilt.__kwdefaults__ = wrapper.__kwdefaults__
+        rebuilt.__qualname__ = wrapper.__qualname__
+        result = rebuilt
+    return result
+
+
+def _compile_instrumented(func: Callable, decorated: bool = False) -> Compiled:
     """Parse, instrument, and compile a Python ``func`` (a ``forward`` or a drilled-into
     callable), or raise.
 
     Raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable] for callables we can't safely rewrite:
     non-Python ones (builtins/C functions have no ``__code__``), those with free
-    variables, no recoverable source, or a decorator (which is load-bearing and
-    would be dropped by extracting the raw code object).
+    variables, or no recoverable source.
+
+    ``decorated`` says the caller has already peeled this function's decorators
+    (see [`_decorator_chain`][nnsight.intervention.source._decorator_chain]) and will
+    rebuild them around the result. Only then is it safe to drop the ``@`` lines
+    from the parsed source: they are load-bearing — transformers wraps most
+    forwards in kwarg shims and output post-processing — so without that promise a
+    decorated callable is still rejected.
     """
     code_object = getattr(func, "__code__", None)
     if code_object is None:
         raise SourceNotAvailable("callable has no Python source (builtin or C function)")
     if code_object.co_freevars:
         # Recompiled at module level, free variables would become globals and
-        # break — methods essentially never close over an enclosing scope, so
-        # bail rather than silently misbehave.
+        # break. A decorator's wrapper always closes over the function it wraps,
+        # so this is also what rejects one we couldn't peel.
         raise SourceNotAvailable("callable closes over free variables")
     try:
         lines, start = inspect.getsourcelines(func)
@@ -225,7 +299,12 @@ def _compile_instrumented(func: Callable) -> Compiled:
     if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
         raise SourceNotAvailable("callable is not a plain function")
     if definition.decorator_list:
-        raise SourceNotAvailable("decorated callable is not supported")
+        if not decorated:
+            raise SourceNotAvailable("decorated callable is not supported")
+        # getsourcelines hands back the `@` lines because they are syntactically
+        # part of the definition. Applying them here would double them up — the
+        # caller re-applies the real, already-evaluated decorators.
+        definition.decorator_list = []
 
     instrument = _Instrument()
     instrument.visit(tree)
@@ -247,7 +326,7 @@ def _compile_instrumented(func: Callable) -> Compiled:
     return Compiled(code, tuple(instrument.names), instrument.lines, source)
 
 
-def _compiled(func: Callable) -> Compiled:
+def _compiled(func: Callable, decorated: bool = False) -> Compiled:
     """Cached `_compile_instrumented`, keyed by ``func``'s code object."""
     key = getattr(func, "__code__", None)
     if key is None:
@@ -259,7 +338,7 @@ def _compiled(func: Callable) -> Compiled:
     if cached is not None:
         return cached
     try:
-        result = _compile_instrumented(func)
+        result = _compile_instrumented(func, decorated=decorated)
     except SourceNotAvailable as error:
         _FORWARD_CACHE[key] = error
         raise
@@ -448,8 +527,12 @@ def install_source(envoy: "Envoy") -> Compiled:
     Returns the module's [`Compiled`][nnsight.intervention.source.Compiled]. Upgrades the controller's body to the
     instrumented forward (built once per module, from code cached per code object).
     """
-    func = type(envoy._module).forward
-    compiled = _compiled(func)  # raises SourceNotAvailable if it can't
+    # transformers wraps most forwards in decorators (kwarg shims, output
+    # post-processing), which close over the function they wrap and so can't be
+    # recompiled directly. Peel them, instrument the real forward, then rebuild
+    # the decorators around it so their behaviour still runs.
+    func, chain = _decorator_chain(type(envoy._module).forward)
+    compiled = _compiled(func, decorated=bool(chain))  # raises if it can't
 
     state = _ensure_controller(envoy)
     if not state.sourced:
@@ -460,7 +543,7 @@ def install_source(envoy: "Envoy") -> Compiled:
         if func.__kwdefaults__:
             forward.__kwdefaults__ = func.__kwdefaults__
         # Unbound (the controller passes the module); a bound method would pin it.
-        state.body = forward
+        state.body = _rewrap(chain, forward)
         state.sourced = True
     return compiled
 
