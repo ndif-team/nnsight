@@ -181,7 +181,44 @@ def _lambda_source(func: types.FunctionType) -> str:
     return ast.unparse(candidates[-1])
 
 
-def code_reduce(source: str, globals: dict, locals: dict) -> tuple:
+def _function_referenced_names(source: str) -> set[str]:
+    """Names a ``def``'s body needs from outside it, by Python's own scoping rules.
+
+    A function is not a block: a name assigned *anywhere* in its body is local to
+    it, and reading that name before the assignment is an ``UnboundLocalError``,
+    never a lookup in the enclosing scope. So the read-anywhere rule
+    `_referenced_names` uses for a traced block is wrong here — it captures the
+    enclosing scope's same-named object for a name the function only ever binds.
+    That is not merely wasteful: a helper doing ``with open(path) as f:`` would
+    drag in whatever ``f`` a notebook cell left lying around, and a closed file
+    can't be pickled at all ("Cannot pickle closed files").
+
+    ``symtable`` answers this exactly, including ``global`` / ``nonlocal``
+    declarations, so it is used rather than re-deriving the rules from the AST.
+    Descendant tables are included because a nested ``def`` or comprehension can
+    reference a module global too; their *free* variables resolve through the
+    enclosing function's closure and are deliberately not collected here.
+    """
+    import symtable
+
+    def globals_of(table: "symtable.SymbolTable") -> set[str]:
+        names = {
+            symbol.get_name() for symbol in table.get_symbols() if symbol.is_global()
+        }
+        for child in table.get_children():
+            names |= globals_of(child)
+        return names
+
+    top = symtable.symtable(source, "<sourced>", "exec")
+    # The source is one `def` (or `lambda`) at module level; its own table is the
+    # single child. Anything else, fall back to the block rule rather than guess.
+    children = top.get_children()
+    if len(children) != 1:
+        return _referenced_names(source)
+    return globals_of(children[0])
+
+
+def code_reduce(source: str, globals: dict, locals: dict, function: bool = False) -> tuple:
     """Reduce source + its scope to a picklable, filtered tuple.
 
     Returns ``(source, used_globals, used_locals)`` — the code as text (so it
@@ -195,8 +232,12 @@ def code_reduce(source: str, globals: dict, locals: dict) -> tuple:
     chain: a nested block (a ``tracer.invoke(...)`` body) runs with a Scope as its
     globals, whose iteration yields only the block's own names, leaving a module
     global it references (e.g. ``torch``) out of the payload.
+
+    ``function`` says ``source`` is a single ``def`` / ``lambda`` rather than a
+    traced block, which changes what counts as "referenced" — see
+    [`_function_referenced_names`][nnsight.intervention.serialization._function_referenced_names].
     """
-    names = _referenced_names(source)
+    names = _function_referenced_names(source) if function else _referenced_names(source)
     used_globals, used_locals = {}, {}
     for name in names:
         if name in locals:
@@ -318,7 +359,7 @@ class CustomCloudPickler(cloudpickle.CloudPickler):
                     pass  # empty cell (not yet bound); nothing to capture
 
         source, used_globals, used_closure = code_reduce(
-            source, func.__globals__, closure
+            source, func.__globals__, closure, function=True
         )
         # Globals go in the state (applied after memoization) so a self-reference
         # resolves via the memo instead of recursing during pickling.

@@ -105,6 +105,36 @@ class TestScopeFiltering:
         _, used_globals, _ = code_reduce("del junk", {"junk": "present"}, {})
         assert used_globals == {"junk": "present"}
 
+    def test_function_locals_are_not_shipped(self):
+        # A function is not a block: a name assigned anywhere in the body is
+        # local to it, so the enclosing scope's same-named object is never what
+        # the body reads. Capturing it dragged a notebook's leftover closed file
+        # handle into the payload, where pickling failed outright.
+        source = (
+            "def load(path):\n"
+            "    with open(path) as f:\n"
+            "        return json.load(f)\n"
+        )
+        globals_ = {"json": "json-mod", "open": "builtin", "f": "a-closed-file"}
+        _, used_globals, _ = code_reduce(source, globals_, {}, function=True)
+        assert "f" not in used_globals
+        assert used_globals["json"] == "json-mod"
+
+    def test_function_globals_still_ship(self):
+        source = (
+            "def score(xs):\n"
+            "    return [WEIGHT * torch.relu(x) for x in xs]\n"
+        )
+        globals_ = {"WEIGHT": 2, "torch": "torch-mod", "xs": "stale", "x": "stale"}
+        _, used_globals, _ = code_reduce(source, globals_, {}, function=True)
+        assert used_globals == {"WEIGHT": 2, "torch": "torch-mod"}
+
+    def test_function_global_declaration_still_ships(self):
+        # `global` makes the assignment target a module global after all.
+        source = "def bump():\n    global counter\n    counter += 1\n"
+        _, used_globals, _ = code_reduce(source, {"counter": 0}, {}, function=True)
+        assert used_globals == {"counter": 0}
+
 
 class TestLambda:
     def test_simple_lambda(self):
