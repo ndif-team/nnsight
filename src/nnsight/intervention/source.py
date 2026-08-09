@@ -368,6 +368,28 @@ def _build_instrumented(fn: Callable, compiled: Compiled, op: Callable) -> Calla
     return instrumented.__get__(receiver) if receiver is not None else instrumented
 
 
+def _run_body(state: "_State", module: Any, args: tuple, kwargs: dict) -> Any:
+    """Run the module's body, honouring accelerate's device-alignment hook.
+
+    ``accelerate.add_hook_to_module`` installs alignment by replacing
+    ``module.forward`` (instance ``__dict__``) and keeping the real forward on
+    ``module._old_forward``. We install our controller into that same slot, so its
+    wrapper is gone and ``pre_forward``/``post_forward`` would never run -- which
+    silently breaks any model sharded across devices, because the inter-module
+    tensor moves are exactly what those do. ``_hf_hook`` stays attached either way,
+    so the omission is invisible.
+
+    Bracketing the body here restores it, and works for both the original forward
+    and the source-instrumented one.
+    """
+    hook = getattr(module, "_hf_hook", None)
+    if hook is None:
+        return state.body(module, *args, **kwargs)
+    args, kwargs = hook.pre_forward(module, *args, **kwargs)
+    output = state.body(module, *args, **kwargs)
+    return hook.post_forward(module, output)
+
+
 def _make_controller(module: Any) -> Callable:
     """Build the forward installed on an instrumented module: skip gate, then body.
 
@@ -389,11 +411,11 @@ def _make_controller(module: Any) -> Callable:
         state = module.__dict__[_STATE]
         interleaver, path = state.active()
         if interleaver is None:
-            return state.body(module, *args, **kwargs)
+            return _run_body(state, module, args, kwargs)
         skipped = _skipped(interleaver, path)
         if skipped is not _NO_SKIP:
             return skipped
-        return state.body(module, *args, **kwargs)
+        return _run_body(state, module, args, kwargs)
 
     return controller
 
