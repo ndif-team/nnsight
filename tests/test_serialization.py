@@ -10,7 +10,7 @@ import textwrap
 import pytest
 import torch
 
-from nnsight.intervention.serialization import dumps, loads
+from nnsight.intervention.serialization import code_reduce, dumps, loads
 from nnsight.ndif import get_local_env
 from nnsight.schema.request import RequestModel
 from nnsight.tracing.backend import Backend
@@ -41,6 +41,69 @@ same_line_lambdas = pytest.mark.skipif(
     sys.version_info < (3, 11),
     reason="same-line, same-signature lambdas need code.co_positions (3.11+)",
 )
+
+
+class TestScopeFiltering:
+    """Only real variable references travel with a block, not attribute names."""
+
+    def test_attribute_name_shadowing_a_global_is_not_shipped(self):
+        # `llm.model` is an attribute; a global that happens to be spelled
+        # `model` must not be dragged into the payload. co_names cannot tell the
+        # two apart, so this used to ship an unrelated model -- whose envoys then
+        # claimed a conflicting Module:<path> id on the server.
+        source = "h = llm.model.layers[-1].output.save()"
+        globals_ = {"llm": "the-traced-model", "model": "an-unrelated-model"}
+        _, used_globals, _ = code_reduce(source, globals_, {})
+        assert used_globals == {"llm": "the-traced-model"}
+
+    def test_common_attribute_names_do_not_leak(self):
+        source = "x = llm.output.save(); y = llm.config.tokenizer"
+        globals_ = {
+            "llm": "the-traced-model",
+            "output": "unrelated",
+            "config": "unrelated",
+            "tokenizer": "unrelated",
+        }
+        _, used_globals, _ = code_reduce(source, globals_, {})
+        assert used_globals == {"llm": "the-traced-model"}
+
+    def test_names_used_in_nested_scopes_still_ship(self):
+        # Comprehensions and lambdas have their own code objects; names they
+        # reference must still be collected.
+        source = "vals = [torch.relu(t) for t in xs]\nf = lambda z: helper(z)"
+        globals_ = {"torch": "torch-mod", "helper": "helper-fn", "xs": [1]}
+        _, used_globals, _ = code_reduce(source, globals_, {})
+        assert used_globals == {"torch": "torch-mod", "helper": "helper-fn", "xs": [1]}
+
+    def test_names_the_block_only_binds_are_not_shipped(self):
+        # `tracer` is a local of the block -- the enclosing scope's same-named
+        # object is about to be shadowed, so shipping it is pointless. It is also
+        # unsafe: a stale Tracer from an earlier cell holds a dead frame and
+        # cannot be pickled at all.
+        source = "with model.trace(prompt) as tracer:\n    h = model.layer1.output"
+        globals_ = {"model": "the-model", "prompt": "hi", "tracer": "a-stale-tracer"}
+        _, used_globals, _ = code_reduce(source, globals_, {})
+        assert used_globals == {"model": "the-model", "prompt": "hi"}
+
+    def test_loop_and_assignment_targets_are_not_shipped(self):
+        # `count` is only ever bound; `i` is bound and then read, so it stays --
+        # the filter is on reads, not on whether the name is also a local.
+        source = "for i in items:\n    count = 1\n    use(i)"
+        globals_ = {"items": [1, 2], "use": "fn", "i": "stale", "count": "stale"}
+        _, used_globals, _ = code_reduce(source, globals_, {})
+        assert used_globals == {"items": [1, 2], "use": "fn", "i": "stale"}
+
+    def test_augmented_assignment_target_still_ships(self):
+        # `total += x` reads `total` before writing it, even though the AST marks
+        # the target as a Store.
+        source = "total += x"
+        globals_ = {"total": 1, "x": 2}
+        _, used_globals, _ = code_reduce(source, globals_, {})
+        assert used_globals == {"total": 1, "x": 2}
+
+    def test_deleted_name_still_ships(self):
+        _, used_globals, _ = code_reduce("del junk", {"junk": "present"}, {})
+        assert used_globals == {"junk": "present"}
 
 
 class TestLambda:

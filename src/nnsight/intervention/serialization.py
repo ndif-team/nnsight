@@ -36,21 +36,47 @@ DEFAULT_PROTOCOL = 4
 
 
 def _referenced_names(source: str) -> set[str]:
-    """Names the source reads/writes — its ``co_names`` (recursively).
+    """Names the source needs from its enclosing scope, from its AST.
 
-    Module-level code reaches its scope through ``LOAD_NAME``, whose names live
-    in ``co_names`` (unlike a function's ``LOAD_GLOBAL``), so this covers what a
-    block references. Attribute names are included too but harmlessly filtered
-    out later since they won't appear in globals/locals.
+    Two filters, both there to keep unrelated objects out of the payload — what
+    lands here gets pickled and shipped, so a wrong name is at best dead weight
+    and at worst an unpicklable object or one the server mis-resolves.
+
+    **Only ``ast.Name`` nodes**, so an attribute is not mistaken for a variable.
+    The bytecode's ``co_names`` cannot make that distinction — ``llm.model.layers``
+    puts ``model`` and ``layers`` in the same table as a genuine variable load —
+    and treating those as names ships whatever global happens to share the
+    spelling. ``model``, ``output``, ``input`` and ``config`` are all both common
+    attributes and common variable names; when one such global was another model,
+    its envoys claimed a conflicting ``Module:<path>`` id and the server failed to
+    resolve it against the deployed checkpoint.
+
+    **Only names the block reads** — ``Load`` (and ``Del``, which needs the
+    binding to exist), plus an augmented-assignment target, which reads before it
+    writes. A name the block merely *binds* (``with model.trace(...) as tracer:``,
+    a ``for`` target, a plain assignment) is a local of the block: it is about to
+    be overwritten, so capturing the enclosing scope's same-named object is
+    pointless. It is also actively harmful, because that object need not be
+    picklable — a stale ``tracer`` left over from an earlier cell holds a dead
+    frame, and pickling it dies in ``SerializedFrame`` on ``None.f_code``.
+
+    ``ast.walk`` covers nested scopes (comprehensions, lambdas, inner ``def``\\ s)
+    in one pass, which is what the previous recursion into ``co_consts`` was for.
     """
-    def walk(code: types.CodeType) -> set[str]:
-        names = set(code.co_names)
-        for const in code.co_consts:
-            if isinstance(const, types.CodeType):
-                names |= walk(const)
-        return names
+    import ast
 
-    return walk(compile(source, "<sourced>", "exec"))
+    tree = ast.parse(source)
+    names = {
+        node.target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+    }
+    names.update(
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Load, ast.Del))
+    )
+    return names
 
 
 def _lambda_source(func: types.FunctionType) -> str:
