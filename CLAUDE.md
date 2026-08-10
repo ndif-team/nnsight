@@ -55,6 +55,8 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 - [docs/remote/non-blocking-jobs.md](docs/remote/non-blocking-jobs.md) — submit and poll
 - [docs/remote/remote-async.md](docs/remote/remote-async.md) — `AsyncRemoteBackend`: `await` / `async for` a job
 - [docs/remote/register-local-modules.md](docs/remote/register-local-modules.md) — ship local code to NDIF
+- [docs/patterns/remote-dataset-sweep.md](docs/patterns/remote-dataset-sweep.md) — sweep a dataset in one job, minimal bytes each way
+- [docs/patterns/remote-training.md](docs/patterns/remote-training.md) — **train a LoRA / probe / steering vector against a remote model** (the local recipes do not work remotely)
 
 ### "I want to verify shapes / inspect dimensions without running the model"
 - [docs/usage/scan.md](docs/usage/scan.md) — `model.scan(...)`
@@ -138,6 +140,7 @@ Read at least the first two if the user is asking "why is my code blocking / out
 
 ## Inline gotcha cheat-sheet (read before writing nnsight code)
 
+- **Nothing a trace body assigns survives the block unless it is saved — not even plain Python values.** `marker = 42` inside a `with model.trace(...)` block is gone on exit. A `with` block that discards its own locals is not ordinary Python, and it is the first thing that surprises people.
 - **`.save()` is required to keep a value past the trace, and now *raises* if called outside a trace.** `x = nnsight.save([])` *before* a `with model.trace(...)` block is an error — put the save inside.
 - **`.save()` returns the value by its *variable name* — you must bind it.** `logits = model.logits.save()` works; a bare `model.logits.save()` marks the value but leaves no name to return it under, so it silently never appears in the results. This bites hardest on vLLM/remote/serve, where you read `output.saves["logits"]` (or the pushed-back local) by name — an unbound save just isn't there.
 - **A module's `.output` is the real object it returns.** For a GPT-2 *block* that's a plain `Tensor (batch, seq, hidden)` — read/write the whole tensor, no `[0]`. An *attention* submodule returns a tuple; check `print(module.source)` or the shape rather than assuming.

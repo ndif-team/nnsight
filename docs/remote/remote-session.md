@@ -128,7 +128,7 @@ See [non-blocking-jobs.md](./non-blocking-jobs.md) for the polling loop.
 
 - `.save()` is still required for any value you want returned to your process. Cross-trace sharing inside the session is free; cross-process (server → you) is not.
 - Sessions cut **queue** and **transport** overhead, not GPU time. A 5-minute session is still 5 minutes of compute.
-- Variables defined outside the session can't be referenced inside it — build everything from scratch inside the session block.
+- Names the block reads from the enclosing scope **are** captured: every one is pickled into the request payload. They must be picklable, they arrive on CPU in their client dtype, and their size is added to your upload — this is the usual reason a sweep's payload gets large. Build data inside the block when you want it *off* the wire, not because referencing it is forbidden.
 - Iterating `for layer in model.transformer.h:` inside a session is ordinary Python during block capture, same as local tracing — not a server-side loop.
 - **One trace fails → the whole session aborts.** If any inner trace raises, the job ends and no further traces run. Structure fault-tolerant pipelines as separate jobs.
 

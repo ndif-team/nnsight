@@ -35,6 +35,25 @@ worker still parked on `model.transformer.h.1.output`, and
 throws `OutOfOrderError` into the worker so the traceback points at the exact line
 that was waiting.
 
+`model.output` is the location that catches people first. It is the *root* envoy —
+the very end of the forward pass — so reading it before any layer strands that
+layer's request:
+
+```python
+# wrong: model.output runs the whole model, so h[8] has already fired
+with model.trace(prompt):
+    logits = model.output.logits.save()
+    hidden = model.model.layers[8].output.save()   # OutOfOrderError
+
+# right: activations first, model.output last
+with model.trace(prompt):
+    hidden = model.model.layers[8].output.save()
+    logits = model.output.logits.save()
+```
+
+That ordering is the natural way to *describe* the task ("give me the prediction and
+also layer 8"), which is why it is such a common first error.
+
 The `.i0` suffix on the location is the occurrence tag — which visit of that
 location the request targets. Without `tracer.iter`, it is always `.i0`; in a
 generation loop it counts `.i0`, `.i1`, `.i2`, … per step.

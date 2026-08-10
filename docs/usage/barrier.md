@@ -24,10 +24,11 @@ module**.
 
 ## When to use / when not to use
 
-- Use when a later invoke needs a value an earlier invoke produced from the *same*
-  module.
-- Don't use when invokes touch entirely different modules — shared invoke scope
-  already handles that (see [invoke-and-batching.md](invoke-and-batching.md)).
+- Use whenever a later invoke reads a value an earlier invoke produced. This holds
+  even when the two invokes touch *different* modules: `module.output[...] = donor`
+  evaluates `donor` before the worker parks, so the name has to be bound by then
+  regardless of module order, and without a barrier it isn't
+  (see [gotchas/cross-invoke.md](../gotchas/cross-invoke.md)).
 - Don't use as a substitute for `tracer.stop()` or `module.skip()`.
 
 ## Canonical pattern (embedding transfer)

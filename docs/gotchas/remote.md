@@ -17,13 +17,15 @@ sources: [src/nnsight/intervention/backends/remote.py, src/nnsight/intervention/
 - Put `remote=True` on `model.session(...)`, **not** on the inner `model.trace(...)` calls — remote goes on the outermost context.
 - `print(...)` inside a remote trace comes back as `LOG` status, not local stdout (gated by `CONFIG.APP.REMOTE_LOGGING`).
 - Local helper functions/classes must be registered with `nnsight.register(...)` to run on the server.
-- **Test offline with `remote="local"`** — it serializes/deserializes the trace (local modules hidden) and runs it locally, a strong dry run for the real remote path.
+- **`remote="local"` checks that your block serializes and comes back** — nothing more. It runs the model in your own process, so use a small stand-in.
 
 ---
 
 ## Test the remote path offline with `remote="local"`
 
-`remote=True` needs a live NDIF server. `remote="local"` (`LocalSimulationBackend`, `src/nnsight/intervention/backends/local.py`) serializes the trace exactly as the remote path would, deserializes it with local (non-installed) modules hidden, then runs it against your real model — so a passing `remote="local"` run is strong evidence the real one will work.
+`remote=True` needs a live NDIF server. `remote="local"` (`LocalSimulationBackend`, `src/nnsight/intervention/backends/local.py`) serializes the trace exactly as the remote path would, deserializes it with your local modules hidden, then runs it against your real model.
+
+Scope it accordingly: **it tells you the block survives the round trip** — that your helpers ship and your saves come back. It runs the model in your own process, so point it at a small stand-in and switch the repo id when you go remote.
 
 ```python
 with model.trace("The Eiffel Tower is in", remote="local"):
@@ -226,6 +228,8 @@ A remote run that references a locally-defined function/class fails with `Module
 - `AsyncRemoteBackend` (`await backend` → saves dict; `async for update in backend` → status updates then the saves dict last) is the async variant. See [docs/remote/remote-async.md](../remote/remote-async.md).
 
 Config: `CONFIG.API.HOST`, `CONFIG.API.APIKEY`, `CONFIG.API.COMPRESS`; `CONFIG.APP.REMOTE_LOGGING`, `CONFIG.APP.DEBUG`. Environment: `NDIF_API_KEY`, `NDIF_HOST`.
+
+`nnsight.compare()` **returns** an `EnvComparison` and renders through `__str__` — call `print(nnsight.compare())` or you get silence. Expect it to flag the client/server nnsight versions as `CRITICAL` whenever you run the documented editable-install workflow, where the server bind-mounts your checkout: the code is identical and only the `.dist-info` metadata differs.
 
 ---
 

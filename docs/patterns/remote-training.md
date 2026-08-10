@@ -67,6 +67,10 @@ with model.session(remote=True) as session:
     rows = load_dataset("nyu-mll/glue", "sst2", split="train[:5000]")
 
     adapter = LoRA(module, dim, 4)
+    # lr is high because WA starts at an unscaled randn and WB at zero, so the
+    # product starts at 0 and the effective step on the composed update is far
+    # smaller than lr suggests. Scale WA down (e.g. * 0.01) if you prefer a
+    # conventional 1e-3.
     optimizer = torch.optim.AdamW(adapter.parameters(), lr=3)
 
     for start in range(0, len(rows), 10):
@@ -109,11 +113,27 @@ with model.generate("I'm upset", remote=True):
 |---|---|
 | Loop inside the session | One queued job per step instead of one for the run |
 | `module.device` for the parameters | `Expected all tensors to be on the same device` — `torch.randn` gives CPU even server-side |
+| Building the adapter *inside* the block | Built on the client, `module.device` is `meta`; `.to("meta")` **silently discards the data**. Meta tensors pickle fine, the job returns COMPLETED, and the adapter does nothing |
+| Optimizer *inside* the block | A client-side optimizer over a shipped module is a no-op: `backward()` populates `.grad` on the server's copy, the client's stays `None`, and every step re-runs an identical forward. No error — the tell is a loss that repeats *bit-identically* |
 | `.to(self.WA.dtype)` around the matmuls | dtype mismatch against a bfloat16 model |
 | `labels.to(logits.device)` | The batch came off the client, so the labels are on the CPU |
 | `super(LoRA, self)` | `RuntimeError: super(): __class__ cell not found` |
 | Save the weights, not the adapter | The adapter holds an `Envoy`; the object cannot be reconstructed client-side |
 | Replacement assignment, not `output[:] =` | `one of the variables needed for gradient computation has been modified by an inplace operation` |
+
+## Check that it is really training
+
+Two of the ways this goes wrong produce no error at all — a client-side optimizer
+and a client-built adapter both run to completion and report a plausible loss. Print
+a parameter norm next to the loss:
+
+```python
+print(f"step {step}  loss {loss.item():.4f}  |WB| {adapter.WB.norm().item():.4f}")
+```
+
+If `|W|` does not move off its initial value, your parameters are not on the server
+(or are on `meta`) and the optimizer is a no-op. A loss that is identical to the last
+decimal on consecutive steps means the same thing.
 
 ## Gotchas
 

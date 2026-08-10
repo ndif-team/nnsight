@@ -111,8 +111,27 @@ for tok, s in zip(tokens, saliency.tolist()):
 
 ### Integrated gradients (IG)
 
-IG averages gradients along a straight-line path from a zero baseline to the actual
-embedding. Here the scaled embedding *is* a leaf you construct, so it needs
+IG averages gradients along a straight-line path from a baseline to the actual
+activation. Two things decide whether the result means anything, and both are easy
+to get wrong:
+
+!!! warning "Pick the baseline deliberately"
+
+    **Scaling `wte.output` alone is not a zero baseline.** GPT-2's transformer is
+    `wte -> wpe -> drop -> h`, so the positional embedding is added *after* `wte`:
+    at `alpha=0` the model still sees full positional information. Scale
+    `drop.output` (or block 0's input) if you want the embedding path to actually
+    start from zero.
+
+    **A zero baseline diverges on a residual stream.** LayerNorm is scale
+    invariant, so its Jacobian grows like `1/alpha` as the activation shrinks —
+    the first sample sits on a singularity and the integral does not converge.
+    Measured on GPT-2 layer 6, `sum(IG)` against a target of `+6.29`:
+    `N=64 -> -237`, `N=128 -> -77`, `N=256 -> +1107`, `N=512 -> -64`. More steps
+    make it worse. Start the path at `alpha ~= 0.05` (0.36% completeness error) or
+    use a mean / corrupted-run baseline instead of zero.
+
+Here the scaled activation *is* a leaf you construct, so it needs
 `requires_grad_(True)`:
 
 ```python
@@ -135,6 +154,44 @@ for step in range(N_STEPS):
 ig = ig_accum / N_STEPS         # [B, S, hidden]
 saliency = ig.sum(dim=-1)       # [B, S]
 ```
+
+**Always check completeness.** IG's defining axiom is that the attributions sum to
+the change in the metric across the path. If they don't, the result is an artifact —
+this is the only thing that distinguishes a converged run from the divergent one
+above, and it costs three lines:
+
+```python
+def F_at(alpha):
+    with model.trace(prompt):
+        act = model.transformer.h[LAYER].output
+        model.transformer.h[LAYER].output = act * alpha
+        value = model.lm_head.output[:, -1, target].save()
+    return value          # `return` *inside* the block is a SyntaxError -- the
+                          # body is recompiled at module level, not as a function
+
+total = ig.sum().item()
+target_delta = F_at(1.0).item() - F_at(ALPHA_START).item()
+print(f"completeness: {total:.4f} vs {target_delta:.4f}")   # want these to match
+```
+
+**Batch the steps.** The alpha steps don't interact, so put several in one batch and
+let `metric.sum().backward()` give you per-row gradients — 14x faster per step than
+one trace per alpha on GPT-2, for a few hundred MiB:
+
+```python
+chunk = alphas[s : s + 16]                       # 16 is a reasonable knee
+with model.trace([prompt] * len(chunk)):
+    act = model.transformer.h[LAYER].output      # rows identical
+    scaled = (act * chunk.view(-1, 1, 1)).detach()
+    scaled.requires_grad_(True)
+    model.transformer.h[LAYER].output = scaled
+    with model.lm_head.output[:, -1, target].sum().backward():
+        g = scaled.grad.sum(0, keepdim=True).save()
+```
+
+Replacement with a detached leaf (above), replacement with a non-leaf
+(`scaled = act * alpha`, no `detach`), and in-place (`act[:] = act * alpha`, then
+read `act.grad`) all give the same gradient — pick whichever reads best.
 
 To run all `N_STEPS` as one (remote-friendly) request, wrap in
 `with model.session():` and accumulate inside — see `docs/usage/session.md`.

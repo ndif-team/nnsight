@@ -113,7 +113,7 @@ with model.trace("Hello", remote=True, blocking=False) as tracer:
 
 ## Gotchas
 
-- Inside one invoke, modules **must** be accessed in forward-pass order — the worker greenlet blocks on a hook event for each request. Out-of-order access raises `OutOfOrderError`. See `docs/gotchas/out-of-order.md`.
+- Inside one invoke, modules **must** be accessed in forward-pass order — the worker greenlet blocks on a hook event for each request. Out-of-order access raises `OutOfOrderError`. See `docs/gotchas/order-and-deadlocks.md`.
 - Values you want after the block **must** be marked with `.save()` / `nnsight.save(...)`. See `docs/usage/save.md`.
 - `with model.trace():` with no input and no invoke is a `ValueError`.
 - Standard Python `if` / `for` works inside the body — the greenlet worker sees real tensors. See `docs/usage/conditionals-and-loops.md`.

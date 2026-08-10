@@ -45,7 +45,12 @@ from nnsight.modeling.transformers import TransformersModel
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 clean   = "The Eiffel Tower is in the city of"   # next token: " Paris"
-corrupt = "The Colosseum is in the city of"      # next token: " Rome"  (both 10 tokens)
+corrupt = "The Colosseum is in the city of"      # both prompts are 10 tokens
+
+# NB: GPT-2 small is near-degenerate on the corrupt prompt -- its top-5 spans 0.3
+# logits and " Rome" only ranks 3rd (' P', ' T', ' C', ' Rome', ' B'). Compare the
+# *logit difference* below, not the top token, or small numerical differences
+# between runs will flip the argmax and look like a bug.
 
 paris = model.tokenizer.encode(" Paris")[0]
 rome  = model.tokenizer.encode(" Rome")[0]

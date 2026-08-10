@@ -12,6 +12,7 @@ sources: [src/nnsight/intervention/barrier.py, src/nnsight/tracing/util.py:32, s
 - A value **defined before/around** the invokes (in the enclosing scope) flows into every invoke automatically — no barrier.
 - A value **produced inside one invoke** (captured from an activation) is **not** automatically visible to a sibling invoke: all invoke workers start together, so the consumer runs before the producer has bound it → `NameError`. Use `tracer.barrier(n)` to order them.
 - This applies whether the invokes touch the **same** module or **different** modules — the old "different modules → no barrier needed" rule no longer holds.
+- **Use a name that doesn't already exist outside the invokes.** Each block starts with a copy of the surrounding scope, and that copy is checked first — so if `donor` already exists out there, the consumer reads the *old* value instead of the one the producer just bound. Nothing errors.
 - `CONFIG.APP.CROSS_INVOKER` is **gone**. Sharing is via the blocks' shared frame locals (`Scope.shared`), sequenced by barriers.
 - Empty `tracer.invoke()` (no input) works on bare `NNsight` — it contributes no rows and skips `_batch()`, so it never raises `NotImplementedError`.
 

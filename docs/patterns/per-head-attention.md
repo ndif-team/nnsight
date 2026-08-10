@@ -59,9 +59,24 @@ print(per_head[:, :, HEAD].shape)  # torch.Size([1, 5, 64])  -- head 4's output
 
 `.attn.output` is a tuple `(attn_out, weights)`, so index `[0]` for the tensor.
 
-### Ablate one head
+### Reshaping the output tuple
 
-Clone, zero one head, reshape back to flat, and assign the whole tuple:
+Clone, zero one head's *slice of the projected output*, reshape back to flat, and
+assign the whole tuple:
+
+!!! warning "This is not head ablation"
+
+    `attn.output[0]` is the output of `c_proj`. After that projection the hidden
+    dimension no longer decomposes per head, so columns
+    `[h*head_dim : (h+1)*head_dim]` are **not** head `h` — zeroing them removes
+    something, but not that head's contribution. Measured on GPT-2 layer 6 head 3,
+    the logit difference moves by `-0.008` here versus `-0.167` for a real
+    ablation: a 21x understatement, with no error and a plausible-looking number.
+
+    To actually ablate a head, cut it *before* the projection — see
+    [Pattern B](#pattern-b-per-head-straight-from-source) below, or slice
+    `attn.c_proj.input`, which is equivalent. Use the pattern here only when you
+    genuinely want to edit the projected output.
 
 ```python
 with model.trace(prompt):
@@ -110,6 +125,21 @@ with model.trace(prompt):
 The op name (`attention_interface_0`) is GPT-2-specific — discover yours with
 `print(model.transformer.h[0].attn.source)`. See `docs/usage/source.md` and
 `docs/patterns/attention-patterns.md`.
+
+Equivalently, zero the head's slice of the projection's *input*, which needs no
+tuple rebuild and no source-op name:
+
+```python
+with model.trace(prompt):
+    lo, hi = HEAD * head_dim, (HEAD + 1) * head_dim
+    model.transformer.h[LAYER].attn.c_proj.input[:, :, lo:hi] = 0
+    logits = model.lm_head.output[:, -1, :].save()
+```
+
+Both routes agree exactly (GPT-2 L6H3: logit difference `+2.0064` → `+1.8399`), and
+both differ from the Pattern A reshape, which is not a head ablation. Prefer this
+one when you just want the ablation; prefer the source-op form when you also want to
+read or edit the per-head tensor.
 
 ## Pattern C: a first-class `.heads` accessor via `eproperty`
 

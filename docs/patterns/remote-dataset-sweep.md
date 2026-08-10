@@ -27,6 +27,25 @@ Two rules carry almost all the benefit:
 - Whenever the thing you want back is a number, a score per example, or a small
   tensor — not the hidden states themselves.
 
+## Measure it
+
+nnsight will tell you what actually crossed the wire, which is the only way to know
+whether any of the below worked:
+
+```python
+from nnsight import CONFIG
+CONFIG.APP.DEBUG = True
+```
+
+```
+[remote] payload: 4,228 bytes (compressed)
+[remote] result: 1,671 bytes downloaded
+```
+
+For reference, a 256-example sweep like the one below runs at ~4 KB up and ~1.7 KB
+down. Shipping the same dataset from the client instead costs ~17 KB up; saving the
+raw residual stream instead of a scalar would cost ~2 MB down, and raw logits ~131 MB.
+
 ## Load the data on the server
 
 A HuggingFace `Dataset` is memory-mapped. Pickling one puts an **arrow file path**
@@ -130,7 +149,9 @@ Without the `nnsight.save(results)`, the appends land on the server's copy and y
   remote=True)` is one queued job per row. Put `remote=True` on the session and
   leave the inner traces plain.
 - **Batch inside the session.** Passing a list of strings to `model.trace` runs
-  them as one forward pass; the loop above batches ten at a time.
+  them as one forward pass; the loop above batches ten at a time. Batched input is
+  **left**-padded, so `[:, -1]` is the true final token of every row even when the
+  prompts differ in length (see [invoke-and-batching.md](../usage/invoke-and-batching.md)).
 - **Sessions have a wall-clock ceiling.** Split a sweep that could exceed an hour
   into several sessions rather than one long one.
 - **Read modules in forward order.** Reading a late module and then an early one in
