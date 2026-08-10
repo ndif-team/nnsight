@@ -24,7 +24,6 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
-import threading
 import types
 from types import FrameType, TracebackType
 from typing import Any
@@ -39,58 +38,6 @@ if sys.version_info < (3, 13):
 else:
     _locals_to_fast = None
 
-# Per-frame stores backing `shared_locals`: id(frame) -> (frame, store), cleared
-# when the outermost trace exits (`nnsight.tracing.tracer.dec`). Thread-local
-# because traces on different threads are independent, like the saved set and the
-# nesting depth.
-_shared = threading.local()
-
-
-def shared_locals(frame: FrameType) -> dict:
-    """The mapping blocks written in ``frame`` share.
-
-    A name bound by a *sibling* block — an earlier ``tracer.invoke(...)`` — has to
-    reach the ones beside it, but must not reach the frame itself: what escapes a
-    trace is what `save` marked, and [`push`][nnsight.tracing.util.push] is the
-    only thing that decides that.
-
-    This used to be ``frame.f_locals`` directly, which worked by accident. Before
-    3.13 that was one stable snapshot dict per frame — writes into it were visible
-    to sibling blocks but never reached the frame's fast locals. PEP 667 replaced
-    it with a fresh write-through proxy per access, so every assignment a block
-    made landed in the user's frame immediately and unsaved values escaped. Keeping
-    our own dict per frame makes the isolation explicit, and the same on every
-    version.
-
-    Args:
-        frame: The frame the blocks were written in.
-
-    Returns:
-        The dict those blocks share — the same object for the same frame, until
-        the outermost trace exits.
-    """
-    store = getattr(_shared, "store", None)
-    if store is None:
-        store = _shared.store = {}
-    entry = store.get(id(frame))
-    if entry is None:
-        # The frame is held alongside its store, not just keyed by. A helper that
-        # opens an invoke has already returned by the time the trace runs, so its
-        # frame would be freed and the next helper allocated at the same address —
-        # merging two scopes that the code keeps apart. Frames aren't weak
-        # referenceable, so a strong reference until the outermost trace exits is
-        # what keeps the id honest.
-        entry = store[id(frame)] = (frame, {})
-    return entry[1]
-
-
-def clear_shared_locals() -> None:
-    """Drop this thread's per-frame shared stores (the outermost trace has exited)."""
-    store = getattr(_shared, "store", None)
-    if store is not None:
-        store.clear()
-
-
 class Scope(dict):
     """The namespace a captured block runs in.
 
@@ -103,7 +50,7 @@ class Scope(dict):
        was written*: a ``for prompt in prompts:`` variable has moved on (or gone)
        by the time the block runs, so the snapshot is what keeps it right.
     2. [`shared`][nnsight.tracing.util.Scope.shared] — the store the blocks written in that frame share
-       ([`shared_locals`][nnsight.tracing.util.shared_locals]). A name bound by a
+       ([`shared_locals`][nnsight.intervention.util.shared_locals]). A name bound by a
        *sibling* block (an earlier ``tracer.invoke(...)``) isn't in the snapshot,
        because nothing had bound it when this block was captured. Blocks written in
        one frame share these; blocks written in different functions have different
@@ -231,7 +178,7 @@ def push(frame: FrameType, variables: dict[str, Any]) -> None:
     ``update`` is enough.
 
     This is the *only* route from a block's namespace back into the frame — see
-    [`shared_locals`][nnsight.tracing.util.shared_locals], which keeps a block's
+    [`shared_locals`][nnsight.intervention.util.shared_locals], which keeps a block's
     other writes out of it.
 
     Args:

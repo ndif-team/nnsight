@@ -331,6 +331,41 @@ class TestBarrier:
         assert order == ["before"] * 3 + ["after"] * 3
 
     @torch.no_grad()
+    def test_name_bound_in_one_invoke_reaches_the_next(self, gpt2):
+        # The one thing the per-frame shared store exists for: invoke bodies are
+        # siblings written in one frame, and `embeddings` is not in the second
+        # body's snapshot because nothing had bound it when that body was
+        # captured. (Every other kind of block reaches what it needs through its
+        # own snapshot, which is why only invokes pass `shared=`.)
+        with gpt2.trace() as tracer:
+            barrier = tracer.barrier(2)
+            with tracer.invoke(MSG):
+                embeddings = gpt2.transformer.wte.output
+                barrier()
+            with tracer.invoke("_ _ _ _ _ _ _ _ _"):
+                barrier()
+                gpt2.transformer.wte.output = embeddings
+                out = gpt2.output.logits[0, -1].argmax().save()
+        assert out.ndim == 0
+
+    @torch.no_grad()
+    def test_invoke_scope_does_not_outlive_its_trace(self, gpt2):
+        # The store is dropped when the trace that owns those invokes finishes,
+        # not when the outermost trace does. Holding it to the end of a session
+        # kept one dead mediator frame -- and its tensors -- per trace.
+        from nnsight.intervention.util import _shared
+
+        def entries():
+            return len(getattr(_shared, "store", None) or {})
+
+        with gpt2.session():
+            for _ in range(3):
+                with gpt2.trace() as tracer:
+                    with tracer.invoke(ET):
+                        gpt2.transformer.h[0].output
+                assert entries() == 0
+
+    @torch.no_grad()
     def test_barrier_no_block_reaches_it_runs_clean(self, gpt2):
         # A barrier nobody calls is inert.
         with gpt2.trace() as tracer:

@@ -34,7 +34,8 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from ..tracing.backend import Backend
 from ..tracing.tracer import Tracer, push_result, save
-from ..tracing.util import Scope, clean_traceback, shared_locals
+from ..tracing.util import Scope, clean_traceback
+from .util import clear_shared_locals, shared_locals
 from .barrier import Barrier
 from .batching import Batcher
 from .cache import Cache, CacheView
@@ -279,7 +280,6 @@ class InterleavingTracer(Tracer):
                     glbls,
                     dict(frame.f_locals),
                     node=self.node,
-                    shared=shared_locals(frame),
                 )
                 mediator.batch_group = self.batcher.add(*self.args, **self.kwargs)
                 interleaver.mediators.append(mediator)
@@ -306,6 +306,10 @@ class InterleavingTracer(Tracer):
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before interleave doesn't leave workers/batcher behind.
             interleaver.cancel()
+            # The invoke bodies that shared a store are done with it. Waiting for
+            # the outermost trace instead would hold one dead frame -- and its
+            # tensors -- per trace, which a loop of traces turns into a leak.
+            clear_shared_locals()
 
     def traceback(self, exception: BaseException) -> TracebackType | None:
         """Return a clean traceback for an error raised inside the trace body.

@@ -40,9 +40,7 @@ from .util import (
     Scope,
     SerializedFrame,
     clean_traceback,
-    clear_shared_locals,
     push,
-    shared_locals,
 )
 
 
@@ -217,16 +215,11 @@ def inc() -> None:
 
 
 def dec() -> None:
-    """Leave a trace scope, clearing the saved set once the outermost one exits.
-
-    The per-frame stores blocks shared go with it: nothing outlives the outermost
-    trace, so an `id(frame)` key can't be reused while its entry is still live.
-    """
+    """Leave a trace scope, clearing the saved set once the outermost one exits."""
     depth = getattr(_local, "depth", 1) - 1
     _local.depth = depth
     if depth == 0:
         _saves().clear()
-        clear_shared_locals()
 
 
 def push_result(frame: FrameType, variables: dict) -> None:
@@ -475,7 +468,7 @@ class Tracer:
         is managed by `__exit__`.
         """
         frame = self.info.frame
-        scope = Scope(dict(frame.f_locals), shared_locals(frame), frame.f_globals)
+        scope = Scope(dict(frame.f_locals), {}, frame.f_globals)
         exec(code, scope)
         push_result(frame, scope)
 

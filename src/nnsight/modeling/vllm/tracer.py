@@ -18,7 +18,8 @@ from ...intervention.batching import Batcher
 from ...intervention.interleaver import Mediator
 from ...intervention.tracer import InterleavingTracer
 from ...tracing.tracer import push_result
-from ...tracing.util import Scope, shared_locals
+from ...intervention.util import clear_shared_locals, shared_locals
+from ...tracing.util import Scope
 
 
 class VLLMTracer(InterleavingTracer):
@@ -52,7 +53,6 @@ class VLLMTracer(InterleavingTracer):
                 glbls,
                 dict(frame.f_locals),
                 node=self.node,
-                shared=shared_locals(frame),
             )
             mediator.batch_group = self.batcher.add(*self.args, **self.kwargs)
             interleaver.mediators.append(mediator)
@@ -82,3 +82,6 @@ class VLLMTracer(InterleavingTracer):
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before it doesn't leave workers/batcher behind.
             self.envoy.interleaver.cancel()
+            # The invoke bodies that shared a store are done with it; holding it
+            # until the outermost trace exits leaks a frame per trace.
+            clear_shared_locals()
