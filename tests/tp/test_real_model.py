@@ -57,6 +57,14 @@ INTERMEDIATE = 8192
 DRIFT = 5e-2
 
 
+def _visible_devices(tp: int) -> str:
+    """Which cards the ranks use: whatever was set, else the first ``tp``."""
+    inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if inherited:
+        return ",".join(inherited.split(",")[:tp])
+    return ",".join(str(index) for index in range(tp))
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("", 0))
@@ -67,7 +75,7 @@ def _run(tp: int, out: str) -> None:
     env = {
         **os.environ,
         "PYTHONPATH": os.pathsep.join(filter(None, [SRC, os.environ.get("PYTHONPATH")])),
-        "CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in range(tp)),
+        "CUDA_VISIBLE_DEVICES": _visible_devices(tp),
     }
     command = [sys.executable]
     if tp > 1:

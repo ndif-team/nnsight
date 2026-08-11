@@ -108,6 +108,56 @@ UNSUPPORTED: Dict[str, str] = {
     "mla_kv_a_proj": "MLA split kv projection",
 }
 
+# The oldest transformers whose tensor parallelism produces correct activations.
+#
+# 5.14.1 shards a tied LM head's *hook* but not its weight, so on a checkpoint
+# with `tie_word_embeddings=True` the head keeps its full weight while
+# `colwise_gather_output` all-gathers the result anyway: logits come back
+# `tp_size` times too wide, inside transformers, before nnsight sees anything.
+# Nothing downstream looks wrong — the argmax still lands inside the first copy —
+# so it survives every casual check. Measured on Llama-3.2-3B at tp=4: width
+# 513024 against a vocabulary of 128256 on 5.14.1, correct on 5.15.0.
+MINIMUM_TRANSFORMERS = "5.15.0"
+
+
+class UnsupportedTransformersVersion(RuntimeError):
+    """transformers is too old to shard a model correctly."""
+
+
+def _check_transformers_version() -> None:
+    """Refuse to trace a sharded model on a transformers known to mis-shard.
+
+    Called once, the first time a genuinely sharded module is seen, so an
+    unsharded model on an old transformers is unaffected.
+    """
+    global _version_checked
+    if _version_checked:
+        return
+    _version_checked = True
+
+    import transformers
+    from packaging.version import Version
+
+    installed = transformers.__version__
+    # Compared on the release numbers alone, so a `5.15.0.dev0` — which a plain
+    # `>=` sorts *below* 5.15.0, pre-releases coming first — counts as 5.15. A
+    # dev build of the fixed series is the normal way to be running it early;
+    # refusing those would make an editable transformers checkout unusable.
+    if Version(installed).release >= Version(MINIMUM_TRANSFORMERS).release:
+        return
+
+    raise UnsupportedTransformersVersion(
+        f"tensor parallelism needs transformers >= {MINIMUM_TRANSFORMERS}, but "
+        f"{installed} is installed. Older versions do not shard a tied LM head's "
+        "weight while still gathering its output, so a model with "
+        "`tie_word_embeddings=True` returns logits `tp_size` times too wide — "
+        "wrong in a way that still produces a plausible argmax. Upgrade "
+        "transformers, or load this model on one GPU."
+    )
+
+
+_version_checked = False
+
 
 class UnsupportedParallelStyle(Exception):
     """The model shards something interventions can't be shown whole."""
@@ -251,6 +301,11 @@ class TPInterleaver(Interleaver):
             # Stamped but not actually split (a degenerate 1-rank mesh) — nothing
             # to gather, and a collective over a 1-rank group is pure overhead.
             return
+
+        # The first genuinely sharded module: past here the weights are already
+        # split, so this is the last point at which refusing is still cheaper
+        # than returning wrong numbers.
+        _check_transformers_version()
 
         self.enabled = True
         for side in SHARDED_SIDES[style]:

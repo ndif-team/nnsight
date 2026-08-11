@@ -9,17 +9,23 @@ into the whole tensor a user asked for.
 """
 
 from .interleaver import (
+    MINIMUM_TRANSFORMERS,
     SHARDED_SIDES,
     UNSUPPORTED,
     TPInterleaver,
     UnsupportedParallelStyle,
+    UnsupportedTransformersVersion,
     is_sharded,
 )
+from .plan import max_tp_size
 
 __all__ = [
+    "MINIMUM_TRANSFORMERS",
     "SHARDED_SIDES",
     "UNSUPPORTED",
     "TPInterleaver",
     "UnsupportedParallelStyle",
+    "UnsupportedTransformersVersion",
     "is_sharded",
+    "max_tp_size",
 ]

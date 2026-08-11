@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 from typing import Any, Optional
 
 import torch
 
 from .mixins.remotable import Remotable
+
+logger = logging.getLogger("nnsight")
 
 # Canonical repo ids, keyed by the user-supplied id (resolves casing/redirects
 # so different spellings of the same model produce the same remote key).
@@ -82,6 +86,97 @@ class HuggingFaceModel(Remotable):
         return json.dumps(
             {"repo_id": _ID_CACHE[self.repo_id], "revision": self.revision}
         )
+
+    @classmethod
+    def _remoteable_estimate_bytes(
+        cls, model_key: str, dtype: str, trust_remote_code: bool = False
+    ) -> int:
+        """Size the weights from the Hub's parameter count, without building the
+        architecture.
+
+        The Hub indexes every safetensors checkpoint and reports how many
+        parameters it holds, so the number the base class builds a whole meta
+        model to count is one request away. Falls back to that build when the
+        count isn't published — an older ``.bin``-only repo, a private mirror, or
+        no network — so this is a shortcut, never the only route.
+
+        Buffers are not in the Hub's count (they aren't checkpoint tensors).
+        They're a rounding error next to the parameters for a transformer, and
+        the caller pads.
+        """
+        from .mixins.remotable import bytes_per_element
+
+        data = json.loads(model_key)
+        repo_id, revision = data.get("repo_id"), data.get("revision")
+
+        parameters = cls._hub_parameter_count(repo_id, revision)
+        if parameters is None:
+            logger.debug(
+                f"No parameter count published for {repo_id!r}; sizing it by "
+                "building the architecture instead"
+            )
+            return super()._remoteable_estimate_bytes(
+                model_key, dtype, trust_remote_code=trust_remote_code
+            )
+
+        return math.ceil(parameters * bytes_per_element(dtype))
+
+    @staticmethod
+    def _hub_parameter_count(repo_id: str, revision: Optional[str]) -> Optional[int]:
+        """Total parameters the Hub reports for a repo, or None if it doesn't."""
+        try:
+            from huggingface_hub import HfApi
+
+            info = HfApi().model_info(repo_id, revision=revision)
+        except Exception:
+            return None
+
+        safetensors = getattr(info, "safetensors", None)
+        return getattr(safetensors, "total", None)
+
+    @classmethod
+    def _remoteable_checkpoint_config(
+        cls, model_key: str, trust_remote_code: bool = False
+    ) -> Optional[Any]:
+        """The repo's config, read from the Hub cache without any weights."""
+        return cls._config(model_key, trust_remote_code)
+
+    @classmethod
+    def _config(cls, model_key: str, trust_remote_code: bool) -> Optional[Any]:
+        from transformers import AutoConfig
+
+        data = json.loads(model_key)
+        try:
+            return AutoConfig.from_pretrained(
+                data.get("repo_id"),
+                revision=data.get("revision"),
+                trust_remote_code=trust_remote_code,
+            )
+        except Exception:
+            logger.debug(f"Could not read a config for {data.get('repo_id')!r}")
+            return None
+
+    @classmethod
+    def _remoteable_checkpoint_revision(
+        cls, model_key: str, **kwargs: Any
+    ) -> Optional[str]:
+        """The revision the key pins, straight out of it."""
+        return json.loads(model_key).get("revision")
+
+    @classmethod
+    def _remoteable_max_tp_size(
+        cls, model_key: str, trust_remote_code: bool = False
+    ) -> Optional[int]:
+        """The largest tensor-parallel degree, read from the checkpoint's config.
+
+        Config only — no weights, no architecture — since the sharding plan and
+        the dimensions it has to divide are both declared there. See
+        [`max_tp_size`][nnsight.modeling.tp.plan.max_tp_size].
+        """
+        from .tp import max_tp_size
+
+        config = cls._config(model_key, trust_remote_code)
+        return max_tp_size(config) if config is not None else None
 
     @classmethod
     def _remoteable_from_model_key(cls, model_key: str, **kwargs: Any) -> HuggingFaceModel:

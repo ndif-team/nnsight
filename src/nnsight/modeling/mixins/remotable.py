@@ -14,15 +14,77 @@ remote (or local-simulation) backend keyed by it. Subclasses supply the two
 model-specific halves — `_remoteable_model_key` and
 `_remoteable_from_model_key` — and may carry per-request state across with
 `_remoteable_get_env` / `_remoteable_set_env`.
+
+A server also has to answer two questions about a checkpoint it has never
+loaded, in order to decide where to put it: how much GPU memory it needs
+([`estimate_bytes`][nnsight.modeling.mixins.remotable.Remotable.estimate_bytes])
+and how many ways it can be split across cards
+([`max_tp_size`][nnsight.modeling.mixins.remotable.Remotable.max_tp_size]). Both
+answer from the key alone, and both have a subclass hook so a wrapper that can
+answer cheaply — a HuggingFace model can read the parameter count off the Hub —
+doesn't pay for building the architecture just to count it.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import math
+from typing import Any, Optional
 
 from ...tracing.backend import Backend
 from ...util import from_import_path, to_import_path
 from .meta import Meta
+
+
+#: Bytes per stored element for names that aren't torch dtypes — quantizations,
+#: which are how a checkpoint is *held* rather than a type torch has. A caller
+#: sizing a deployment names these as plainly as it names ``"bfloat16"``.
+#:
+#: These are the nominal widths and they under-count real footprint:
+#: bitsandbytes leaves the LM head (usually the embeddings and norms too) in 16
+#: bits and stores an absmax/scale tensor per block, none of which is in the
+#: parameter count. `accelerate`'s memory estimator makes the same simplification.
+#: Anything placing a model on this number should pad it.
+_QUANTIZED_BYTES: dict[str, float] = {
+    "int4": 0.5,
+    "nf4": 0.5,
+    "fp4": 0.5,
+    "4bit": 0.5,
+    "int8": 1.0,
+    "fp8": 1.0,
+    "8bit": 1.0,
+}
+
+
+def bytes_per_element(dtype: str) -> float:
+    """How many bytes one weight occupies when held as ``dtype``.
+
+    Accepts what torch calls a dtype (``"bfloat16"``, ``"float32"``, with or
+    without a ``torch.`` prefix) and what only a quantizer calls one
+    (``"int4"``, ``"nf4"``, ``"fp8"``). Fractional for sub-byte formats, so the
+    result is a float — round the product, not this.
+
+    Raises:
+        ValueError: for a name that is neither, rather than defaulting to a
+            plausible width: a wrong guess here silently mis-sizes a deployment.
+    """
+    import torch
+
+    name = dtype.removeprefix("torch.").lower()
+
+    # The table wins over torch, which reports sub-byte dtypes as one byte
+    # because that is the smallest thing it can address: `torch.int4.itemsize`
+    # is 1, and sizing 4-bit weights by it would ask for twice the memory.
+    if name in _QUANTIZED_BYTES:
+        return _QUANTIZED_BYTES[name]
+
+    resolved = getattr(torch, name, None)
+    if isinstance(resolved, torch.dtype):
+        return float(resolved.itemsize)
+
+    raise ValueError(
+        f"Unknown dtype {dtype!r}: not a torch dtype and not one of "
+        f"{sorted(_QUANTIZED_BYTES)}."
+    )
 
 
 class Remotable(Meta):
@@ -133,6 +195,60 @@ class Remotable(Meta):
         raise NotImplementedError()
 
     @classmethod
+    def _remoteable_estimate_bytes(
+        cls, model_key: str, dtype: str, trust_remote_code: bool = False
+    ) -> int:
+        """Size this checkpoint's weights, given the key suffix.
+
+        Base default: build the architecture on the meta device and count what
+        it holds. That costs a config read and the graph, but no weights and no
+        device, and it works for any wrapper — which is why it is the fallback
+        every subclass drops back to.
+
+        Elements are counted rather than bytes summed, because the size wanted is
+        the size *as it will be held*, and that can be a dtype the meta build
+        cannot use (a 4-bit quantization has no torch dtype to build with).
+        """
+        model = cls.from_model_key(
+            f"{to_import_path(cls)}:{model_key}",
+            dispatch=False,
+            trust_remote_code=trust_remote_code,
+        )
+        module = model._module
+        elements = sum(p.nelement() for p in module.parameters())
+        elements += sum(b.nelement() for b in module.buffers())
+        return math.ceil(elements * bytes_per_element(dtype))
+
+    @classmethod
+    def _remoteable_checkpoint_config(
+        cls, model_key: str, trust_remote_code: bool = False
+    ) -> Optional[Any]:
+        """This checkpoint's config. Base default: ``None`` — not every wrapper
+        has one, and nothing here should have to invent it."""
+        return None
+
+    @classmethod
+    def _remoteable_checkpoint_revision(
+        cls, model_key: str, **kwargs: Any
+    ) -> Optional[str]:
+        """This checkpoint's revision. Base default: ``None`` — a key that names
+        no revision has none to report."""
+        return None
+
+    @classmethod
+    def _remoteable_max_tp_size(
+        cls, model_key: str, trust_remote_code: bool = False
+    ) -> Optional[int]:
+        """The largest tensor-parallel degree this checkpoint supports.
+
+        Base default: ``None`` — a wrapper says nothing about tensor parallelism
+        unless it knows better. Nothing is inferred from the architecture here,
+        because splitting a model is a property of the runtime that loads it, not
+        of the tree alone.
+        """
+        return None
+
+    @classmethod
     def _remoteable_from_model_key(cls, model_key: str, **kwargs: Any) -> Remotable:
         """Rebuild a model wrapper from the suffix `_remoteable_model_key` made.
 
@@ -173,3 +289,60 @@ class Remotable(Meta):
         import_path, model_key = model_key.split(":", 1)
         model_cls: type[Remotable] = from_import_path(import_path)
         return model_cls._remoteable_from_model_key(model_key, **kwargs)
+
+    @classmethod
+    def estimate_bytes(cls, model_key: str, dtype: str, **kwargs: Any) -> int:
+        """How much memory this checkpoint's weights need, without loading them.
+
+        Resolves the wrapper class from the key the same way
+        [`from_model_key`][nnsight.modeling.mixins.remotable.Remotable.from_model_key]
+        does, then asks it. What comes back counts parameters and buffers only —
+        no activations, no CUDA context, no framework overhead — so a caller
+        placing a model needs to pad it.
+
+        Args:
+            model_key: A full key, ``"import.path.ClassName:model_key"``.
+            dtype: What the weights will be held in — a torch dtype name, or a
+                quantization named as a string (see
+                [`bytes_per_element`][nnsight.modeling.mixins.remotable.bytes_per_element]).
+        """
+        import_path, suffix = model_key.split(":", 1)
+        model_cls: type[Remotable] = from_import_path(import_path)
+        return model_cls._remoteable_estimate_bytes(suffix, dtype, **kwargs)
+
+    @classmethod
+    def checkpoint_config(cls, model_key: str, **kwargs: Any) -> Optional[Any]:
+        """The checkpoint's own config object, or ``None`` if it has no notion of one.
+
+        For a server reporting what it has loaded — architecture, hidden size,
+        the rest — without holding the model to ask.
+        """
+        import_path, suffix = model_key.split(":", 1)
+        model_cls: type[Remotable] = from_import_path(import_path)
+        return model_cls._remoteable_checkpoint_config(suffix, **kwargs)
+
+    @classmethod
+    def checkpoint_revision(cls, model_key: str, **kwargs: Any) -> Optional[str]:
+        """Which revision of the checkpoint the key names, if it names one.
+
+        Reported alongside the config by a server listing what it has loaded, so
+        two deployments of the same repo at different revisions are tellable
+        apart.
+        """
+        import_path, suffix = model_key.split(":", 1)
+        model_cls: type[Remotable] = from_import_path(import_path)
+        return model_cls._remoteable_checkpoint_revision(suffix, **kwargs)
+
+    @classmethod
+    def max_tp_size(cls, model_key: str, **kwargs: Any) -> Optional[int]:
+        """The largest number of ranks this checkpoint's weights split into.
+
+        ``None`` when the model cannot be tensor-parallel at all. Otherwise the
+        degrees that actually work are the **divisors** of this number, so a
+        caller wanting to split a model *n* ways takes the smallest divisor
+        ``>= n`` — there may be none, and then the model has to be spread some
+        other way.
+        """
+        import_path, suffix = model_key.split(":", 1)
+        model_cls: type[Remotable] = from_import_path(import_path)
+        return model_cls._remoteable_max_tp_size(suffix, **kwargs)

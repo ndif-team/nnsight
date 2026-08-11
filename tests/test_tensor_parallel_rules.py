@@ -211,3 +211,140 @@ class TestSourceWarns:
             warnings.simplefilter("always")
             assert interleaver.handle("model.mlp.source.self_gate_proj_0.output", 7) == 7
         assert not caught
+
+
+class TestMaxTpSize:
+    """The largest degree a checkpoint's config says it splits into.
+
+    Divisibility is the whole constraint: transformers shards attention by head
+    and the MLP by its intermediate dimension, and its all-gather assumes equal
+    pieces — an uneven degree does not run slower, it does not run.
+    """
+
+    def _config(self, **fields):
+        plan = fields.pop("plan", {"layers.*.self_attn.q_proj": "colwise"})
+        config = type("Config", (), {})()
+        config.base_model_tp_plan = plan
+        for name, value in fields.items():
+            setattr(config, name, value)
+        return config
+
+    def test_the_gcd_of_the_dimensions_it_must_divide(self):
+        from nnsight.modeling.tp import max_tp_size
+
+        # 24 heads, 8 kv heads, 8192 intermediate -> 8.
+        assert max_tp_size(self._config(
+            num_attention_heads=24, num_key_value_heads=8, intermediate_size=8192
+        )) == 8
+
+    def test_a_low_key_value_head_count_caps_it(self):
+        from nnsight.modeling.tp import max_tp_size
+
+        # Qwen2.5-0.5B's shape: plenty of heads, but 2 kv heads stops it at 2.
+        assert max_tp_size(self._config(
+            num_attention_heads=14, num_key_value_heads=2, intermediate_size=4864
+        )) == 2
+
+    def test_no_plan_means_it_cannot_be_split(self):
+        from nnsight.modeling.tp import max_tp_size
+
+        assert max_tp_size(self._config(plan=None, num_attention_heads=12)) is None
+
+    def test_an_unsupported_style_in_the_plan_refuses(self):
+        from nnsight.modeling.tp import max_tp_size
+
+        # An expert-parallel model would fail at load; it must not be *placed*
+        # as though it could be split.
+        assert max_tp_size(self._config(
+            plan={"layers.*.mlp.experts": "grouped_gemm"},
+            num_attention_heads=16, num_key_value_heads=16, intermediate_size=4096,
+        )) is None
+
+    def test_an_odd_dimension_leaves_nothing_to_split(self):
+        from nnsight.modeling.tp import max_tp_size
+
+        assert max_tp_size(self._config(
+            num_attention_heads=3, num_key_value_heads=1, intermediate_size=11
+        )) is None
+
+    def test_dimensions_are_read_from_a_nested_text_config(self):
+        from nnsight.modeling.tp import max_tp_size
+
+        # A multimodal config keeps the transformer dims one level down; reading
+        # the outer one finds nothing to divide and would call every degree fine.
+        outer = self._config()
+        outer.text_config = self._config(
+            num_attention_heads=32, num_key_value_heads=8, intermediate_size=14336
+        )
+        assert max_tp_size(outer) == 8
+
+
+class TestBytesPerElement:
+    """Sizing a checkpoint by the dtype it will be held in."""
+
+    def test_torch_dtypes(self):
+        from nnsight.modeling.mixins.remotable import bytes_per_element
+
+        assert bytes_per_element("bfloat16") == 2
+        assert bytes_per_element("torch.float32") == 4
+        assert bytes_per_element("float64") == 8
+
+    def test_sub_byte_quantizations_beat_torchs_rounding(self):
+        from nnsight.modeling.mixins.remotable import bytes_per_element
+
+        # torch.int4 exists and reports itemsize 1 -- the smallest it can
+        # address -- so trusting it would size 4-bit weights at twice reality.
+        assert bytes_per_element("int4") == 0.5
+        assert bytes_per_element("nf4") == 0.5
+        assert bytes_per_element("int8") == 1
+
+    def test_an_unknown_name_raises_rather_than_guessing(self):
+        from nnsight.modeling.mixins.remotable import bytes_per_element
+
+        with pytest.raises(ValueError, match="Unknown dtype"):
+            bytes_per_element("float3")
+
+
+class TestTransformersVersionFloor:
+    """Sharding is refused on a transformers that shards incorrectly.
+
+    Caught on a live deployment: the container ran 5.14.1 and a tied-embedding
+    model came back with logits four times the vocabulary width, while the argmax
+    — and so every eyeball check — stayed right.
+    """
+
+    def _check(self, monkeypatch, version: str):
+        import transformers
+
+        from nnsight.modeling.tp import interleaver
+
+        monkeypatch.setattr(transformers, "__version__", version)
+        monkeypatch.setattr(interleaver, "_version_checked", False)
+        interleaver._check_transformers_version()
+
+    def test_an_older_transformers_is_refused(self, monkeypatch):
+        from nnsight.modeling.tp import UnsupportedTransformersVersion
+
+        with pytest.raises(UnsupportedTransformersVersion, match="tie_word_embeddings"):
+            self._check(monkeypatch, "5.14.1")
+
+    @pytest.mark.parametrize(
+        "version", ["5.15.0", "5.15.1", "6.0.0", "5.15.0.dev0", "5.16.0rc1"]
+    )
+    def test_the_floor_and_above_are_allowed(self, monkeypatch, version):
+        # Including pre-releases of the fixed series: an editable transformers
+        # checkout reports 5.15.0.dev0, which a plain >= would reject.
+        self._check(monkeypatch, version)
+
+    def test_it_only_runs_once(self, monkeypatch):
+        # instrument() calls this per sharded module -- hundreds on a real model
+        # -- so the import and version parse have to happen once, not per call.
+        import transformers
+
+        from nnsight.modeling.tp import interleaver
+
+        monkeypatch.setattr(transformers, "__version__", "5.15.0")
+        monkeypatch.setattr(interleaver, "_version_checked", False)
+        interleaver._check_transformers_version()
+        monkeypatch.setattr(transformers, "__version__", "0.1.0")
+        interleaver._check_transformers_version()  # would raise if re-checked

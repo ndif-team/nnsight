@@ -57,6 +57,14 @@ TP_SIZE = 2
 DRIFT = 1e-3
 
 
+def _visible_devices(tp: int) -> str:
+    """Which cards the ranks use: whatever was set, else the first ``tp``."""
+    inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if inherited:
+        return ",".join(inherited.split(",")[:tp])
+    return ",".join(str(index) for index in range(tp))
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("", 0))
@@ -70,8 +78,9 @@ def _run(tp: int, out: str) -> None:
         "PYTHONPATH": os.pathsep.join(filter(None, [SRC, os.environ.get("PYTHONPATH")])),
         # Rank i must land on the i-th visible device; see
         # transformers.integrations.tensor_parallel.initialize_tensor_parallelism,
-        # which uses LOCAL_RANK directly as a CUDA index.
-        "CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in range(tp)),
+        # which uses LOCAL_RANK directly as a CUDA index. An inherited setting
+        # wins, so a shared machine can be pointed at the cards that are free.
+        "CUDA_VISIBLE_DEVICES": _visible_devices(tp),
     }
     command = [sys.executable]
     if tp > 1:
