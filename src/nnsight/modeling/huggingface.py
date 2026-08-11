@@ -39,6 +39,20 @@ class HuggingFaceModel(Remotable):
             repo_id if isinstance(repo_id, str) else getattr(repo_id, "name_or_path", None)
         )
         self.revision = revision
+
+        # A model loaded with `distributed_config=DistributedConfig(tp_size=N)`
+        # has its linears split across ranks, so a plain interleaver would hand
+        # intervention code one rank's slice of an activation. Whether this model
+        # is sharded isn't known yet — it only becomes visible as the weights
+        # load — so give the tree an interleaver that can handle it either way:
+        # it stays disabled (and behaves exactly like the base) unless it finds
+        # something actually split while instrumenting. Explicit rather than
+        # setdefault so a caller-supplied interleaver still wins.
+        if "interleaver" not in kwargs:
+            from .tp import TPInterleaver
+
+            kwargs["interleaver"] = TPInterleaver()
+
         # revision is used by _load/_load_meta via self.revision, not threaded
         # through super (it must not reach Envoy.__init__ on the passthrough).
         super().__init__(repo_id, *args, **kwargs)

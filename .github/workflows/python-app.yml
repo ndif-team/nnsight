@@ -44,4 +44,4 @@ jobs:
         env:
           CUDA_VISIBLE_DEVICES: ""
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
-        run: pytest tests/ -q --ignore=tests/vllm
+        run: pytest tests/ -q --ignore=tests/vllm --ignore=tests/tp

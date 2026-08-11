@@ -100,8 +100,8 @@ class Cache:
         # CacheView); tree navigation needs a model re-attached.
         return {**self.__dict__, "model": None}
 
-    def observe(self, location: str, value: Any) -> None:
-        """Record ``value`` if ``location`` is a selected module's input/output.
+    def _select(self, location: str) -> "tuple[str, str] | None":
+        """``(module_path, slot)`` if ``location`` is one this cache keeps, else None.
 
         ``location`` is ``"{module_path}.output"`` or ``"{module_path}.input"``.
         Anything else (source ops, skip gates, the run ``result``) has a base that
@@ -110,17 +110,39 @@ class Cache:
         if location.endswith(".output"):
             path, key = location[: -len(".output")], "output"
             if not self.include_output:
-                return
+                return None
         elif location.endswith(".input"):
             path, key = location[: -len(".input")], "inputs"
             if not self.include_inputs:
-                return
+                return None
         else:
-            return
+            return None
 
         if self.targets is not None and path not in self.targets:
+            return None
+
+        return path, key
+
+    def wants(self, location: str) -> bool:
+        """Whether this cache would record ``location``.
+
+        The same question [`observe`][nnsight.intervention.cache.Cache.observe]
+        answers by recording, asked without recording — for a caller that has to
+        do work *before* the value can be offered, and only wants to do it for
+        locations some cache actually keeps (see
+        [`TPInterleaver`][nnsight.modeling.tp.interleaver.TPInterleaver], which
+        must run a collective first). Shares `_select` with ``observe`` so the two
+        can't drift.
+        """
+        return self._select(location) is not None
+
+    def observe(self, location: str, value: Any) -> None:
+        """Record ``value`` if ``location`` is a selected module's input/output."""
+        selected = self._select(location)
+        if selected is None:
             return
 
+        path, key = selected
         self._record(path, key, self._transform(value))
 
     def _transform(self, value: Any) -> Any:
