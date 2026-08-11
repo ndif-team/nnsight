@@ -1,0 +1,146 @@
+---
+title: Tensor Parallelism
+one_liner: Trace a model sharded across GPUs with transformers tensor parallelism — sharded activations are gathered so a trace reads exactly as it would on one GPU.
+tags: [models, transformers, tensor-parallel, multi-gpu, distributed]
+related: [docs/models/transformers-model.md, docs/models/vllm.md, docs/models/index.md, docs/usage/generate.md, docs/usage/cache.md]
+sources: [src/nnsight/modeling/tp/interleaver.py, src/nnsight/modeling/huggingface.py, tests/test_transformers_tensor_parallel.py, tests/tp_worker.py]
+---
+
+# Tensor Parallelism
+
+## What this is for
+
+A model too big for one GPU can be **split across several** with transformers'
+native tensor parallelism: each rank holds a slice of every attention and MLP
+projection. This is different from `device_map="auto"`, which puts whole *layers*
+on different GPUs and runs them one after another — tensor parallelism splits
+*within* each layer and runs the ranks together.
+
+The catch for interpretability is that a sharded module's activation, on any one
+rank, is only that rank's slice of the real tensor. nnsight gathers those slices
+before your intervention sees the value and re-splits whatever you leave behind,
+so **the trace you write is the trace you would write against one GPU**.
+
+There is nothing to install, import, or enable.
+
+## The canonical pattern
+
+Tensor parallelism needs one process per GPU, so the script is launched with
+`torchrun` (or `python -m torch.distributed.run`) and **every rank runs the whole
+script, including your intervention code**.
+
+```python
+# tp_trace.py  —  torchrun --nproc_per_node=4 tp_trace.py
+import torch
+from transformers.distributed import DistributedConfig
+from nnsight.modeling.transformers import TransformersModel
+
+model = TransformersModel(
+    "meta-llama/Llama-3.2-3B",
+    task="text-generation",
+    dispatch=True,
+    dtype=torch.bfloat16,
+    distributed_config=DistributedConfig(tp_size=4),
+)
+
+with model.trace("The Eiffel Tower is in the city of"):
+    # gate_proj is column-parallel: each rank computes 2048 of these 8192
+    # features. Read it and you get all 8192.
+    gate = model.model.layers[5].mlp.gate_proj.output.save()
+    logits = model.lm_head.output.save()
+
+print(gate.shape)  # (1, 11, 8192) on every rank, not (1, 11, 2048)
+```
+
+Edits work the same way: you edit the whole tensor and nnsight puts each rank's
+piece back.
+
+```python
+with model.trace(prompt):
+    # Spans rank boundaries; you never think about that.
+    model.model.layers[5].mlp.gate_proj.output[..., :3000] = 0
+    logits = model.lm_head.output.save()
+```
+
+> `tp_plan="auto"` / `tp_size=` are **not** `from_pretrained` arguments in
+> transformers 5.x, despite what its `from_pretrained` docstring still says. Use
+> `distributed_config=DistributedConfig(tp_size=N)`.
+
+## What is sharded and what is not
+
+Most of what people read is **already whole** and costs nothing: a row-parallel
+layer all-reduces its output, so a decoder layer, `self_attn`, `mlp`, and the
+final norm all arrive complete. Only two kinds of value are really a slice:
+
+| | Sharded? | Example |
+|---|---|---|
+| Column-parallel **output** | yes, gathered for you | `q_proj`, `k_proj`, `v_proj`, `gate_proj`, `up_proj` |
+| Row-parallel **input** | yes, gathered for you | `o_proj.input`, `down_proj.input` |
+| Row-parallel output | no — all-reduced | `o_proj.output`, `down_proj.output` |
+| Whole modules | no | `model.layers[i].output`, `mlp.output`, `norm.output` |
+| The LM head | no — gathered by transformers | `lm_head.output` |
+| Embeddings | no — all-reduced | `embed_tokens.output` |
+
+The gather only fires when an intervention is actually parked on that location,
+so reading a handful of locations does not pay for the hundreds you ignored. A
+`tracer.cache()` gathers only the modules it selects.
+
+## Rules for intervention code under TP
+
+**Every rank runs your block.** That is what keeps the collectives lined up, and
+it puts two obligations on the code:
+
+1. **No rank-dependent control flow.** Nothing may branch on rank, and nothing
+   may take a different path on different ranks — the ranks would stop agreeing
+   on when to gather, and the run deadlocks.
+
+2. **Seed before you sample.** This one is a correctness bug, not an
+   inconsistency. If sampling diverges, the ranks generate *different tokens*,
+   and then the model's own all-reduces sum activations computed from different
+   sequences — the output is wrong on every rank, not merely different. Use
+   greedy decoding, or seed identically on every rank:
+
+   ```python
+   torch.manual_seed(0)                      # same on every rank
+   with model.generate(prompt, max_new_tokens=20) as tracer:
+       out = tracer.result.save()
+   ```
+
+   Many checkpoints ship `do_sample: true` in `generation_config.json`, so this
+   bites without you asking for sampling.
+
+**Every rank produces the same saved values**, since they are computed from
+gathered tensors. Print or write results from one rank, or you get N copies.
+
+## What is not supported
+
+Mixture-of-experts sharding (`grouped_gemm`, `ep_router`, `moe_tp_experts`, and
+the rest of the expert-parallel family) and MLA's split kv projection slice by
+*expert* rather than along the feature dimension, so the gather here does not
+apply. Loading such a model tensor-parallel raises `UnsupportedParallelStyle`
+naming the module and style — deliberately, rather than handing you a fragment of
+a tensor and letting you draw conclusions from it.
+
+`float`/`bfloat16` results differ slightly from a single-GPU run (relative error
+around 1e-3 to 1e-2, growing with depth) because an all-reduce sums in a
+different order than one big matmul. Token choices are unaffected in practice;
+the test suite asserts generated ids are identical.
+
+## Under the hood
+
+`TPInterleaver` ([`nnsight.modeling.tp`][nnsight.modeling.tp]) subclasses the
+[`Interleaver`][nnsight.intervention.interleaver.Interleaver] and brackets
+`handle`: gather the value, serve the parked workers the whole tensor, re-split
+what they leave. Every `HuggingFaceModel` is built with one; it stays inert
+(`enabled = False`, behaving exactly like the base) until it instruments a module
+transformers has stamped with a `_hf_tp_plan`, which is also where it records
+which locations are sharded. That covers eager loading and the
+meta-then-`dispatch()` path without either needing to know about it.
+
+## Related
+
+- [transformers-model.md](transformers-model.md) — the wrapper being sharded.
+- [vllm.md](vllm.md) — the other way to shard across GPUs, with its own tradeoffs
+  (throughput and continuous batching, one prompt per invoke).
+- [../usage/cache.md](../usage/cache.md) — `tracer.cache()`, which gathers only
+  what it selects.

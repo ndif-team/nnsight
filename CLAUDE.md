@@ -47,6 +47,9 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 - [docs/patterns/gradient-based-attribution.md](docs/patterns/gradient-based-attribution.md)
 - [docs/patterns/attribution-patching.md](docs/patterns/attribution-patching.md)
 
+### "My model is too big for one GPU"
+- [docs/models/tensor-parallel.md](docs/models/tensor-parallel.md) — `transformers` tensor parallelism: `distributed_config=DistributedConfig(tp_size=N)` under `torchrun`, sharded activations gathered so the trace reads as it would on one GPU
+
 ### "I want to run remotely on NDIF"
 - [docs/remote/ndif-overview.md](docs/remote/ndif-overview.md) — what NDIF is, job lifecycle
 - [docs/remote/api-key-and-config.md](docs/remote/api-key-and-config.md) — set up your API key
@@ -91,7 +94,8 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 | Any `torch.nn.Module` | `NNsight(module)` | [docs/models/nnsight-base.md](docs/models/nnsight-base.md) |
 | **HuggingFace model (text/vision/multimodal/audio)** | `TransformersModel("repo/id", task=...)` | [docs/models/transformers-model.md](docs/models/transformers-model.md) |
 | Diffusion pipelines | `DiffusionModel("repo/id", ...)` | [docs/models/diffusion-model.md](docs/models/diffusion-model.md) |
-| High-throughput / production / TP | `VLLM("repo/id", mode="sync"\|"async")` | [docs/models/vllm.md](docs/models/vllm.md) |
+| High-throughput / production | `VLLM("repo/id", mode="sync"\|"async")` | [docs/models/vllm.md](docs/models/vllm.md) |
+| **Model too big for one GPU (tensor parallel)** | `TransformersModel(..., distributed_config=DistributedConfig(tp_size=N))` under `torchrun` | [docs/models/tensor-parallel.md](docs/models/tensor-parallel.md) |
 | Causal LM (**deprecated** alias) | `LanguageModel(...)` → use `TransformersModel(task="text-generation")` | [docs/models/language-model.md](docs/models/language-model.md) |
 | Vision-language (**deprecated** alias) | `VisionLanguageModel(...)` → use `TransformersModel(task="image-text-to-text")` | [docs/models/vision-language-model.md](docs/models/vision-language-model.md) |
 
