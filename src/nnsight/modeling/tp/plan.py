@@ -16,7 +16,7 @@ from __future__ import annotations
 from math import gcd
 from typing import Any, Optional
 
-from .interleaver import UNSUPPORTED
+from .interleaver import SHARDED_SIDES
 
 #: Config fields a tensor-parallel degree has to divide. Attention is split by
 #: head, so both head counts must divide; the MLP is split along its intermediate
@@ -43,17 +43,25 @@ def _text_config(config: Any) -> Any:
 def max_tp_size(config: Any) -> Optional[int]:
     """The largest tensor-parallel degree ``config``'s model supports.
 
-    ``None`` when it cannot be split at all: no plan to shard by, or a plan that
-    shards in a way interventions can't be shown whole (see
-    [`UNSUPPORTED`][nnsight.modeling.tp.interleaver.UNSUPPORTED] — the
-    expert-parallel family, which slices by expert). Refusing here keeps a model
-    that would fail at load from being *placed* as though it could be split.
+    ``None`` when it cannot be split at all: no plan to shard by, or a plan
+    containing a style [`TPInterleaver.instrument`][nnsight.modeling.tp.interleaver.TPInterleaver.instrument]
+    will refuse. Refusing here keeps a model that would fail at load from being
+    *placed* as though it could be split.
+
+    The two must refuse **the same set**, which is why this asks
+    [`SHARDED_SIDES`][nnsight.modeling.tp.interleaver.SHARDED_SIDES] rather than
+    only [`UNSUPPORTED`][nnsight.modeling.tp.interleaver.UNSUPPORTED]. A style in
+    neither — one transformers added, or one it never registered in
+    ``ALL_PARALLEL_STYLES`` — used to pass here and raise there, so a server
+    would allocate the cards, load the weights across them, and only then find
+    out. ``Llama4Config`` does exactly this: its plan is ``colwise_rep``, which
+    is in no list and no registry.
     """
     plan = getattr(config, "base_model_tp_plan", None)
     if not plan:
         return None
 
-    if any(style in UNSUPPORTED for style in plan.values()):
+    if any(style not in SHARDED_SIDES for style in plan.values()):
         return None
 
     dimensions = [

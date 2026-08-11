@@ -348,3 +348,237 @@ class TestTransformersVersionFloor:
         interleaver._check_transformers_version()
         monkeypatch.setattr(transformers, "__version__", "0.1.0")
         interleaver._check_transformers_version()  # would raise if re-checked
+
+
+class TestTheTwoGatesAgree:
+    """Placement and load must refuse the same set of models.
+
+    `max_tp_size` decides whether a model is *placed* tensor-parallel;
+    `instrument` decides whether it can be *traced* that way. They ran different
+    predicates -- one checked UNSUPPORTED, the other checked SHARDED_SIDES -- so a
+    style in neither list passed placement and raised at load, after a server had
+    already allocated the cards and read the weights onto them.
+    """
+
+    def _config(self, plan):
+        class Config:
+            base_model_tp_plan = plan
+            num_attention_heads = 32
+            num_key_value_heads = 8
+            intermediate_size = 14336
+
+        return Config()
+
+    def test_a_style_in_neither_list_is_refused(self):
+        from nnsight.modeling.tp import SHARDED_SIDES, UNSUPPORTED, max_tp_size
+
+        # Llama-4's actual plan. transformers does not register it in
+        # ALL_PARALLEL_STYLES either, so the drift test below cannot see it.
+        assert "colwise_rep" not in SHARDED_SIDES
+        assert "colwise_rep" not in UNSUPPORTED
+        assert max_tp_size(self._config({"layer.q_proj": "colwise_rep"})) is None
+
+    def test_a_refused_style_is_still_refused(self):
+        from nnsight.modeling.tp import max_tp_size
+
+        assert max_tp_size(self._config({"layer.experts": "grouped_gemm"})) is None
+
+    def test_a_known_style_still_places(self):
+        from nnsight.modeling.tp import max_tp_size
+
+        assert max_tp_size(self._config({"layer.q_proj": "colwise"})) == 8
+
+    def test_every_placeable_plan_is_instrumentable(self):
+        # The property, stated directly: anything max_tp_size accepts, instrument
+        # must not raise on. Both now read SHARDED_SIDES, so this holds by
+        # construction -- it is here to fail if they ever diverge again.
+        from nnsight.modeling.tp import SHARDED_SIDES, max_tp_size
+
+        for style in SHARDED_SIDES:
+            assert max_tp_size(self._config({"layer.x": style})) == 8, style
+
+
+class TestExpertParallelIsNotAutomaticallyRefused:
+    """`moe_tp_experts` needs no gather, and refusing it cost the MoE models.
+
+    It is expert-parallel, which is why it was refused on sight. But its forward
+    all-reduces -- `_prepare_input_fn` applies only `all_reduce_backward`, which
+    is identity going forwards -- so both sides arrive whole, exactly like
+    `all_reduce`. 26 of the configs shipped with transformers 5.15 (Mixtral,
+    DeepSeek-V3, Qwen3-MoE, ...) were refused for this and nothing else.
+    """
+
+    def test_it_is_no_longer_refused(self):
+        from nnsight.modeling.tp import UNSUPPORTED
+
+        assert "moe_tp_experts" not in UNSUPPORTED
+
+    def test_neither_side_is_gathered(self):
+        from nnsight.modeling.tp import SHARDED_SIDES
+
+        assert SHARDED_SIDES["moe_tp_experts"] == ()
+
+    def test_an_moe_plan_can_now_be_placed(self):
+        from nnsight.modeling.tp import max_tp_size
+
+        class Config:
+            base_model_tp_plan = {
+                "layers.*.self_attn.q_proj": "colwise",
+                "layers.*.mlp.experts": "moe_tp_experts",
+            }
+            num_attention_heads = 32
+            num_key_value_heads = 8
+            intermediate_size = 14336
+
+        assert max_tp_size(Config()) == 8
+
+    def test_a_style_that_really_slices_by_expert_is_still_refused(self):
+        from nnsight.modeling.tp import UNSUPPORTED
+
+        assert "grouped_gemm" in UNSUPPORTED
+        assert "mla_kv_a_proj" in UNSUPPORTED
+
+
+class TestEmbeddingColwiseIsWhole:
+    """`embedding_colwise` all-reduces its output despite the name.
+
+    `EmbeddingParallel._prepare_output_fn` ends in an unconditional
+    `all_reduce_forward`; the `embedding_dim_sharding == 0` branch above it guards
+    only the vocab masking. Gathering it again would hand users a tensor tp_size
+    times too wide with a plausible first copy -- the tied-LM-head bug that
+    MINIMUM_TRANSFORMERS exists for, reintroduced by this table.
+    """
+
+    def test_its_output_is_not_gathered(self):
+        from nnsight.modeling.tp import SHARDED_SIDES
+
+        assert SHARDED_SIDES["embedding_colwise"] == ()
+
+
+class FakeMesh:
+    """Just enough device mesh for the pure-tensor helpers."""
+
+    def __init__(self, size: int):
+        self._size = size
+
+    def size(self) -> int:
+        return self._size
+
+
+class TestReshardGuard:
+    """What goes back to the model must be guarded like what came out of it.
+
+    `_reshard`'s output is consumed by the model's own forward, so splitting a
+    value that was never a fragment hands every rank a slice of something whole.
+    Divisibility alone cannot tell the two apart: an integer `position_ids` of
+    width 8 at tp=4 divides perfectly, and the result is wrong answers on every
+    rank identically -- not a hang, and nothing to notice.
+    """
+
+    def _split_calls(self, monkeypatch):
+        import transformers.integrations.tensor_parallel as tp
+
+        seen = []
+
+        def fake_split(tensor, mesh):
+            seen.append(tensor)
+            return tensor
+
+        monkeypatch.setattr(tp, "split", fake_split)
+        return seen
+
+    @pytest.mark.parametrize(
+        "tensor,why",
+        [
+            (torch.arange(8).reshape(1, 8), "integer position_ids"),
+            (torch.zeros(1, 1, 8, 8, dtype=torch.bool), "a boolean mask"),
+            (torch.tensor(1.0), "a 0-dim scalar"),
+        ],
+    )
+    def test_a_value_the_gather_skipped_is_not_split(self, monkeypatch, tensor, why):
+        from nnsight.modeling.tp.interleaver import _gather, _reshard
+
+        gather_seen = self._split_calls(monkeypatch)
+        import transformers.integrations.tensor_parallel as tp
+
+        monkeypatch.setattr(tp, "all_gather", lambda t, m: gather_seen.append(t) or t)
+        mesh = FakeMesh(4)
+
+        _gather(tensor, mesh)
+        assert not gather_seen, f"{why} should not have been gathered"
+
+        split_seen = self._split_calls(monkeypatch)
+        _reshard(tensor, mesh)
+        assert not split_seen, f"{why} was split though it was never gathered"
+
+    def test_a_real_shard_still_round_trips(self, monkeypatch):
+        from nnsight.modeling.tp.interleaver import _reshard
+
+        split_seen = self._split_calls(monkeypatch)
+        _reshard(torch.randn(1, 4, 8), FakeMesh(4))
+        assert len(split_seen) == 1
+
+
+class TestGatherShapeCheck:
+    """A rule that names a whole value is caught the first time it fires.
+
+    The rules are a claim about a transformers version, and most were settled by
+    reading its source. This is what makes a wrong one loud: a side listed as
+    sharded must actually widen by `world_size` when gathered. A value the model
+    already made whole doesn't -- which is exactly the failure MINIMUM_TRANSFORMERS
+    exists for, caught here for every version rather than one known one.
+    """
+
+    def _interleaver(self, monkeypatch, gathered):
+        import transformers.integrations.tensor_parallel as tp
+
+        from nnsight.modeling.tp import TPInterleaver
+
+        monkeypatch.setattr(tp, "all_gather", lambda tensor, mesh: gathered)
+        interleaver = TPInterleaver()
+        interleaver.enabled = True
+        # Stand in for the mediator machinery: the check runs before any of it.
+        monkeypatch.setattr(type(interleaver), "observed", lambda self, p: True)
+        return interleaver
+
+    def test_a_value_that_did_not_widen_is_refused(self, monkeypatch):
+        from nnsight.modeling.tp import UnsupportedParallelStyle
+
+        mesh = FakeMesh(4)
+        # The model's own hook already made it whole; gathering returns the same
+        # width. Left unchecked, the user gets 4x the real tensor.
+        value = torch.randn(1, 4, 2048)
+        interleaver = self._interleaver(monkeypatch, torch.randn(1, 4, 2048))
+
+        with pytest.raises(UnsupportedParallelStyle, match="times too wide|expected"):
+            interleaver._gather_whole("model.layer.output", value, mesh)
+
+    def test_a_real_shard_passes(self, monkeypatch):
+        mesh = FakeMesh(4)
+        value = torch.randn(1, 4, 2048)
+        interleaver = self._interleaver(monkeypatch, torch.randn(1, 4, 8192))
+
+        whole = interleaver._gather_whole("model.layer.output", value, mesh)
+        assert whole.shape[-1] == 8192
+
+    def test_it_checks_once_per_location(self, monkeypatch):
+        # A generation loop revisits a location hundreds of times; the rule is a
+        # property of the model, not of the visit.
+        mesh = FakeMesh(4)
+        interleaver = self._interleaver(monkeypatch, torch.randn(1, 4, 8192))
+        interleaver._gather_whole("model.layer.output", torch.randn(1, 4, 2048), mesh)
+
+        import transformers.integrations.tensor_parallel as tp
+
+        monkeypatch.setattr(tp, "all_gather", lambda t, m: torch.randn(1, 4, 2048))
+        # Would raise if re-checked; the second visit is not checked.
+        interleaver._gather_whole("model.layer.output", torch.randn(1, 4, 2048), mesh)
+
+    def test_an_ambiguous_value_is_not_judged(self, monkeypatch):
+        # Two float tensors of different widths: nothing to compare, so the check
+        # abstains rather than guessing which one the rule meant.
+        mesh = FakeMesh(4)
+        interleaver = self._interleaver(monkeypatch, torch.randn(1, 4, 2048))
+        value = (torch.randn(1, 4, 2048), torch.randn(1, 4, 512))
+
+        interleaver._gather_whole("model.layer.output", value, mesh)

@@ -37,31 +37,38 @@ from different tokens — so seed every rank identically before generating.
 
 vLLM does the equivalent gather in a
 [`Batcher`][nnsight.intervention.batching.Batcher] subclass
-([`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher]), because it is
-already overriding the batcher for vLLM's flat token axis, and because its model
-runner constructs the batcher itself and assigns ``interleaver.batcher`` directly
-— no trace is deserialized in the worker, only a
-[`Mediator`][nnsight.intervention.interleaver.Mediator].
+([`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher]), so the obvious
+question is why this isn't one too.
 
-That does not carry over to a deserialized *trace*, which is how a remote request
-runs. ``Envoy.__getstate__`` pickles the envoy **by value**, tagging only its
-module and its interleaver as persistent ids. So the tracer executing server-side
-holds a *copy of the client's* envoy, and
-``self.batcher = self.envoy._batcher_class(...)`` resolves against the client's
-class — while ``self.envoy.interleaver`` resolves, through the persistent id, to
-the **server's own** interleaver. Only one of those two is an object the serving
-process controls.
+The reason is **when each is called**. ``Batcher.narrow``/``widen`` run once per
+*mediator* — inside the loop that serves each parked worker in turn
+(``Interleaver.handle``) — so a batcher that gathered would fire one collective
+per reader of a location. Ranks would then run different numbers of collectives
+depending on how many workers happened to be parked, which is a deadlock. vLLM
+pays for this with ``self.gathered`` memoization plus ``watch``/``release``
+brackets its *model runner* installs (see ``VLLMBatcher``'s own note that
+"several workers reading the same value would otherwise deadlock the ranks"), and
+it can do that because its runner constructs the batcher itself and owns the
+forward.
 
-Sitting on the interleaver is also the better fit on its own terms: the
-collective fires once per location per visit however many workers read it (no
-per-worker memoization needed), and it composes with the real batcher, whose
-dim-0 row narrowing happens inside this bracket.
+``Interleaver.handle`` is already the once-per-visit bracket: it runs exactly
+once per location per visit however many workers read it. So the collective lands
+in the right place with no memoization and no external bracket, and it composes
+with the real batcher, whose dim-0 row narrowing happens inside it.
+
+*Not* the reason, though it was written here for a while and is worth correcting
+because it sounds plausible: that ``_batcher_class`` would resolve to the
+client's class across a remote trace. ``Envoy.__getstate__`` does pickle the
+envoy by value, but ``_batcher_class`` is a *class* attribute, and cloudpickle
+serializes an importable class by reference — so it resolves to the server's
+value, exactly like ``interleaver``. A ``TPBatcher`` would have been reachable;
+it would just have been called at the wrong granularity.
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -87,22 +94,54 @@ SHARDED_SIDES: Dict[str, Tuple[str, ...]] = {
     "rowwise_split_input": ("input",),        #   TP splits it in its own pre-hook
     "packed_rowwise": ("input",),
     "embedding_rowwise": (),                  # * vocab-parallel; output all-reduced
-    "embedding_colwise": ("output",),         #   hidden dim split
-    "sequence_parallel": ("output",),         #   reduce-scatter on the last dim
+    "embedding_colwise": (),                  # + output all-reduced (see below)
+    "sequence_parallel": ("output",),         # + reduce-scatter, on the LAST dim
     "all_reduce": (),                         #   output all-reduced -> whole
     "replicated_with_grad_allreduce": (),     #   params replicated; activations whole
+    "moe_tp_experts": (),                     # + output all-reduced (see below)
 }
 
-# Styles refused rather than guessed at. The expert-parallel family slices by
-# *expert*, not along the last dim, so neither the gather nor the re-split below
-# is meaningful for it; MLA's split kv projection needs its own rule. A model
-# that uses one of these fails at load instead of silently handing users a
-# fragment of a tensor.
+# Entries marked + were settled by reading transformers/integrations/
+# tensor_parallel.py rather than by running a model, because no checkpoint in the
+# test set exercises them. Each is a case where the obvious reading of the style's
+# *name* is wrong:
+#
+# * ``embedding_colwise`` splits the hidden dim, so its output looks like a
+#   fragment — but ``EmbeddingParallel._prepare_output_fn`` ends in an
+#   unconditional ``all_reduce_forward``; the ``embedding_dim_sharding == 0``
+#   branch above it guards only the vocab masking. Listing "output" here would
+#   all-gather an already-whole tensor and handed users one ``tp_size`` times too
+#   wide with a plausible first copy — the same failure as the tied-LM-head bug
+#   MINIMUM_TRANSFORMERS exists for, reintroduced by this table.
+# * ``moe_tp_experts`` is expert-parallel and was previously refused outright.
+#   Its forward needs nothing: ``_prepare_input_fn`` applies only
+#   ``all_reduce_backward`` (identity going forwards) and ``_prepare_output_fn``
+#   is ``all_reduce_forward``. Both sides are whole, exactly like ``all_reduce``.
+#   Refusing it cost every MoE checkpoint that uses it — 26 of the configs
+#   shipped with transformers 5.15, including Mixtral, DeepSeek-V3 and Qwen3-MoE,
+#   were refused for this and nothing else.
+# * ``sequence_parallel`` names a sequence dim and takes a ``sequence_dim=1``
+#   argument, which it stores and never uses: its reduce-scatter hardcodes
+#   ``x.dim() - 1``. The entry matches the implementation and contradicts the
+#   declared intent, so it is the one most likely to rot — see the shape check in
+#   `_gather_whole`, which is what would catch it.
+
+# Styles refused rather than guessed at, with the reason a user is shown. These
+# slice something other than the last dim — by expert, or into a fused kv
+# projection — so neither the gather nor the re-split above means anything for
+# them. A model using one fails at load rather than silently handing users a
+# fragment.
+#
+# Being on this list is a claim that the style *needs* a rule nnsight doesn't
+# have, not merely that no one has checked it. ``moe_tp_experts`` was here on the
+# strength of its name and did not belong: it is expert-parallel and still needs
+# nothing, because its forward all-reduces (see SHARDED_SIDES). Prefer reading
+# the style's ``_prepare_input_fn``/``_prepare_output_fn`` to inferring from the
+# family it belongs to — the two do not track each other.
 UNSUPPORTED: Dict[str, str] = {
     "grouped_gemm": "expert-parallel (MoE)",
     "ep_router": "expert-parallel (MoE)",
     "megamoe_router": "expert-parallel (MoE)",
-    "moe_tp_experts": "expert-parallel (MoE)",
     "megamoe_experts": "expert-parallel (MoE)",
     "moe_identity_expert": "expert-parallel (MoE)",
     "mla_kv_a_proj": "MLA split kv projection",
@@ -192,6 +231,26 @@ def _gather(value: Any, mesh: Any) -> Any:
     )
 
 
+def _last_dim(value: Any) -> Optional[int]:
+    """The last dimension of the one shardable tensor in ``value``, if there is one.
+
+    A location's value is often a tuple or a dataclass, most of whose members
+    are not fragments — a mask, a cache, ``None``. Exactly one shardable tensor
+    makes the width comparable before and after a gather; anything else (none, or
+    several of different widths) is not something to draw a conclusion from, and
+    the caller skips the check rather than guessing.
+    """
+    widths = []
+    apply(
+        value,
+        lambda tensor: widths.append(tensor.shape[-1])
+        if tensor.is_floating_point() and tensor.dim() >= 1
+        else None,
+        torch.Tensor,
+    )
+    return widths[0] if len(widths) == 1 else None
+
+
 def _reshard(value: Any, mesh: Any) -> Any:
     """This rank's slice of ``value``, as the model's own forward expects it.
 
@@ -199,6 +258,13 @@ def _reshard(value: Any, mesh: Any) -> Any:
     along the last dim, take this rank's — so a value no worker touched comes back
     unchanged, and an edited one carries the edit. Both are autograd functions, so
     the pair is transparent to a backward pass as well.
+
+    Guarded by the same predicate as the gather, and it must be: what goes back
+    is what the model's own forward consumes. A tensor ``_gather`` declined to
+    touch was never a fragment, so splitting it here hands the model a slice of
+    something whole. Divisibility alone is not enough to tell those apart — an
+    integer ``position_ids`` of width 8 at tp=4 divides perfectly, and every rank
+    would silently continue on a quarter of it. Wrong answers, not a hang.
     """
     from transformers.integrations.tensor_parallel import split
 
@@ -206,7 +272,7 @@ def _reshard(value: Any, mesh: Any) -> Any:
     return apply(
         value,
         lambda tensor: (
-            split(tensor, mesh) if tensor.shape[-1] % world_size == 0 else tensor
+            split(tensor, mesh) if _shardable(tensor, world_size) else tensor
         ),
         torch.Tensor,
     )
@@ -215,10 +281,14 @@ def _reshard(value: Any, mesh: Any) -> Any:
 def is_sharded(module: torch.nn.Module) -> bool:
     """Whether ``module``'s tree has anything split across a multi-rank mesh.
 
-    The test [`Envoy._interleaver_class`][nnsight.intervention.envoy.Envoy._interleaver_class]
-    uses to decide whether a model needs a
-    [`TPInterleaver`][nnsight.modeling.tp.interleaver.TPInterleaver] at all. A
-    degenerate 1-rank mesh reads as not sharded: there is nothing to gather.
+    A caller's way to ask whether a loaded model is sharded at all, without
+    reaching into transformers' stamps itself. Nothing in nnsight branches on it
+    — a [`TPInterleaver`][nnsight.modeling.tp.interleaver.TPInterleaver] is built
+    for every HuggingFace model and stays inert until
+    [`instrument`][nnsight.modeling.tp.interleaver.TPInterleaver.instrument] finds
+    a sharded module — but a server deciding how to run a replica wants it.
+
+    A degenerate 1-rank mesh reads as not sharded: there is nothing to gather.
     """
     for child in module.modules():
         if getattr(child, "_hf_tp_plan", None) is None:
@@ -254,6 +324,10 @@ class TPInterleaver(Interleaver):
         self.tp_rules: Dict[str, Any] = {}
         # Source locations already warned about this run; see `_warn_source`.
         self._warned: set = set()
+        # Locations whose gather has been shape-checked; see `_gather_whole`.
+        # Not cleared between runs: the rule for a location is a property of the
+        # loaded model, so re-checking it every trace buys nothing.
+        self._checked: set = set()
 
     def __enter__(self) -> "TPInterleaver":
         # A fresh run: warn again about anything it reads (see `_warn_source`).
@@ -331,8 +405,56 @@ class TPInterleaver(Interleaver):
         if mesh is None or not self.observed(provider):
             return super().handle(provider, value)
 
-        whole = super().handle(provider, _gather(value, mesh))
+        whole = super().handle(provider, self._gather_whole(provider, value, mesh))
         return _reshard(whole, mesh)
+
+    def _gather_whole(self, provider: str, value: Any, mesh: Any) -> Any:
+        """``value`` gathered, checked once per location against the rule used.
+
+        The rules in [`SHARDED_SIDES`][nnsight.modeling.tp.interleaver.SHARDED_SIDES]
+        are a claim about a transformers version, and most of them were settled by
+        reading its source rather than by running a model. This is what turns a
+        wrong claim from silent into loud.
+
+        The check is cheap and total: a side listed as sharded must actually grow
+        by ``world_size`` when gathered. A rule that named a whole value leaves
+        the width unchanged after the collective — which is precisely the shape of
+        the failure that motivated
+        [`MINIMUM_TRANSFORMERS`][nnsight.modeling.tp.interleaver.MINIMUM_TRANSFORMERS]:
+        a value already made whole by the model's own hook, gathered a second time
+        and handed back ``tp_size`` times too wide with a plausible first copy.
+        A version floor catches that for one known version; this catches it for
+        every version, including the one after next.
+
+        Once per location per run, not per visit — the answer is a property of
+        the rule, and a generation loop revisits the same location hundreds of
+        times.
+
+        Raises:
+            UnsupportedParallelStyle: if the gather did not widen the value.
+        """
+        gathered = _gather(value, mesh)
+
+        if provider in self._checked:
+            return gathered
+        self._checked.add(provider)
+
+        before, after = _last_dim(value), _last_dim(gathered)
+        if before is None or after is None:
+            return gathered
+
+        expected = before * mesh.size()
+        if after != expected:
+            raise UnsupportedParallelStyle(
+                f"'{provider}' is listed as carrying this rank's shard, but "
+                f"gathering it across {mesh.size()} ranks gave a last dimension "
+                f"of {after} where {expected} was expected (it was {before} "
+                "before). Either this transformers version already makes the "
+                "value whole — in which case gathering it hands out a tensor "
+                f"{mesh.size()} times too wide — or it is split on an axis these "
+                "rules don't describe. Refusing rather than returning it."
+            )
+        return gathered
 
     def _warn_source(self, provider: str) -> None:
         """Warn that a ``.source`` read is this rank's shard, and hand it over.

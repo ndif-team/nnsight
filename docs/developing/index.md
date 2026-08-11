@@ -68,6 +68,13 @@ as an edit).
 - `docs/developing/batching-internals.md` — `Batcher` add/narrow/widen, batch
   groups, `gather_skip`/`assemble_skip`.
 
+### Proposals (not implemented)
+
+- `docs/developing/fragments-proposal.md` — vLLM and tensor parallelism both make
+  a fragment whole at a location, in unrelated subclasses of unrelated base
+  classes. What one shared collaborator would look like, and why the reason
+  originally given for keeping them apart was wrong.
+
 ### Backends
 
 - `docs/developing/backends.md` — the `Backend` base and the existing backends
