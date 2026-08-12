@@ -178,7 +178,7 @@ site with the `envoys=` argument, which maps a module **type** or a dotted **pat
 suffix** to a custom `Envoy` class.
 
 ```python
-from nnsight.intervention.envoy import Envoy
+from nnsight import Envoy
 from nnsight.intervention.eproperty import eproperty
 
 class SAEView(Envoy):

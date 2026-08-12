@@ -156,7 +156,7 @@ indexes `value[0]`:
 
 ```python
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
-from nnsight.intervention.envoy import Envoy
+from nnsight import Envoy
 from nnsight.intervention.eproperty import eproperty
 from nnsight.modeling.transformers import TransformersModel
 

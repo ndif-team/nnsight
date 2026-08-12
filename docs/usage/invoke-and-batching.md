@@ -148,7 +148,7 @@ Base `NNsight` runs a single invoke fine, but batching two or more raises
 
 ```python
 import torch
-from nnsight.intervention.envoy import Envoy
+from nnsight import Envoy
 
 class BatchEnvoy(Envoy):
     def _batch_size(self, *inputs, **kwargs):
