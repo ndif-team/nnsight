@@ -130,24 +130,38 @@ class HuggingFaceModel(Remotable):
         config = AutoConfig.from_pretrained(repo_id, revision=self.revision)
         return self._auto().from_config(config)
 
-    def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        # Before the weights are fetched, because that is the only point where a
-        # refusal is cheap and the message can still say what to do instead.
-        # transformers accepts an impossible degree silently -- see
-        # `check_tp_request` -- so a checkpoint that cannot be split would
-        # otherwise load a full copy on every rank and look like it worked.
+    def _refuse_impossible_tp(self, repo_id: str, kwargs: dict) -> None:
+        """Raise if this load asks for a degree the checkpoint cannot be split into.
+
+        Called from every ``_load``, before the weights are fetched -- the only
+        point where a refusal is cheap and the message can still say what to do
+        instead. transformers accepts an impossible degree silently (see
+        [`check_tp_request`][nnsight.modeling.tp.plan.check_tp_request]), so a
+        checkpoint that cannot be split would otherwise load a full copy onto
+        every rank and look like it worked.
+
+        A subclass that builds the model some other way -- ``TransformersModel``
+        goes through ``transformers.pipeline`` -- has to call this itself, since
+        it does not reach the base's ``_load``. Reading the raw ``kwargs`` rather
+        than a split-out subset is deliberate: ``distributed_config`` travels
+        differently on each path, and a check that silently sees nothing is worse
+        than no check.
+        """
         from .tp import check_tp_request, requested_tp_size
 
         tp_size = requested_tp_size(kwargs.get("distributed_config"))
-        if tp_size is not None:
-            from transformers import AutoConfig
+        if tp_size is None:
+            # The ordinary path: no degree asked for, so no config to read.
+            return
 
-            # Only read when a degree was actually asked for: the ordinary path
-            # should not pay a config load for a check that cannot apply to it.
-            check_tp_request(
-                AutoConfig.from_pretrained(repo_id, revision=self.revision), tp_size
-            )
+        from transformers import AutoConfig
 
+        check_tp_request(
+            AutoConfig.from_pretrained(repo_id, revision=self.revision), tp_size
+        )
+
+    def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        self._refuse_impossible_tp(repo_id, kwargs)
         return self._auto().from_pretrained(repo_id, revision=self.revision, **kwargs)
 
     def _remoteable_model_key(self) -> str:

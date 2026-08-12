@@ -931,3 +931,96 @@ class TestRequestedTpSize:
 
         assert requested_tp_size(type("D", (), {"tp_size": 4})()) == 4
         assert requested_tp_size({"tp_size": 4}) == 4
+
+
+class TestEveryLoadPathChecks:
+    """The check has to sit on every `_load`, not only the base's.
+
+    `TransformersModel` builds its model through `transformers.pipeline` and
+    never calls `super()._load`, so a guard written once in `HuggingFaceModel`
+    is dead for the class the tensor-parallel server actually loads through.
+    That is exactly how this was first written, and a forced gpt2 deployment
+    came up "tensor-parallel" across two cards regardless.
+    """
+
+    #: Loads that do not go through transformers, so a transformers tensor-parallel
+    #: degree cannot reach them and cannot silently replicate. `DiffusionModel`
+    #: builds a `diffusers` pipeline, which has no `base_model_tp_plan` and no
+    #: `distributed_config` to honour.
+    NOT_TRANSFORMERS = {"DiffusionModel"}
+
+    def _overrides(self):
+        import inspect
+
+        # Imported explicitly: a subclass only exists once its module is, so a
+        # sweep over `__subclasses__` otherwise passes by finding nothing --
+        # which is the failure mode a coverage test can least afford.
+        import nnsight.modeling.diffusion  # noqa: F401
+        import nnsight.modeling.transformers  # noqa: F401
+        from nnsight.modeling.huggingface import HuggingFaceModel
+
+        subclasses, seen = [HuggingFaceModel], set()
+        while subclasses:
+            cls = subclasses.pop()
+            if cls in seen:
+                continue
+            seen.add(cls)
+            subclasses.extend(cls.__subclasses__())
+        return {
+            cls: inspect.getsource(cls.__dict__["_load"])
+            for cls in seen
+            if "_load" in cls.__dict__ and cls.__name__ not in self.NOT_TRANSFORMERS
+        }
+
+    def test_the_sweep_finds_the_overrides(self):
+        # Guards the guard: if `_overrides` ever returns nothing, the assertion
+        # below passes while checking nothing at all.
+        names = {cls.__name__ for cls in self._overrides()}
+
+        assert {"HuggingFaceModel", "TransformersModel"} <= names, names
+
+    def test_every_load_override_refuses_an_impossible_degree(self):
+        # Either it calls the shared check itself, or it delegates to a `_load`
+        # that does. Anything else fetches the weights unchecked.
+        unguarded = [
+            cls.__name__
+            for cls, source in self._overrides().items()
+            if "_refuse_impossible_tp" not in source and "super()._load" not in source
+        ]
+
+        assert not unguarded, (
+            f"these _load overrides never check the tensor-parallel degree: "
+            f"{unguarded}. transformers will not check it either."
+        )
+
+    def test_the_class_the_server_loads_through_is_covered(self):
+        # Stated separately from the sweep above because it is the specific one
+        # that was missed, and a sweep can be quietly narrowed.
+        import inspect
+
+        from nnsight.modeling.transformers import TransformersModel
+
+        assert "_refuse_impossible_tp" in inspect.getsource(TransformersModel._load)
+
+    def test_a_load_with_no_degree_reads_no_config(self):
+        # The check must cost the ordinary single-GPU path nothing: it runs on
+        # every load, and a config read per load would be a real regression.
+        from nnsight.modeling.huggingface import HuggingFaceModel
+
+        read = []
+
+        class Probe(HuggingFaceModel):
+            def __init__(self):  # bypass Envoy construction; only the check matters
+                self.revision = None
+
+        import transformers
+
+        original = transformers.AutoConfig.from_pretrained
+        transformers.AutoConfig.from_pretrained = lambda *a, **k: read.append(a) or original(*a, **k)
+        try:
+            Probe()._refuse_impossible_tp("openai-community/gpt2", {})
+            Probe()._refuse_impossible_tp("openai-community/gpt2", {"distributed_config": None})
+        finally:
+            transformers.AutoConfig.from_pretrained = original
+
+        assert read == [], "the no-tensor-parallel path read a config it did not need"

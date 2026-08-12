@@ -390,6 +390,11 @@ class TransformersModel(HuggingFaceModel):
     def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import pipeline
 
+        # Before the split, and before the pipeline fetches anything. This path
+        # does not reach the base's `_load`, so the check has to be repeated
+        # here -- the tensor-parallel server loads through *this* class.
+        self._refuse_impossible_tp(repo_id, kwargs)
+
         top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
         # The pipeline loads the model and infers every preprocessor; only
         # forward the ones the user explicitly supplied.
