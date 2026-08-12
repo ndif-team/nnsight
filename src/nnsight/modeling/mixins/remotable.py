@@ -15,24 +15,58 @@ model-specific halves — `_remoteable_model_key` and
 `_remoteable_from_model_key` — and may carry per-request state across with
 `_remoteable_get_env` / `_remoteable_set_env`.
 
-A server also has to answer two questions about a checkpoint it has never
-loaded, in order to decide where to put it: how much GPU memory it needs
-([`estimate_bytes`][nnsight.modeling.mixins.remotable.Remotable.estimate_bytes])
-and how many ways it can be split across cards
-([`max_tp_size`][nnsight.modeling.mixins.remotable.Remotable.max_tp_size]). Both
-answer from the key alone, and both have a subclass hook so a wrapper that can
-answer cheaply — a HuggingFace model can read the parameter count off the Hub —
-doesn't pay for building the architecture just to count it.
+A server also has to know things about a checkpoint it has never loaded, to
+decide where to put it. Those come in two shapes, and the split is deliberate:
+
+* **What the checkpoint is** —
+  [`describe_checkpoint`][nnsight.modeling.mixins.remotable.Remotable.describe_checkpoint]
+  returns a [`CheckpointInfo`][nnsight.modeling.mixins.remotable.CheckpointInfo]:
+  its size in a given dtype, its parameter count, its config, its revision. One
+  call, because a wrapper that can answer any of these cheaply answers all of
+  them from the same read — a HuggingFace model fetches one config and one Hub
+  record rather than one per question.
+* **What a runtime can do with it** —
+  [`max_tp_size`][nnsight.modeling.mixins.remotable.Remotable.max_tp_size] stays
+  its own question, and should. How many ways weights can be split is a property
+  of the *loader*, not of the checkpoint: the same files shard eight ways under
+  transformers tensor parallelism and not at all under something else. Folding it
+  into a description of the checkpoint would make it look like a fact about the
+  files.
+
+Both answer from the key alone, and both have a subclass hook, so a wrapper that
+can answer cheaply doesn't pay for building the architecture just to count it.
 """
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from ...tracing.backend import Backend
 from ...util import from_import_path, to_import_path
 from .meta import Meta
+
+
+@dataclass
+class CheckpointInfo:
+    """What a placement decision needs to know about a checkpoint.
+
+    Every field is optional and defaults to ``None``: a wrapper answers what it
+    can, and a caller treats a ``None`` as "this wrapper doesn't know" rather
+    than as a fact. Deliberately not a place for anything runtime-specific —
+    see the module docstring on why ``max_tp_size`` is asked separately.
+    """
+
+    #: The weights' size in the dtype that was asked for. ``None`` only if the
+    #: wrapper cannot size its own checkpoint at all.
+    size_bytes: Optional[int] = None
+    #: How many parameters, if the wrapper knows without loading them.
+    n_params: Optional[int] = None
+    #: The checkpoint's own config object, for a server reporting what it holds.
+    config: Optional[Any] = None
+    #: Which revision the key names, if it names one.
+    revision: Optional[str] = None
 
 
 #: Bytes per stored element for names that aren't torch dtypes — quantizations,
@@ -220,20 +254,21 @@ class Remotable(Meta):
         return math.ceil(elements * bytes_per_element(dtype))
 
     @classmethod
-    def _remoteable_checkpoint_config(
-        cls, model_key: str, trust_remote_code: bool = False
-    ) -> Optional[Any]:
-        """This checkpoint's config. Base default: ``None`` — not every wrapper
-        has one, and nothing here should have to invent it."""
-        return None
+    def _remoteable_describe_checkpoint(
+        cls, model_key: str, dtype: str, trust_remote_code: bool = False
+    ) -> "CheckpointInfo":
+        """Everything a placement decision needs, from one look at the checkpoint.
 
-    @classmethod
-    def _remoteable_checkpoint_revision(
-        cls, model_key: str, **kwargs: Any
-    ) -> Optional[str]:
-        """This checkpoint's revision. Base default: ``None`` — a key that names
-        no revision has none to report."""
-        return None
+        Base default: size it the expensive way and say nothing else. A subclass
+        that can read its checkpoint's metadata should override this rather than
+        the individual pieces — the point of one call is that a wrapper reading a
+        config can answer every field from the *same* read.
+        """
+        return CheckpointInfo(
+            size_bytes=cls._remoteable_estimate_bytes(
+                model_key, dtype, trust_remote_code=trust_remote_code
+            )
+        )
 
     @classmethod
     def _remoteable_max_tp_size(
@@ -311,27 +346,25 @@ class Remotable(Meta):
         return model_cls._remoteable_estimate_bytes(suffix, dtype, **kwargs)
 
     @classmethod
-    def checkpoint_config(cls, model_key: str, **kwargs: Any) -> Optional[Any]:
-        """The checkpoint's own config object, or ``None`` if it has no notion of one.
+    def describe_checkpoint(
+        cls, model_key: str, dtype: str, **kwargs: Any
+    ) -> "CheckpointInfo":
+        """What this checkpoint is, without loading it.
 
-        For a server reporting what it has loaded — architecture, hidden size,
-        the rest — without holding the model to ask.
+        One call rather than one per question, because the questions a server
+        asks before placing a model — how big, how many parameters, what
+        architecture, which revision — are all answered from the same metadata,
+        and asking separately meant fetching it repeatedly.
+
+        Args:
+            model_key: A full key, ``"import.path.ClassName:model_key"``.
+            dtype: What the weights will be held in — a torch dtype name, or a
+                quantization named as a string (see
+                [`bytes_per_element`][nnsight.modeling.mixins.remotable.bytes_per_element]).
         """
         import_path, suffix = model_key.split(":", 1)
         model_cls: type[Remotable] = from_import_path(import_path)
-        return model_cls._remoteable_checkpoint_config(suffix, **kwargs)
-
-    @classmethod
-    def checkpoint_revision(cls, model_key: str, **kwargs: Any) -> Optional[str]:
-        """Which revision of the checkpoint the key names, if it names one.
-
-        Reported alongside the config by a server listing what it has loaded, so
-        two deployments of the same repo at different revisions are tellable
-        apart.
-        """
-        import_path, suffix = model_key.split(":", 1)
-        model_cls: type[Remotable] = from_import_path(import_path)
-        return model_cls._remoteable_checkpoint_revision(suffix, **kwargs)
+        return model_cls._remoteable_describe_checkpoint(suffix, dtype, **kwargs)
 
     @classmethod
     def max_tp_size(cls, model_key: str, **kwargs: Any) -> Optional[int]:
