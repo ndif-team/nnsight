@@ -51,6 +51,7 @@ from ..tracing.util import Scope
 
 if TYPE_CHECKING:
     from .envoy import Envoy
+    from .fragments import Fragments
 
 
 class Event(enum.Enum):
@@ -506,11 +507,21 @@ class Interleaver:
         sourced: Op-location -> the instrumented callable a worker drilled into
             (see [`nnsight.intervention.source`][nnsight.intervention.source]), or ``None`` while one is
             requested but not yet built. Per-run; cleared on entry.
+        fragments: A [`Fragments`][nnsight.intervention.fragments.Fragments] for a
+            model whose values are split across devices, or ``None``. When set,
+            `handle` gathers a fragment before serving workers and re-splits it
+            afterwards.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, fragments: Optional["Fragments"] = None) -> None:
         self.handles: dict[str, list[torch.utils.hooks.RemovableHandle]] = {}
         self.mediators: list[Mediator] = []
+        # What, if anything, makes a value at a location whole before workers see
+        # it — see intervention/fragments.py. None on an ordinary model, and on a
+        # distributed one it is the runtime's own object. Kept as a collaborator
+        # rather than a subclass because *when* to gather is a property of this
+        # class and *what* to gather is a property of the runtime.
+        self.fragments: Optional["Fragments"] = fragments
         # The batcher for the current run (combined-input assembly + narrow/widen),
         # or None when not batching. Owned by the tracer and registered here for the
         # run by `Envoy.interleave` (see intervention/envoy.py); each mediator reads
@@ -541,6 +552,8 @@ class Interleaver:
         """
         self.interleaving = True
         self.sourced.clear()
+        if self.fragments is not None:
+            self.fragments.begin()
         try:
             for mediator in self.mediators:
                 if mediator.worker is not None:
@@ -565,6 +578,35 @@ class Interleaver:
         # has done its job unwinding the model, so swallow it here.
         return exc_type is EarlyStopException
 
+    def observed(self, provider: str) -> bool:
+        """Whether anything is waiting on *this* visit to ``provider``.
+
+        Mirrors the match [`Mediator.handle`][nnsight.intervention.interleaver.Mediator.handle]
+        makes — a worker parks already carrying the occurrence tag it wants, so
+        this is the same single string comparison against this visit's count.
+        Deliberately not "is any worker parked anywhere": a worker waiting on a
+        *later* iteration of this location must not trigger work now.
+
+        A ``tracer.cache()`` counts too — it would otherwise record fragments —
+        but only for the locations it actually keeps. A cache is usually scoped to
+        a handful of modules, so asking it (rather than assuming any open cache
+        wants everything) is the difference between a few collectives and one at
+        every sharded module in the model.
+
+        Used to gate the gather in `handle`. Every rank evaluates it over the same
+        block, so it answers the same everywhere.
+        """
+        for mediator in self.mediators:
+            pending = mediator.pending
+            if (
+                pending is not None
+                and pending[1] == f"{provider}.i{mediator.iterations[provider]}"
+            ):
+                return True
+            if any(cache.wants(provider) for cache in mediator.caches):
+                return True
+        return False
+
     def instrument(self, envoy: Envoy) -> None:
         """Install this interleaver's forward hooks on an envoy's module.
 
@@ -587,6 +629,15 @@ class Interleaver:
         # (which happens before pre-hooks run) — needed when a skip's replacement is
         # read from the module's own input first.
         install_skip(envoy)
+
+        # The one moment both the module — carrying whatever its runtime stamped
+        # on it — and its path are in hand, which is what a distributed runtime
+        # needs to record which of this envoy's values are pieces of larger ones.
+        # Called again through `Envoy._update` when real weights are dispatched
+        # under a tree built on meta, which is where a shard first becomes
+        # visible.
+        if self.fragments is not None:
+            self.fragments.instrument(envoy)
 
         path = envoy.path
 
@@ -620,6 +671,22 @@ class Interleaver:
         own rows of the batch — narrowed the same way the worker's reads are.
         Caches select which locations to keep themselves.
         """
+        # A fragment is made whole before any worker sees it, and only when one
+        # is actually waiting: a trace reads a handful of locations out of
+        # hundreds, and a collective at every other one would cost far more than
+        # the reads do. `observed` answers the same on every rank, which is what
+        # keeps their collectives matched.
+        gathering = False
+        if (
+            self.fragments is not None
+            and self.fragments.enabled
+            and self.observed(provider)
+        ):
+            self.fragments.read(provider)
+            if self.fragments.fragmented(provider):
+                gathering = True
+                value = self.fragments.whole(provider, value)
+
         for mediator in self.mediators:
             try:
                 value = mediator.handle(provider, value)
@@ -647,6 +714,12 @@ class Interleaver:
             )
             for cache in mediator.caches:
                 cache.observe(provider, served)
+
+        # Back to the piece the model's own forward expects, carrying whatever
+        # the workers left behind — so an edit to the assembled tensor reaches
+        # the model rather than being dropped with the gather.
+        if gathering:
+            value = self.fragments.fragment(provider, value)
         return value
 
     def check_dangling_mediators(self) -> None:

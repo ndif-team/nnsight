@@ -2,17 +2,18 @@
 
 Nothing here needs installing or enabling. A
 [`HuggingFaceModel`][nnsight.modeling.huggingface.HuggingFaceModel] is always
-built with a [`TPInterleaver`][nnsight.modeling.tp.interleaver.TPInterleaver],
-which stays inert unless it finds the model actually sharded. See
-[`interleaver`][nnsight.modeling.tp.interleaver] for how a shard is turned back
-into the whole tensor a user asked for.
+built with a [`TPFragments`][nnsight.modeling.tp.fragments.TPFragments], which
+stays inert unless it finds the model actually sharded. See
+[`fragments`][nnsight.modeling.tp.fragments] for which values are pieces and how
+they are reassembled, and
+[`nnsight.intervention.fragments`][nnsight.intervention.fragments] for when.
 """
 
-from .interleaver import (
+from .fragments import (
     MINIMUM_TRANSFORMERS,
     SHARDED_SIDES,
     UNSUPPORTED,
-    TPInterleaver,
+    TPFragments,
     UnsupportedParallelStyle,
     UnsupportedTransformersVersion,
     is_sharded,
@@ -23,7 +24,7 @@ __all__ = [
     "MINIMUM_TRANSFORMERS",
     "SHARDED_SIDES",
     "UNSUPPORTED",
-    "TPInterleaver",
+    "TPFragments",
     "UnsupportedParallelStyle",
     "UnsupportedTransformersVersion",
     "is_sharded",

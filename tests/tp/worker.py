@@ -29,7 +29,7 @@ LAYER = 1
 
 
 def build(repo_id: str, tp: int, dtype: torch.dtype):
-    from nnsight.modeling.tp import TPInterleaver
+    from nnsight.modeling.tp import TPFragments
     from nnsight.modeling.transformers import TransformersModel
 
     if tp > 1:
@@ -46,18 +46,20 @@ def build(repo_id: str, tp: int, dtype: torch.dtype):
         )
 
     # Nothing installs or enables anything: every HuggingFace model is built with
-    # a TPInterleaver, which works out for itself whether it has a job to do.
+    # an ordinary interleaver carrying TPFragments, which work out for itself
+    # whether they have a job to do.
     interleaver = model.interleaver
-    assert isinstance(interleaver, TPInterleaver), type(interleaver)
+    fragments = interleaver.fragments
+    assert isinstance(fragments, TPFragments), type(fragments)
     if tp > 1:
-        assert interleaver.enabled, "sharded model did not enable the TP path"
-        assert interleaver.tp_rules, "sharded model recorded no rules"
+        assert fragments.enabled, "sharded model did not enable the TP path"
+        assert fragments.tp_rules, "sharded model recorded no rules"
         # One interleaver serves the whole tree, including standalone children
         # outside named_children() — strand one and its values reach nothing.
         assert model.generator.interleaver is interleaver
     else:
-        assert not interleaver.enabled, "unsharded model enabled the TP path"
-        assert not interleaver.tp_rules
+        assert not fragments.enabled, "unsharded model enabled the TP path"
+        assert not fragments.tp_rules
 
     return model
 
@@ -117,7 +119,7 @@ def main() -> None:
     record("generated_steps", torch.stack([s.reshape(()) for s in steps]))
 
     # Greedy so the ranks cannot diverge on sampling; see the module docstring of
-    # nnsight/modeling/tp/interleaver.py for why that would be a correctness bug.
+    # nnsight/modeling/tp/fragments.py for why that would be a correctness bug.
     with model.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
         record("generated", tracer.result.save().float())
 

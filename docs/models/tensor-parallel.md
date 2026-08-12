@@ -112,14 +112,27 @@ it puts two obligations on the code:
 **Every rank produces the same saved values**, since they are computed from
 gathered tensors. Print or write results from one rank, or you get N copies.
 
+## Requires transformers >= 5.15
+
+Below that, a checkpoint with `tie_word_embeddings=True` — Llama-3.2, Qwen2.5,
+most small models — has its LM head gathered but never sharded, so logits come
+back `tp_size` times too wide. The argmax still lands inside the first copy, so
+nothing downstream looks wrong. nnsight raises `UnsupportedTransformersVersion`
+rather than let that through.
+
 ## What is not supported
 
-Mixture-of-experts sharding (`grouped_gemm`, `ep_router`, `moe_tp_experts`, and
-the rest of the expert-parallel family) and MLA's split kv projection slice by
-*expert* rather than along the feature dimension, so the gather here does not
-apply. Loading such a model tensor-parallel raises `UnsupportedParallelStyle`
-naming the module and style — deliberately, rather than handing you a fragment of
-a tensor and letting you draw conclusions from it.
+A few expert-parallel styles slice by *expert* rather than along the feature
+dimension, so the gather here does not apply: `grouped_gemm`, `ep_router`,
+`megamoe_*`, `moe_identity_expert`, and MLA's split kv projection
+(`mla_kv_a_proj`). Loading such a model tensor-parallel raises
+`UnsupportedParallelStyle` naming the module and style — deliberately, rather than
+handing you a fragment of a tensor and letting you draw conclusions from it.
+
+**Most mixture-of-experts checkpoints are fine.** `moe_tp_experts`, which Mixtral,
+DeepSeek-V3, Qwen3-MoE and around twenty-five other shipped configs use,
+all-reduces inside its own forward — both sides arrive whole and nothing needs
+gathering.
 
 `float`/`bfloat16` results differ slightly from a single-GPU run (relative error
 around 1e-3 to 1e-2, growing with depth) because an all-reduce sums in a
@@ -128,14 +141,21 @@ the test suite asserts generated ids are identical.
 
 ## Under the hood
 
-`TPInterleaver` ([`nnsight.modeling.tp`][nnsight.modeling.tp]) subclasses the
-[`Interleaver`][nnsight.intervention.interleaver.Interleaver] and brackets
-`handle`: gather the value, serve the parked workers the whole tensor, re-split
-what they leave. Every `HuggingFaceModel` is built with one; it stays inert
-(`enabled = False`, behaving exactly like the base) until it instruments a module
-transformers has stamped with a `_hf_tp_plan`, which is also where it records
-which locations are sharded. That covers eager loading and the
+`TPFragments` ([`nnsight.modeling.tp`][nnsight.modeling.tp]) says which locations
+hold one rank's slice and how to reassemble them; the
+[`Interleaver`][nnsight.intervention.interleaver.Interleaver] does the bracketing —
+gather the value, serve the parked workers the whole tensor, re-split what they
+leave — once per visit, and only when something is actually waiting to read it.
+
+Every `HuggingFaceModel` is built with an ordinary interleaver carrying one of
+these. It stays inert (`enabled = False`, one attribute check per location) until
+it instruments a module transformers has stamped with a `_hf_tp_plan`, which is
+also where it records the rules. That covers eager loading and the
 meta-then-`dispatch()` path without either needing to know about it.
+
+The same seam serves vLLM's tensor parallelism, which shards differently and
+gathers with different collectives — see
+[`nnsight.intervention.fragments`][nnsight.intervention.fragments].
 
 ## Related
 

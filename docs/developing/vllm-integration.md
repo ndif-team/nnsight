@@ -40,7 +40,7 @@ runs it against the real module, and ships saved values back.
 - **Worker process(es).** vLLM spawns these with `worker_cls =
   "nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker"` (`vllm.py:189`). The
   worker builds a *second* `VLLM` Envoy over the actually-loaded module
-  (`GPUModelRunner.load_model`), which owns the `Interleaver` and `VLLMBatcher` and
+  (`GPUModelRunner.load_model`), which owns the `Interleaver`, its `VLLMFragments` and the `VLLMBatcher`, and
   is where interventions run.
 
 Model-parallel init happens in the client process before the meta build (vLLM builds
@@ -136,26 +136,32 @@ recomputed every step:
   into a `ValueError` (barrier) or `OutOfOrderError` (the run already ran past its
   location); an over-iterated `tracer.iter` only warns.
 
-## Tensor parallelism: `VLLMBatcher`
+## Tensor parallelism: `VLLMFragments`
 
 When `tensor_parallel_size > 1`, parallel linears shard tensors across GPUs;
-intervention code must see the whole tensor. `VLLMBatcher(Batcher)`
-(`batching.py:32`) gathers before a worker reads and re-shards after it writes.
+intervention code must see the whole tensor. `VLLMFragments(Fragments)`
+(`fragments.py`) says which locations are a rank's piece and how to reassemble
+them; the `Interleaver` brackets the gather (see
+[`nnsight.intervention.fragments`][nnsight.intervention.fragments]).
 
-- Its `batching` property is always `True` — a request's tokens sit alongside others
-  in the slab, so even a lone invoke must be narrowed to its own span.
-- `narrow`/`widen` (`:62`/`:65`) first call `_whole(value)` to assemble the full
-  tensor, then do the base row math on the `[start, size]` token span.
-- `_whole(value)` (`:74`) all-gathers or all-reduces per layer kind:
-  `ColumnParallelLinear` output → `all_gather`; `RowParallelLinear` input →
-  `all_gather`; `RowParallelLinear` output → `all_reduce`. `_shard(value)` (`:113`)
-  is the inverse. `watch`/`release` (`:134`/`:156`) track the current module and,
-  after an edit, re-shard the reassembled whole so vLLM's forward resumes correctly.
+- `instrument` records `location -> (module, side)` as the Envoy tree is built,
+  for the layers that really shard: `ColumnParallelLinear` output unless it
+  gathers its own, `RowParallelLinear` input when `input_is_parallel`, its output
+  unless `reduce_results`, and a `FusedMoE` output that defers its combine.
+- `whole` all-gathers or all-reduces per layer kind; `fragment` is the inverse,
+  dividing an MoE write-back by `tp_size * ep_size` so the block's own reduce sums
+  it exactly once. With TP=1 nothing is recorded and `enabled` stays `False`.
+- `VLLMBatcher` keeps only the row math: its `batching` property is always `True`,
+  because a request's tokens sit alongside others in the slab, so even a lone
+  invoke must be narrowed to its own span.
 
-The gather/re-shard hooks are wired in the runner: `_watch_parallel_linears`
-(`GPUModelRunner.py:58`) registers **before** the interleaver's hooks (gather first),
-`_release_parallel_linears` (`:78`) **after** (re-shard last). With TP=1 neither is
-wired — it's pure overhead. See [batching-internals.md](./batching-internals.md).
+This used to live in `VLLMBatcher` with two extra pairs of forward hooks per
+parallel layer, installed either side of building the tree so they bracketed the
+interleaver's. It needed them because `Batcher.narrow` runs once per *parked
+worker*, so the gather had to be memoized and explicitly released — several
+workers reading one value would otherwise have run several collectives and
+deadlocked the ranks. On the interleaver the bracket is already once-per-visit,
+so none of that is needed. See [batching-internals.md](./batching-internals.md).
 
 ## Sync result collection
 
@@ -262,7 +268,7 @@ test guarding it):
   each does not merge back (unlike the in-process local path). Each invoke saves its
   own values.
 - **`defer_exceptions` must drop a worker on all TP ranks or none**, and the lazy
-  gather in `VLLMBatcher` assumes every rank runs identical mediators in lockstep — a
+  gather in `VLLMFragments` assumes every rank runs identical mediators in lockstep — a
   rank-divergent error or a rank-local read hangs the collective.
 - **`tracer.result` is not served on vLLM.** Read generated tokens via `model.logits`/
   `model.samples` (or the streamed `RequestOutput` in async), never `tracer.result`
@@ -280,7 +286,8 @@ tests, and for the mediator payload to ride Ray's transport). See
 
 - `src/nnsight/modeling/vllm/vllm.py` — `VLLM` (`:36`), `_attach_mediators` (`:403`),
   `_collect` (`:382`), `trace` override (`:330`), `logits`/`samples` eproperties (`:144`)
-- `src/nnsight/modeling/vllm/batching.py:32` — `VLLMBatcher`
+- `src/nnsight/modeling/vllm/fragments.py` — `VLLMFragments`
+- `src/nnsight/modeling/vllm/batching.py` — `VLLMBatcher` (row scoping only)
 - `src/nnsight/modeling/vllm/model_runners/GPUModelRunner.py` — runner (`:324`),
   `Requests` (`:97`), `collect_nnsight` (`:471`)
 - `src/nnsight/modeling/vllm/engines/engine.py:17` — `NNsightLLMEngine` (sync)
@@ -293,6 +300,7 @@ tests, and for the mediator payload to ride Ray's transport). See
 
 - [serialization.md](./serialization.md) — how mediators survive process boundaries
 - [batching-internals.md](./batching-internals.md) — the `Batcher`/`VLLMBatcher` contract
+- [fragments-proposal.md](./fragments-proposal.md) — the seam both distributed runtimes share
 - [extending-envoy.md](./extending-envoy.md) — how `logits`/`samples` are exposed
 - [adding-a-new-runtime.md](./adding-a-new-runtime.md) — vLLM as the reference runtime
 - `tests/vllm/` — the reference test suite (needs GPU + `vllm`)

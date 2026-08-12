@@ -68,12 +68,12 @@ as an edit).
 - `docs/developing/batching-internals.md` — `Batcher` add/narrow/widen, batch
   groups, `gather_skip`/`assemble_skip`.
 
-### Proposals (not implemented)
+### Distributed values
 
-- `docs/developing/fragments-proposal.md` — vLLM and tensor parallelism both make
-  a fragment whole at a location, in unrelated subclasses of unrelated base
-  classes. What one shared collaborator would look like, and why the reason
-  originally given for keeping them apart was wrong.
+- `docs/developing/fragments-proposal.md` — `Fragments`, the one seam both vLLM
+  and transformers tensor parallelism use to make a sharded value whole at a
+  location. Why it hangs off the interleaver rather than the batcher, and what
+  the port cost.
 
 ### Backends
 

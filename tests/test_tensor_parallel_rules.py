@@ -23,7 +23,7 @@ from nnsight.intervention.interleaver import Interleaver
 from nnsight.modeling.tp import (
     SHARDED_SIDES,
     UNSUPPORTED,
-    TPInterleaver,
+    TPFragments,
     UnsupportedParallelStyle,
 )
 
@@ -92,13 +92,12 @@ class TestInstrument:
     """What the interleaver does as the Envoy tree is built."""
 
     def test_starts_inert(self):
-        interleaver = TPInterleaver()
+        interleaver = TPFragments()
         assert not interleaver.enabled
         assert not interleaver.tp_rules
 
     def test_an_unsharded_module_records_nothing(self, monkeypatch):
-        interleaver = TPInterleaver()
-        monkeypatch.setattr(Interleaver, "instrument", lambda self, envoy: None)
+        interleaver = TPFragments()
 
         interleaver.instrument(_FakeEnvoy(_module(None)))
 
@@ -106,8 +105,7 @@ class TestInstrument:
         assert not interleaver.tp_rules
 
     def test_a_sharded_module_records_its_side_and_enables(self, monkeypatch):
-        interleaver = TPInterleaver()
-        monkeypatch.setattr(Interleaver, "instrument", lambda self, envoy: None)
+        interleaver = TPFragments()
 
         interleaver.instrument(_FakeEnvoy(_module("colwise"), path="model.q_proj"))
 
@@ -115,8 +113,7 @@ class TestInstrument:
         assert "model.q_proj.output" in interleaver.tp_rules
 
     def test_a_row_parallel_module_records_its_input(self, monkeypatch):
-        interleaver = TPInterleaver()
-        monkeypatch.setattr(Interleaver, "instrument", lambda self, envoy: None)
+        interleaver = TPFragments()
 
         interleaver.instrument(_FakeEnvoy(_module("rowwise"), path="model.o_proj"))
 
@@ -125,15 +122,13 @@ class TestInstrument:
 
     @pytest.mark.parametrize("style", sorted(UNSUPPORTED))
     def test_a_refused_style_raises(self, style, monkeypatch):
-        interleaver = TPInterleaver()
-        monkeypatch.setattr(Interleaver, "instrument", lambda self, envoy: None)
+        interleaver = TPFragments()
 
         with pytest.raises(UnsupportedParallelStyle, match=style):
             interleaver.instrument(_FakeEnvoy(_module(style)))
 
     def test_an_unknown_style_raises(self, monkeypatch):
-        interleaver = TPInterleaver()
-        monkeypatch.setattr(Interleaver, "instrument", lambda self, envoy: None)
+        interleaver = TPFragments()
 
         with pytest.raises(UnsupportedParallelStyle, match="not a parallel style"):
             interleaver.instrument(_FakeEnvoy(_module("something_new_upstream")))
@@ -145,72 +140,70 @@ class TestSourceWarns:
     They cannot be gathered — the split axis moves through the forward — but
     plenty of them are whole anyway (anything past the layer that all-reduces),
     so refusing them all would block correct work. See
-    `TPInterleaver._warn_source`.
+    `TPFragments.read`.
     """
 
     def _sharded(self, monkeypatch):
-        interleaver = TPInterleaver()
-        monkeypatch.setattr(Interleaver, "instrument", lambda self, envoy: None)
-        monkeypatch.setattr(Interleaver, "handle", lambda self, provider, value: value)
-        interleaver.instrument(
+        fragments = TPFragments()
+        fragments.instrument(
             _FakeEnvoy(_module("colwise"), path="model.layers.0.mlp.gate_proj")
         )
-        return interleaver
+        return fragments
 
-    def test_a_source_read_warns_and_returns_the_value(self, monkeypatch):
-        interleaver = self._sharded(monkeypatch)
-        monkeypatch.setattr(TPInterleaver, "observed", lambda self, provider: True)
+    def test_a_source_read_warns(self, monkeypatch):
+        fragments = self._sharded(monkeypatch)
 
         with pytest.warns(UserWarning, match="split across ranks"):
-            value = interleaver.handle(
-                "model.layers.0.mlp.source.self_gate_proj_0.output", 7
-            )
-        assert value == 7
+            fragments.read("model.layers.0.mlp.source.self_gate_proj_0.output")
+
+    def test_a_source_location_is_not_treated_as_a_fragment(self, monkeypatch):
+        # The warning exists *because* it cannot be gathered: which axis a
+        # `.source` value is split on changes through the forward.
+        fragments = self._sharded(monkeypatch)
+
+        assert not fragments.fragmented(
+            "model.layers.0.mlp.source.self_gate_proj_0.output"
+        )
 
     def test_it_warns_once_per_location_per_run(self, monkeypatch):
         # A read inside a generation loop fires every token; one caveat is a
         # caveat, hundreds are noise.
-        interleaver = self._sharded(monkeypatch)
-        monkeypatch.setattr(TPInterleaver, "observed", lambda self, provider: True)
+        fragments = self._sharded(monkeypatch)
         location = "model.layers.0.mlp.source.self_gate_proj_0.output"
 
         with pytest.warns(UserWarning):
-            interleaver.handle(location, 7)
+            fragments.read(location)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            interleaver.handle(location, 7)
+            fragments.read(location)
         assert not caught
 
     def test_a_new_run_warns_again(self, monkeypatch):
         # A long-lived model actor serves request after request; the second
         # user deserves the same caveat as the first.
-        interleaver = self._sharded(monkeypatch)
-        monkeypatch.setattr(TPInterleaver, "observed", lambda self, provider: True)
+        fragments = self._sharded(monkeypatch)
         location = "model.layers.0.mlp.source.self_gate_proj_0.output"
 
         with pytest.warns(UserWarning):
-            interleaver.handle(location, 7)
-        interleaver._warned.clear()  # what __enter__ does at the start of a run
+            fragments.read(location)
+        fragments.begin()  # what Interleaver.__enter__ does at the start of a run
         with pytest.warns(UserWarning):
-            interleaver.handle(location, 7)
+            fragments.read(location)
 
     def test_a_plain_module_read_does_not_warn(self, monkeypatch):
-        interleaver = self._sharded(monkeypatch)
-        monkeypatch.setattr(TPInterleaver, "observed", lambda self, provider: True)
+        fragments = self._sharded(monkeypatch)
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            assert interleaver.handle("model.layers.0.mlp.output", 7) == 7
+            fragments.read("model.layers.0.mlp.output")
         assert not caught
 
-    def test_an_unsharded_model_never_warns(self, monkeypatch):
-        interleaver = TPInterleaver()
-        monkeypatch.setattr(Interleaver, "handle", lambda self, provider, value: value)
+    def test_an_unsharded_model_is_never_asked(self, monkeypatch):
+        # The interleaver checks `enabled` before anything else, so an unsharded
+        # model never reaches `read` at all.
+        from nnsight.modeling.tp import TPFragments
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            assert interleaver.handle("model.mlp.source.self_gate_proj_0.output", 7) == 7
-        assert not caught
+        assert TPFragments().enabled is False
 
 
 class TestMaxTpSize:
@@ -316,11 +309,11 @@ class TestTransformersVersionFloor:
     def _check(self, monkeypatch, version: str):
         import transformers
 
-        from nnsight.modeling.tp import interleaver
+        from nnsight.modeling.tp import fragments as tp_fragments
 
         monkeypatch.setattr(transformers, "__version__", version)
-        monkeypatch.setattr(interleaver, "_version_checked", False)
-        interleaver._check_transformers_version()
+        monkeypatch.setattr(tp_fragments, "_version_checked", False)
+        tp_fragments._check_transformers_version()
 
     def test_an_older_transformers_is_refused(self, monkeypatch):
         from nnsight.modeling.tp import UnsupportedTransformersVersion
@@ -341,13 +334,13 @@ class TestTransformersVersionFloor:
         # -- so the import and version parse have to happen once, not per call.
         import transformers
 
-        from nnsight.modeling.tp import interleaver
+        from nnsight.modeling.tp import fragments as tp_fragments
 
         monkeypatch.setattr(transformers, "__version__", "5.15.0")
-        monkeypatch.setattr(interleaver, "_version_checked", False)
-        interleaver._check_transformers_version()
+        monkeypatch.setattr(tp_fragments, "_version_checked", False)
+        tp_fragments._check_transformers_version()
         monkeypatch.setattr(transformers, "__version__", "0.1.0")
-        interleaver._check_transformers_version()  # would raise if re-checked
+        tp_fragments._check_transformers_version()  # would raise if re-checked
 
 
 class TestTheTwoGatesAgree:
@@ -496,7 +489,7 @@ class TestReshardGuard:
         ],
     )
     def test_a_value_the_gather_skipped_is_not_split(self, monkeypatch, tensor, why):
-        from nnsight.modeling.tp.interleaver import _gather, _reshard
+        from nnsight.modeling.tp.fragments import _gather, _reshard
 
         gather_seen = self._split_calls(monkeypatch)
         import transformers.integrations.tensor_parallel as tp
@@ -512,7 +505,7 @@ class TestReshardGuard:
         assert not split_seen, f"{why} was split though it was never gathered"
 
     def test_a_real_shard_still_round_trips(self, monkeypatch):
-        from nnsight.modeling.tp.interleaver import _reshard
+        from nnsight.modeling.tp.fragments import _reshard
 
         split_seen = self._split_calls(monkeypatch)
         _reshard(torch.randn(1, 4, 8), FakeMesh(4))
@@ -529,17 +522,15 @@ class TestGatherShapeCheck:
     exists for, caught here for every version rather than one known one.
     """
 
-    def _interleaver(self, monkeypatch, gathered):
+    def _fragments(self, monkeypatch, gathered):
         import transformers.integrations.tensor_parallel as tp
 
-        from nnsight.modeling.tp import TPInterleaver
+        from nnsight.modeling.tp import TPFragments
 
         monkeypatch.setattr(tp, "all_gather", lambda tensor, mesh: gathered)
-        interleaver = TPInterleaver()
-        interleaver.enabled = True
-        # Stand in for the mediator machinery: the check runs before any of it.
-        monkeypatch.setattr(type(interleaver), "observed", lambda self, p: True)
-        return interleaver
+        fragments = TPFragments()
+        fragments.enabled = True
+        return fragments
 
     def test_a_value_that_did_not_widen_is_refused(self, monkeypatch):
         from nnsight.modeling.tp import UnsupportedParallelStyle
@@ -548,37 +539,287 @@ class TestGatherShapeCheck:
         # The model's own hook already made it whole; gathering returns the same
         # width. Left unchecked, the user gets 4x the real tensor.
         value = torch.randn(1, 4, 2048)
-        interleaver = self._interleaver(monkeypatch, torch.randn(1, 4, 2048))
+        fragments = self._fragments(monkeypatch, torch.randn(1, 4, 2048))
 
         with pytest.raises(UnsupportedParallelStyle, match="times too wide|expected"):
-            interleaver._gather_whole("model.layer.output", value, mesh)
+            fragments._gather_whole("model.layer.output", value, mesh)
 
     def test_a_real_shard_passes(self, monkeypatch):
         mesh = FakeMesh(4)
         value = torch.randn(1, 4, 2048)
-        interleaver = self._interleaver(monkeypatch, torch.randn(1, 4, 8192))
+        fragments = self._fragments(monkeypatch, torch.randn(1, 4, 8192))
 
-        whole = interleaver._gather_whole("model.layer.output", value, mesh)
+        whole = fragments._gather_whole("model.layer.output", value, mesh)
         assert whole.shape[-1] == 8192
 
     def test_it_checks_once_per_location(self, monkeypatch):
         # A generation loop revisits a location hundreds of times; the rule is a
         # property of the model, not of the visit.
         mesh = FakeMesh(4)
-        interleaver = self._interleaver(monkeypatch, torch.randn(1, 4, 8192))
-        interleaver._gather_whole("model.layer.output", torch.randn(1, 4, 2048), mesh)
+        fragments = self._fragments(monkeypatch, torch.randn(1, 4, 8192))
+        fragments._gather_whole("model.layer.output", torch.randn(1, 4, 2048), mesh)
 
         import transformers.integrations.tensor_parallel as tp
 
         monkeypatch.setattr(tp, "all_gather", lambda t, m: torch.randn(1, 4, 2048))
         # Would raise if re-checked; the second visit is not checked.
-        interleaver._gather_whole("model.layer.output", torch.randn(1, 4, 2048), mesh)
+        fragments._gather_whole("model.layer.output", torch.randn(1, 4, 2048), mesh)
 
     def test_an_ambiguous_value_is_not_judged(self, monkeypatch):
         # Two float tensors of different widths: nothing to compare, so the check
         # abstains rather than guessing which one the rule meant.
         mesh = FakeMesh(4)
-        interleaver = self._interleaver(monkeypatch, torch.randn(1, 4, 2048))
+        fragments = self._fragments(monkeypatch, torch.randn(1, 4, 2048))
         value = (torch.randn(1, 4, 2048), torch.randn(1, 4, 512))
 
-        interleaver._gather_whole("model.layer.output", value, mesh)
+        fragments._gather_whole("model.layer.output", value, mesh)
+
+
+class TestHubFailuresAreDistinguishable:
+    """"Couldn't read it" must not be reported as "there's nothing to read".
+
+    Every reader on the placement path returns None to mean a real absence -- no
+    published parameter count, no config, no sharding plan. None is also what
+    `max_tp_size` returns to mean "this model cannot be split at all". So a
+    config that failed to download used to become a fact about the architecture,
+    and a perfectly shardable model was placed layer-by-layer with a debug line
+    as the only trace.
+    """
+
+    def _http(self, error_class, status):
+        # These carry the response they were built from; a 4xx is the Hub
+        # answering and a 5xx is the Hub failing, which is the distinction.
+        import requests
+        from huggingface_hub.errors import HfHubHTTPError  # noqa: F401
+
+        response = requests.Response()
+        response.status_code = status
+        return error_class("boom", response=response)
+
+    def test_a_missing_repo_is_an_absence(self):
+        from huggingface_hub.errors import RepositoryNotFoundError
+
+        from nnsight.modeling.huggingface import _unreachable
+
+        assert _unreachable(self._http(RepositoryNotFoundError, 404)) is False
+
+    def test_the_hub_failing_is_a_failure_to_read(self):
+        from huggingface_hub.errors import HfHubHTTPError
+
+        from nnsight.modeling.huggingface import _unreachable
+
+        assert _unreachable(self._http(HfHubHTTPError, 503)) is True
+
+    def test_the_hub_refusing_is_an_answer(self):
+        from huggingface_hub.errors import HfHubHTTPError
+
+        from nnsight.modeling.huggingface import _unreachable
+
+        assert _unreachable(self._http(HfHubHTTPError, 401)) is False
+
+    def test_no_network_and_no_cache_is_a_failure_to_read(self):
+        # Reads backwards, which is the whole reason this function exists: the
+        # Hub raises LocalEntryNotFoundError when it could not reach the network
+        # *and* found nothing cached. It is connectivity, not a missing file.
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        from nnsight.modeling.huggingface import _unreachable
+
+        assert _unreachable(LocalEntryNotFoundError("offline")) is True
+
+    def test_offline_mode_is_a_failure_to_read(self):
+        from huggingface_hub.errors import OfflineModeIsEnabled
+
+        from nnsight.modeling.huggingface import _unreachable
+
+        assert _unreachable(OfflineModeIsEnabled("offline")) is True
+
+    def test_a_socket_error_is_a_failure_to_read(self):
+        from nnsight.modeling.huggingface import _unreachable
+
+        assert _unreachable(OSError("connection reset")) is True
+
+    def test_an_unrelated_error_is_not(self):
+        from nnsight.modeling.huggingface import _unreachable
+
+        assert _unreachable(ValueError("bad config")) is False
+
+
+class TestHubCallsAreBounded:
+    """A slow Hub gives up rather than parking whoever asked.
+
+    Mostly not this code's doing, which is worth recording because it looked like
+    a gap: `AutoConfig.from_pretrained` takes no timeout argument, but everything
+    huggingface_hub fetches is bounded by `HF_HUB_ETAG_TIMEOUT` and
+    `HF_HUB_DOWNLOAD_TIMEOUT`, both 10s by default. So the config read is bounded
+    per request whether or not nnsight says so, and the only call that needed a
+    timeout passed explicitly is `model_info`, which accepts one.
+
+    An earlier version of this ran the read on an abandoned daemon thread to
+    bound it. That is worse than the problem: a thread left blocked in an
+    uninterruptible wait stops the *process* exiting -- verified, the interpreter
+    hangs -- which in a model actor means one that will not shut down when told.
+    """
+
+    def test_the_transport_is_bounded_by_default(self):
+        import huggingface_hub.constants as constants
+
+        assert constants.HF_HUB_ETAG_TIMEOUT > 0
+        assert constants.HF_HUB_DOWNLOAD_TIMEOUT > 0
+
+    def test_the_hub_api_call_is_given_a_timeout(self):
+        import inspect
+
+        from nnsight.modeling.huggingface import HUB_TIMEOUT_SECONDS, HuggingFaceModel
+
+        source = inspect.getsource(HuggingFaceModel._hub_parameter_count)
+        assert "timeout=HUB_TIMEOUT_SECONDS" in source
+        assert HUB_TIMEOUT_SECONDS > 0
+
+    def test_nothing_here_abandons_a_thread(self):
+        # The regression guard for the above: no background thread on this path.
+        import inspect
+
+        import nnsight.modeling.huggingface as hf
+
+        source = inspect.getsource(hf)
+        assert "ThreadPoolExecutor" not in source
+        assert "daemon=True" not in source
+
+
+class TestConfigIsReadOnce:
+    """Several questions are answered from one config; it is fetched once.
+
+    Sizing a model, working out how it shards, and reporting it in a status all
+    read the same object, and each used to fetch it again -- two network round
+    trips per cold entry, on the path that was already blocking the event loop.
+    """
+
+    def test_a_second_read_does_not_hit_the_network(self, monkeypatch):
+        import nnsight.modeling.huggingface as hf
+
+        calls = []
+
+        class Config:
+            base_model_tp_plan = {"layers.*.q_proj": "colwise"}
+            num_attention_heads = 32
+            num_key_value_heads = 8
+            intermediate_size = 14336
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return Config()
+
+        import transformers
+
+        monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", counted)
+
+        key = '{"repo_id": "x", "revision": null}'
+        hf._CONFIG_CACHE.pop((key, False), None)
+        first = hf.HuggingFaceModel._config(key, False)
+        second = hf.HuggingFaceModel._config(key, False)
+
+        assert first is second
+        assert len(calls) == 1, f"the config was fetched {len(calls)} times"
+
+    def test_the_two_questions_that_need_it_share_one_read(self, monkeypatch):
+        import nnsight.modeling.huggingface as hf
+
+        calls = []
+
+        class Config:
+            base_model_tp_plan = {"layers.*.q_proj": "colwise"}
+            num_attention_heads = 32
+            num_key_value_heads = 8
+            intermediate_size = 14336
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return Config()
+
+        key = '{"repo_id": "shared", "revision": null}'
+        hf._CONFIG_CACHE.pop((key, False), None)
+
+        import transformers
+
+        monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", counted)
+        # Not what this is about: stub the Hub record so only the config read is
+        # being counted.
+        monkeypatch.setattr(
+            hf.HuggingFaceModel, "_hub_parameter_count", staticmethod(lambda *a: 1_000)
+        )
+
+        assert hf.HuggingFaceModel._remoteable_max_tp_size(key) == 8
+        described = hf.HuggingFaceModel._remoteable_describe_checkpoint(key, "bfloat16")
+        assert described.config is not None
+        assert len(calls) == 1, f"the config was fetched {len(calls)} times"
+
+
+class TestDescribeCheckpoint:
+    """One call for what a checkpoint is; a separate one for what a runtime can
+    do with it.
+
+    The split is the point. `max_tp_size` is not a property of the files -- the
+    same weights shard eight ways under transformers tensor parallelism and not
+    at all under something else -- so folding it into a description of the
+    checkpoint would make it read as one.
+    """
+
+    def test_it_is_not_a_field_of_the_description(self):
+        from nnsight.modeling.mixins.remotable import CheckpointInfo
+
+        assert not hasattr(CheckpointInfo(), "max_tp_size")
+
+    def test_every_field_defaults_to_not_knowing(self):
+        from nnsight.modeling.mixins.remotable import CheckpointInfo
+
+        info = CheckpointInfo()
+        assert (info.size_bytes, info.n_params, info.config, info.revision) == (
+            None,
+            None,
+            None,
+            None,
+        )
+
+    def test_the_base_wrapper_answers_only_the_size(self, monkeypatch):
+        from nnsight.modeling.mixins.remotable import CheckpointInfo, Remotable
+
+        monkeypatch.setattr(
+            Remotable, "_remoteable_estimate_bytes", classmethod(lambda cls, *a, **k: 42)
+        )
+        info = Remotable._remoteable_describe_checkpoint("k", "bfloat16")
+
+        assert isinstance(info, CheckpointInfo)
+        assert info.size_bytes == 42
+        assert info.config is None and info.revision is None
+
+    def test_a_huggingface_key_reports_its_revision(self, monkeypatch):
+        import nnsight.modeling.huggingface as hf
+
+        key = '{"repo_id": "r", "revision": "abc123"}'
+        hf._CONFIG_CACHE[(key, False)] = None
+        monkeypatch.setattr(
+            hf.HuggingFaceModel, "_hub_parameter_count", staticmethod(lambda *a: 1_000)
+        )
+
+        info = hf.HuggingFaceModel._remoteable_describe_checkpoint(key, "bfloat16")
+
+        assert info.revision == "abc123"
+        assert info.n_params == 1_000
+        assert info.size_bytes == 2_000  # bfloat16
+
+    def test_sizing_and_describing_cannot_disagree(self, monkeypatch):
+        # One of these decides where a model goes. Two implementations of "how
+        # big is it" could drift; there is only one.
+        import nnsight.modeling.huggingface as hf
+
+        key = '{"repo_id": "r2", "revision": null}'
+        hf._CONFIG_CACHE[(key, False)] = None
+        monkeypatch.setattr(
+            hf.HuggingFaceModel, "_hub_parameter_count", staticmethod(lambda *a: 7_777)
+        )
+
+        described = hf.HuggingFaceModel._remoteable_describe_checkpoint(key, "float32")
+        estimated = hf.HuggingFaceModel._remoteable_estimate_bytes(key, "float32")
+
+        assert described.size_bytes == estimated

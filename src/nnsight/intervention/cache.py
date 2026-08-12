@@ -130,7 +130,7 @@ class Cache:
         answers by recording, asked without recording — for a caller that has to
         do work *before* the value can be offered, and only wants to do it for
         locations some cache actually keeps (see
-        [`TPInterleaver`][nnsight.modeling.tp.interleaver.TPInterleaver], which
+        [`TPFragments`][nnsight.modeling.tp.fragments.TPFragments], which
         must run a collective first). Shares `_select` with ``observe`` so the two
         can't drift.
         """

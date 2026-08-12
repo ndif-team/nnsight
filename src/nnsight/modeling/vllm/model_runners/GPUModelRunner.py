@@ -30,71 +30,20 @@ import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from ....intervention.interleaver import Interleaver
 from ....intervention.serialization import loads
 from ....tracing.tracer import _local, _saves, inc
 from ..batching import VLLMBatcher
+from ..fragments import VLLMFragments
 
 if TYPE_CHECKING:
     from vllm.sequence import IntermediateTensors
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
     from ..vllm import VLLM
-
-
-def _parallel_linears(module: torch.nn.Module) -> list[torch.nn.Module]:
-    """Every tensor-parallel linear in ``module``'s tree."""
-    from vllm.model_executor.layers.linear import (
-        ColumnParallelLinear,
-        RowParallelLinear,
-    )
-
-    return [
-        child
-        for child in module.modules()
-        if isinstance(child, (ColumnParallelLinear, RowParallelLinear))
-    ]
-
-
-def _watch_parallel_linears(module: torch.nn.Module, batcher: VLLMBatcher) -> None:
-    """Have the batcher note each parallel linear's value *before* workers see it.
-
-    Registered before the interleaver's hooks, so — pre-forward and forward hooks
-    both firing in registration order — these run first: the value is gathered by
-    the time a worker reads it. There is no ordered-hook machinery to arrange this;
-    it falls out of building the Envoy tree (which registers the interleaver's
-    hooks) after this call and before `_release_parallel_linears`.
-    """
-    for linear in _parallel_linears(module):
-        linear.register_forward_pre_hook(
-            lambda mod, args, kwargs, batcher=batcher: batcher.watch(mod, "input"),
-            with_kwargs=True,
-        )
-        linear.register_forward_hook(
-            lambda mod, args, kwargs, out, batcher=batcher: batcher.watch(mod, "output"),
-            with_kwargs=True,
-        )
-
-
-def _release_parallel_linears(module: torch.nn.Module, batcher: VLLMBatcher) -> None:
-    """Have the batcher re-shard each parallel linear's value *after* workers edit it.
-
-    Registered after the interleaver's hooks so they run last, handing vLLM back a
-    shard of whatever the workers left — the reduced form its own forward expects.
-    """
-    for linear in _parallel_linears(module):
-        # The interleaver serves a module's input as the whole (args, kwargs), so a
-        # pre-hook returning that pair replaces both — hand back the resharded pair.
-        linear.register_forward_pre_hook(
-            lambda mod, args, kwargs, batcher=batcher: batcher.release((args, kwargs)),
-            with_kwargs=True,
-        )
-        linear.register_forward_hook(
-            lambda mod, args, kwargs, out, batcher=batcher: batcher.release(out),
-            with_kwargs=True,
-        )
 
 
 class Requests:
@@ -354,20 +303,17 @@ class NNsightGPUModelRunner(GPUModelRunner):
         super().load_model(*args, **kwargs)
 
         batcher = VLLMBatcher()
-        # With one rank nothing is sharded, so there is nothing to gather.
-        sharded = get_tp_group().world_size > 1
-        if sharded:
-            _watch_parallel_linears(self.model, batcher)
 
         # An Envoy tree over the real module. Passing a loaded module builds it
         # directly, so no weights are read twice and the paths match the ones the
-        # client's meta tree gave the user. Building it here also registers the
-        # interleaver's hooks, which is what brackets the gather (see below).
-        self.nnsight_model: VLLM = VLLM(self.model)
+        # client's meta tree gave the user. Building it here is also what walks
+        # every module past `VLLMFragments.instrument`, so the tree comes back
+        # already knowing which of its values are one rank's piece — on one rank
+        # it finds nothing and stays inert.
+        self.nnsight_model: VLLM = VLLM(
+            self.model, interleaver=Interleaver(fragments=VLLMFragments())
+        )
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
-
-        if sharded:
-            _release_parallel_linears(self.model, batcher)
 
         interleaver = self.nnsight_model.interleaver
         interleaver.mediators = []

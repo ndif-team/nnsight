@@ -159,13 +159,13 @@ def test_swapped_experts_output_reaches_the_block_once(vllm_moe_tp):
     )
 
 
-class TestBatcherPolicy:
-    """Which MoE values count as shards, and what a write-back is divided by.
+class TestFragmentPolicy:
+    """Which MoE values count as pieces, and what a write-back is divided by.
 
-    Runs without GPUs: the decisions in `VLLMBatcher.watch` and the divisor in
-    `VLLMBatcher._shard` are pure functions of the module's parallel config, so a
-    stub with that config pins them. The end-to-end tests above check the numbers
-    these decisions produce; these check the decisions.
+    Runs without GPUs: the decision in `_is_piece` and the divisor in
+    `VLLMFragments.fragment` are pure functions of the module's parallel config,
+    so a stub with that config pins them. The end-to-end tests above check the
+    numbers these decisions produce; these check the decisions.
     """
 
     @staticmethod
@@ -212,21 +212,19 @@ class TestBatcherPolicy:
             (dict(tp=2, ep=1, must_reduce=True), "output", False),
         ],
     )
-    def test_only_deferred_reduce_outputs_are_shards(self, config, kind, expected):
-        from nnsight.modeling.vllm.batching import VLLMBatcher
+    def test_only_deferred_reduce_outputs_are_pieces(self, config, kind, expected):
+        from nnsight.modeling.vllm.fragments import _is_piece
 
-        batcher = VLLMBatcher()
-        batcher.watch(self._stub(**config), kind)
-        assert batcher.parallel is expected
+        assert _is_piece(self._stub(**config), kind) is expected
 
     @pytest.mark.parametrize("tp, ep", [(2, 1), (1, 2), (2, 4)])
     def test_write_back_divides_by_the_group_size(self, tp, ep):
         # The block all-reduces over tp*ep ranks right after, so an equal share
         # is what sums back to the whole exactly once.
-        from nnsight.modeling.vllm.batching import VLLMBatcher
+        from nnsight.modeling.vllm.fragments import VLLMFragments
 
-        batcher = VLLMBatcher()
-        batcher.watch(self._stub(tp=tp, ep=ep), "output")
-        sharded = batcher._shard(torch.full((2, 4), 6.0))
+        fragments = VLLMFragments()
+        fragments.rules["m.output"] = (self._stub(tp=tp, ep=ep), "output")
+        sharded = fragments.fragment("m.output", torch.full((2, 4), 6.0))
 
         assert torch.allclose(sharded, torch.full((2, 4), 6.0 / (tp * ep)))
