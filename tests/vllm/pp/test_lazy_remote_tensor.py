@@ -75,21 +75,6 @@ class TestNoTraffic:
         with pytest.raises(ValueError, match="outside of interleaving"):
             lazy + 1
 
-    def test_torch_function_refuses_an_unforced_proxy(self):
-        # Materializing inside torch's dispatcher would park the worker with
-        # dispatcher state installed on the thread; the forward then runs
-        # under it and the process segfaults. The guard raises instead, and
-        # must pull nothing.
-        lazy = make_lazy()
-        with pytest.raises(RuntimeError, match="has not been materialized"):
-            torch.ones_like(lazy)
-        assert lazy._real is None
-
-    def test_torch_function_refuses_a_child_of_an_unforced_proxy(self):
-        lazy = make_lazy()
-        with pytest.raises(RuntimeError, match="has not been materialized"):
-            torch.sum(lazy[0])
-
     def test_torch_function_accepts_a_child_of_a_forced_proxy(self):
         # Indexing into a cached parent never parks, so the guard must let a
         # resolved chain through.

@@ -1,22 +1,27 @@
-"""Per-greenlet torch thread-local state isolation. Env-gated.
+"""Per-greenlet torch thread-local state isolation.
 
-``NNSIGHT_PP_TLS_SWAP=1`` installs a greenlet trace hook on the forward
-thread: on every switch or throw, capture the departing greenlet's torch
-thread-local state and install the arriving greenlet's saved one. This
-restores the per-thread isolation that 0.7's real threads provided, where
-each intervention block had its own copy of torch's per-thread state.
+Installed by the PP runner on the forward thread: on every greenlet switch
+or throw, capture the departing greenlet's torch thread-local state and
+install the arriving greenlet's saved one. This restores the per-thread
+isolation that 0.7's real threads provided, where each intervention block
+had its own copy of torch's per-thread state. Without it, a worker that
+parks inside a torch call (forcing a cross-stage value in
+``__torch_function__``, or any operator with a plain tensor on the left of a
+lazy) leaves torch's dispatcher state installed on the thread, and the
+forward that runs next segfaults in C++ (observed: SIGSEGV in ``c10::warn``
+under ``ProcessGroupNCCL::send``).
 
 The bundle is the C-level ``at::ThreadLocalState`` plus the c10 warning
 handler, captured through a small extension JIT-built against the installed
 torch on first use (see ``pp_tls_state.cpp``). A Python-level bundle (grad
-mode, dispatcher key sets) was prototyped first and failed the canary —
-``torch.ones_like(unforced_lazy)`` on a PP engine still killed the worker —
-because the crashing word, the warning handler pointing into the parked
-greenlet's C stack, has no Python surface.
+mode, dispatcher key sets) was prototyped first and failed the canary
+(``torch.ones_like(unforced_lazy)`` still killed the worker) because the
+crashing word, the warning handler pointing into the parked greenlet's C
+stack, has no Python surface.
 
-While the swap is active, the ``__torch_function__`` materialization guard
-in ``lazy_remote_tensor`` stands down: parks inside torch's dispatcher are
-the case this swap makes safe.
+On by default for PP; ``NNSIGHT_PP_TLS_SWAP=0`` disables it, which leaves
+parks inside torch calls unsafe. A failed extension build raises at engine
+start instead of running unprotected.
 """
 
 from __future__ import annotations
@@ -33,17 +38,8 @@ _installed = threading.local()
 _module = None
 
 
-def requested() -> bool:
-    return os.environ.get("NNSIGHT_PP_TLS_SWAP") == "1"
-
-
-def active() -> bool:
-    """Whether the swap is loaded and protecting this process.
-
-    The guard consults this: it must stand down only once the extension
-    actually loaded, never on the env var alone.
-    """
-    return _module is not None
+def enabled() -> bool:
+    return os.environ.get("NNSIGHT_PP_TLS_SWAP") != "0"
 
 
 def _load():

@@ -114,43 +114,14 @@ class LazyRemoteTensor:
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
-        # Materializing here would park the worker greenlet INSIDE torch's
-        # dispatcher: every torch binding installs thread-local state on entry
-        # (the pybind warning handler lives on this greenlet's C stack) that
-        # stays installed across the switch, and the forward that then runs on
-        # this thread segfaults in C++ the next time that state is consulted
-        # (observed: SIGSEGV in c10::warn under ProcessGroupNCCL::send).
-        # Parks from plain Python frames — operators, methods, properties —
-        # carry no dispatcher state, so force the value through one of those
-        # first. Refusing loudly here turns a silent worker-process death into
-        # a catchable in-trace error.
-        def check(x):
-            if isinstance(x, LazyRemoteTensor):
-                root = x
-                while root._parent is not None:
-                    root = root._parent
-                # A resolved root means materializing is pure indexing into
-                # the cached value; only an unresolved root would park. With
-                # the thread-local-state swap active (prototype), such parks
-                # are the case it exists to make safe, so the guard stands
-                # down and lets the canary exercise them.
-                from .pp_tls_swap import active as _tls_swap_active
-
-                if root._real is None and not _tls_swap_active():
-                    raise RuntimeError(
-                        f"{func.__name__} received a cross-stage value that "
-                        f"has not been materialized "
-                        f"({x._meta['provider_string']!r}). Torch functions "
-                        f"cannot force one under pipeline parallelism, and "
-                        f"an operator with a plain tensor on the LEFT "
-                        f"(``tensor + value``) routes through the same torch "
-                        f"machinery. Read the value first with a method or "
-                        f"with it leading the expression (``value.clone()``, "
-                        f"``value + 0``), then use the result."
-                    )
-            return x
-
-        tree_map(check, (args, kwargs))
+        # Materializing here can park the worker greenlet INSIDE torch's
+        # dispatcher, whose entry state (including the pybind warning handler,
+        # a pointer into this greenlet's C stack) lives in OS-thread-local
+        # storage. That is safe only because the PP runner installs the
+        # per-greenlet state swap (pp_tls_swap): the switch carries the
+        # dispatcher state away with the parked worker and restores the
+        # forward's own. Without the swap this park poisons the forward's
+        # thread state and the process segfaults in C++.
         args = tree_map(
             lambda x: x._materialize() if isinstance(x, LazyRemoteTensor) else x,
             args,
