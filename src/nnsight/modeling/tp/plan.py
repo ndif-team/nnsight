@@ -76,3 +76,67 @@ def max_tp_size(config: Any) -> Optional[int]:
     # so the gcd *is* the largest workable degree and its divisors are the rest.
     limit = gcd(*dimensions) if len(dimensions) > 1 else dimensions[0]
     return limit if limit > 1 else None
+
+
+class UnshardableCheckpoint(ValueError):
+    """A tensor-parallel degree was asked for that this checkpoint cannot serve."""
+
+
+def requested_tp_size(distributed_config: Any) -> Optional[int]:
+    """The degree a ``distributed_config`` asks for, or ``None`` if it asks for none.
+
+    Accepts the dataclass or a plain dict, because transformers does.
+    """
+    if distributed_config is None:
+        return None
+
+    if isinstance(distributed_config, dict):
+        size = distributed_config.get("tp_size")
+    else:
+        size = getattr(distributed_config, "tp_size", None)
+
+    return size if isinstance(size, int) and size > 1 else None
+
+
+def check_tp_request(config: Any, tp_size: Optional[int]) -> None:
+    """Raise unless ``tp_size`` is a degree ``config``'s model can really be split into.
+
+    transformers does not check this. Asked to shard a checkpoint with no plan it
+    shards *nothing*: ``verify_tp_plan`` returns early on a ``None`` plan and
+    ``apply_tensor_parallelism`` installs no hooks, so every rank quietly loads a
+    complete copy of the weights. Nothing errors and nothing warns — the model
+    answers correctly off one rank while the other cards hold redundant copies,
+    so the only symptom is *n* times the memory for one model's worth of work.
+
+    That is worth refusing rather than reporting, because there is no reading of
+    "shard this over 4 GPUs" that is served by putting the whole thing on each of
+    them. Raising here also puts the failure before the weights are fetched,
+    where the message can still say what to do about it.
+
+    Raises:
+        UnshardableCheckpoint: if the model cannot be split at all, or not into
+            exactly ``tp_size`` pieces.
+    """
+    if tp_size is None:
+        return
+
+    limit = max_tp_size(config)
+    if limit is None:
+        raise UnshardableCheckpoint(
+            f"this checkpoint cannot be split tensor-parallel, so tp_size={tp_size} "
+            "would load a whole copy of it onto every rank rather than a shard. "
+            "Either it publishes no `base_model_tp_plan`, its plan uses a style "
+            "nnsight cannot gather, or its dimensions divide no degree above 1. "
+            "Load it without `distributed_config` — on one GPU, or spread over "
+            "several with `device_map`."
+        )
+
+    if limit % tp_size:
+        workable = sorted(size for size in range(2, limit + 1) if limit % size == 0)
+        raise UnshardableCheckpoint(
+            f"this checkpoint splits at most {limit} ways and not into {tp_size} "
+            f"pieces: a degree has to divide the dimensions evenly, so the ones "
+            f"that work are {workable}. transformers would shard what it could and "
+            "gather as though every rank held an equal piece, which does not fail "
+            "so much as return the wrong shape."
+        )

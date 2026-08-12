@@ -131,6 +131,23 @@ class HuggingFaceModel(Remotable):
         return self._auto().from_config(config)
 
     def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        # Before the weights are fetched, because that is the only point where a
+        # refusal is cheap and the message can still say what to do instead.
+        # transformers accepts an impossible degree silently -- see
+        # `check_tp_request` -- so a checkpoint that cannot be split would
+        # otherwise load a full copy on every rank and look like it worked.
+        from .tp import check_tp_request, requested_tp_size
+
+        tp_size = requested_tp_size(kwargs.get("distributed_config"))
+        if tp_size is not None:
+            from transformers import AutoConfig
+
+            # Only read when a degree was actually asked for: the ordinary path
+            # should not pay a config load for a check that cannot apply to it.
+            check_tp_request(
+                AutoConfig.from_pretrained(repo_id, revision=self.revision), tp_size
+            )
+
         return self._auto().from_pretrained(repo_id, revision=self.revision, **kwargs)
 
     def _remoteable_model_key(self) -> str:

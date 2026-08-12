@@ -18,7 +18,12 @@ from .fragments import (
     UnsupportedTransformersVersion,
     is_sharded,
 )
-from .plan import max_tp_size
+from .plan import (
+    UnshardableCheckpoint,
+    check_tp_request,
+    max_tp_size,
+    requested_tp_size,
+)
 
 __all__ = [
     "MINIMUM_TRANSFORMERS",
@@ -28,5 +33,8 @@ __all__ = [
     "UnsupportedParallelStyle",
     "UnsupportedTransformersVersion",
     "is_sharded",
+    "UnshardableCheckpoint",
+    "check_tp_request",
     "max_tp_size",
+    "requested_tp_size",
 ]

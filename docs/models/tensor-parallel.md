@@ -120,6 +120,40 @@ back `tp_size` times too wide. The argmax still lands inside the first copy, so
 nothing downstream looks wrong. nnsight raises `UnsupportedTransformersVersion`
 rather than let that through.
 
+## A checkpoint that cannot be split at all
+
+Not every model publishes a sharding plan. gpt2 is the obvious one: its config
+has no `base_model_tp_plan`, so there is nothing telling transformers which
+weights to cut or along which dimension.
+
+**transformers does not refuse this, and does not warn.** Given a plan of `None`
+it shards *nothing* — `verify_tp_plan` returns early and no hooks are installed —
+so every rank loads a complete copy of the weights. The model then answers
+correctly off one rank while the other cards hold redundant copies. Nothing
+fails; you simply paid `tp_size` GPUs for one GPU's worth of work.
+
+nnsight raises `UnshardableCheckpoint` instead, before the weights are fetched:
+
+```python
+TransformersModel(
+    "openai-community/gpt2",
+    distributed_config=DistributedConfig(tp_size=2),
+)
+# UnshardableCheckpoint: this checkpoint cannot be split tensor-parallel, so
+# tp_size=2 would load a whole copy of it onto every rank rather than a shard.
+```
+
+The same error covers a degree that does not divide evenly — `tp_size=3` on a
+model that splits 8 ways — because the all-gather assumes every rank holds an
+equal piece, so an uneven degree returns the wrong shape rather than running
+slower. The message lists the degrees that would work.
+
+To find out in advance, ask
+[`max_tp_size`][nnsight.modeling.tp.plan.max_tp_size] for the largest degree a
+config supports; every workable degree is one of its divisors, and `None` means
+the model has to be spread some other way (one GPU, or `device_map` over
+several).
+
 ## What is not supported
 
 A few expert-parallel styles slice by *expert* rather than along the feature

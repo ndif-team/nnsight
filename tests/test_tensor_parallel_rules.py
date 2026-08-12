@@ -823,3 +823,111 @@ class TestDescribeCheckpoint:
         estimated = hf.HuggingFaceModel._remoteable_estimate_bytes(key, "float32")
 
         assert described.size_bytes == estimated
+
+
+class TestCheckTpRequest:
+    """Refusing a degree the checkpoint cannot actually be split into.
+
+    transformers does not check this and does not fail. Asked to shard a model
+    with no plan it shards *nothing*: `verify_tp_plan` returns early on a `None`
+    plan and `apply_tensor_parallelism` installs no hooks, so every rank loads a
+    complete copy of the weights, nothing warns, and the model answers correctly
+    off one rank while the other cards hold redundant copies. The only symptom is
+    n times the memory for one model's worth of work, which is why this refuses
+    rather than reports.
+    """
+
+    def _config(self, **fields):
+        plan = fields.pop("plan", {"layers.*.self_attn.q_proj": "colwise"})
+        config = type("Config", (), {})()
+        config.base_model_tp_plan = plan
+        for name, value in fields.items():
+            setattr(config, name, value)
+        return config
+
+    def _shardable(self):
+        # 24 heads, 8 kv heads, 8192 intermediate -> splits 8 ways.
+        return self._config(
+            num_attention_heads=24, num_key_value_heads=8, intermediate_size=8192
+        )
+
+    def test_asking_for_no_degree_checks_nothing(self):
+        # The ordinary single-GPU path reaches this on every load; it must not
+        # even look at the config.
+        from nnsight.modeling.tp import check_tp_request
+
+        check_tp_request(None, None)
+
+    def test_a_checkpoint_with_no_plan_is_refused(self):
+        # gpt2's shape, and the case this exists for.
+        from nnsight.modeling.tp import UnshardableCheckpoint, check_tp_request
+
+        with pytest.raises(UnshardableCheckpoint, match="cannot be split"):
+            check_tp_request(self._config(plan=None, num_attention_heads=12), 2)
+
+    def test_the_refusal_says_what_would_have_happened(self):
+        # A message that only says "unsupported" leaves the operator to discover
+        # that it *would* have loaded, wrongly. This is the part worth keeping.
+        from nnsight.modeling.tp import UnshardableCheckpoint, check_tp_request
+
+        with pytest.raises(UnshardableCheckpoint, match="whole copy of it onto every rank"):
+            check_tp_request(self._config(plan=None, num_attention_heads=12), 4)
+
+    def test_a_workable_degree_is_allowed(self):
+        from nnsight.modeling.tp import check_tp_request
+
+        for degree in (2, 4, 8):
+            check_tp_request(self._shardable(), degree)
+
+    def test_a_degree_that_does_not_divide_is_refused(self):
+        # Not a slower option: the all-gather assumes equal pieces, so an uneven
+        # degree returns the wrong shape rather than failing outright.
+        from nnsight.modeling.tp import UnshardableCheckpoint, check_tp_request
+
+        with pytest.raises(UnshardableCheckpoint, match="splits at most 8 ways"):
+            check_tp_request(self._shardable(), 3)
+
+    def test_it_lists_the_degrees_that_would_work(self):
+        from nnsight.modeling.tp import UnshardableCheckpoint, check_tp_request
+
+        with pytest.raises(UnshardableCheckpoint, match=r"\[2, 4, 8\]"):
+            check_tp_request(self._shardable(), 6)
+
+    def test_it_agrees_with_max_tp_size(self):
+        # The two must refuse the same set. `max_tp_size` is what a server places
+        # from; this is what a load refuses on. A model placed on cards it then
+        # refuses to load onto is the failure this pairing prevents.
+        from nnsight.modeling.tp import UnshardableCheckpoint, check_tp_request, max_tp_size
+
+        for config in (self._shardable(), self._config(plan=None, num_attention_heads=12)):
+            limit = max_tp_size(config)
+            for degree in range(2, 10):
+                allowed = limit is not None and limit % degree == 0
+                try:
+                    check_tp_request(config, degree)
+                except UnshardableCheckpoint:
+                    assert not allowed, f"refused tp_size={degree} though the limit is {limit}"
+                else:
+                    assert allowed, f"allowed tp_size={degree} though the limit is {limit}"
+
+
+class TestRequestedTpSize:
+    """Reading the degree off whatever transformers would accept."""
+
+    def test_no_config_asks_for_nothing(self):
+        from nnsight.modeling.tp import requested_tp_size
+
+        assert requested_tp_size(None) is None
+
+    def test_a_degree_of_one_is_not_a_request(self):
+        # tp_size=1 is the ordinary single-process case, not a split.
+        from nnsight.modeling.tp import requested_tp_size
+
+        assert requested_tp_size(type("D", (), {"tp_size": 1})()) is None
+
+    def test_a_dataclass_and_a_dict_read_the_same(self):
+        # transformers takes either, so the check has to see either.
+        from nnsight.modeling.tp import requested_tp_size
+
+        assert requested_tp_size(type("D", (), {"tp_size": 4})()) == 4
+        assert requested_tp_size({"tp_size": 4}) == 4
