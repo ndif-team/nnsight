@@ -24,6 +24,7 @@ import json
 import sys
 import time
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from uuid import uuid4
 from typing import Any, AsyncIterator, Optional
 
 from ...schema.config import CONFIG
@@ -114,6 +115,18 @@ class RemoteBackend(Backend):
             enabled=CONFIG.APP.REMOTE_LOGGING or self.verbose, verbose=self.verbose
         )
 
+    #: How the payload travels, learned from the ``/subscribe`` handshake.
+    #: ``None`` is the ordinary NDIF — a multipart body up, a presigned url down.
+    #: ``"shm"`` is a singleton deployment on this machine, which takes a
+    #: shared-memory path both ways (see [`shm`][nnsight.intervention.backends.shm]).
+    #:
+    #: **Detected, not configured.** The client reads that frame *before* it
+    #: sends anything, which makes it the only point where a server can change
+    #: how the payload travels for free — by the time a response could say so,
+    #: the payload has already gone the slow way. So pointing a client at a
+    #: singleton is the whole of the setup; nothing about `remote=True` changes.
+    transport: Optional[str] = None
+
     def _log(self, message: str) -> None:
         """Print a diagnostic line when verbose (payload/result sizes, etc.)."""
         if self.verbose:
@@ -173,12 +186,26 @@ class RemoteBackend(Backend):
     def download_result(self, url: Optional[str]) -> Optional[RESULT]:
         """Stream and deserialize the result blob from a presigned url.
 
+        Or, against a singleton, read it from the shared-memory path that took
+        the url's place.
+
         Downloads in chunks behind a tqdm progress bar (shown when remote logging
         is enabled), then decompresses under the same flag the request was
         compressed with and loads it with torch.load.
         """
         if not url:
             return None
+
+        # A singleton put the result in shared memory rather than an object
+        # store, so `data` is a path on this machine and there is nothing to
+        # download -- reading it *is* the transfer, and reading unlinks it,
+        # which is what reclaims the memory.
+        if self.transport == "shm":
+            from . import shm
+
+            content = shm.read(url)
+            self._log(f"result: {len(content):,} bytes read from {url}")
+            return self.finalize(content)
 
         import io
 
@@ -224,6 +251,19 @@ class RemoteBackend(Backend):
 
         return torch.load(io.BytesIO(content), map_location="cpu", weights_only=False)
 
+    def _adopt_transport(self, transport: Optional[str], request: RequestModel) -> None:
+        """Take the transport the handshake announced, and its consequences.
+
+        Only one so far: a singleton is never compressed. zstd earns its keep by
+        shrinking what crosses a wire, and there is none — measured at 180 ms of
+        a 470 ms round trip on a 45 MB result. The request carries the flag too,
+        because the *server* matches it when it returns the result.
+        """
+        self.transport = transport
+        if transport == "shm":
+            self.compress = False
+            request.compress = False
+
     def _post(self, request: RequestModel, blob: bytes) -> ResponseModel:
         """POST the request over HTTP and return the initial (RECEIVED) response.
 
@@ -245,14 +285,25 @@ class RemoteBackend(Backend):
             headers["ndif-api-key"] = self.api_key
 
         timeout = httpx.Timeout(_CONNECT_TIMEOUT, read=_READ_TIMEOUT)
+        # A singleton takes the payload through shared memory: the same JSON
+        # envelope plus where the bytes are, and no body. Written before the POST
+        # so the path names something by the time the server reads it.
+        payload_path = self._stage(blob) if self.transport == "shm" else None
         try:
             with httpx.Client(timeout=timeout) as client:
-                http_response = client.post(
-                    f"{self.host}/request",
-                    data={"data": request.metadata()},
-                    files={"blob": ("request", blob, "application/octet-stream")},
-                    headers=headers,
-                )
+                if payload_path is not None:
+                    body = json.loads(request.metadata())
+                    body["payload_path"] = payload_path
+                    http_response = client.post(
+                        f"{self.host}/request", json=body, headers=headers
+                    )
+                else:
+                    http_response = client.post(
+                        f"{self.host}/request",
+                        data={"data": request.metadata()},
+                        files={"blob": ("request", blob, "application/octet-stream")},
+                        headers=headers,
+                    )
             http_response.raise_for_status()
         except httpx.HTTPStatusError as error:
             # The server explains the failure in the JSON body (FastAPI returns
@@ -267,9 +318,37 @@ class RemoteBackend(Backend):
                 detail = error.response.text or None
             raise RemoteError(f"Failed to send request: {detail or error}") from error
         except httpx.HTTPError as error:
+            if payload_path is not None:
+                # The server never read it, so nobody will: the reader is what
+                # reclaims a segment, and there isn't one.
+                from . import shm
+
+                shm.discard(payload_path)
             raise RemoteError(f"Failed to send request: {error}") from error
 
         return ResponseModel.model_validate_json(http_response.text)
+
+    def _stage(self, blob: bytes) -> str:
+        """Put the payload in shared memory and return its path.
+
+        The server unlinks it once read, so nothing here has to — except when
+        the POST never arrives, which `_post` handles.
+        """
+        from . import shm
+
+        if not shm.available():
+            raise RemoteError(
+                f"This deployment is a singleton and hands its payload over "
+                f"through {shm.ROOT}, which is not writable here. That directory "
+                "is how the two ends share memory, so it only works from the "
+                "machine the singleton runs on."
+            )
+        # The client's RequestModel carries no id -- the server mints one -- so
+        # the segment gets a fresh uuid. It only has to be unique against other
+        # in-flight requests on this machine.
+        path = shm.write(blob, uuid4().hex)
+        self._log(f"payload: {len(blob):,} bytes staged at {path}")
+        return path
 
     def send(self, request: RequestModel, blob: bytes) -> Optional[RESULT]:
         """Submit the request and handle the initial (blocking) response."""
@@ -333,16 +412,20 @@ class RemoteBackend(Backend):
     def request(self, request: RequestModel, tracer: Tracer) -> Optional[RESULT]:
         import websocket  # lazy: only needed for actual remote calls
 
-        blob = self._serialize(tracer)
-
-        # Subscribe before sending so no update is missed; the server assigns
-        # the session id and sends it as the first message.
+        # Subscribe *before* serializing, not just before sending: the handshake
+        # decides whether this is a singleton, and that decides whether the blob
+        # is compressed. Serializing first would compress a payload destined for
+        # shared memory, which is pure cost -- there is no wire to shrink it for.
         connection = websocket.create_connection(
             f"{self.ws_host}/subscribe",
             header={"ndif-api-key": self.api_key} if self.api_key else None,
         )
         try:
-            request.session_id = json.loads(connection.recv())["session_id"]
+            handshake = json.loads(connection.recv())
+            request.session_id = handshake["session_id"]
+            self._adopt_transport(handshake.get("transport"), request)
+
+            blob = self._serialize(tracer)
 
             # The initial response comes back over HTTP.
             self.send(request, blob)
