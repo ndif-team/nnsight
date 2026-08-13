@@ -969,7 +969,12 @@ class TestEveryLoadPathChecks:
         return {
             cls: inspect.getsource(cls.__dict__["_load"])
             for cls in seen
-            if "_load" in cls.__dict__ and cls.__name__ not in self.NOT_TRANSFORMERS
+            # Shipped classes only. `__subclasses__` also sees every test double
+            # any other module has defined, and a stub that never loads weights is
+            # not something this guard has anything to say about.
+            if cls.__module__.startswith("nnsight.")
+            and "_load" in cls.__dict__
+            and cls.__name__ not in self.NOT_TRANSFORMERS
         }
 
     def test_the_sweep_finds_the_overrides(self):
