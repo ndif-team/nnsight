@@ -330,6 +330,14 @@ class TransformersModel(HuggingFaceModel):
         from transformers import AutoConfig, pipeline
         from transformers.pipelines import check_task, get_task
 
+        from .quantization import resolve_load_kwargs
+
+        # A quantization name in `dtype` becomes the compute dtype here and no
+        # quantizer config: there are no weights on meta to quantize. Done before
+        # the filter below, not after, so an explicit compute dtype (which is not
+        # an architecture kwarg and would be dropped) still reaches the build.
+        kwargs = resolve_load_kwargs(kwargs, quantize=False)
+
         # Only architecture-shaping kwargs reach the meta build (see
         # _META_MODEL_KWARGS); AutoConfig.from_pretrained tolerates extras but
         # from_config does not, and placement kwargs don't apply to meta tensors.
@@ -390,10 +398,18 @@ class TransformersModel(HuggingFaceModel):
     def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import pipeline
 
+        from .quantization import resolve_load_kwargs
+
         # Before the split, and before the pipeline fetches anything. This path
         # does not reach the base's `_load`, so the check has to be repeated
         # here -- the tensor-parallel server loads through *this* class.
         self._refuse_impossible_tp(repo_id, kwargs)
+
+        # Also before the split: `dtype` is a pipeline-factory argument, so a
+        # quantization name left in it would be handed to `pipeline()` rather
+        # than to the quantizer. `quantization_config` is not a factory argument
+        # and lands in `model_kwargs`, which is where from_pretrained wants it.
+        kwargs = resolve_load_kwargs(kwargs)
 
         top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
         # The pipeline loads the model and infers every preprocessor; only

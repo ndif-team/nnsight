@@ -69,26 +69,6 @@ class CheckpointInfo:
     revision: Optional[str] = None
 
 
-#: Bytes per stored element for names that aren't torch dtypes — quantizations,
-#: which are how a checkpoint is *held* rather than a type torch has. A caller
-#: sizing a deployment names these as plainly as it names ``"bfloat16"``.
-#:
-#: These are the nominal widths and they under-count real footprint:
-#: bitsandbytes leaves the LM head (usually the embeddings and norms too) in 16
-#: bits and stores an absmax/scale tensor per block, none of which is in the
-#: parameter count. `accelerate`'s memory estimator makes the same simplification.
-#: Anything placing a model on this number should pad it.
-_QUANTIZED_BYTES: dict[str, float] = {
-    "int4": 0.5,
-    "nf4": 0.5,
-    "fp4": 0.5,
-    "4bit": 0.5,
-    "int8": 1.0,
-    "fp8": 1.0,
-    "8bit": 1.0,
-}
-
-
 def bytes_per_element(dtype: str) -> float:
     """How many bytes one weight occupies when held as ``dtype``.
 
@@ -97,28 +77,72 @@ def bytes_per_element(dtype: str) -> float:
     (``"int4"``, ``"nf4"``, ``"fp8"``). Fractional for sub-byte formats, so the
     result is a float — round the product, not this.
 
+    The quantization names come from
+    [`QUANTIZATIONS`][nnsight.modeling.quantization.QUANTIZATIONS], which is the
+    same table the loader builds from. Sizing a checkpoint and loading it must
+    accept exactly the same set: a name only one side knows is a deployment that
+    is placed and then cannot load, or loads having never been placed. See there
+    for why these widths are nominal and a caller has to pad.
+
     Raises:
         ValueError: for a name that is neither, rather than defaulting to a
             plausible width: a wrong guess here silently mis-sizes a deployment.
     """
     import torch
 
+    from ..quantization import QUANTIZATIONS
+
     name = dtype.removeprefix("torch.").lower()
 
     # The table wins over torch, which reports sub-byte dtypes as one byte
     # because that is the smallest thing it can address: `torch.int4.itemsize`
     # is 1, and sizing 4-bit weights by it would ask for twice the memory.
-    if name in _QUANTIZED_BYTES:
-        return _QUANTIZED_BYTES[name]
+    if name in QUANTIZATIONS:
+        return QUANTIZATIONS[name].bytes_per_element
 
     resolved = getattr(torch, name, None)
     if isinstance(resolved, torch.dtype):
-        return float(resolved.itemsize)
+        if _addressable(resolved):
+            return float(resolved.itemsize)
+
+        # torch carries `int1` through `int7` (and the unsigned ones), all
+        # reporting an itemsize of 1. Sizing weights by that asks for up to eight
+        # times the memory they take, and nothing here can load them anyway:
+        # the sub-byte formats a checkpoint is really held in are in
+        # QUANTIZATIONS under their own names, with a quantizer behind each.
+        raise ValueError(
+            f"Cannot size a checkpoint held as {dtype!r}: torch reports it as one "
+            "byte per element regardless of how narrow it is. The sub-byte formats "
+            f"that can be loaded are {sorted(QUANTIZATIONS)}."
+        )
 
     raise ValueError(
         f"Unknown dtype {dtype!r}: not a torch dtype and not one of "
-        f"{sorted(_QUANTIZED_BYTES)}."
+        f"{sorted(QUANTIZATIONS)}."
     )
+
+
+def _addressable(dtype: Any) -> bool:
+    """Whether ``dtype.itemsize`` is really how much one element occupies.
+
+    True for every dtype that occupies whole bytes. False for torch's sub-byte
+    integer dtypes, which round their itemsize up to 1 — and which are exactly
+    the ones neither ``iinfo`` nor ``finfo`` will describe, so that is the test.
+    Only an itemsize of 1 is in doubt; anything wider cannot have been rounded up
+    to a whole byte, and asking about it would get ``complex64`` wrong (32-bit
+    components, 8 bytes stored).
+    """
+    import torch
+
+    if dtype.itemsize > 1:
+        return True
+
+    for info in (torch.iinfo, torch.finfo):
+        try:
+            return info(dtype).bits == 8
+        except TypeError:
+            continue
+    return False
 
 
 class Remotable(Meta):

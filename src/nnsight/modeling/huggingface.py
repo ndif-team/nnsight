@@ -161,7 +161,12 @@ class HuggingFaceModel(Remotable):
         )
 
     def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
+        from .quantization import resolve_load_kwargs
+
         self._refuse_impossible_tp(repo_id, kwargs)
+        # A `dtype=` naming a quantization becomes a quantizer config plus the
+        # compute dtype; an ordinary dtype passes through untouched.
+        kwargs = resolve_load_kwargs(kwargs)
         return self._auto().from_pretrained(repo_id, revision=self.revision, **kwargs)
 
     def _remoteable_model_key(self) -> str:
