@@ -25,12 +25,21 @@ saves and errors are snapshotted onto the mediator on the worker thread
 
 from __future__ import annotations
 
+import os
 import pickle
 import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from vllm.distributed.parallel_state import get_pp_group
+
+if os.environ.get("NNSIGHT_PP_DEBUG_STACKS") == "1":
+    # kill -USR1 <worker pid> dumps every thread's stack to stderr. Debug aid
+    # for wedged workers on machines where ptrace (py-spy/gdb) is blocked.
+    import faulthandler
+    import signal
+
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from ....intervention.interleaver import Interleaver
