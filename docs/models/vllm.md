@@ -82,7 +82,7 @@ print(model.tokenizer.decode(logits.argmax(dim=-1)))
 
 ### `logits` and `samples`
 
-These are vLLM-specific hookable values on the model — `eproperty` descriptors (the same mechanism behind a module's `.output`/`.input`, `vllm.py:144`), not on a vanilla `vllm.LLM`, and only meaningful inside a trace. **They are how you read generated output on vLLM** — `tracer.result` is *not* served here (see below).
+These are vLLM-specific hookable values on the model — `eproperty` descriptors (the same mechanism behind a module's `.output`/`.input`, `vllm.py:144`), not on a vanilla `vllm.LLM`, and only meaningful inside a trace. Read them for the logits and sampled ids of each step; for the finished request as a whole, read `tracer.result`.
 
 | Property | Description |
 |----------|-------------|
@@ -114,11 +114,32 @@ with model.trace(PROMPT, max_tokens=10) as tracer:
 # len(logits) == 10
 ```
 
-### `generate` is an alias for `trace`
+### `generate` traces, or just runs
 
-vLLM generation is driven by `max_tokens`, so there is no forward/generate split. `model.generate(...)` calls `trace` and rewrites `max_new_tokens` → `max_tokens` for parity with `TransformersModel` (`trace` accepts `max_new_tokens` too).
+vLLM generation is driven by `max_tokens`, so there is no forward/generate split. Used as a `with` block, `model.generate(...)` is `trace` (and rewrites `max_new_tokens` → `max_tokens`; `trace` accepts either).
 
-> Unlike `TransformersModel`, **`tracer.result` is not served on vLLM** — reading it parks a worker forever. Read the generated tokens through `model.logits` / `model.samples` under `tracer.iter`/`tracer.all()` (or the streamed `RequestOutput` in async mode).
+Called **without** a `with` block it simply runs the engine and returns vLLM's `RequestOutput`s — which is how you read a registered block's values without reaching past the model for `model.vllm_entrypoint`:
+
+```python
+outputs = model.generate(prompts, max_tokens=5)
+outputs[3].saves["hidden"]        # see Registering a block, below
+```
+
+On `mode="async"` the same call returns an awaitable: `outputs = await model.generate(...)`.
+
+### `tracer.result`
+
+`tracer.result` is the finished `RequestOutput` for the request an invoke made — one per invoke:
+
+```python
+with model.trace("The Eiffel Tower is in", temperature=0.0, max_tokens=3) as tracer:
+    hidden = model.model.layers[8].output[0].save()
+    result = tracer.result.save()
+
+result.outputs[0].text        # ' Paris, France'
+```
+
+It is served at collect time, which is the first moment both halves exist — the block runs in the engine's worker, the output is assembled by the engine. Two consequences: it carries the generation but **not** `.saves` (those are attached to the engine's own copy afterwards), and per-step values still come from `model.logits` / `model.samples` under `tracer.iter`, since `result` is the request's end state.
 
 ### Sampling parameters
 
@@ -243,8 +264,8 @@ per prompt, and it can only touch requests that *are* nnsight traces.
 `model.register()` sends the block over once and leaves it there. Every request
 the engine runs afterwards gets its own copy — including requests submitted by
 something that never heard of nnsight, e.g. an OpenAI-API client on the same
-server. Each copy has its own scope, so what it saves is that request's, and the
-values wait on the worker until you collect them.
+server. Each copy has its own scope, so what it saves is that request's, and it
+comes back on that request's output — the same place a trace's values arrive.
 
 ```python
 model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True, enable_prefix_caching=False)
@@ -253,11 +274,15 @@ with model.register() as (tracer, registration):
     hidden = model.model.layers[16].output[0].save()
 
 # Not traces — plain vLLM requests. The block still runs for them.
-model.vllm_entrypoint.generate(["The Eiffel Tower is in", "The capital of Japan is"], sp)
+outputs = model.generate(["The Eiffel Tower is in", "The capital of Japan is"],
+                         max_tokens=5)
 
-results = registration.saves          # {request_id: {"hidden": tensor}}
+outputs[1].saves["hidden"]        # prompt 1's activations
 registration.clear()
 ```
+
+There is no id to join on: the value is on the output of the request that
+produced it. For a *traced* request, reach it through `tracer.result.saves`.
 
 The block is written exactly like a trace body — same envoy tree, same `.save()`.
 It belongs to no particular request, so there is **no `tracer.invoke(...)`**. The
@@ -274,14 +299,30 @@ with model.register() as (tracer, registration):
 
 | Member | Description |
 |---|---|
-| `registration.saves` | `{request_id: {name: value}}` for every request that has finished. Reading does not drop anything. |
-| `registration.drain()` | The same, and takes them off the worker — what a long sweep wants. |
-| `registration.clear()` | Stop running the block and drop anything uncollected. |
+| `registration.clear()` | Stop running the block. `await registration.aclear()` on an async engine. |
 
-An error raised inside a registered block surfaces from `saves` / `drain()`; it
-has no request of its own to report through.
+That is the whole handle — the values are not read through it. They are taken as
+they are collected, so nothing accumulates on the worker for as long as somebody
+is reading the outputs, which on the synchronous engine is every request there
+is. An error raised inside a registered block is re-raised where its values would
+have arrived.
 
-Request ids are the engine's own, so they line up with `RequestOutput.request_id`.
+### On an async engine
+
+Installing the block is a `collective_rpc`, which on `mode="async"` can only be
+awaited from inside the running loop — so use `async with`, and `aclear`:
+
+```python
+async with model.register() as (tracer, registration):
+    hidden = model.model.layers[16].output[0].save()
+
+outputs = await model.generate(prompts, max_tokens=5)
+outputs[1].saves["hidden"]
+
+await registration.aclear()
+```
+
+A plain `with` on an async engine raises rather than silently not installing it.
 
 ### When to register instead of trace
 
@@ -373,7 +414,7 @@ For GPT-2-style models: `model.transformer.h[i].attn.output`, `model.transformer
 
 - **A saved value comes back by its variable *name* — bind it.** `logits = model.logits.save()` works; a bare `model.logits.save()` marks the value but has no name to return it under, so `output.saves["logits"]` (async/serve) or the pushed-back local is silently missing. This is the most common "saves don't come back" bug on vLLM.
 - **Cross-invoke shared state does not merge.** A container declared outside the invokes and appended inside each one is serialized per request, so the appends don't come back — save per invoke (see [Continuous batching](#continuous-batching-multiple-invokes)).
-- **`tracer.result` is not served** — read output via `model.logits` / `model.samples`, not `tracer.result`.
+- **`tracer.result` is the finished `RequestOutput`, not per-step.** It carries the generation but not `.saves`; use `model.logits` / `model.samples` under `tracer.iter` for per-step values.
 - **An empty `tracer.invoke()` with interventions raises** (its work would vanish); a do-nothing empty invoke is a harmless no-op.
 - **A typo'd sampling kwarg raises** (`trace(temperatur=0.0)` → `TypeError`), rather than being silently ignored.
 - **Mode is fixed at construction.** Build with `mode="async"` if you want streaming.

@@ -203,6 +203,26 @@ This mirrors `AsyncRemoteBackend`'s await/async-iterate shape. Sync differs by
 collecting inside `NNsightLLMEngine.step()`; async has no `step()` and collects
 per-request in the stream.
 
+## Reading a request's outputs
+
+`VLLM.generate` is `trace` when used as a `with` block and a plain run when not —
+the same test `traceable` makes, via `WithBlockNotFoundError` from a `capture()`
+that finds no block. The plain form returns vLLM's `RequestOutput`s (an awaitable
+on `mode="async"`, since the async engine has no call that runs to completion),
+and `_generate_async` does its own collect because the streaming backend only
+runs for traces nnsight submitted.
+
+`NNsightLLMEngine.step` collects for **every** finished request, not only traced
+ones, and `merge_collected` merges across ranks rather than taking the first
+answer — a trace's values come from the rank holding the sampled output, a
+registered block's from whichever rank ran the layers it read.
+
+`attach` puts both on the output: `output.saves` carries them together, while
+`output.nnsight_saves` keeps the trace's own apart. That separation is load-
+bearing — `_collect` feeds only the latter to `merge_shared_saves`, which reads a
+name saved across several requests as one shared container and would otherwise
+fold a sweep's per-request values into one.
+
 ## Registered blocks — the `registration.py` module
 
 `model.register()` is the persistent counterpart of the per-request transport
@@ -223,8 +243,19 @@ every rank via `collective_rpc("nnsight_register", ...)` and kept there.
 - `Requests.harvest` moves a finished request's saves into `harvested`, driven by
   `scheduler_output.finished_req_ids` in `_update_states` — **not** by
   `collect_nnsight`, because a request nobody traced never triggers a collect.
-- `Registration.collect` merges across ranks (a registered block runs wherever
-  its layers live, so under PP the values are split across stages).
+- Values are taken at collect, not held: `collect_nnsight` pops them from
+  `harvested` into the entry that rides home on the output. It also harvests on
+  demand, because the scheduler's own pass happens at the top of the *next* step,
+  which on the async path may come later or (for the last request in flight)
+  never.
+- The registered portion is answered from **every** rank, the traced portion only
+  from rank 0 — a registered block runs wherever its layers live, so under PP its
+  values are not on rank 0.
+- Installing is synchronous on `LLM` and a coroutine on `AsyncLLM`; the latter can
+  only be awaited from inside the engine's own loop (a foreign loop on another
+  thread times out, and none is exposed), hence `__aenter__`/`__aexit__` and
+  `aclear`. `__aenter__` spells out `__enter__`'s body rather than calling it,
+  because `capture` reads the caller's frame at a fixed depth.
 
 Worker RPCs are exposed on `NNsightGPUWorker`, not the runner —
 `collective_rpc` resolves method names on the worker.
@@ -301,9 +332,13 @@ test guarding it):
 - **`defer_exceptions` must drop a worker on all TP ranks or none**, and the lazy
   gather in `VLLMFragments` assumes every rank runs identical mediators in lockstep — a
   rank-divergent error or a rank-local read hangs the collective.
-- **`tracer.result` is not served on vLLM.** Read generated tokens via `model.logits`/
-  `model.samples` (or the streamed `RequestOutput` in async), never `tracer.result`
-  (a worker would park on it forever).
+- **`tracer.result` is served from `collect_nnsight`, not `interleave`.** The block
+  runs in the worker and the `RequestOutput` is assembled by the engine, so the
+  collect is the first moment both exist — the engine passes `{request_id: output}`
+  alongside the ids and `Requests.serve_result` hands it to a worker parked on
+  `"result"`, before `finish_dangling` would throw into it. The worker binds its
+  name *after* the run's last `record_saves`, so `serve_result` re-takes that
+  snapshot (`Requests.record`) or the value comes home unbound.
 
 ## Testing
 
