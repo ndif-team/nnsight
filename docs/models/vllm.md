@@ -234,6 +234,71 @@ print(last.saves["logits"].shape)
 - Errors in the block surface when you iterate the stream (a `1/0` raises `RuntimeError: ...ZeroDivisionError`).
 - `remote=True` skips async-backend injection (`vllm.py:347`).
 
+## Registering a block on the engine
+
+A trace carries its block on the request it rides. That is the right shape for
+"run this one experiment", but it means a sweep serializes the same block once
+per prompt, and it can only touch requests that *are* nnsight traces.
+
+`model.register()` sends the block over once and leaves it there. Every request
+the engine runs afterwards gets its own copy — including requests submitted by
+something that never heard of nnsight, e.g. an OpenAI-API client on the same
+server. Each copy has its own scope, so what it saves is that request's, and the
+values wait on the worker until you collect them.
+
+```python
+model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True, enable_prefix_caching=False)
+
+with model.register() as (tracer, registration):
+    hidden = model.model.layers[16].output[0].save()
+
+# Not traces — plain vLLM requests. The block still runs for them.
+model.vllm_entrypoint.generate(["The Eiffel Tower is in", "The capital of Japan is"], sp)
+
+results = registration.saves          # {request_id: {"hidden": tensor}}
+registration.clear()
+```
+
+The block is written exactly like a trace body — same envoy tree, same `.save()`.
+It belongs to no particular request, so there is **no `tracer.invoke(...)`**. The
+tracer is bound alongside the handle (as `model.edit()` binds `(tracer, edited)`)
+because `tracer.iter` / `tracer.all()` is what lets a registered block follow a
+request across its generated tokens rather than seeing only the prefill:
+
+```python
+with model.register() as (tracer, registration):
+    readout = nnsight.save([])
+    for step in tracer.all():
+        readout.append(model.model.layers[16].output[0][-1])
+```
+
+| Member | Description |
+|---|---|
+| `registration.saves` | `{request_id: {name: value}}` for every request that has finished. Reading does not drop anything. |
+| `registration.drain()` | The same, and takes them off the worker — what a long sweep wants. |
+| `registration.clear()` | Stop running the block and drop anything uncollected. |
+
+An error raised inside a registered block surfaces from `saves` / `drain()`; it
+has no request of its own to report through.
+
+Request ids are the engine's own, so they line up with `RequestOutput.request_id`.
+
+### When to register instead of trace
+
+- Sweeping many prompts — registering pays the serialization once instead of per
+  request. Capturing one layer over 1024 prompts on Llama-3.1-8B: **2.04 s
+  traced, 1.43 s registered** (bare vLLM 0.87 s).
+- Instrumenting traffic you don't control (a served endpoint, another client).
+- Keep tracing for one-off experiments, and whenever you want the values pushed
+  back into your own variables.
+
+> **Prefix caching must be off.** A prefix-cached token is served from the KV
+> cache without a forward pass, so no hook fires and a registered block sees a
+> short activation with no error. A trace asks for its own request to be
+> recomputed; a registration rides requests it did not create and cannot. Build
+> with `enable_prefix_caching=False` — registering against an engine that has it
+> on warns.
+
 ## Remote / serve
 
 - `trace(..., remote=True)` runs on NDIF. The model key is the repo id (`vllm.py:449`).

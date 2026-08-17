@@ -203,6 +203,37 @@ This mirrors `AsyncRemoteBackend`'s await/async-iterate shape. Sync differs by
 collecting inside `NNsightLLMEngine.step()`; async has no `step()` and collects
 per-request in the stream.
 
+## Registered blocks — the `registration.py` module
+
+`model.register()` is the persistent counterpart of the per-request transport
+above: instead of a mediator per request in `extra_args`, one block is sent to
+every rank via `collective_rpc("nnsight_register", ...)` and kept there.
+
+- `RegisteringTracer` (`registration.py`) captures the block like `EditingTracer`
+  but `execute` ships it rather than storing it on the envoy — an edit is
+  replayed by the envoy that holds it, which on vLLM leaves it in the client
+  where there are no weights.
+- `Requests.register` deserializes **once** and keeps `(code, glbls, lcls,
+  presaved)`; `Requests.add` builds a fresh `Mediator` per arriving request from
+  those pieces, so the source is compiled once rather than per request. That is
+  the whole performance argument for registering.
+- Registered copies are scoped, started, unflattened and `record_saves`-ed
+  alongside traced ones (`Requests.scope` runs them *first*, so a trace on the
+  same request sees what they left).
+- `Requests.harvest` moves a finished request's saves into `harvested`, driven by
+  `scheduler_output.finished_req_ids` in `_update_states` — **not** by
+  `collect_nnsight`, because a request nobody traced never triggers a collect.
+- `Registration.collect` merges across ranks (a registered block runs wherever
+  its layers live, so under PP the values are split across stages).
+
+Worker RPCs are exposed on `NNsightGPUWorker`, not the runner —
+`collective_rpc` resolves method names on the worker.
+
+**Prefix caching.** A cached token runs no forward, so no hook fires for it. A
+trace sets `skip_reading_prefix_cache` on its own request (`_attach_mediators`);
+a registration rides requests it did not create, so it cannot, and
+`_warn_if_prefix_caching` says so at register time.
+
 ## Serving over HTTP — the `serve/` package
 
 `serve/` (new) exposes `model.trace(..., serve=url)`: a GPU-less client holds only
