@@ -55,6 +55,28 @@ def vllm_gpt2():
 
 
 @pytest.fixture(scope="module")
+def vllm_gpt2_uncached():
+    """A gpt2 with prefix caching off, which a registration needs.
+
+    A prefix-cached token is served without a forward pass, so no hook fires for
+    it and a registered block sees fewer rows than the prompt has — silently. A
+    trace asks for its own request to be recomputed; a registration rides requests
+    it did not create and cannot, so the cache has to be off at the engine.
+    """
+    from nnsight.modeling.vllm import VLLM
+
+    if GPU_COUNT < 1:
+        pytest.skip("vLLM tests need a GPU")
+    return VLLM(
+        "gpt2",
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.1,
+        enable_prefix_caching=False,
+        dispatch=True,
+    )
+
+
+@pytest.fixture(scope="module")
 def vllm_qwen_ref():
     """A single-rank Qwen, the unsharded reference the parallel runs compare to."""
     from nnsight.modeling.vllm import VLLM
