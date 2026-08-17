@@ -56,6 +56,12 @@ def _grad_property(
         property: A ``getter``/``setter`` property to bind to ``torch.Tensor.grad``.
     """
 
+    # The real descriptor, for tensors this mechanism cannot serve: a tensor
+    # with requires_grad=False cannot take a backward hook, and library code
+    # (e.g. FSDP2's post_backward) reads `.grad` on frozen params while the
+    # property is installed.
+    original = torch.Tensor.grad
+
     def wrap(tensor: torch.Tensor) -> None:
         location = id(tensor)
         if location in seen:
@@ -103,10 +109,14 @@ def _grad_property(
         hooks.append(handle)
 
     def getter(tensor: torch.Tensor) -> Any:
+        if not tensor.requires_grad:
+            return original.__get__(tensor, torch.Tensor)
         wrap(tensor)
         return Mediator.value(f"{id(tensor)}.grad")
 
     def setter(tensor: torch.Tensor, value: Any) -> None:
+        if not tensor.requires_grad:
+            return original.__set__(tensor, value)
         wrap(tensor)
         Mediator.swap(f"{id(tensor)}.grad", value)
 
