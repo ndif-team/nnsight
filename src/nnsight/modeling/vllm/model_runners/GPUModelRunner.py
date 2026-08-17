@@ -33,7 +33,7 @@ import torch
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from ....intervention.interleaver import Interleaver
+from ....intervention.interleaver import Interleaver, Mediator
 from ....intervention.serialization import loads
 from ....tracing.tracer import _local, _saves, inc
 from ..batching import VLLMBatcher
@@ -49,12 +49,25 @@ if TYPE_CHECKING:
 class Requests:
     """The workers riding this engine's in-flight requests.
 
+    Two kinds of worker run here. A *traced* one arrives on its request, one per
+    request, and goes home when that request finishes. A *registered* one is a
+    block left on the engine ahead of time (see
+    [`nnsight.modeling.vllm.registration`][nnsight.modeling.vllm.registration]):
+    the template is deserialized once, and every request that arrives afterwards
+    — whether or not it is an nnsight trace at all — gets a fresh copy with a
+    scope of its own, whose saves are kept here until they are collected.
+
     Attributes:
-        mediators: Worker by request id, for as long as the request lives.
+        mediators: Traced worker by request id, for as long as the request lives.
         errored: Deferred error by request id for a payload that failed to
             deserialize — surfaced at collect instead of crashing the engine.
         rows: Request ids in the order the forward's tensors carry them.
         tokens: Token count each request contributes this step, by request id.
+        templates: Registration id -> what a per-request copy of that block is
+            built from, so the source is compiled once rather than per request.
+        registered: Request id -> registration id -> that request's own copy.
+        harvested: Registration id -> engine request id -> the values that
+            request's copy saved, waiting to be collected.
     """
 
     def __init__(self) -> None:
@@ -62,6 +75,32 @@ class Requests:
         self.errored: dict[str, Any] = {}
         self.rows: list[str] = []
         self.tokens: dict[str, int] = {}
+        self.templates: dict[str, tuple] = {}
+        self.registered: dict[str, dict[str, Any]] = {}
+        self.harvested: dict[str, dict[str, dict]] = {}
+
+    def register(self, registration_id: str, payload: bytes, persistent_objects: dict) -> None:
+        """Take a block the engine should run for every request from now on.
+
+        Deserializing recompiles the block's source, so it is done once here and
+        the pieces kept; `add` then builds each request's copy from them, which
+        is the whole point of registering rather than tracing.
+        """
+        template = loads(payload, persistent_objects=persistent_objects)
+        self.templates[registration_id] = (
+            template.code,
+            template.glbls,
+            dict(template.lcls),
+            template.presaved,
+        )
+        self.harvested.setdefault(registration_id, {})
+
+    def unregister(self, registration_id: str) -> None:
+        """Stop running a block and forget anything it has not handed back."""
+        self.templates.pop(registration_id, None)
+        self.harvested.pop(registration_id, None)
+        for per_request in self.registered.values():
+            per_request.pop(registration_id, None)
 
     def add(
         self, new_requests: list["NewRequestData"], persistent_objects: dict
@@ -81,6 +120,18 @@ class Requests:
         from ....intervention.errors import capture_exception
 
         for request in new_requests:
+            # Registered blocks apply to every request, including ones carrying no
+            # nnsight payload at all — that is what registering is for. Each gets
+            # its own mediator so its scope, and so what it saves, is this
+            # request's alone.
+            if self.templates:
+                copies = self.registered.setdefault(request.req_id, {})
+                for registration_id, template in self.templates.items():
+                    code, glbls, lcls, presaved = template
+                    mediator = Mediator(code, glbls, dict(lcls))
+                    mediator.presaved = presaved
+                    copies[registration_id] = mediator
+
             extra_args = getattr(request.sampling_params, "extra_args", None) or {}
             if "nnsight_mediator" not in extra_args:
                 continue
@@ -105,45 +156,57 @@ class Requests:
         """
         for mediator in self.mediators.values():
             mediator.batch_group = None
+        for copies in self.registered.values():
+            for mediator in copies.values():
+                mediator.batch_group = None
 
         interleaver = model.interleaver
         scheduled = []
         start = 0
 
+        def take(mediator: Any, tokens: int) -> None:
+            """Give one worker this request's span, starting it the first time."""
+            # A block that already finished is normally dropped — its work is
+            # done and it must not run a second time. Two exceptions stay
+            # scheduled (never restarted, only kept in view): one holding open
+            # caches (tracer.cache()) keeps observing every step until the request
+            # ends, and one that raised keeps a row here so _finish_erred can force
+            # its end-of-sequence every step until vLLM actually retires it —
+            # forcing once is not enough when min_tokens defers the stop.
+            # A mediator has no worker until start(); once started it keeps a
+            # (dead once its block finishes) greenlet. So `worker is not None`
+            # means started, and started-but-not-alive means the block finished.
+            started = mediator.worker is not None
+            finished = started and not mediator.alive
+            if finished and not mediator.caches and mediator.exception is None:
+                return
+            mediator.batch_group = [start, tokens]
+            scheduled.append(mediator)
+            # Which requests run is only settled here, once the forward has
+            # already begun, so a worker is started the moment its request
+            # is first scheduled rather than on the way into the interleaver.
+            if not started:
+                try:
+                    mediator.start(interleaver)
+                except Exception as exception:
+                    # A block that errors before it first parks (a bad line
+                    # at the top) is deferred here, like one that errors
+                    # mid-run in the interleaver; _finish_erred ends it.
+                    if not interleaver.defer_exceptions:
+                        raise
+                    mediator.exception = exception
+
         for request_id in self.rows:
             tokens = self.tokens.get(request_id)
             if tokens is None:
                 continue
+            # Registered copies go first, so a trace written for this request
+            # reads whatever they left behind rather than racing them.
+            for mediator in self.registered.get(request_id, {}).values():
+                take(mediator, tokens)
             mediator = self.mediators.get(request_id)
             if mediator is not None:
-                # A block that already finished is normally dropped — its work is
-                # done and it must not run a second time. Two exceptions stay
-                # scheduled (never restarted, only kept in view): one holding open
-                # caches (tracer.cache()) keeps observing every step until the request
-                # ends, and one that raised keeps a row here so _finish_erred can force
-                # its end-of-sequence every step until vLLM actually retires it —
-                # forcing once is not enough when min_tokens defers the stop.
-                # A mediator has no worker until start(); once started it keeps a
-                # (dead once its block finishes) greenlet. So `worker is not None`
-                # means started, and started-but-not-alive means the block finished.
-                started = mediator.worker is not None
-                finished = started and not mediator.alive
-                if not finished or mediator.caches or mediator.exception is not None:
-                    mediator.batch_group = [start, tokens]
-                    scheduled.append(mediator)
-                    # Which requests run is only settled here, once the forward has
-                    # already begun, so a worker is started the moment its request
-                    # is first scheduled rather than on the way into the interleaver.
-                    if not started:
-                        try:
-                            mediator.start(interleaver)
-                        except Exception as exception:
-                            # A block that errors before it first parks (a bad line
-                            # at the top) is deferred here, like one that errors
-                            # mid-run in the interleaver; _finish_erred ends it.
-                            if not interleaver.defer_exceptions:
-                                raise
-                            mediator.exception = exception
+                take(mediator, tokens)
             start += tokens
 
         # Every scheduled request's tokens, nnsight's or not — the leading dim of
@@ -165,6 +228,9 @@ class Requests:
         for request_id in self.rows:
             if self.tokens.get(request_id) is None:
                 continue
+            for mediator in self.registered.get(request_id, {}).values():
+                if id(mediator) in scheduled:
+                    mediator.batch_group = [row, 1]
             mediator = self.mediators.get(request_id)
             if mediator is not None and id(mediator) in scheduled:
                 mediator.batch_group = [row, 1]
@@ -204,7 +270,12 @@ class Requests:
         from ....intervention.errors import capture_exception
 
         saved = _saves()
-        for mediator in self.mediators.values():
+        registered = [
+            mediator
+            for copies in self.registered.values()
+            for mediator in copies.values()
+        ]
+        for mediator in list(self.mediators.values()) + registered:
             if mediator.batch_group is None:
                 continue
             # Saves marked in this process, plus names the sending process
@@ -222,6 +293,60 @@ class Requests:
                 and getattr(mediator, "nnsight_error", None) is None
             ):
                 mediator.nnsight_error = capture_exception(mediator.exception)
+
+    def harvest(self, finished: set[str]) -> None:
+        """Move finished requests' registered values somewhere collectable.
+
+        Driven by the scheduler's own finished set rather than by a collect, so a
+        registration works for requests nobody is tracing — the OpenAI server's,
+        say — where nothing would otherwise come asking. A worker still parked
+        when its request ends was waiting for a location this request never
+        reached; that is ordinary for a registration (a block written for one
+        architecture's layer, a request that stopped early), so it is unwound
+        quietly and whatever it did save is kept.
+        """
+        for worker_id in list(self.registered):
+            if worker_id not in finished:
+                continue
+            engine_id = worker_id.rsplit("-", 1)[0]
+            for registration_id, mediator in self.registered.pop(worker_id).items():
+                if registration_id not in self.harvested:
+                    continue
+                if mediator.alive:
+                    self.finish_dangling_mediator(mediator)
+                names = getattr(mediator, "nnsight_saved", set()) | mediator.presaved
+                saved = {
+                    name: mediator.lcls[name]
+                    for name in names
+                    if name in mediator.lcls
+                }
+                # A block that raised has to be reported. It saved nothing, so
+                # without this the request would simply be missing from the
+                # results and a broken registration would look like an idle one.
+                error = getattr(mediator, "nnsight_error", None)
+                if saved or error is not None:
+                    self.harvested[registration_id][engine_id] = {
+                        "saves": saved,
+                        "error": error,
+                    }
+
+    def finish_dangling_mediator(self, mediator: Any) -> None:
+        """Unwind a still-parked worker without surfacing an error to anyone.
+
+        `finish_dangling` reports through the request its worker rode in on; a
+        registered copy has no such request to report to, so it is only unwound
+        (running its ``finally`` blocks) and its exception dropped.
+        """
+        from greenlet import error as greenlet_error
+
+        from ....intervention.interleaver import OutOfOrderError
+
+        try:
+            mediator.worker.throw(
+                OutOfOrderError("the request finished before this location was reached")
+            )
+        except (greenlet_error, BaseException):
+            return
 
     def finish_dangling(self, worker_id: str) -> None:
         """Surface a worker still parked when its request has finished.
@@ -247,10 +372,11 @@ class Requests:
         if mediator is None or not mediator.alive:
             return
 
-        # pending is (event, location) for a read, (event, location, value) for a
-        # swap/skip — index rather than unpack, or a worker parked on an edit crashes
-        # here and takes the shared engine down with it.
-        event, requester = mediator.pending[0], mediator.pending[1]
+        # `requester` is printed into the error, where Pending renders as
+        # "{location}.i{n}" — the occurrence is what explains an iter loop that
+        # asked for more steps than the request generated.
+        pending = mediator.pending
+        event, requester = pending.event, pending
         if event is Event.BARRIER:
             error: BaseException = ValueError(
                 "A barrier was never reached by every block it waits for; "
@@ -334,6 +460,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
         super()._update_states(scheduler_output)
 
         requests = self.nnsight_requests
+        # Registered blocks are collected off the scheduler's own finished set:
+        # a request nobody traced has no collect coming for it, and this is the
+        # one place the runner is told it is over.
+        finished = getattr(scheduler_output, "finished_req_ids", None)
+        if finished and requests.registered:
+            requests.harvest(set(finished))
         requests.add(
             scheduler_output.scheduled_new_reqs, self.nnsight_persistent_objects
         )
@@ -367,7 +499,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # bounds its growth and stops any id reuse across separate waves of requests.
         # (Residual: reuse *within* one wave of concurrent requests, which is rare.)
         requests = self.nnsight_requests
-        if not requests.mediators and not requests.errored:
+        # Registered blocks count as in-flight too. They mark saves like any other
+        # block, and a block that spans several steps (tracer.iter) is only marked
+        # on the step it first bound the value — clearing underneath it would make
+        # `record_saves` recompute an empty set and drop what it already had.
+        if not requests.mediators and not requests.errored and not requests.registered:
             _saves().clear()
 
         interleaver = self.nnsight_model.interleaver
@@ -532,6 +668,45 @@ class NNsightGPUModelRunner(GPUModelRunner):
             torch.cuda.synchronize()
 
         return pickle.dumps(collected)
+
+    # ------------------------------------------------------------------
+    # Registered blocks (called via collective_rpc on every rank)
+    # ------------------------------------------------------------------
+
+    def nnsight_register(self, registration_id: str, payload: bytes) -> None:
+        """Keep a block and run it for every request from now on.
+
+        See [`nnsight.modeling.vllm.registration`][nnsight.modeling.vllm.registration].
+        Runs on all ranks, so every rank builds the same per-request copies and
+        their reads stay in lockstep — which is what a sharded model's gathers
+        need.
+        """
+        self.nnsight_requests.register(
+            registration_id, payload, self.nnsight_persistent_objects
+        )
+
+    def nnsight_collect_registered(
+        self, registration_id: str, clear: bool = True
+    ) -> Optional[bytes]:
+        """Hand back what a registration's finished requests saved.
+
+        Unlike `collect_nnsight` this answers from every rank: a registered block
+        runs wherever the layers it reads live, so under pipeline parallelism the
+        values are split across stages and the client merges them.
+        """
+        harvested = self.nnsight_requests.harvested.get(registration_id)
+        if not harvested:
+            return None
+        collected = dict(harvested)
+        if clear:
+            harvested.clear()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return pickle.dumps(collected)
+
+    def nnsight_clear_registered(self, registration_id: str) -> None:
+        """Stop running a block and drop what it has not handed back."""
+        self.nnsight_requests.unregister(registration_id)
 
     def nnsight_request_count(self) -> int:
         """How many requests' workers this runner still tracks.

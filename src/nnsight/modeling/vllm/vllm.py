@@ -405,6 +405,40 @@ class VLLM(Remotable):
         kwargs.setdefault("fn", self._call)
         return super().trace(*inputs, **kwargs)
 
+    def register(self, *, backend: Any = None) -> Any:
+        """Leave a block on the engine to run for every request it handles.
+
+        A trace carries its block on the request it rides, so a sweep pays to
+        serialize it once per prompt and only requests written as traces are
+        touched at all. A registration sends the block over once; the engine then
+        gives every request its own copy, whoever submitted it — an OpenAI-API
+        client on the same server included. Each copy saves into a scope of its
+        own, and the values wait on the worker until collected.
+
+        The block is written like a trace body against the same envoy tree. It
+        belongs to no particular request, so there is nothing to
+        ``tracer.invoke(...)`` — give it the locations you want and ``.save()``
+        what you want back.
+
+        Returns:
+            The [`Registration`][nnsight.modeling.vllm.registration.Registration]
+            the block's per-request values are collected through. Bind it with
+            ``as`` and keep it: it is also how the block is removed again.
+
+        Examples:
+            Read one layer out of everything the engine runs::
+
+                >>> with model.register() as registration:   # doctest: +SKIP
+                ...     hidden = model.model.layers[16].output[0].save()
+                >>> model.generate("Hello", max_tokens=5)    # doctest: +SKIP
+                >>> registration.collect()                   # doctest: +SKIP
+                {'0': {'hidden': tensor(...)}}
+                >>> registration.clear()                     # doctest: +SKIP
+        """
+        from .registration import RegisteringTracer
+
+        return RegisteringTracer(self, backend=backend)
+
     def generate(self, *inputs: Any, **kwargs: Any) -> Any:
         """Alias for `trace`, for parity with other models' ``generate``.
 
