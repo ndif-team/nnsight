@@ -269,7 +269,6 @@ class Requests:
         """
         from ....intervention.errors import capture_exception
 
-        saved = _saves()
         registered = [
             mediator
             for copies in self.registered.values()
@@ -278,27 +277,47 @@ class Requests:
         for mediator in list(self.mediators.values()) + registered:
             if mediator.batch_group is None:
                 continue
-            # Saves marked in this process, plus names the sending process
-            # marked before serialization (Mediator.presaved).
-            mediator.nnsight_saved = {
-                name for name, value in mediator.lcls.items() if id(value) in saved
-            } | mediator.presaved
-            # An error (or stop) is captured on the workers' own thread too, for the
-            # same reason saves are — the collect thread cannot read the exception's
-            # intervention traceback off this greenlet. Captured once: an erred worker
-            # stays scheduled (see Requests.scope) and would otherwise re-capture every
-            # step until the request is retired.
-            if (
-                mediator.exception is not None
-                and getattr(mediator, "nnsight_error", None) is None
-            ):
-                mediator.nnsight_error = capture_exception(mediator.exception)
+            self.record(mediator)
+
+    def record(self, mediator: Any) -> None:
+        """Snapshot one worker's saved names, and its error if it has one.
+
+        Split out because the snapshot is not only taken per step: a worker served
+        at collect time — one parked on ``tracer.result``, which only exists once
+        the engine has assembled the output — binds its name after the last
+        `record_saves` of the run, and would otherwise be recorded as having
+        saved nothing.
+        """
+        from ....intervention.errors import capture_exception
+
+        saved = _saves()
+        # Saves marked in this process, plus names the sending process
+        # marked before serialization (Mediator.presaved).
+        mediator.nnsight_saved = {
+            name for name, value in mediator.lcls.items() if id(value) in saved
+        } | mediator.presaved
+        # An error (or stop) is captured on the workers' own thread too, for the
+        # same reason saves are — the collect thread cannot read the exception's
+        # intervention traceback off this greenlet. Captured once: an erred worker
+        # stays scheduled (see Requests.scope) and would otherwise re-capture every
+        # step until the request is retired.
+        if (
+            mediator.exception is not None
+            and getattr(mediator, "nnsight_error", None) is None
+        ):
+            mediator.nnsight_error = capture_exception(mediator.exception)
 
     def harvest(self, finished: set[str]) -> None:
         """Move finished requests' registered values somewhere collectable.
 
-        Driven by the scheduler's own finished set rather than by a collect, so a
-        registration works for requests nobody is tracing — the OpenAI server's,
+        Driven by the scheduler's own finished set, and again by a collect that
+        finds a request not yet harvested — the scheduler's pass happens at the
+        top of the *next* step, which on the async path may come after the
+        collect, or (for the last request in flight) never. Idempotent: a request
+        already harvested is gone from `registered` and skipped.
+
+        Off the scheduler rather than only off a collect so a registration works
+        for requests nobody is tracing — the OpenAI server's,
         say — where nothing would otherwise come asking. A worker still parked
         when its request ends was waiting for a location this request never
         reached; that is ordinary for a registration (a block written for one
@@ -306,9 +325,11 @@ class Requests:
         quietly and whatever it did save is kept.
         """
         for worker_id in list(self.registered):
-            if worker_id not in finished:
-                continue
             engine_id = worker_id.rsplit("-", 1)[0]
+            # Named either way: the scheduler says "0-a2460f0e", a collect asks
+            # with the engine's "0".
+            if worker_id not in finished and engine_id not in finished:
+                continue
             for registration_id, mediator in self.registered.pop(worker_id).items():
                 if registration_id not in self.harvested:
                     continue
@@ -347,6 +368,32 @@ class Requests:
             )
         except (greenlet_error, BaseException):
             return
+
+    def serve_result(self, worker_id: str, output: Any) -> None:
+        """Hand a finished request's output to a worker parked on ``tracer.result``.
+
+        A worker parked anywhere else is left alone — its own location is what it
+        is waiting for, and `finish_dangling` reports it. Runs on the workers'
+        own thread where the greenlet can be resumed; where that differs (Ray's
+        collect) the switch is refused and the read is left unserved, exactly as
+        it was before.
+        """
+        from greenlet import error as greenlet_error
+
+        mediator = self.mediators.get(worker_id)
+        if mediator is None or not mediator.alive:
+            return
+        pending = mediator.pending
+        if pending is None or pending.provider != "result":
+            return
+        try:
+            mediator.handle("result", output)
+        except greenlet_error:
+            return
+        # The block ran on past its read and bound whatever it saved there, after
+        # the run's last `record_saves` — so take the snapshot again or those
+        # names go home missing.
+        self.record(mediator)
 
     def finish_dangling(self, worker_id: str) -> None:
         """Surface a worker still parked when its request has finished.
@@ -604,26 +651,90 @@ class NNsightGPUModelRunner(GPUModelRunner):
         return interleaver
 
     def collect_nnsight(
-        self, request_ids: list[str], finished_request_ids: Optional[list[str]] = None
+        self,
+        request_ids: list[str],
+        finished_request_ids: Optional[list[str]] = None,
+        outputs: Optional[dict] = None,
     ) -> Optional[bytes]:
         """Return the saved values and any deferred error of the named requests.
 
         Keyed per request rather than merged, so two traces that happen to name a
         variable the same don't overwrite each other on the way home. Each entry is
-        ``{"saves": {...}, "error": <deferred error or None>}``.
+        ``{"saves": {...}, "error": ..., "registered": {...}}``.
+
+        A registered block's values are kept apart from the trace's own because
+        they are not the same kind of thing: a name a *trace* saved on several
+        requests is one shared container the invokes were writing into, and
+        [`merge_shared_saves`][nnsight.modeling.vllm.collect.merge_shared_saves]
+        reassembles it on that assumption. A registration saving the same name on
+        every request it runs on looks identical from the outside and is not — it
+        is one value per request — so merging them together would quietly fold a
+        thousand separate activations into one.
 
         Args:
             request_ids: Requests to collect saved values from.
             finished_request_ids: Those that are done, whose workers are wound up
                 and forgotten afterwards.
+            outputs: Engine request id -> the ``RequestOutput`` that request
+                produced, for serving ``tracer.result``. The engine has it and the
+                worker does not, so it has to be handed back across; a caller that
+                does not pass it simply leaves ``result`` unserved.
         """
-        # Only one rank holds the sampled output; the others have nothing to say.
-        if get_pp_group().rank != 0:
-            return None
-
         requests = self.nnsight_requests
         finished = set(finished_request_ids or [])
-        matched = requests.match(set(request_ids) | finished)
+        wanted = set(request_ids) | finished
+        collected: dict[str, dict] = {}
+
+        # Harvest anything finished that the scheduler has not got to yet, so a
+        # collect never reads an empty shelf for a request that is over.
+        if finished and requests.registered:
+            requests.harvest(finished)
+
+        # Registered values, taken rather than read. This is the only way out for
+        # them: the output they ride home on is the one the caller already has, so
+        # nothing else will come asking and holding a second copy would just grow.
+        # Answered from *every* rank — a registered block runs wherever the layers
+        # it reads live, which under pipeline parallelism is not only rank 0 — and
+        # the caller merges what the ranks return.
+        for harvested in requests.harvested.values():
+            for engine_id in list(harvested):
+                if engine_id not in wanted:
+                    continue
+                taken = harvested.pop(engine_id)
+                entry = collected.setdefault(
+                    engine_id, {"saves": {}, "error": None, "registered": {}}
+                )
+                entry["registered"].update(taken["saves"])
+                if entry["error"] is None:
+                    entry["error"] = taken["error"]
+
+        # Everything below is the trace's own, and only one rank holds it.
+        if get_pp_group().rank != 0:
+            return pickle.dumps(collected)
+
+        matched = requests.match(wanted)
+
+        # The run's return value, served the way [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave]
+        # serves it locally — right after the model has produced it and before
+        # anything is read back. It cannot be served there for this runtime: the
+        # block runs here in the worker and the value is a `RequestOutput` the
+        # *engine* assembles, so this is the first moment both exist. Served per
+        # request, since each has its own.
+        for engine_id, worker_id in matched:
+            if engine_id in finished and outputs and engine_id in outputs:
+                output = outputs[engine_id]
+                # What a registered block saved for this request, put on the copy
+                # the block is about to be handed. It is the one thing a trace
+                # cannot reach any other way: the engine attaches it to *its* copy
+                # after this returns, and the trace never sees that object.
+                #
+                # The trace's own saves are not here and cannot be: they are what
+                # this call is collecting, and one of them may be the output
+                # itself.
+                registered = collected.get(engine_id, {}).get("registered")
+                if registered:
+                    output.saves = dict(registered)
+                requests.serve_result(worker_id, output)
 
         # A worker still parked when its request finishes was waiting on a location the
         # model never reached; surface that as its deferred error before it is read.
@@ -631,25 +742,46 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if engine_id in finished:
                 requests.finish_dangling(worker_id)
 
-        collected = {
-            engine_id: {
-                "saves": requests.saves(worker_id),
-                "error": requests.error(worker_id),
-            }
-            for engine_id, worker_id in matched
-        }
+        for engine_id, worker_id in matched:
+            entry = collected.setdefault(
+                engine_id, {"saves": {}, "error": None, "registered": {}}
+            )
+            entry["saves"] = requests.saves(worker_id)
+            if entry["error"] is None:
+                entry["error"] = requests.error(worker_id)
 
         # Requests whose payload failed to deserialize (see Requests.add) carry no
         # worker; surface their captured error here, keyed like the collected saves.
-        wanted = set(request_ids) | finished
         for req_id, error in list(requests.errored.items()):
             engine_id = req_id.rsplit("-", 1)[0]
             key = engine_id if engine_id in wanted else req_id if req_id in wanted else None
             if key is None:
                 continue
-            collected[key] = {"saves": {}, "error": error}
+            entry = collected.setdefault(
+                key, {"saves": {}, "error": None, "registered": {}}
+            )
+            entry["error"] = error
             if engine_id in finished or req_id in finished:
                 requests.errored.pop(req_id, None)
+
+        # Registered blocks ride requests nnsight did not create, so their values
+        # are keyed here by the same engine id. Merging them means a caller that
+        # is already collecting gets them on the output without a second trip —
+        # both the sync engine's `step`, which collects for *every* finished
+        # request, and the async backend, which collects for its own.
+        #
+        # Not removed: `Registration.drain` is still the way to take them, and a
+        # request whose output nobody reads (a served one) would otherwise lose
+        # them entirely. That does mean a collected value is held twice until the
+        # registration is drained.
+        for harvested in requests.harvested.values():
+            for engine_id in harvested:
+                if engine_id not in wanted:
+                    continue
+                entry = collected.setdefault(engine_id, {"saves": {}, "error": None})
+                entry["saves"].update(harvested[engine_id]["saves"])
+                if entry["error"] is None:
+                    entry["error"] = harvested[engine_id]["error"]
 
         saved = _saves()
         for engine_id, worker_id in matched:
@@ -684,25 +816,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
         self.nnsight_requests.register(
             registration_id, payload, self.nnsight_persistent_objects
         )
-
-    def nnsight_collect_registered(
-        self, registration_id: str, clear: bool = True
-    ) -> Optional[bytes]:
-        """Hand back what a registration's finished requests saved.
-
-        Unlike `collect_nnsight` this answers from every rank: a registered block
-        runs wherever the layers it reads live, so under pipeline parallelism the
-        values are split across stages and the client merges them.
-        """
-        harvested = self.nnsight_requests.harvested.get(registration_id)
-        if not harvested:
-            return None
-        collected = dict(harvested)
-        if clear:
-            harvested.clear()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        return pickle.dumps(collected)
 
     def nnsight_clear_registered(self, registration_id: str) -> None:
         """Stop running a block and drop what it has not handed back."""

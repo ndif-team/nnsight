@@ -137,15 +137,17 @@ class AsyncVLLMBackend(Backend):
         """Fetch this finished request's saved values from the worker onto ``output``."""
         from ...intervention.errors import raise_deferred
 
+        from .engines.engine import attach, merge_collected
+
         request_id = self._request_id
         results = await self.model.vllm_entrypoint.collective_rpc(
-            "collect_nnsight", args=([request_id], [request_id])
+            "collect_nnsight",
+            args=([request_id], [request_id], {request_id: output}),
         )
-        # Only the rank holding the sampled output returns anything.
-        payload = next((result for result in results if result is not None), None)
-        if payload is None:
-            return
-        entry = pickle.loads(payload).get(request_id)
+        # Merged rather than taking the first rank to answer: a trace's values
+        # come from the rank holding the sampled output, a registered block's from
+        # whichever rank ran the layers it read.
+        entry = merge_collected(results).get(request_id)
         if entry is not None:
-            output.saves = entry["saves"]
+            attach(output, entry)
             raise_deferred(entry["error"])

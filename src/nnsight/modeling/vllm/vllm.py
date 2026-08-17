@@ -440,15 +440,111 @@ class VLLM(Remotable):
         return RegisteringTracer(self, backend=backend)
 
     def generate(self, *inputs: Any, **kwargs: Any) -> Any:
-        """Alias for `trace`, for parity with other models' ``generate``.
+        """Generate — as a trace when used as a ``with`` block, plainly when not.
 
-        vLLM generation is driven by ``max_tokens`` (``trace`` rewrites
-        ``max_new_tokens`` to it), so there is no forward/generate distinction to draw.
-        Read generated tokens through ``model.logits``/``model.samples`` under
-        ``tracer.iter``, not ``tracer.result`` — the latter is never served here and a
-        worker reading it would park forever.
+        ``with model.generate(...)`` is `trace`: vLLM has no forward/generate
+        split, so the two are the same thing and generation length is
+        ``max_tokens`` (``max_new_tokens`` is accepted and rewritten). Read the
+        generated tokens through ``model.logits``/``model.samples`` under
+        ``tracer.iter``, or through ``tracer.result``.
+
+        Called without a ``with`` block it just runs the engine and hands back
+        vLLM's request outputs, so a registration's values — which arrive on
+        the output — can be read without reaching past the model for
+        ``model.vllm_entrypoint``::
+
+            >>> with model.register() as (tracer, registration):  # doctest: +SKIP
+            ...     hidden = model.model.layers[16].output[0].save()
+            >>> outputs = model.generate(prompts, max_tokens=5)   # doctest: +SKIP
+            >>> outputs[5].saves["hidden"]                        # doctest: +SKIP
+
+        Which of the two it is comes from the call site — the same test
+        [`traceable`][nnsight.intervention.envoy.traceable] makes for a method
+        used either way: capturing a block that is not there raises, and that is
+        the signal to run plainly.
         """
-        return self.trace(*inputs, **kwargs)
+        from ...tracing.tracer import WithBlockNotFoundError
+
+        tracer = self.trace(*inputs, **kwargs)
+        try:
+            # Idempotent, and reads the caller's frame from the same depth
+            # `__enter__` would — so this only asks the question, and entering
+            # the block later still captures normally.
+            tracer.capture()
+        except WithBlockNotFoundError:
+            return self._generate(*inputs, **kwargs)
+        return tracer
+
+    def _generate(self, *inputs: Any, **kwargs: Any) -> Any:
+        """Run the engine with no block of this caller's own.
+
+        Registered blocks still run — they belong to the engine, not to the
+        caller — so their values come back on the outputs this returns.
+
+        Args:
+            *inputs: One prompt, or a list of them. Unlike a trace there is no
+                invoke to be one-per-request, so a list is simply a batch.
+            **kwargs: Sampling settings for the whole batch.
+        """
+        from vllm import SamplingParams
+
+        if not self.dispatched:
+            self.dispatch()
+
+        kwargs = dict(kwargs)
+        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
+        lora_request = kwargs.pop("lora_request", None)
+        params = SamplingParams(**kwargs)
+
+        prompts = inputs[0] if len(inputs) == 1 else list(inputs)
+        if self._async_engine:
+            # An async engine has no call that runs to completion, so this cannot
+            # hand back outputs — it hands back the await that will. Same shape
+            # either way: `outputs = model.generate(...)` on a sync engine,
+            # `outputs = await model.generate(...)` on an async one.
+            return self._generate_async(prompts, params, lora_request)
+        return self.vllm_entrypoint.generate(
+            prompts, params, lora_request=lora_request
+        )
+
+    async def _generate_async(self, prompts: Any, params: Any, lora_request: Any) -> list:
+        """Drive the async engine to completion and collect, as the sync path does.
+
+        Each prompt is its own request, submitted together so the engine batches
+        them, and each is drained to its final output. The collect is done here
+        because nothing else will: the streaming backend runs only for traces
+        nnsight itself submitted, so without this a registered block's values
+        would have no way onto these outputs.
+        """
+        import asyncio
+        import uuid
+
+        from .engines.engine import attach, merge_collected
+
+        engine = self.vllm_entrypoint
+        if isinstance(prompts, str) or not isinstance(prompts, (list, tuple)):
+            prompts = [prompts]
+
+        async def run(prompt: Any) -> Any:
+            request_id = uuid.uuid4().hex
+            extra = {} if lora_request is None else {"lora_request": lora_request}
+            output = None
+            async for output in engine.generate(prompt, params, request_id, **extra):
+                pass
+            if output is None:
+                return None
+            entry = merge_collected(
+                await engine.collective_rpc(
+                    "collect_nnsight",
+                    args=([request_id], [request_id], {request_id: output}),
+                )
+            ).get(request_id)
+            if entry is not None:
+                attach(output, entry)
+            return output
+
+        return list(await asyncio.gather(*(run(prompt) for prompt in prompts)))
 
     def _call(
         self, prompts: list, params: list, lora_requests: list, **kwargs: Any
@@ -477,7 +573,14 @@ class VLLM(Remotable):
 
         per_request_saves = []
         for mediator, output in zip(mediators, outputs):
-            saves = getattr(output, "saves", {})
+            # The trace's own names only. `output.saves` also carries whatever a
+            # registered block saved for this request, and those must not be
+            # pushed into the trace's variables — nor handed to
+            # `merge_shared_saves`, which would read one name saved across many
+            # requests as a single shared container and fold them together.
+            saves = getattr(output, "nnsight_saves", None)
+            if saves is None:
+                saves = getattr(output, "saves", {})
             per_request_saves.append(saves)
             for name, value in saves.items():
                 mark(value)  # marking results after the run; no trace active to guard
