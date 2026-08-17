@@ -505,6 +505,17 @@ class VLLM(Remotable):
 
         for mediator, param in zip(attached, params):
             param.extra_args = {"nnsight_mediator": dumps(mediator)}
+            # A prefix-cached token is served from the KV cache without a forward
+            # pass, so no hook fires for it and the intervention silently sees a
+            # short activation — the trace reads only the tokens that were
+            # recomputed. That is invisible at the call site (no error, just fewer
+            # rows), and it bites exactly when a prompt repeats or shares a prefix
+            # with an earlier one, which is the normal case for a dataset sweep.
+            # Interventions are worth more than the cache hit, so force the
+            # recompute. Older vLLM has no such field; there the cache is not
+            # consulted this way and the read is whole anyway.
+            if hasattr(param, "skip_reading_prefix_cache"):
+                param.skip_reading_prefix_cache = True
             for attr, value in kwargs.items():
                 if getattr(param, attr) == getattr(default, attr):
                     setattr(param, attr, value)
