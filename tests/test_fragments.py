@@ -120,6 +120,15 @@ class TestGating:
 
         assert ("read", "model.output") in fragments.calls
 
+    def test_targeted_cache_gathers_its_subscription(self, model):
+        fragments = Recorder(locations={"model.output"})
+        model.interleaver.fragments = fragments
+        with model.trace(torch.randn(1, 4)) as tracer:
+            cache = tracer.cache(modules=[model])
+
+        assert ("whole", "model.output") in fragments.calls
+        assert cache["model"].output.shape[-1] == 8
+
 
 class TestLifecycle:
     def test_the_tree_is_walked_past_instrument(self, model):

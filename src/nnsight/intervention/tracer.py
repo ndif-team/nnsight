@@ -195,8 +195,8 @@ class InterleavingTracer(Tracer):
             cache["model.transformer.h.0"].output      # by path
             cache.transformer.h[0].output              # or by navigation
 
-        Only modules the run reaches *after* this call are captured. Values are
-        recorded post-intervention. In a generation loop a module is captured once
+        Declare the cache before reading or modifying a model value. Values are
+        recorded post-intervention; in a generation loop a module is captured once
         per step (``len(cache[path])`` is the step count).
 
         Args:
@@ -211,6 +211,13 @@ class InterleavingTracer(Tracer):
                 you move captured tensors across CUDA streams yourself and want the
                 copy synchronized before use.
         """
+        mediator = Mediator.current("tracer.cache()")
+        if mediator.pending is not None:
+            raise ValueError(
+                "tracer.cache() must be declared before reading or modifying a "
+                "model value"
+            )
+
         cache = Cache(
             self.envoy,
             modules=modules,
@@ -221,14 +228,9 @@ class InterleavingTracer(Tracer):
             include_inputs=include_inputs,
             non_blocking=non_blocking,
         )
-        # The trace body runs in the worker greenlet; register the cache on its
-        # mediator so the interleaver feeds it every location from here on.
-        mediator = Mediator.current("tracer.cache()")
+        # The trace body runs in the worker greenlet; register the cache before
+        # the interleaver builds this run's fixed observer routes.
         mediator.caches.append(cache)
-        # A cache wants locations no worker is parked on, so it has to switch off
-        # the interleaver's "nobody wants this one" skip for the rest of the run.
-        if mediator.interleaver is not None:
-            mediator.interleaver.caching = True
         # Save so the view survives past the trace (like a .save()d value). The
         # view is a virtual root above the model (see CacheView).
         return save(CacheView(cache, None))

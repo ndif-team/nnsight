@@ -136,11 +136,43 @@ class Cache:
         """
         return self._select(location) is not None
 
+    def subscriptions(self) -> "dict[str, tuple[str, str]] | None":
+        """The fixed locations this cache observes, or ``None`` for a wildcard.
+
+        A cache with an explicit module list can name every location it will ever
+        keep before the model starts. The interleaver uses that to route a value
+        directly to its caches instead of asking every cache about every hook.
+        ``modules=None`` deliberately remains a wildcard: it preserves the
+        existing behaviour of selecting every matching ``.input``/``.output``
+        location, including locations introduced later by source tracing.
+        """
+        if self.targets is None:
+            return None
+
+        subscriptions = {}
+        for path in self.targets:
+            if self.include_output:
+                subscriptions[f"{path}.output"] = (path, "output")
+            if self.include_inputs:
+                subscriptions[f"{path}.input"] = (path, "inputs")
+        return subscriptions
+
     def observe(self, location: str, value: Any) -> None:
         """Record ``value`` if ``location`` is a selected module's input/output."""
         selected = self._select(location)
         if selected is None:
             return
+
+        self.observe_selected(selected, value)
+
+    def observe_selected(self, selected: tuple[str, str], value: Any) -> None:
+        """Record a location the interleaver has already selected.
+
+        This is the fast counterpart to [`observe`][nnsight.intervention.cache.Cache.observe]:
+        an explicit-target cache receives its ``(path, slot)`` subscription from
+        the interleaver, so there is no second provider-string parse on the hot
+        path.
+        """
 
         path, key = selected
         self._record(path, key, self._transform(value))

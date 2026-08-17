@@ -5,6 +5,7 @@ import nnsight
 import torch.nn as nn
 from greenlet import getcurrent
 
+from nnsight.intervention.barrier import Barrier
 from nnsight.intervention.envoy import Envoy
 from nnsight.intervention.interleaver import (
     Event,
@@ -175,6 +176,7 @@ class TestInterleaver:
         il.mediators.append(requester(s1))
         il.mediators.append(requester(s2))
         with il:
+            assert il.waiting == {"loc": 2}
             il.handle("loc", 7)
         assert s1["got"] == 7
         assert s2["got"] == 7
@@ -185,39 +187,127 @@ class TestInterleaver:
         il.cancel()
         assert il.mediators == []
 
-    def test_parked_index_is_rebuilt_each_run(self):
-        # `parked` tells handle which locations are worth walking the workers for.
-        # The worker list is appended to and cleared in place rather than replaced,
-        # so an index only rebuilt on assignment goes stale: it would keep last
-        # run's locations forever and the skip would stop firing.
+    def test_waiting_index_is_rebuilt_each_run(self):
+        # A prior run's wait count must not leak into the next run.
         il = Interleaver()
         first = requester({}, "a")
         il.mediators.append(first)
         with il:
-            assert il.parked == {"a"}
+            assert il.waiting == {"a": 1}
         il.cancel()
 
         second = requester({}, "b")
         il.mediators.append(second)
         with il:
-            assert il.parked == {"b"}, "last run's locations leaked into this one"
+            assert il.waiting == {"b": 1}
 
-    def test_caching_does_not_stick_across_runs(self):
-        # A cache forces the slow path at every location. Left set after the run
-        # that opened it, it would quietly cost every later trace on the same model
-        # the walk this index exists to skip.
+    def test_cache_routes_do_not_stick_across_runs(self):
+        class Cache:
+            def subscriptions(self):
+                return {"a.output": ("a", "output")}
+
         il = Interleaver()
-        il.mediators.append(requester({}, "a"))
+        first = requester({}, "a")
+        il.mediators.append(first)
         with il:
-            # A cache is opened from inside a running block, which is why
-            # tracer.cache() sets this directly rather than it being derived at
-            # entry — `start` has already reset the worker's cache list by then.
-            il.caching = True
+            first.caches.append(Cache())
+            il.reindex()
+            assert "a.output" in il.observers
         il.cancel()
 
-        il.mediators.append(requester({}, "b"))
+        second = requester({}, "b")
+        il.mediators.append(second)
         with il:
-            assert not il.caching, "caching stayed on after the caching run ended"
+            assert not il.observers
+
+    def test_only_ready_waiters_are_served(self):
+        il = Interleaver()
+        target, other = requester({}, "target"), requester({}, "other")
+        il.mediators.extend([target, other])
+        called = []
+        original = other.handle
+
+        def spy(*args):
+            called.append(args)
+            return original(*args)
+
+        other.handle = spy
+        with il:
+            il.handle("target", 1)
+
+        assert not called
+        assert other.iterations["target"] == 1
+
+    def test_waiting_route_moves_with_a_worker(self):
+        store = {}
+        mediator = make_mediator(
+            "store['a'] = Mediator.value('a')\n"
+            "store['b'] = Mediator.value('b')",
+            store=store,
+        )
+        il = Interleaver()
+        il.mediators.append(mediator)
+
+        with il:
+            assert il.waiting == {"a": 1}
+            il.handle("a", 1)
+            assert il.waiting == {"b": 1}
+            il.handle("b", 2)
+
+        assert store == {"a": 1, "b": 2}
+
+    def test_barrier_repark_uses_the_next_provider_occurrence(self):
+        # The first worker has already had its current occurrence counted when
+        # the second worker releases it from the barrier. Its next read of loc
+        # must therefore wait for the next hook, not be stranded on occurrence 0.
+        store = {}
+        barrier = Barrier(2)
+        first = make_mediator(
+            "store['first'] = Mediator.value('loc')\n"
+            "getcurrent().mediator().iteration = None\n"
+            "barrier()\n"
+            "store['after'] = Mediator.value('loc')",
+            store=store,
+            barrier=barrier,
+        )
+        second = make_mediator(
+            "store['second'] = Mediator.value('loc')\nbarrier()",
+            store=store,
+            barrier=barrier,
+        )
+        il = Interleaver()
+        il.mediators.extend([first, second])
+
+        with il:
+            il.handle("loc", 1)
+            assert first.pending == Pending(Event.VALUE, "loc", 1)
+            il.handle("loc", 2)
+
+        assert store == {"first": 1, "second": 1, "after": 2}
+
+    def test_targeted_cache_observes_only_its_subscription(self):
+        class Cache:
+            def __init__(self):
+                self.observed = []
+
+            def subscriptions(self):
+                return {"target.output": ("target", "output")}
+
+            def observe_selected(self, selected, value):
+                self.observed.append((selected, value))
+
+        il = Interleaver()
+        mediator = make_mediator("pass")
+        il.mediators.append(mediator)
+        cache = Cache()
+
+        with il:
+            mediator.caches.append(cache)
+            il.reindex()
+            il.handle("other.output", 1)
+            il.handle("target.output", 2)
+
+        assert cache.observed == [(('target', 'output'), 2)]
 
     def test_check_dangling_throws_into_parked_worker(self):
         il = Interleaver()
@@ -606,14 +696,11 @@ class TestCache:
         assert torch.equal(cache.model.l1.output, cache["model.l1"].output)
         assert torch.equal(cache.l1.output, cache["model.l1"].output)
 
-    def test_cache_after_partial_run_misses_earlier(self, envoy, model, x):
-        # A cache created after an intervention that parks at l2 misses the earlier
-        # l1 (already run this forward) but still captures l2 (the park point).
-        with envoy.trace(x) as tracer:
-            envoy.l2.output = envoy.l2.output  # parks at l2.output, past l1
-            cache = tracer.cache()
-        assert "model.l1" not in cache
-        assert cache["model.l2"].output is not None
+    def test_cache_must_be_created_before_model_access(self, envoy, x):
+        with pytest.raises(ValueError, match="before reading or modifying"):
+            with envoy.trace(x) as tracer:
+                envoy.l2.output = envoy.l2.output
+                tracer.cache(modules=[envoy.l2])
 
     def test_cache_captures_skipped_output(self, envoy, x):
         with envoy.trace(x) as tracer:

@@ -171,8 +171,9 @@ Returns a `CacheView` (already saved, so it survives past the trace).
 
 ## Gotchas
 
-- **Only modules reached *after* the `tracer.cache(...)` call are captured.** Call
-  it early (right after opening the trace).
+- **Declare `tracer.cache(...)` before reading or modifying a model value.** Cache
+  routes are fixed before the model starts; opening one after an activation access
+  raises `ValueError`.
 - **`tracer.cache()` must be called inside a trace.** It registers on the running
   worker's mediator; outside interleaving there is nothing to attach to.
 - **Multiple visits accumulate into a list.** Across generation steps (or a
