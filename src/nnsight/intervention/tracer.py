@@ -223,7 +223,12 @@ class InterleavingTracer(Tracer):
         )
         # The trace body runs in the worker greenlet; register the cache on its
         # mediator so the interleaver feeds it every location from here on.
-        Mediator.current("tracer.cache()").caches.append(cache)
+        mediator = Mediator.current("tracer.cache()")
+        mediator.caches.append(cache)
+        # A cache wants locations no worker is parked on, so it has to switch off
+        # the interleaver's "nobody wants this one" skip for the rest of the run.
+        if mediator.interleaver is not None:
+            mediator.interleaver.caching = True
         # Save so the view survives past the trace (like a .save()d value). The
         # view is a virtual root above the model (see CacheView).
         return save(CacheView(cache, None))

@@ -682,7 +682,9 @@ class Envoy:
         # Registered edits run first — prepend them so an edit's swap lands before a
         # trace intervention reads that location. They act on the whole batch (no
         # group); the interleaver's `prepare` has already added any invoke workers.
-        self.interleaver.mediators[:0] = self._edits
+        # Assigned rather than spliced in place, so this goes through the setter
+        # and the interleaver's index of who is parked where is re-derived with it.
+        self.interleaver.mediators = self._edits + self.interleaver.mediators
         result = None
         try:
             with self.interleaver:
