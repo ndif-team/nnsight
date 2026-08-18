@@ -60,6 +60,34 @@ def _gpus_with_free_memory(min_free_mib: int) -> int:
     return count
 
 
+def _experts_output_is_partial() -> bool:
+    """Whether this vLLM leaves a fused-experts output as a per-rank partial.
+
+    Through 0.26 it does — the block all-reduces a few lines later, which is what
+    the tests below use as their oracle. From 0.27 the layer reduces its own
+    output (`MoERunner._maybe_all_reduce`), and measuring it on a two-rank
+    Qwen1.5-MoE confirms it: both ranks hand back the identical tensor. There is
+    then no partial to sum, no gather to check, and nothing to re-split — so
+    these read something that does not exist there.
+
+    What they check on 0.27 instead — that a read matches what the module really
+    produced, and that a write reaches the block once when nothing is
+    re-split — still wants writing.
+    """
+    from vllm.model_executor.layers import fused_moe
+
+    return hasattr(fused_moe, "FusedMoE")
+
+
+requires_partial_experts = pytest.mark.skipif(
+    not _experts_output_is_partial(),
+    reason=(
+        "this vLLM reduces the fused-experts output itself, so there is no "
+        "per-rank partial for these to assemble; 0.27-shaped equivalents are "
+        "not written yet"
+    ),
+)
+
 requires_two_gpus = pytest.mark.skipif(
     _gpus_with_free_memory(MIN_FREE_MIB) < 2,
     reason=f"needs 2 GPUs with {MIN_FREE_MIB} MiB free each",
@@ -133,6 +161,7 @@ def _block_output(mlp):
 
 
 @requires_two_gpus
+@requires_partial_experts
 @torch.no_grad()
 def test_experts_output_read_is_the_full_value(vllm_moe_tp):
     # The block output IS the all-reduce of the per-rank partials, so the two
@@ -146,6 +175,7 @@ def test_experts_output_read_is_the_full_value(vllm_moe_tp):
 
 
 @requires_two_gpus
+@requires_partial_experts
 @torch.no_grad()
 def test_swapped_experts_output_reaches_the_block_once(vllm_moe_tp):
     # The block computes all_reduce(a' + b') from whatever the write-back left on
@@ -171,6 +201,7 @@ def test_swapped_experts_output_reaches_the_block_once(vllm_moe_tp):
 
 
 @requires_two_gpus
+@requires_partial_experts
 @torch.no_grad()
 def test_each_invoke_reads_its_own_rows(vllm_moe_tp):
     # Continuous batching packs both requests into one flat slab; the gather runs
@@ -199,6 +230,7 @@ def test_each_invoke_reads_its_own_rows(vllm_moe_tp):
 
 
 @requires_two_gpus
+@requires_partial_experts
 @torch.no_grad()
 def test_an_installed_block_reads_the_full_value(vllm_moe_tp):
     # An edit runs per request on every rank, the same as a trace's block, so its
