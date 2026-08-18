@@ -81,19 +81,16 @@ def _coerce(value: str) -> object:
 
 
 def _add_api_key_middleware(app, expected_key: str) -> None:
-    from fastapi import Request
-    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
-    class ApiKeyMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            if request.url.path == "/health":
-                return await call_next(request)
-            if request.headers.get("ndif-api-key", "") != expected_key:
-                return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
-            return await call_next(request)
-
-    app.add_middleware(ApiKeyMiddleware)
+    @app.middleware("http")
+    async def check_api_key(request, call_next):
+        # /health stays open, so a liveness probe needs no secret.
+        if request.url.path != "/health" and (
+            request.headers.get("ndif-api-key", "") != expected_key
+        ):
+            return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
+        return await call_next(request)
 
 
 if __name__ == "__main__":

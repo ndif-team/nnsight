@@ -31,7 +31,7 @@ needed: no memo, no ``watch``/``release``, no extra hooks.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 
@@ -42,9 +42,11 @@ from ...util import apply
 def _tp_world_size() -> int:
     """How many ranks this engine's tensor-parallel group spans.
 
-    ``1`` when there is no group yet — a client building a meta tree has vLLM's
-    single-rank gloo group and nothing model-parallel — which is also the answer
-    that means "nothing here is a fragment".
+    The one caller is `VLLMFragments.instrument`, which runs while a worker builds
+    its tree in `NNsightGPUModelRunner.load_model` — after vLLM has initialized the
+    group. The fallback is for a tree built anywhere else: ``1`` is also the answer
+    that means "nothing here is a fragment", so degrading to it leaves an
+    unsharded tree rather than failing the load.
     """
     try:
         from vllm.distributed.parallel_state import get_tp_group
@@ -78,8 +80,7 @@ class VLLMFragments(Fragments):
         once, after ``load_model``, and does not swap modules under it — a hook
         registered on a swapped-out module would have gone just as dead.
         """
-        world_size = _tp_world_size()
-        if world_size < 2:
+        if _tp_world_size() < 2:
             return
 
         module = envoy._module
@@ -97,25 +98,21 @@ class VLLMFragments(Fragments):
             tensor_model_parallel_all_gather,
             tensor_model_parallel_all_reduce,
         )
-        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.linear import ColumnParallelLinear
 
         module, side = self.rules[location]
 
-        if isinstance(module, ColumnParallelLinear):
+        if isinstance(module, ColumnParallelLinear) or side == "input":
             # Column sharding splits the output features, so the ranks hold
-            # different columns of the same rows.
+            # different columns of the same rows; a row-parallel layer takes its
+            # input already split by feature. Either way the whole is the ranks'
+            # concatenation.
             collective = tensor_model_parallel_all_gather
-        elif side == "input":
-            # A row-parallel layer takes its input already split by feature.
-            collective = tensor_model_parallel_all_gather
-        elif isinstance(module, FusedMoE):
-            # Each rank holds a partial sum of the experts' combined output —
-            # the same collective the outer block runs right afterwards.
-            collective = tensor_model_parallel_all_reduce
         else:
-            # Row sharding splits the summed terms, so each rank holds a partial
-            # sum and the whole is their total.
+            # Row sharding splits the summed terms, and a deferred-combine FusedMoE
+            # leaves each rank a partial sum of the experts' output — either way
+            # each rank holds part of the total and the whole is their sum. For the
+            # MoE it is the same collective the outer block runs right afterwards.
             collective = tensor_model_parallel_all_reduce
 
         return apply(value, collective, torch.Tensor)
@@ -172,7 +169,7 @@ def _is_piece(module: torch.nn.Module, side: str) -> bool:
 
     if isinstance(module, ColumnParallelLinear):
         # vLLM gathers this itself when asked to, and then it isn't a piece.
-        return not module.gather_output if side == "output" else False
+        return side == "output" and not module.gather_output
 
     if isinstance(module, RowParallelLinear):
         if side == "input":

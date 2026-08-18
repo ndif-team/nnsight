@@ -221,3 +221,44 @@ class TestShardedEdit:
         tp_logits = _zero_all(vllm_qwen_tp, path, ET_prompt)
 
         assert tp_logits.argmax(dim=-1).item() == ref_logits.argmax(dim=-1).item()
+
+
+class TestEveryRankWindsUp:
+    """Cleanup is per rank, not just the one whose values go home.
+
+    Every rank runs the block, so every rank holds a worker, its greenlet, and
+    whatever that greenlet captured. Only rank 0's values are reported, and the
+    collect used to return early on the others — leaving all of it in place for
+    the life of the engine. `nnsight_request_count` is the gauge, and the reason
+    the leak survived is that the one test using it looked only at `counts[0]`.
+    """
+
+    @torch.no_grad()
+    def test_no_worker_is_left_on_any_rank(self, vllm_qwen_tp, ET_prompt):
+        model = vllm_qwen_tp
+        engine = model.vllm_entrypoint.llm_engine
+
+        for _ in range(3):
+            with model.trace(ET_prompt, temperature=0.0, top_p=1):
+                hidden = model.model.layers[LAYER].output[0].save()
+
+        counts = engine.collective_rpc("nnsight_request_count")
+        assert len(counts) > 1, "expected more than one rank"
+        assert counts == [0] * len(counts), f"workers left behind per rank: {counts}"
+
+    @torch.no_grad()
+    def test_an_installed_block_leaves_nothing_either(self, vllm_qwen_tp, ET_prompt):
+        model = vllm_qwen_tp
+        engine = model.vllm_entrypoint.llm_engine
+
+        with model.edit() as (tracer, edit):
+            hidden = model.model.layers[LAYER].output[0].save()
+        try:
+            for _ in range(3):
+                model.generate([ET_prompt], max_tokens=2, temperature=0.0,
+                               ignore_eos=True)
+
+            counts = engine.collective_rpc("nnsight_request_count")
+            assert counts == [0] * len(counts), f"workers left behind: {counts}"
+        finally:
+            edit.clear()

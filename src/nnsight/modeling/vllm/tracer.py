@@ -14,7 +14,6 @@ from __future__ import annotations
 from types import CodeType
 from typing import Any
 
-from ...intervention.batching import Batcher
 from ...intervention.interleaver import Mediator
 from ...intervention.tracer import InterleavingTracer
 from ...tracing.tracer import push_result
@@ -65,7 +64,7 @@ class VLLMTracer(InterleavingTracer):
         interleaver = self.envoy.interleaver
         # The batcher belongs to this trace; each Invoker adds its input to it through
         # self.tracer.batcher while the body runs to collect invokes.
-        self.batcher = Batcher(self.envoy)
+        self.batcher = self.envoy._batcher_class(self.envoy, self.kwargs)
         # >0 rows means direct input (one implicit invoke); 0 means invoke mode
         # (the body defines the batch via tracer.invoke(...)). Trace-level params
         # that aren't data go to the call.

@@ -14,7 +14,7 @@ can be handed back on the output they belong to.
 from __future__ import annotations
 
 import pickle
-from typing import Any
+from typing import Any, Optional
 
 from vllm.v1.engine.llm_engine import LLMEngine
 
@@ -63,19 +63,34 @@ def attach(output: Any, entry: dict) -> None:
     output.nnsight_error = entry["error"]
 
 
+async def acollect(engine: Any, request_id: str, output: Any = None) -> Optional[dict]:
+    """One finished request's collected values, merged across the ranks.
+
+    The awaitable form, for the engines whose ``collective_rpc`` is a coroutine.
+    ``output`` is the finished ``RequestOutput``, which the worker cannot build
+    and needs in order to serve ``tracer.result``; without one this is simply the
+    call that winds the request's workers up and frees what they held.
+    """
+    ids = [request_id]
+    args = (ids, ids) if output is None else (ids, ids, {request_id: output})
+    return merge_collected(await engine.collective_rpc("collect_nnsight", args=args)).get(
+        request_id
+    )
+
+
 class NNsightLLMEngine(LLMEngine):
     """An engine that attaches each finished request's saved values to its output."""
 
     def step(self) -> Any:
         outputs = super().step()
 
-        finished = [output.request_id for output in outputs if output.finished]
-        if not finished:
-            return outputs
-
         # The outputs ride along so a block parked on `tracer.result` can be
         # served: the value it is waiting for is assembled here, not in the worker.
         by_id = {output.request_id: output for output in outputs if output.finished}
+        if not by_id:
+            return outputs
+
+        finished = list(by_id)
         collected = merge_collected(
             self.engine_core.collective_rpc(
                 "collect_nnsight", args=(finished, finished, by_id)

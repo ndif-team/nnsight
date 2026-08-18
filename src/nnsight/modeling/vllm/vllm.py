@@ -79,7 +79,8 @@ class VLLM(Remotable):
             ...     logits = model.logits.save()
 
     Attributes:
-        vllm_entrypoint: The underlying ``vllm.LLM``, or None until dispatch.
+        vllm_entrypoint: The underlying ``vllm.LLM`` (sync) or ``AsyncLLM``
+            (async), or None until dispatch.
         tokenizer: The tokenizer vLLM resolved for the checkpoint.
     """
 
@@ -183,7 +184,7 @@ class VLLM(Remotable):
         CPU-only host (no CUDA at all) selects a CPU backend that never probes, so
         this is a no-op there too.
         """
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+        if torch.cuda.is_available():
             yield
             return
         from unittest import mock
@@ -218,13 +219,13 @@ class VLLM(Remotable):
         _ROPE_DICT.clear()
 
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-        if getattr(self.tokenizer, "pad_token", None) is None:
+        if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         return model
 
-    # vLLM already carries interventions through to the worker in this field, so
-    # the worker needs no transport of its own.
+    # The worker class vLLM instantiates in each of its processes; it installs the
+    # nnsight model runner, which is what deserializes and runs the blocks.
     _WORKER_CLS = "nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker"
 
     # A ready module (the worker-side runner wrapping the module vLLM already
@@ -372,14 +373,25 @@ class VLLM(Remotable):
 
         return TokensPrompt(prompt_token_ids=input_ids)
 
+    @staticmethod
+    def _sampling_kwargs(kwargs: dict) -> dict:
+        """A copy of `kwargs` with generation length spelled the way vLLM spells it.
+
+        vLLM's is ``max_tokens``; ``max_new_tokens`` is the ``LanguageModel`` API's
+        and is accepted on trace and generate alike, rewritten before it reaches
+        SamplingParams — where an unknown keyword now raises rather than being
+        quietly ignored. The copy is what lets a caller pass its own dict through
+        twice (``generate`` hands one to ``trace`` and keeps the original).
+        """
+        kwargs = dict(kwargs)
+        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
+        return kwargs
+
     def trace(self, *inputs: Any, **kwargs: Any) -> Any:
         from .tracer import VLLMTracer
 
-        # vLLM generation length is `max_tokens`; accept `max_new_tokens` (from the
-        # LanguageModel API) on trace and generate alike, rewriting before it reaches
-        # SamplingParams (where an unknown kwarg now raises).
-        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
+        kwargs = self._sampling_kwargs(kwargs)
 
         # `serve=url` runs the trace on a remote nnsight-serve engine; `api_key`
         # rides along with it. Pop both before they reach the base trace.
@@ -483,7 +495,6 @@ class VLLM(Remotable):
         """
         for edit in list(self._installed_edits):
             edit.clear()
-        self._installed_edits.clear()
 
     def generate(self, *inputs: Any, **kwargs: Any) -> Any:
         """Generate — as a trace when used as a ``with`` block, plainly when not.
@@ -537,9 +548,7 @@ class VLLM(Remotable):
         if not self.dispatched:
             self.dispatch()
 
-        kwargs = dict(kwargs)
-        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
+        kwargs = self._sampling_kwargs(kwargs)
         lora_request = kwargs.pop("lora_request", None)
         params = SamplingParams(**kwargs)
 
@@ -566,26 +575,22 @@ class VLLM(Remotable):
         import asyncio
         import uuid
 
-        from .engines.engine import attach, merge_collected
+        from .engines.engine import acollect, attach
 
         engine = self.vllm_entrypoint
-        if isinstance(prompts, str) or not isinstance(prompts, (list, tuple)):
+        if not isinstance(prompts, (list, tuple)):
             prompts = [prompts]
 
         async def run(prompt: Any) -> Any:
             request_id = uuid.uuid4().hex
-            extra = {} if lora_request is None else {"lora_request": lora_request}
             output = None
-            async for output in engine.generate(prompt, params, request_id, **extra):
+            async for output in engine.generate(
+                prompt, params, request_id, lora_request=lora_request
+            ):
                 pass
             if output is None:
                 return None
-            entry = merge_collected(
-                await engine.collective_rpc(
-                    "collect_nnsight",
-                    args=([request_id], [request_id], {request_id: output}),
-                )
-            ).get(request_id)
+            entry = await acollect(engine, request_id, output)
             if entry is not None:
                 attach(output, entry)
             return output
@@ -624,9 +629,7 @@ class VLLM(Remotable):
             # pushed into the trace's variables — nor handed to
             # `merge_shared_saves`, which would read one name saved across many
             # requests as a single shared container and fold them together.
-            saves = getattr(output, "nnsight_saves", None)
-            if saves is None:
-                saves = getattr(output, "saves", {})
+            saves = getattr(output, "nnsight_saves", {})
             per_request_saves.append(saves)
             for name, value in saves.items():
                 mark(value)  # marking results after the run; no trace active to guard
@@ -665,12 +668,11 @@ class VLLM(Remotable):
 
         from ...tracing.tracer import skippable
 
-        attached, orphaned = [], []
+        attached = []
         for mediator in self.interleaver.mediators:
-            (attached if mediator.batch_group is not None else orphaned).append(mediator)
-
-        for mediator in orphaned:
-            if mediator.node is not None and skippable(mediator.node):
+            if mediator.batch_group is not None:
+                attached.append(mediator)
+            elif mediator.node is not None and skippable(mediator.node):
                 raise ValueError(
                     "A `tracer.invoke(...)` with no prompt has no vLLM request to run "
                     "on, so its interventions would be silently dropped. Each invoke is "
@@ -736,14 +738,6 @@ class VLLM(Remotable):
         state = super().__getstate__()
         # The engine is a live process handle; the far side has its own.
         state["vllm_entrypoint"] = None
-        state["_async_engine"] = self._async_engine
         if self.tokenizer is not None:
             self.tokenizer._persistent_id = "Tokenizer"
-        state["tokenizer"] = self.tokenizer
         return state
-
-    def __setstate__(self, state: dict) -> None:
-        super().__setstate__(state)
-        self.vllm_entrypoint = state["vllm_entrypoint"]
-        self._async_engine = state.get("_async_engine", False)
-        self.tokenizer = state["tokenizer"]

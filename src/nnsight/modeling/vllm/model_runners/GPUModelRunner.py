@@ -129,7 +129,7 @@ class Requests:
                 for registration_id, template in self.templates.items():
                     code, glbls, lcls, presaved = template
                     mediator = Mediator(code, glbls, dict(lcls))
-                    mediator.presaved = presaved
+                    mediator.presaved = set(presaved)
                     copies[registration_id] = mediator
 
             extra_args = getattr(request.sampling_params, "extra_args", None) or {}
@@ -142,6 +142,23 @@ class Requests:
                 )
             except Exception as exception:
                 self.errored[request.req_id] = capture_exception(exception)
+
+    def _by_row(self):
+        """Each scheduled request's token count and its workers, in batch order.
+
+        Registered copies come first, so a trace written for this request reads
+        whatever they left behind rather than racing them. A request the scheduler
+        did not run this step contributes no tokens and no row.
+        """
+        for request_id in self.rows:
+            tokens = self.tokens.get(request_id)
+            if tokens is None:
+                continue
+            workers = list(self.registered.get(request_id, {}).values())
+            mediator = self.mediators.get(request_id)
+            if mediator is not None:
+                workers.append(mediator)
+            yield tokens, workers
 
     def scope(self, model: "VLLM") -> None:
         """Point every worker at its own tokens within this step's batch.
@@ -196,16 +213,8 @@ class Requests:
                         raise
                     mediator.exception = exception
 
-        for request_id in self.rows:
-            tokens = self.tokens.get(request_id)
-            if tokens is None:
-                continue
-            # Registered copies go first, so a trace written for this request
-            # reads whatever they left behind rather than racing them.
-            for mediator in self.registered.get(request_id, {}).values():
-                take(mediator, tokens)
-            mediator = self.mediators.get(request_id)
-            if mediator is not None:
+        for tokens, workers in self._by_row():
+            for mediator in workers:
                 take(mediator, tokens)
             start += tokens
 
@@ -221,41 +230,45 @@ class Requests:
         spans that scoped the forward would select the wrong thing. The row order
         is the same order the forward's tensors used.
         """
-        interleaver = model.interleaver
-        scheduled = {id(mediator) for mediator in interleaver.mediators}
         row = 0
-
-        for request_id in self.rows:
-            if self.tokens.get(request_id) is None:
-                continue
-            for mediator in self.registered.get(request_id, {}).values():
-                if id(mediator) in scheduled:
+        for _, workers in self._by_row():
+            for mediator in workers:
+                # Having a span is exactly what "scheduled" means: `scope` clears
+                # every tracked worker's, `take` sets it for the ones it kept, and
+                # nothing writes one between there and here.
+                if mediator.batch_group is not None:
                     mediator.batch_group = [row, 1]
-            mediator = self.mediators.get(request_id)
-            if mediator is not None and id(mediator) in scheduled:
-                mediator.batch_group = [row, 1]
             row += 1
 
-        interleaver.batcher.total = row
+        model.interleaver.batcher.total = row
 
-    def match(self, request_ids: set[str]) -> list[tuple[str, str]]:
-        """Pair the engine's name for each request with this worker's.
+    @staticmethod
+    def engine_key(worker_id: str, request_ids) -> Optional[str]:
+        """The name the engine knows this request by, or None if it is not asking.
 
         The two sides name the same request differently: vLLM appends a hash of the
         request's content on the way in, so a request the engine calls ``"0"``
         arrives here as ``"0-a2460f0e"``. Saves have to go home under the name the
-        engine will recognize.
+        engine will recognize — which is usually the stripped one, but a runtime
+        that does not append the hash (or an id with a ``-`` of its own, as the
+        serve path mints) is known by the whole thing.
+        """
+        engine_id = worker_id.rsplit("-", 1)[0]
+        if engine_id in request_ids:
+            return engine_id
+        return worker_id if worker_id in request_ids else None
+
+    def match(self, request_ids: set[str]) -> list[tuple[str, str]]:
+        """Pair the engine's name for each of our requests with this worker's.
 
         Returns:
             ``(engine_id, worker_id)`` for each requested id that is ours.
         """
         matched = []
         for worker_id in self.mediators:
-            engine_id = worker_id.rsplit("-", 1)[0]
-            if engine_id in request_ids:
+            engine_id = self.engine_key(worker_id, request_ids)
+            if engine_id is not None:
                 matched.append((engine_id, worker_id))
-            elif worker_id in request_ids:
-                matched.append((worker_id, worker_id))
         return matched
 
     def record_saves(self) -> None:
@@ -267,8 +280,6 @@ class Requests:
         captured here and carried on the mediator instead. The set only grows across
         a request's steps, so re-recording each step keeps the latest superset.
         """
-        from ....intervention.errors import capture_exception
-
         registered = [
             mediator
             for copies in self.registered.values()
@@ -328,7 +339,7 @@ class Requests:
             engine_id = worker_id.rsplit("-", 1)[0]
             # Named either way: the scheduler says "0-a2460f0e", a collect asks
             # with the engine's "0".
-            if worker_id not in finished and engine_id not in finished:
+            if self.engine_key(worker_id, finished) is None:
                 continue
             for registration_id, mediator in self.registered.pop(worker_id).items():
                 if registration_id not in self.harvested:
@@ -358,15 +369,13 @@ class Requests:
         registered copy has no such request to report to, so it is only unwound
         (running its ``finally`` blocks) and its exception dropped.
         """
-        from greenlet import error as greenlet_error
-
         from ....intervention.interleaver import OutOfOrderError
 
         try:
             mediator.worker.throw(
                 OutOfOrderError("the request finished before this location was reached")
             )
-        except (greenlet_error, BaseException):
+        except BaseException:
             return
 
     def serve_result(self, worker_id: str, output: Any) -> None:
@@ -422,9 +431,8 @@ class Requests:
         # `requester` is printed into the error, where Pending renders as
         # "{location}.i{n}" — the occurrence is what explains an iter loop that
         # asked for more steps than the request generated.
-        pending = mediator.pending
-        event, requester = pending.event, pending
-        if event is Event.BARRIER:
+        requester = mediator.pending
+        if requester.event is Event.BARRIER:
             error: BaseException = ValueError(
                 "A barrier was never reached by every block it waits for; "
                 "check the count it was created with"
@@ -475,8 +483,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         super().load_model(*args, **kwargs)
 
-        batcher = VLLMBatcher()
-
         # An Envoy tree over the real module. Passing a loaded module builds it
         # directly, so no weights are read twice and the paths match the ones the
         # client's meta tree gave the user. Building it here is also what walks
@@ -489,8 +495,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
 
         interleaver = self.nnsight_model.interleaver
-        interleaver.mediators = []
-        interleaver.batcher = batcher
+        # No envoy: the spans come from the scheduler rather than from an invoke,
+        # so the row math never looks at a tree — and there is none to hand it yet.
+        interleaver.batcher = VLLMBatcher(None)
         # A worker's error must end only its own request, not tear down the engine
         # every other request shares.
         interleaver.defer_exceptions = True
@@ -685,6 +692,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
         wanted = set(request_ids) | finished
         collected: dict[str, dict] = {}
 
+        def entry_for(request_id: str) -> dict:
+            return collected.setdefault(
+                request_id, {"saves": {}, "error": None, "registered": {}}
+            )
+
         # Harvest anything finished that the scheduler has not got to yet, so a
         # collect never reads an empty shelf for a request that is over.
         if finished and requests.registered:
@@ -701,16 +713,22 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 if engine_id not in wanted:
                     continue
                 taken = harvested.pop(engine_id)
-                entry = collected.setdefault(
-                    engine_id, {"saves": {}, "error": None, "registered": {}}
-                )
+                entry = entry_for(engine_id)
                 entry["registered"].update(taken["saves"])
                 if entry["error"] is None:
                     entry["error"] = taken["error"]
 
-        # Everything below is the trace's own, and only one rank holds it.
-        if get_pp_group().rank != 0:
-            return pickle.dumps(collected)
+        # Everything below is the trace's own. Every rank ran the block and so
+        # has a worker to wind up, but only one rank's values are wanted: the
+        # reads are gathered, so every rank holds the same ones, and shipping
+        # them all would cost bandwidth to hand back a copy that is thrown away.
+        #
+        # Only the *reporting* is gated. This used to be an early return, which
+        # left every other rank's workers, their greenlets, and their captured
+        # activations in place for the life of the engine — `get_pp_group().rank`
+        # is the global rank when there is no pipeline, so under plain tensor
+        # parallelism every rank but 0 skipped its own cleanup.
+        reporting = get_pp_group().rank == 0
 
         matched = requests.match(wanted)
 
@@ -742,39 +760,34 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if engine_id in finished:
                 requests.finish_dangling(worker_id)
 
-        for engine_id, worker_id in matched:
-            entry = collected.setdefault(
-                engine_id, {"saves": {}, "error": None, "registered": {}}
-            )
-            entry["saves"] = requests.saves(worker_id)
-            if entry["error"] is None:
-                entry["error"] = requests.error(worker_id)
-
-        # Requests whose payload failed to deserialize (see Requests.add) carry no
-        # worker; surface their captured error here, keyed like the collected saves.
-        for req_id, error in list(requests.errored.items()):
-            engine_id = req_id.rsplit("-", 1)[0]
-            key = engine_id if engine_id in wanted else req_id if req_id in wanted else None
-            if key is None:
-                continue
-            entry = collected.setdefault(
-                key, {"saves": {}, "error": None, "registered": {}}
-            )
-            entry["error"] = error
-            if engine_id in finished or req_id in finished:
-                requests.errored.pop(req_id, None)
-
         saved = _saves()
         for engine_id, worker_id in matched:
+            values = requests.saves(worker_id)
+            if reporting:
+                entry = entry_for(engine_id)
+                entry["saves"] = values
+                if entry["error"] is None:
+                    entry["error"] = requests.error(worker_id)
             if engine_id in finished:
                 # Drop this request's saved values from the thread-local set as they
                 # leave: it is keyed by object id, so a finished request's ids left
                 # behind could be reused by a later request's values and mistaken for
                 # saved. (No-op on a collect thread other than the workers' own, e.g.
                 # Ray, where that set is empty — but harmless.)
-                for value in collected[engine_id]["saves"].values():
+                for value in values.values():
                     saved.discard(id(value))
                 requests.mediators.pop(worker_id, None)
+
+        # Requests whose payload failed to deserialize (see Requests.add) carry no
+        # worker; surface their captured error here, keyed like the collected saves.
+        for req_id, error in list(requests.errored.items()):
+            key = Requests.engine_key(req_id, wanted)
+            if key is None:
+                continue
+            if reporting:
+                entry_for(key)["error"] = error
+            if Requests.engine_key(req_id, finished) is not None:
+                requests.errored.pop(req_id, None)
 
         # Saves may still be device work in flight; they are about to be pickled.
         if torch.cuda.is_available():
@@ -783,7 +796,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         return pickle.dumps(collected)
 
     # ------------------------------------------------------------------
-    # Registered blocks (called via collective_rpc on every rank)
+    # Worker-side RPC entry points (called by name via collective_rpc)
     # ------------------------------------------------------------------
 
     def nnsight_register(self, registration_id: str, payload: bytes) -> None:

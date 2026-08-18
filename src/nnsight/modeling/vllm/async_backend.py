@@ -38,7 +38,6 @@ a ``step()`` to hook, it happens here, in the stream.
 
 from __future__ import annotations
 
-import pickle
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
@@ -118,9 +117,9 @@ class AsyncVLLMBackend(Backend):
         """Release an aborted request's worker (and its saved tensors) on the engine."""
         if self._request_id is None:
             return
-        await self.model.vllm_entrypoint.collective_rpc(
-            "collect_nnsight", args=([self._request_id], [self._request_id])
-        )
+        from .engines.engine import acollect
+
+        await acollect(self.model.vllm_entrypoint, self._request_id)
 
     def __await__(self):
         """``await tracer.backend`` drains the stream and returns the last output."""
@@ -137,17 +136,11 @@ class AsyncVLLMBackend(Backend):
         """Fetch this finished request's saved values from the worker onto ``output``."""
         from ...intervention.errors import raise_deferred
 
-        from .engines.engine import attach, merge_collected
+        from .engines.engine import acollect, attach
 
-        request_id = self._request_id
-        results = await self.model.vllm_entrypoint.collective_rpc(
-            "collect_nnsight",
-            args=([request_id], [request_id], {request_id: output}),
+        entry = await acollect(
+            self.model.vllm_entrypoint, self._request_id, output
         )
-        # Merged rather than taking the first rank to answer: a trace's values
-        # come from the rank holding the sampled output, a registered block's from
-        # whichever rank ran the layers it read.
-        entry = merge_collected(results).get(request_id)
         if entry is not None:
             attach(output, entry)
             raise_deferred(entry["error"])

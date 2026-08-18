@@ -38,6 +38,7 @@ has it on warns.
 
 from __future__ import annotations
 
+import inspect
 import uuid
 import warnings
 from types import CodeType
@@ -45,10 +46,9 @@ from typing import TYPE_CHECKING, Any
 
 from ...intervention.interleaver import Mediator
 from ...intervention.serialization import dumps
-from ...intervention.tracer import InterleavingTracer
 from ...tracing.backend import Backend
 from ...tracing.tracer import skip_context, skippable
-from .tracer import no_barrier
+from .tracer import VLLMTracer
 
 if TYPE_CHECKING:
     from .vllm import VLLM
@@ -81,7 +81,8 @@ def _warn_if_prefix_caching(model: "VLLM") -> None:
             "its activations come back short, with no error. Build the model with "
             "VLLM(..., enable_prefix_caching=False) to register against whole "
             "prompts.",
-            stacklevel=4,
+            # execute -> Backend.__call__ -> Tracer.__exit__ -> this exit -> caller.
+            stacklevel=6,
         )
 
 
@@ -98,10 +99,11 @@ class Registration:
     accumulates for as long as somebody is reading the outputs, which on the
     synchronous engine is every request there is.
 
-    Synchronous engines only: installing the block is a ``collective_rpc``, which
-    on ``mode="async"`` is a coroutine there is no safe way to finish from a
-    plain statement, so `VLLM.edit` refuses there rather than silently not
-    installing it.
+    A plain ``with`` is synchronous-engine only: installing the block is a
+    ``collective_rpc``, which on ``mode="async"`` is a coroutine there is no safe
+    way to finish from a plain statement, so the exit raises there rather than
+    silently not installing it. On an async engine use ``async with`` and
+    `aclear`, which can await that trip from inside the loop it is already on.
 
     Attributes:
         model: The engine this is registered on.
@@ -114,6 +116,14 @@ class Registration:
         self.id = id
         self.cleared = False
 
+    def _collective(self, method: str, args: tuple) -> Any:
+        """Call `method` on every worker, however this engine reaches them."""
+        engine = self.model.vllm_entrypoint
+        # The sync entrypoint keeps the engine one level down; the async one is
+        # already the engine.
+        core = getattr(engine, "llm_engine", engine)
+        return core.collective_rpc(method, args=args)
+
     def _rpc(self, method: str, *args: Any) -> list:
         """Reach every worker.
 
@@ -124,13 +134,7 @@ class Registration:
         refuses rather than returning a coroutine nobody awaits, which is what it
         used to do: the block was never installed and nothing said so.
         """
-        import inspect
-
-        engine = self.model.vllm_entrypoint
-        # The sync entrypoint keeps the engine one level down; the async one is
-        # already the engine.
-        core = getattr(engine, "llm_engine", engine)
-        result = core.collective_rpc(method, args=args)
+        result = self._collective(method, args)
         if inspect.iscoroutine(result):
             result.close()
             raise NotImplementedError(
@@ -149,11 +153,7 @@ class Registration:
         answer (``run_coroutine_threadsafe`` times out), and the engine exposes no
         loop to target instead.
         """
-        import inspect
-
-        engine = self.model.vllm_entrypoint
-        core = getattr(engine, "llm_engine", engine)
-        result = core.collective_rpc(method, args=args)
+        result = self._collective(method, args)
         if inspect.isawaitable(result):
             return await result
         return result
@@ -166,6 +166,14 @@ class Registration:
         """`install`, awaited."""
         await self._arpc("nnsight_register", self.id, payload)
 
+    def uninstall(self) -> None:
+        """Take the block off the engine. The other half of the seam."""
+        self._rpc("nnsight_clear_registered", self.id)
+
+    async def auninstall(self) -> None:
+        """`uninstall`, awaited."""
+        await self._arpc("nnsight_clear_registered", self.id)
+
     def clear(self) -> None:
         """Stop running the block and drop anything it has not handed back.
 
@@ -174,22 +182,21 @@ class Registration:
         """
         if self.cleared:
             return
-        self._rpc("nnsight_clear_registered", self.id)
+        self.uninstall()
         self._forget()
 
     async def aclear(self) -> None:
         """`clear`, awaited — the async engine's form."""
         if self.cleared:
             return
-        await self._arpc("nnsight_clear_registered", self.id)
+        await self.auninstall()
         self._forget()
 
     def _forget(self) -> None:
         """Mark this cleared and drop it from the model's list of installed edits."""
         self.cleared = True
-        installed = getattr(self.model, "_installed_edits", None)
-        if installed is not None and self in installed:
-            installed.remove(self)
+        if self in self.model._installed_edits:
+            self.model._installed_edits.remove(self)
 
     def __repr__(self) -> str:
         state = "cleared" if self.cleared else "active"
@@ -206,9 +213,6 @@ class ServeRegistration(Registration):
     a trace sent to that same server.
     """
 
-    CONNECT_TIMEOUT: float = 10.0
-    READ_TIMEOUT: float = 600.0
-
     def __init__(
         self, model: "VLLM", id: str, host: str, api_key: str | None = None
     ) -> None:
@@ -216,43 +220,31 @@ class ServeRegistration(Registration):
         self.host = host.rstrip("/")
         self.api_key = api_key
 
-    def _headers(self) -> dict:
-        headers = {"Content-Type": "application/octet-stream"}
-        if self.api_key:
-            headers["ndif-api-key"] = self.api_key
-        return headers
-
-    def _check(self, response: Any) -> None:
-        if response.status_code != 200:
-            try:
-                detail = response.json().get("detail", response.reason_phrase)
-            except Exception:
-                detail = response.reason_phrase
-            raise ConnectionError(
-                f"nnsight-serve returned {response.status_code}: {detail}"
-            )
-
     def _post(self, path: str, content: bytes = b"") -> None:
         import httpx
 
-        with httpx.Client(
-            timeout=httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
-        ) as client:
-            self._check(
+        from .serve import http
+
+        with httpx.Client(timeout=http.timeout()) as client:
+            http.check(
                 client.post(
-                    f"{self.host}{path}", content=content, headers=self._headers()
+                    f"{self.host}{path}",
+                    content=content,
+                    headers=http.headers(self.api_key),
                 )
             )
 
     async def _apost(self, path: str, content: bytes = b"") -> None:
         import httpx
 
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
-        ) as client:
-            self._check(
+        from .serve import http
+
+        async with httpx.AsyncClient(timeout=http.timeout()) as client:
+            http.check(
                 await client.post(
-                    f"{self.host}{path}", content=content, headers=self._headers()
+                    f"{self.host}{path}",
+                    content=content,
+                    headers=http.headers(self.api_key),
                 )
             )
 
@@ -262,24 +254,18 @@ class ServeRegistration(Registration):
     async def ainstall(self, payload: bytes) -> None:
         await self._apost(f"/v1/nnsight/register/{self.id}", payload)
 
-    def clear(self) -> None:
-        if self.cleared:
-            return
+    def uninstall(self) -> None:
         self._post(f"/v1/nnsight/register/{self.id}/clear")
-        self._forget()
 
-    async def aclear(self) -> None:
-        if self.cleared:
-            return
+    async def auninstall(self) -> None:
         await self._apost(f"/v1/nnsight/register/{self.id}/clear")
-        self._forget()
 
     def __repr__(self) -> str:
         state = "cleared" if self.cleared else "active"
         return f"<Registration {self.id} on {self.host} ({state})>"
 
 
-class RegisteringTracer(InterleavingTracer):
+class RegisteringTracer(VLLMTracer):
     """Capture a block and leave it on the engine instead of running it once.
 
     The counterpart of [`EditingTracer`][nnsight.intervention.editing.EditingTracer]
@@ -320,10 +306,6 @@ class RegisteringTracer(InterleavingTracer):
             )
         return Registration(self._model, id)
 
-    def barrier(self, n: int) -> None:
-        """Not available here — see [`no_barrier`][nnsight.modeling.vllm.tracer.no_barrier]."""
-        no_barrier(n)
-
     def __enter__(self) -> tuple["RegisteringTracer", Registration]:
         """Enter the block, binding the tracer and the handle that ends it.
 
@@ -349,9 +331,11 @@ class RegisteringTracer(InterleavingTracer):
     async def __aenter__(self) -> tuple["RegisteringTracer", Registration]:
         """`__enter__`, for ``async with`` — the form an async engine needs.
 
-        Spelled out rather than delegating to `__enter__`: `capture` reads the
-        caller's frame at a fixed depth, so going through another call would hand
-        it this method's frame and it would find no ``with`` block at all.
+        Spelled out rather than delegating to `__enter__`: both `capture` and the
+        skip guard read the caller's frame at a fixed depth, so going through
+        another call would hand them this method's frame — `capture` would find no
+        ``with`` block at all, and `skip_context` would arm the wrong frame and
+        let the body run here as well as on the workers.
         """
         self.capture()
         if skippable(self.node):

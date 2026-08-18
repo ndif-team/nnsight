@@ -25,8 +25,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 from fastapi import FastAPI, HTTPException, Request, Response
 
-from ....intervention.serialization import loads
-from ..engines.engine import merge_collected
+from ..engines.engine import acollect
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
@@ -61,46 +60,44 @@ def set_model(model: "VLLM") -> None:
 def _build_tracer(body: bytes, compress: bool) -> Any:
     """Rebuild a runnable tracer from a serialized trace, bound to this model.
 
-    Mirrors [`RequestModel.deserialize`][nnsight.schema.request.RequestModel.deserialize] — recompile the block from its source
-    onto the tracer — but also restores the tracer's AST node. Deserialize drops it
-    (server-side mediators normally just run in place), yet here they are
-    re-serialized onto the engine's requests, which needs the AST; parsing the
-    shipped source back gives an equivalent node whose ``body`` reduces the same way.
+    [`RequestModel.deserialize`][nnsight.schema.request.RequestModel.deserialize]
+    does the work — recompile the block from its source onto the tracer — and this
+    adds the one thing it drops: the AST node. Server-side mediators normally just
+    run in place, so deserialize has no use for it, but here they are re-serialized
+    onto the engine's requests, which does; parsing the shipped source back gives
+    an equivalent node whose ``body`` reduces the same way.
+
+    Note that deserialize registers the source in ``linecache`` under the client's
+    filename (e.g. ``"<stdin>"``), so requests from different clients collide on
+    that process-global cache. Safe only because the whole build runs without an
+    await (see the module docstring): no two builds interleave, so the source a
+    traceback resolves — and the source read back here — is always the one just
+    written. An await added to the build path would break that.
     """
     import linecache
 
-    if compress:
-        import zstandard as zstd
+    from ....schema.request import RequestModel
 
-        body = zstd.ZstdDecompressor().decompress(body)
-
-    tracer, (source, glbls, variables) = loads(body, _persistent_objects)
-    frame = tracer.info.frame
-    filename = frame.f_code.co_filename
-    tracer.info.code = compile(source, filename, "exec").replace(
-        co_name=frame.f_code.co_name
-    )
-    # `filename` is the client's (e.g. "<stdin>"), so requests from different clients
-    # collide on this process-global cache. Safe only because the whole build runs
-    # without an await (see the module docstring): no two builds interleave, so the
-    # source a traceback resolves is always the one just written. An await added to
-    # the build path would break that — key by request id then.
-    linecache.cache[filename] = (
-        len(source),
-        None,
-        source.splitlines(keepends=True),
-        filename,
-    )
-    frame.f_globals = glbls
-    frame.f_locals = variables
+    tracer = RequestModel.deserialize(body, _persistent_objects, compress=compress)
+    source = "".join(linecache.cache[tracer.info.frame.f_code.co_filename][2])
     tracer.node = ast.parse(source)
     return tracer
 
 
-@app.get("/health")
-async def health() -> dict:
+def _ready() -> "VLLM":
+    """The dispatched engine, or a 503 — what every endpoint needs before it starts.
+
+    Both halves matter: `set_model` runs before the engine is built, so a request
+    arriving in between finds a model whose ``vllm_entrypoint`` is still None.
+    """
     if _model is None or _model.vllm_entrypoint is None:
         raise HTTPException(status_code=503, detail="Engine not ready")
+    return _model
+
+
+@app.get("/health")
+async def health() -> dict:
+    _ready()
     return {"status": "ok"}
 
 
@@ -114,21 +111,20 @@ async def register(registration_id: str, request: Request) -> dict:
     makes. What the block saves rides the output of the request it ran on, so a
     serve client reads it through ``tracer.result``.
     """
-    if _model is None:
-        raise HTTPException(status_code=503, detail="Engine not ready")
+    model = _ready()
 
     # The client cannot check this — it has no engine — so the server does.
     from ..registration import _warn_if_prefix_caching
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        _warn_if_prefix_caching(_model)
+        _warn_if_prefix_caching(model)
     for warning in caught:
         logger.warning(str(warning.message))
 
     payload = await request.body()
     try:
-        await _model.vllm_entrypoint.collective_rpc(
+        await model.vllm_entrypoint.collective_rpc(
             "nnsight_register", args=(registration_id, payload)
         )
     except Exception as exception:
@@ -140,10 +136,7 @@ async def register(registration_id: str, request: Request) -> dict:
 @app.post("/v1/nnsight/register/{registration_id}/clear")
 async def clear_registration(registration_id: str) -> dict:
     """Stop running an installed block. Unknown ids are a no-op, so clearing twice is safe."""
-    if _model is None:
-        raise HTTPException(status_code=503, detail="Engine not ready")
-
-    await _model.vllm_entrypoint.collective_rpc(
+    await _ready().vllm_entrypoint.collective_rpc(
         "nnsight_clear_registered", args=(registration_id,)
     )
     return {"status": "ok", "id": registration_id}
@@ -162,8 +155,7 @@ async def generate(request: Request) -> Response:
     """
     from ....intervention.errors import capture_exception
 
-    if _model is None:
-        raise HTTPException(status_code=503, detail="Engine not ready")
+    model = _ready()
 
     body = await request.body()
     compress = request.headers.get("nnsight-compress", "False").lower() == "true"
@@ -175,7 +167,7 @@ async def generate(request: Request) -> Response:
         _, (prompts, params, lora_requests), forward_kwargs = tracer.prepare(
             tracer.info.code
         )
-        _model._attach_mediators(params, **forward_kwargs)
+        model._attach_mediators(params, **forward_kwargs)
     except Exception as exception:
         logger.exception("Failed to build trace")
         return _payload({}, capture_exception(exception))
@@ -183,9 +175,9 @@ async def generate(request: Request) -> Response:
         # prepare appends this request's workers onto the shared interleaver; clear
         # them whether the build succeeded (they are serialized onto the request now)
         # or failed (or they would bleed into the next request's build).
-        _model.interleaver.cancel()
+        model.interleaver.cancel()
 
-    engine = _model.vllm_entrypoint
+    engine = model.vllm_entrypoint
 
     async def run_invoke(prompt: Any, param: Any, lora_request: Any) -> tuple:
         request_id = str(uuid.uuid4())
@@ -200,14 +192,8 @@ async def generate(request: Request) -> Response:
             ):
                 pass
 
-            results = await engine.collective_rpc(
-                "collect_nnsight",
-                args=([request_id], [request_id], {request_id: output}),
-            )
+            entry = await acollect(engine, request_id, output)
             collected = True
-            # Merged, not first-non-empty: under pipeline parallelism a trace's
-            # values and an installed block's come from different ranks.
-            entry = merge_collected(results).get(request_id)
             if entry is not None:
                 return entry["saves"], entry["error"]
             return {}, None
@@ -219,11 +205,7 @@ async def generate(request: Request) -> Response:
             # cancellation. Stock uvicorn does not cancel a handler on client
             # disconnect, so under it this path simply does not run.
             if not collected:
-                cleanup = asyncio.ensure_future(
-                    engine.collective_rpc(
-                        "collect_nnsight", args=([request_id], [request_id])
-                    )
-                )
+                cleanup = asyncio.ensure_future(acollect(engine, request_id))
                 _cleanups.add(cleanup)
                 cleanup.add_done_callback(_cleanups.discard)
                 await asyncio.shield(cleanup)
@@ -239,7 +221,7 @@ async def generate(request: Request) -> Response:
     all_saves: dict = {}
     first_error = None
     for result in results:
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             logger.exception("Generation failed", exc_info=result)
             if first_error is None:
                 first_error = capture_exception(result)
