@@ -188,14 +188,17 @@ call input **without running the model**, returning `(mediators, args, kwargs)`.
 `AsyncVLLMBackend(Backend)` (`async_backend.py:40`), injected by `VLLM.trace` when
 `mode="async"`:
 
-- `__call__(tracer)` (`:48`) runs on `__exit__` while the frame is live: dispatches,
-  `tracer.prepare(...)`, `_attach_mediators`, then starts
-  `model.vllm_entrypoint.generate(prompt, param, request_id)` and stores the async
-  generator. One prompt only (`NotImplementedError` otherwise).
-- `__aiter__` (`:82`) — `async for output in tracer.backend:` yields each step's
-  `RequestOutput`; on `output.finished` it collects saves via `collective_rpc(
-  "collect_nnsight", ...)`, attaches `output.saves`, and `raise_deferred`s. If the
-  consumer stops early, `_free_worker` (`:101`) frees the aborted request's worker.
+- `__call__(tracer)` runs on `__exit__` while the frame is live: dispatches,
+  `tracer.prepare(...)`, `_attach_mediators`, then starts one
+  `model.vllm_entrypoint.generate(prompt, param, request_id)` per invoke and
+  stores the `(request_id, stream)` pairs.
+- `__aiter__` — `async for output in tracer.backend:` drains every stream through
+  one queue (a pump task each) and yields `RequestOutput`s in arrival order; on
+  `output.finished` it collects that request's saves via `collective_rpc(
+  "collect_nnsight", ...)`, attaches `output.saves`, and `raise_deferred`s. When
+  the last request finishes, saves shared across invokes are merged with
+  `merge_shared_saves` onto that output. If the consumer stops early,
+  `_free_workers` frees the outstanding requests' workers.
 - `__await__` (`:109`) — `await tracer.backend` drains the stream and returns the last
   output.
 

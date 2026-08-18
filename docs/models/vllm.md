@@ -228,7 +228,7 @@ print(last.saves["logits"].shape)
 
 ### Async notes
 
-- Async tracing takes a **single prompt** (one invoke or a direct input) — several invokes raise `NotImplementedError` (`async_backend.py:64`).
+- A multi-invoke async trace submits **one engine request per invoke**; the stream interleaves all requests' outputs in arrival order, each invoke's saves arrive on its own finished output, and saves shared across invokes arrive merged on the **last** finished output (`async_backend.py:_merge_shared`).
 - The stream is single-shot; once drained it won't restart.
 - A stream closed before it finishes aborts the request and frees its worker (`async_backend.py:91`).
 - Errors in the block surface when you iterate the stream (a `1/0` raises `RuntimeError: ...ZeroDivisionError`).

@@ -266,15 +266,53 @@ class TestAsyncEngine:
 
         async_loop.run_until_complete(run())
 
-    def test_multi_invoke_raises(self, vllm_gpt2_async, ET_prompt, MSG_prompt):
-        # Async supports one prompt per trace; several invokes is refused (the backend
-        # submits a single request). Raised synchronously on the trace's __exit__.
-        with pytest.raises(NotImplementedError):
+    def test_multi_invoke_runs_every_invoke(
+        self, vllm_gpt2_async, async_loop, ET_prompt, MSG_prompt
+    ):
+        # A multi-invoke async trace submits one engine request per invoke: both
+        # prompts run, and each invoke's saves arrive on its own finished output.
+        async def run():
             with vllm_gpt2_async.trace(temperature=0.0, max_tokens=1) as tracer:
                 with tracer.invoke(ET_prompt):
-                    vllm_gpt2_async.logits.save()
+                    et_logits = vllm_gpt2_async.logits.save()
                 with tracer.invoke(MSG_prompt):
-                    vllm_gpt2_async.logits.save()
+                    msg_logits = vllm_gpt2_async.logits.save()
+
+            finished = [o async for o in tracer.backend if o.finished]
+            assert len(finished) == 2
+
+            saves = {}
+            for output in finished:
+                saves.update(output.saves)
+            decode = vllm_gpt2_async.tokenizer.decode
+            assert decode(saves["et_logits"].argmax(dim=-1)) == " Paris"
+            assert decode(saves["msg_logits"].argmax(dim=-1)) == " New"
+
+        async_loop.run_until_complete(run())
+
+    def test_multi_invoke_merges_shared_saves(
+        self, vllm_gpt2_async, async_loop, ET_prompt, MSG_prompt
+    ):
+        # A container bound and saved above the invoke blocks rides back once per
+        # request, each copy holding one invoke's writes; the merged view lands on
+        # the last finished output, exactly as the sync path merges it.
+        async def run():
+            with vllm_gpt2_async.trace(temperature=0.0, max_tokens=1) as tracer:
+                cities = [None, None]
+                cities.save()
+                with tracer.invoke(ET_prompt):
+                    cities[0] = vllm_gpt2_async.logits.argmax(dim=-1)
+                with tracer.invoke(MSG_prompt):
+                    cities[1] = vllm_gpt2_async.logits.argmax(dim=-1)
+
+            last = await tracer.backend
+            merged = last.saves["cities"]
+            assert all(slot is not None for slot in merged)
+            decode = vllm_gpt2_async.tokenizer.decode
+            assert decode(merged[0]) == " Paris"
+            assert decode(merged[1]) == " New"
+
+        async_loop.run_until_complete(run())
 
     def test_foreign_tenant_shares_the_batch(
         self, vllm_gpt2_async, async_loop, ET_prompt, MSG_prompt
