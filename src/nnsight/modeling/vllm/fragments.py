@@ -49,9 +49,11 @@ def _tp_world_size() -> int:
     unsharded tree rather than failing the load.
     """
     try:
-        from vllm.distributed.parallel_state import get_tp_group
+        from vllm.distributed.parallel_state import (
+            get_tensor_model_parallel_world_size,
+        )
 
-        return get_tp_group().world_size
+        return get_tensor_model_parallel_world_size()
     except Exception:
         return 1
 
@@ -166,6 +168,15 @@ def _is_piece(module: torch.nn.Module, side: str) -> bool:
         ColumnParallelLinear,
         RowParallelLinear,
     )
+
+    # A layer built with `disable_tp=True` is replicated on every rank rather than
+    # sharded — vLLM sets its `tp_size` to 1 and guards its own collectives on
+    # `tp_size > 1` for exactly that reason (DeepSeek-V2's `fused_qkv_a_proj` is
+    # one; the branch beside it uses a `ReplicatedLinear` for the same role). The
+    # engine's world size says nothing about it, so ask the module.
+    if isinstance(module, (ColumnParallelLinear, RowParallelLinear)):
+        if module.tp_size == 1:
+            return False
 
     if isinstance(module, ColumnParallelLinear):
         # vLLM gathers this itself when asked to, and then it isn't a piece.

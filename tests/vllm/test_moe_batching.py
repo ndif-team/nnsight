@@ -289,3 +289,64 @@ class TestFragmentPolicy:
         sharded = fragments.fragment("m.output", torch.full((2, 4), 6.0))
 
         assert torch.allclose(sharded, torch.full((2, 4), 6.0 / (tp * ep)))
+
+
+class TestReplicatedLinearsAreNotPieces:
+    """A `disable_tp=True` linear is replicated, so nothing about it is a piece.
+
+    vLLM lets a model opt one layer out of tensor parallelism — DeepSeek-V2's
+    `fused_qkv_a_proj` does, and the branch beside it uses a `ReplicatedLinear`
+    for the same role — by setting the layer's own ``tp_size`` to 1 while the
+    engine stays sharded. Its own forward guards every collective on
+    ``tp_size > 1`` for that reason. Reading the engine's world size instead
+    would gather a tensor every rank already holds whole: the value comes back
+    ``world_size``x too wide, built of identical copies, and an edit written
+    against it goes into the next matmul at the wrong shape — silently, both ways.
+
+    Runs without GPUs, like `TestFragmentPolicy`: the decision is a pure function
+    of the module's parallel config. No cached checkpoint uses `disable_tp`, so a
+    stub is the only way to pin it.
+    """
+
+    @staticmethod
+    def _stub(cls, tp, **attributes):
+        """A real linear subclass (so ``isinstance`` holds) with its config stubbed.
+
+        The real ``__init__`` reads the live process group, which does not exist
+        off-engine, so bypass it and set what `_is_piece` reads.
+        """
+
+        class Stub(cls):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+                self.tp_size = tp
+                for name, value in attributes.items():
+                    setattr(self, name, value)
+
+        return Stub()
+
+    @pytest.mark.parametrize("side", ["input", "output"])
+    def test_a_replicated_column_linear_is_never_a_piece(self, side):
+        from vllm.model_executor.layers.linear import ColumnParallelLinear
+
+        from nnsight.modeling.vllm.fragments import _is_piece
+
+        # gather_output=False is what makes a *sharded* column linear a piece.
+        replicated = self._stub(ColumnParallelLinear, tp=1, gather_output=False)
+        sharded = self._stub(ColumnParallelLinear, tp=2, gather_output=False)
+
+        assert _is_piece(replicated, side) is False
+        assert _is_piece(sharded, side) is (side == "output")
+
+    @pytest.mark.parametrize("side", ["input", "output"])
+    def test_a_replicated_row_linear_is_never_a_piece(self, side):
+        from vllm.model_executor.layers.linear import RowParallelLinear
+
+        from nnsight.modeling.vllm.fragments import _is_piece
+
+        config = dict(input_is_parallel=True, reduce_results=False)
+        replicated = self._stub(RowParallelLinear, tp=1, **config)
+        sharded = self._stub(RowParallelLinear, tp=2, **config)
+
+        assert _is_piece(replicated, side) is False
+        assert _is_piece(sharded, side) is True
