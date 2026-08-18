@@ -233,7 +233,16 @@ class VLLM(Remotable):
     # meta tree; the caller sets the tokenizer.
 
     def _load(self, repo_id: str, **kwargs: Any) -> "Module":
-        meta_model = self._load_meta(repo_id, **kwargs)
+        # A lazily built model already has its meta tree — `Meta.__init__` built one
+        # to write interventions against — and `_update` is about to re-point the
+        # envoy tree at whatever comes back. Building a second, structurally
+        # identical tree here only costs a full architecture instantiation and
+        # repopulates the global rope cache that `_load_meta` then has to clear
+        # again. `dispatch=True` skips `__init__`'s build and arrives here with
+        # nothing, so it still builds.
+        meta_model = self.__dict__.get("_module")
+        if meta_model is None:
+            meta_model = self._load_meta(repo_id, **kwargs)
 
         # The real engine brings up its own process group; the one __init__ made
         # to build the meta tree would collide with it. Only tear down a group this
@@ -491,7 +500,9 @@ class VLLM(Remotable):
         """Clear every edit still installed on the engine.
 
         The local form drops a list held on the envoy; here each edit lives on
-        the workers, so each is cleared through its own handle.
+        the workers, so each is cleared through its own handle — which means this
+        is synchronous-engine only, like `clear` itself. On ``mode="async"`` clear
+        each handle with ``await edit.aclear()`` instead.
         """
         for edit in list(self._installed_edits):
             edit.clear()

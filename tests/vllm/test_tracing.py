@@ -571,3 +571,68 @@ class TestCache:
         assert outputs[0].shape[0] == n_prompt
         assert outputs[1].shape[0] == 1
         assert outputs[2].shape[0] == 1
+
+
+class TestLazyDispatch:
+    """Building without ``dispatch=True``, then tracing.
+
+    The path a user takes when they construct a model and only later run
+    something on it: `__init__` builds the meta tree, and the first trace calls
+    `dispatch`, which brings up the engine and re-points the tree at it. Every
+    other test here dispatches eagerly, so nothing else covers it.
+    """
+
+    @torch.no_grad()
+    def test_first_trace_dispatches_and_reads(self, ET_prompt):
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM("gpt2", gpu_memory_utilization=0.1)
+        assert not model.dispatched
+        # The meta tree is there to write interventions against before any engine.
+        assert model.tokenizer is not None
+        assert model.transformer.h[5] is not None
+
+        with model.trace(ET_prompt, temperature=0.0, top_p=1):
+            hidden = model.transformer.h[5].output.save()
+            logits = model.logits.save()
+
+        assert model.dispatched
+        assert hidden.shape[0] == len(model.tokenizer.encode(ET_prompt))
+        assert model.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_dispatch_does_not_rebuild_the_meta_tree(self, ET_prompt):
+        # `__init__` already built one, and dispatch is about to re-point the envoy
+        # tree at whatever `_load` returns — so building a second, identical tree
+        # is a whole architecture instantiation for nothing.
+        from unittest import mock
+
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM("gpt2", gpu_memory_utilization=0.1)
+        tree = model._module
+
+        with mock.patch.object(
+            model, "_load_meta", side_effect=AssertionError("rebuilt the meta tree")
+        ):
+            model.dispatch()
+
+        assert model.dispatched
+        assert model._module is tree
+
+    @torch.no_grad()
+    def test_an_edit_written_before_dispatch_still_lands(self, ET_prompt):
+        # `edit()` dispatches for itself, since the block has to go to an engine.
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM("gpt2", gpu_memory_utilization=0.1,
+                     enable_prefix_caching=False)
+        with model.edit() as (tracer, edit):
+            hidden = model.transformer.h[5].output.save()
+        try:
+            assert model.dispatched
+            output = model.generate([ET_prompt], max_tokens=2, temperature=0.0,
+                                    ignore_eos=True)[0]
+            assert output.saves["hidden"].shape[0] == len(output.prompt_token_ids)
+        finally:
+            edit.clear()
