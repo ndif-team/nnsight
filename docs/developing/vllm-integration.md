@@ -225,7 +225,7 @@ fold a sweep's per-request values into one.
 
 ## Registered blocks — the `registration.py` module
 
-`model.register()` is the persistent counterpart of the per-request transport
+`model.edit()` is the persistent counterpart of the per-request transport
 above: instead of a mediator per request in `extra_args`, one block is sent to
 every rank via `collective_rpc("nnsight_register", ...)` and kept there.
 
@@ -256,6 +256,11 @@ every rank via `collective_rpc("nnsight_register", ...)` and kept there.
   thread times out, and none is exposed), hence `__aenter__`/`__aexit__` and
   `aclear`. `__aenter__` spells out `__enter__`'s body rather than calling it,
   because `capture` reads the caller's frame at a fixed depth.
+- `Registration.install`/`clear` are the transport seam. `ServeRegistration`
+  overrides them to POST instead, for `model.edit(serve=url)` from a client with
+  no engine to `collective_rpc` into.
+- `VLLM._installed_edits` holds the live handles so `clear_edits()` can reach
+  them; `Registration._forget` drops one as it clears.
 
 Worker RPCs are exposed on `NNsightGPUWorker`, not the runner —
 `collective_rpc` resolves method names on the worker.

@@ -84,6 +84,9 @@ def vllm_moe_tp(request):
         MODEL,
         tensor_parallel_size=2,
         enable_expert_parallel=request.param,
+        # Off so an installed block sees whole prompts (a cached token runs no
+        # forward). The traced reads below are single-prompt and unaffected.
+        enable_prefix_caching=False,
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         dispatch=True,
     )
@@ -92,6 +95,29 @@ def vllm_moe_tp(request):
     del model
     gc.collect()
     torch.cuda.empty_cache()
+
+
+def _assert_gathered(experts_out, block_out, what):
+    """The two per-rank partials sum to the block's own all-reduced output.
+
+    Which they only do if the read was gathered — an ungathered partial is the
+    right shape and roughly half the value.
+    """
+    experts_sum = (experts_out[0] + experts_out[1]).float().cpu()
+    block = block_out.float().cpu()
+
+    cosine = torch.nn.functional.cosine_similarity(
+        experts_sum.flatten(), block.flatten(), dim=0
+    ).item()
+    max_delta = (experts_sum - block).abs().max().item()
+
+    assert cosine >= READ_MIN_COSINE, (
+        f"{what} read back a per-rank partial rather than the full value: "
+        f"cos={cosine:.6f} against its own block output"
+    )
+    assert max_delta <= READ_MAX_DELTA, (
+        f"{what} diverges from its own block output: max|delta|={max_delta:.4f}"
+    )
 
 
 def _block_output(mlp):
@@ -116,22 +142,7 @@ def test_experts_output_read_is_the_full_value(vllm_moe_tp):
         experts_out = mlp.experts.output.save()
         block_out = _block_output(mlp)
 
-    experts_sum = (experts_out[0] + experts_out[1]).float().cpu()
-    block = block_out.float().cpu()
-
-    cosine = torch.nn.functional.cosine_similarity(
-        experts_sum.flatten(), block.flatten(), dim=0
-    ).item()
-    max_delta = (experts_sum - block).abs().max().item()
-
-    assert cosine >= READ_MIN_COSINE, (
-        "experts.output read back a per-rank partial rather than the full "
-        f"value: cos={cosine:.6f} against its own block output"
-    )
-    assert max_delta <= READ_MAX_DELTA, (
-        f"experts.output diverges from its own block output: "
-        f"max|delta|={max_delta:.4f}"
-    )
+    _assert_gathered(experts_out, block_out, "experts.output")
 
 
 @requires_two_gpus
@@ -157,6 +168,56 @@ def test_swapped_experts_output_reaches_the_block_once(vllm_moe_tp):
         f"(a missing write-back divide double-counts it): "
         f"max|delta|={max_delta:.4f}"
     )
+
+
+@requires_two_gpus
+@torch.no_grad()
+def test_each_invoke_reads_its_own_rows(vllm_moe_tp):
+    # Continuous batching packs both requests into one flat slab; the gather runs
+    # once over the whole of it and the rows are handed back per request. If the
+    # split and the gather disagreed, one invoke would read the other's rows —
+    # still summing to *a* block output, but not to its own.
+    short, long = "Paris", PROMPT
+
+    with vllm_moe_tp.trace(temperature=0.0, top_p=1, max_tokens=1) as tracer:
+        with tracer.invoke(short):
+            short_mlp = vllm_moe_tp.model.layers[LAYER].mlp
+            short_experts = short_mlp.experts.output.save()
+            short_block = _block_output(short_mlp)
+        with tracer.invoke(long):
+            long_mlp = vllm_moe_tp.model.layers[LAYER].mlp
+            long_experts = long_mlp.experts.output.save()
+            long_block = _block_output(long_mlp)
+
+    # Each request's own prompt length, not the batch's.
+    assert short_experts[0].shape[0] < long_experts[0].shape[0]
+    assert short_experts[0].shape[0] == short_block.shape[0]
+    assert long_experts[0].shape[0] == long_block.shape[0]
+
+    _assert_gathered(short_experts, short_block, "the short invoke's read")
+    _assert_gathered(long_experts, long_block, "the long invoke's read")
+
+
+@requires_two_gpus
+@torch.no_grad()
+def test_an_installed_block_reads_the_full_value(vllm_moe_tp):
+    # An edit runs per request on every rank, the same as a trace's block, so its
+    # read has to be gathered too — and it arrives on the request's output rather
+    # than in a variable, from whichever ranks reported it.
+    with vllm_moe_tp.edit() as (tracer, edit):
+        mlp = vllm_moe_tp.model.layers[LAYER].mlp
+        experts_out = mlp.experts.output.save()
+        block_out = _block_output(mlp)
+    try:
+        saves = vllm_moe_tp.generate(
+            [PROMPT], max_tokens=1, temperature=0.0, top_p=1
+        )[0].saves
+
+        _assert_gathered(
+            saves["experts_out"], saves["block_out"], "an installed block's read"
+        )
+    finally:
+        edit.clear()
 
 
 class TestFragmentPolicy:

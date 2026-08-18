@@ -15,13 +15,13 @@ Example:
     >>> model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True,
     ...              enable_prefix_caching=False)
     >>>
-    >>> with model.register() as (tracer, registration):        # doctest: +SKIP
+    >>> with model.edit() as (tracer, edit):                    # doctest: +SKIP
     ...     hidden = model.model.layers[16].output[0].save()
     >>>
     >>> outputs = model.vllm_entrypoint.generate(prompts, sampling)  # doctest: +SKIP
     >>> outputs[5].saves["hidden"].shape                        # doctest: +SKIP
     >>>
-    >>> registration.clear()                                    # doctest: +SKIP
+    >>> edit.clear()                                            # doctest: +SKIP
 
 The block is written exactly like a trace body — the same envoy tree, the same
 ``.save()``. What it cannot do is anything that belongs to one particular
@@ -48,6 +48,7 @@ from ...intervention.serialization import dumps
 from ...intervention.tracer import InterleavingTracer
 from ...tracing.backend import Backend
 from ...tracing.tracer import skip_context, skippable
+from .tracer import no_barrier
 
 if TYPE_CHECKING:
     from .vllm import VLLM
@@ -87,8 +88,8 @@ def _warn_if_prefix_caching(model: "VLLM") -> None:
 class Registration:
     """A handle on a block the engine is running for every request.
 
-    Returned by [`VLLM.register`][nnsight.modeling.vllm.vllm.VLLM.register] and
-    live until `clear`.
+    Returned by [`VLLM.edit`][nnsight.modeling.vllm.vllm.VLLM.edit] and live
+    until `clear`.
 
     There is nothing to read here. What a registered block saves comes back on
     the ``RequestOutput`` of the request it ran on, as ``output.saves``, by the
@@ -99,7 +100,7 @@ class Registration:
 
     Synchronous engines only: installing the block is a ``collective_rpc``, which
     on ``mode="async"`` is a coroutine there is no safe way to finish from a
-    plain statement, so `VLLM.register` refuses there rather than silently not
+    plain statement, so `VLLM.edit` refuses there rather than silently not
     installing it.
 
     Attributes:
@@ -157,6 +158,14 @@ class Registration:
             return await result
         return result
 
+    def install(self, payload: bytes) -> None:
+        """Put the block on the engine. The seam a serve client replaces."""
+        self._rpc("nnsight_register", self.id, payload)
+
+    async def ainstall(self, payload: bytes) -> None:
+        """`install`, awaited."""
+        await self._arpc("nnsight_register", self.id, payload)
+
     def clear(self) -> None:
         """Stop running the block and drop anything it has not handed back.
 
@@ -166,18 +175,108 @@ class Registration:
         if self.cleared:
             return
         self._rpc("nnsight_clear_registered", self.id)
-        self.cleared = True
+        self._forget()
 
     async def aclear(self) -> None:
         """`clear`, awaited — the async engine's form."""
         if self.cleared:
             return
         await self._arpc("nnsight_clear_registered", self.id)
+        self._forget()
+
+    def _forget(self) -> None:
+        """Mark this cleared and drop it from the model's list of installed edits."""
         self.cleared = True
+        installed = getattr(self.model, "_installed_edits", None)
+        if installed is not None and self in installed:
+            installed.remove(self)
 
     def __repr__(self) -> str:
         state = "cleared" if self.cleared else "active"
         return f"<Registration {self.id} ({state})>"
+
+
+class ServeRegistration(Registration):
+    """A block installed on an [nnsight-serve][nnsight.modeling.vllm.serve.server] engine.
+
+    The same handle, over HTTP: the client has no engine to ``collective_rpc``
+    into — it holds a meta model and no weights — so the block goes to the
+    server, which installs it on the engine it holds. What it saves rides the
+    request it ran on, which for a serve client means ``tracer.result.saves`` of
+    a trace sent to that same server.
+    """
+
+    CONNECT_TIMEOUT: float = 10.0
+    READ_TIMEOUT: float = 600.0
+
+    def __init__(
+        self, model: "VLLM", id: str, host: str, api_key: str | None = None
+    ) -> None:
+        super().__init__(model, id)
+        self.host = host.rstrip("/")
+        self.api_key = api_key
+
+    def _headers(self) -> dict:
+        headers = {"Content-Type": "application/octet-stream"}
+        if self.api_key:
+            headers["ndif-api-key"] = self.api_key
+        return headers
+
+    def _check(self, response: Any) -> None:
+        if response.status_code != 200:
+            try:
+                detail = response.json().get("detail", response.reason_phrase)
+            except Exception:
+                detail = response.reason_phrase
+            raise ConnectionError(
+                f"nnsight-serve returned {response.status_code}: {detail}"
+            )
+
+    def _post(self, path: str, content: bytes = b"") -> None:
+        import httpx
+
+        with httpx.Client(
+            timeout=httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
+        ) as client:
+            self._check(
+                client.post(
+                    f"{self.host}{path}", content=content, headers=self._headers()
+                )
+            )
+
+    async def _apost(self, path: str, content: bytes = b"") -> None:
+        import httpx
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
+        ) as client:
+            self._check(
+                await client.post(
+                    f"{self.host}{path}", content=content, headers=self._headers()
+                )
+            )
+
+    def install(self, payload: bytes) -> None:
+        self._post(f"/v1/nnsight/register/{self.id}", payload)
+
+    async def ainstall(self, payload: bytes) -> None:
+        await self._apost(f"/v1/nnsight/register/{self.id}", payload)
+
+    def clear(self) -> None:
+        if self.cleared:
+            return
+        self._post(f"/v1/nnsight/register/{self.id}/clear")
+        self._forget()
+
+    async def aclear(self) -> None:
+        if self.cleared:
+            return
+        await self._apost(f"/v1/nnsight/register/{self.id}/clear")
+        self._forget()
+
+    def __repr__(self) -> str:
+        state = "cleared" if self.cleared else "active"
+        return f"<Registration {self.id} on {self.host} ({state})>"
 
 
 class RegisteringTracer(InterleavingTracer):
@@ -191,12 +290,39 @@ class RegisteringTracer(InterleavingTracer):
     off again with.
     """
 
-    def __init__(self, model: "VLLM", *, backend: Backend | None = None) -> None:
+    def __init__(
+        self,
+        model: "VLLM",
+        *,
+        backend: Backend | None = None,
+        serve: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         super().__init__(model, "__call__", backend=backend)
         self._model = model
+        # Where the block goes: this process's engine, or an nnsight-serve one.
+        self._serve = serve
+        self._api_key = api_key
         self.registration: Registration | None = None
         # Set by `execute`, sent by whichever exit ran.
         self._payload: bytes | None = None
+
+    def _handle(self) -> Registration:
+        """The handle for this install, addressed at whatever holds the engine."""
+        # Not id(self): this tracer is a temporary, so the next edit() can be
+        # allocated at the same address and collide with this one — which the
+        # worker would read as a re-registration, overwriting the first block and
+        # handing both handles the same values.
+        id = f"registration-{uuid.uuid4().hex}"
+        if self._serve is not None:
+            return ServeRegistration(
+                self._model, id, self._serve, api_key=self._api_key
+            )
+        return Registration(self._model, id)
+
+    def barrier(self, n: int) -> None:
+        """Not available here — see [`no_barrier`][nnsight.modeling.vllm.tracer.no_barrier]."""
+        no_barrier(n)
 
     def __enter__(self) -> tuple["RegisteringTracer", Registration]:
         """Enter the block, binding the tracer and the handle that ends it.
@@ -207,7 +333,7 @@ class RegisteringTracer(InterleavingTracer):
         only ever see a request's first forward — its prefill — and never the
         steps it generates::
 
-            with model.register() as (tracer, registration):
+            with model.edit() as (tracer, edit):
                 readouts = nnsight.save([])
                 for step in tracer.all():
                     readouts.append(model.model.layers[16].output[0][-1])
@@ -217,13 +343,7 @@ class RegisteringTracer(InterleavingTracer):
         self.capture()
         if skippable(self.node):
             skip_context(self)
-        # Not id(self): this tracer is a temporary, so the next register() can be
-        # allocated at the same address and collide with this one — which the
-        # worker would read as a re-registration, overwriting the first block and
-        # handing both handles the same values.
-        self.registration = Registration(
-            self._model, id=f"registration-{uuid.uuid4().hex}"
-        )
+        self.registration = self._handle()
         return self, self.registration
 
     async def __aenter__(self) -> tuple["RegisteringTracer", Registration]:
@@ -236,18 +356,15 @@ class RegisteringTracer(InterleavingTracer):
         self.capture()
         if skippable(self.node):
             skip_context(self)
-        self.registration = Registration(
-            self._model, id=f"registration-{uuid.uuid4().hex}"
-        )
+        self.registration = self._handle()
         return self, self.registration
 
     def __exit__(self, *exception: Any) -> bool:
         handled = super().__exit__(*exception)
         if self._payload is not None:
-            self.registration._rpc(
-                "nnsight_register", self.registration.id, self._payload
-            )
+            self.registration.install(self._payload)
             self._payload = None
+            self._model._installed_edits.append(self.registration)
         return handled
 
     async def __aexit__(self, *exception: Any) -> bool:
@@ -259,10 +376,9 @@ class RegisteringTracer(InterleavingTracer):
         """
         handled = super().__exit__(*exception)
         if self._payload is not None:
-            await self.registration._arpc(
-                "nnsight_register", self.registration.id, self._payload
-            )
+            await self.registration.ainstall(self._payload)
             self._payload = None
+            self._model._installed_edits.append(self.registration)
         return handled
 
     def execute(self, code: CodeType) -> None:
@@ -279,7 +395,9 @@ class RegisteringTracer(InterleavingTracer):
         block's saves have to land in it for the collect to find them.
         """
         model = self._model
-        if not model.dispatched:
+        # A serve client has no engine of its own — a meta model and no weights —
+        # and the block is going to the server's. Dispatching here would build one.
+        if self._serve is None and not model.dispatched:
             model.dispatch()
         _warn_if_prefix_caching(model)
 

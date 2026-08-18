@@ -26,6 +26,12 @@ def merge_collected(payloads: list) -> dict:
     the sampled output, while a registered block's come from whichever rank ran
     the layers it read — under pipeline parallelism those are different ranks,
     and taking one would silently drop the other.
+
+    Where two ranks did report the same name — tensor parallelism, where every
+    rank runs the block and each gathers the same whole value — the earliest
+    rank's wins. They are equal, but they are on different devices, and a value
+    whose device depended on which rank answered last would be a confusing thing
+    to hand back next to a traced one.
     """
     merged: dict[str, dict] = {}
     for payload in payloads or ():
@@ -36,7 +42,8 @@ def merge_collected(payloads: list) -> dict:
                 request_id, {"saves": {}, "error": None, "registered": {}}
             )
             into["saves"].update(entry.get("saves") or {})
-            into["registered"].update(entry.get("registered") or {})
+            for name, value in (entry.get("registered") or {}).items():
+                into["registered"].setdefault(name, value)
             if into["error"] is None:
                 into["error"] = entry.get("error")
     return merged

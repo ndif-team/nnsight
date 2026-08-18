@@ -41,8 +41,8 @@ class VLLM(Remotable):
     process. Sampling settings (``temperature``, ``max_tokens``, ``top_p``, ...)
     are passed to ``trace``/``invoke`` rather than configured on the model, since
     each invoke is its own vLLM request. Read generated tokens through
-    ``model.logits`` / ``model.samples`` (or the streamed output in async), not
-    ``tracer.result`` — the latter is not served here.
+    ``model.logits`` / ``model.samples`` under ``tracer.iter``, or the whole
+    finished request through ``tracer.result``.
 
     Examples:
         Single prompt, edit an activation, read the logits::
@@ -93,6 +93,9 @@ class VLLM(Remotable):
         # Whether this construction brought up the process group — so only then do we
         # tear it down (on dispatch and at exit), never a group nnsight found running.
         self._owns_distributed = False
+        # Edits installed on the engine, so `clear_edits` can reach them; a
+        # cleared one drops out (see registration.Registration.clear).
+        self._installed_edits: list = []
 
         # Model-parallel init has to happen before `Meta.__init__` opens its
         # meta-device context: vLLM builds real rank tensors here and later calls
@@ -405,39 +408,82 @@ class VLLM(Remotable):
         kwargs.setdefault("fn", self._call)
         return super().trace(*inputs, **kwargs)
 
-    def register(self, *, backend: Any = None) -> Any:
-        """Leave a block on the engine to run for every request it handles.
+    def edit(
+        self,
+        *,
+        inplace: bool = True,
+        serve: str | None = None,
+        api_key: str | None = None,
+        backend: Any = None,
+    ) -> Any:
+        """Install a block on the engine, to run for every request it handles.
 
-        A trace carries its block on the request it rides, so a sweep pays to
-        serialize it once per prompt and only requests written as traces are
-        touched at all. A registration sends the block over once; the engine then
-        gives every request its own copy, whoever submitted it — an OpenAI-API
-        client on the same server included. Each copy saves into a scope of its
-        own, and the values wait on the worker until collected.
+        The vLLM form of [`Envoy.edit`][nnsight.intervention.envoy.Envoy.edit].
+        An ordinary edit is replayed by the envoy that stores it, which here is
+        the client — where there are no weights, so it would never run. This
+        sends the block to the engine instead, where every request afterwards
+        gets its own copy: requests you trace, and requests submitted by
+        something that has never heard of nnsight.
+
+        What the block saves comes back on that request's output, as
+        ``output.saves`` — the same place a trace's values arrive. For a request
+        you are tracing, read it through ``tracer.result.saves``.
 
         The block is written like a trace body against the same envoy tree. It
         belongs to no particular request, so there is nothing to
-        ``tracer.invoke(...)`` — give it the locations you want and ``.save()``
-        what you want back.
+        ``tracer.invoke(...)``.
+
+        Args:
+            inplace: Only ``True``. An edit here lives on the engine every caller
+                shares, so unlike the local form there is no copy to edit
+                instead.
+            serve: An nnsight-serve URL to install the block on, the counterpart
+                of ``trace(..., serve=url)``. Without it the block goes to this
+                process's own engine.
+            api_key: Sent as the ``ndif-api-key`` header alongside ``serve``.
+            backend: Optional backend for the underlying trace.
 
         Returns:
-            The [`Registration`][nnsight.modeling.vllm.registration.Registration]
-            the block's per-request values are collected through. Bind it with
-            ``as`` and keep it: it is also how the block is removed again.
+            ``(tracer, edit)`` — the tracer, whose ``iter``/``all`` is what lets
+            the block follow a request across its generated tokens rather than
+            seeing only the prefill; and the handle to
+            [`clear`][nnsight.modeling.vllm.registration.Registration.clear] it
+            with. [`clear_edits`][nnsight.modeling.vllm.vllm.VLLM.clear_edits]
+            clears every one still installed.
 
         Examples:
             Read one layer out of everything the engine runs::
 
-                >>> with model.register() as registration:   # doctest: +SKIP
+                >>> with model.edit() as (tracer, edit):     # doctest: +SKIP
                 ...     hidden = model.model.layers[16].output[0].save()
-                >>> model.generate("Hello", max_tokens=5)    # doctest: +SKIP
-                >>> registration.collect()                   # doctest: +SKIP
-                {'0': {'hidden': tensor(...)}}
-                >>> registration.clear()                     # doctest: +SKIP
+                >>> outputs = model.generate(prompts, max_tokens=5)  # doctest: +SKIP
+                >>> outputs[3].saves["hidden"]               # doctest: +SKIP
+                >>> edit.clear()                             # doctest: +SKIP
+
+            Against a served engine, from a client with no GPU::
+
+                >>> with model.edit(serve="http://host:8000") as (tracer, edit):
+                ...     model.model.layers[16].output[0][:] = 0  # doctest: +SKIP
         """
         from .registration import RegisteringTracer
 
-        return RegisteringTracer(self, backend=backend)
+        if not inplace:
+            raise ValueError(
+                "a vLLM edit is installed on the engine itself, which every "
+                "caller shares — there is no copy to edit instead. Drop "
+                "inplace=False, or trace the requests you want to change."
+            )
+        return RegisteringTracer(self, backend=backend, serve=serve, api_key=api_key)
+
+    def clear_edits(self) -> None:
+        """Clear every edit still installed on the engine.
+
+        The local form drops a list held on the envoy; here each edit lives on
+        the workers, so each is cleared through its own handle.
+        """
+        for edit in list(self._installed_edits):
+            edit.clear()
+        self._installed_edits.clear()
 
     def generate(self, *inputs: Any, **kwargs: Any) -> Any:
         """Generate — as a trace when used as a ``with`` block, plainly when not.
@@ -449,11 +495,11 @@ class VLLM(Remotable):
         ``tracer.iter``, or through ``tracer.result``.
 
         Called without a ``with`` block it just runs the engine and hands back
-        vLLM's request outputs, so a registration's values — which arrive on
-        the output — can be read without reaching past the model for
+        vLLM's request outputs, so an edit's values — which arrive on the
+        output — can be read without reaching past the model for
         ``model.vllm_entrypoint``::
 
-            >>> with model.register() as (tracer, registration):  # doctest: +SKIP
+            >>> with model.edit() as (tracer, edit):              # doctest: +SKIP
             ...     hidden = model.model.layers[16].output[0].save()
             >>> outputs = model.generate(prompts, max_tokens=5)   # doctest: +SKIP
             >>> outputs[5].saves["hidden"]                        # doctest: +SKIP

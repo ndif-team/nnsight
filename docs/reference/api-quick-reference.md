@@ -102,6 +102,7 @@ Deprecated aliases (warn; use the `tracer.*` forms): `model.iter`, `model.all()`
 | `model.generator.streamer.output` | `TransformersModel` | Per-step generated tokens during decoding. |
 | `model.logits` | `VLLM` | This request's pre-sampling logits for the step. |
 | `model.samples` | `VLLM` | The token ids the sampler drew for the step. |
+| `model.edit` | `VLLM` | `with model.edit() as (tracer, edit):` — install a block on the engine, run for *every* request it handles; values arrive on `output.saves`. `edit.clear()` / `model.clear_edits()` stop it. Needs `enable_prefix_caching=False`. |
 
 ## Top-level functions
 

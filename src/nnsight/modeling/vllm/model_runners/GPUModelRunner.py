@@ -764,25 +764,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if engine_id in finished or req_id in finished:
                 requests.errored.pop(req_id, None)
 
-        # Registered blocks ride requests nnsight did not create, so their values
-        # are keyed here by the same engine id. Merging them means a caller that
-        # is already collecting gets them on the output without a second trip —
-        # both the sync engine's `step`, which collects for *every* finished
-        # request, and the async backend, which collects for its own.
-        #
-        # Not removed: `Registration.drain` is still the way to take them, and a
-        # request whose output nobody reads (a served one) would otherwise lose
-        # them entirely. That does mean a collected value is held twice until the
-        # registration is drained.
-        for harvested in requests.harvested.values():
-            for engine_id in harvested:
-                if engine_id not in wanted:
-                    continue
-                entry = collected.setdefault(engine_id, {"saves": {}, "error": None})
-                entry["saves"].update(harvested[engine_id]["saves"])
-                if entry["error"] is None:
-                    entry["error"] = harvested[engine_id]["error"]
-
         saved = _saves()
         for engine_id, worker_id in matched:
             if engine_id in finished:

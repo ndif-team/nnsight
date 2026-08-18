@@ -173,6 +173,10 @@ still at site *i*.
 - **A barrier is per-trace.** Create it inside the `with model.trace()` block.
 - **An early `return` that skips a `barrier()` in one invoke hangs that round** —
   every participant must reach it.
+- **Not available on vLLM.** Each invoke there is a separate engine request,
+  scheduled independently, so the blocks never run against one forward — a barrier
+  could not release. `tracer.barrier(n)` raises `NotImplementedError` rather than
+  hanging.
 - **Reading a later site too early breaks an earlier one.** With several sites,
   put each source's read *after* the rounds for every site before it; requesting
   a location is what advances the model. See above.

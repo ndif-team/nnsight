@@ -118,11 +118,11 @@ with model.trace(PROMPT, max_tokens=10) as tracer:
 
 vLLM generation is driven by `max_tokens`, so there is no forward/generate split. Used as a `with` block, `model.generate(...)` is `trace` (and rewrites `max_new_tokens` → `max_tokens`; `trace` accepts either).
 
-Called **without** a `with` block it simply runs the engine and returns vLLM's `RequestOutput`s — which is how you read a registered block's values without reaching past the model for `model.vllm_entrypoint`:
+Called **without** a `with` block it simply runs the engine and returns vLLM's `RequestOutput`s — which is how you read an edit's values without reaching past the model for `model.vllm_entrypoint`:
 
 ```python
 outputs = model.generate(prompts, max_tokens=5)
-outputs[3].saves["hidden"]        # see Registering a block, below
+outputs[3].saves["hidden"]        # see Editing the engine, below
 ```
 
 On `mode="async"` the same call returns an awaitable: `outputs = await model.generate(...)`.
@@ -255,13 +255,13 @@ print(last.saves["logits"].shape)
 - Errors in the block surface when you iterate the stream (a `1/0` raises `RuntimeError: ...ZeroDivisionError`).
 - `remote=True` skips async-backend injection (`vllm.py:347`).
 
-## Registering a block on the engine
+## Editing the engine
 
 A trace carries its block on the request it rides. That is the right shape for
 "run this one experiment", but it means a sweep serializes the same block once
 per prompt, and it can only touch requests that *are* nnsight traces.
 
-`model.register()` sends the block over once and leaves it there. Every request
+`model.edit()` sends the block over once and leaves it there. Every request
 the engine runs afterwards gets its own copy — including requests submitted by
 something that never heard of nnsight, e.g. an OpenAI-API client on the same
 server. Each copy has its own scope, so what it saves is that request's, and it
@@ -270,7 +270,7 @@ comes back on that request's output — the same place a trace's values arrive.
 ```python
 model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True, enable_prefix_caching=False)
 
-with model.register() as (tracer, registration):
+with model.edit() as (tracer, edit):
     hidden = model.model.layers[16].output[0].save()
 
 # Not traces — plain vLLM requests. The block still runs for them.
@@ -278,7 +278,7 @@ outputs = model.generate(["The Eiffel Tower is in", "The capital of Japan is"],
                          max_tokens=5)
 
 outputs[1].saves["hidden"]        # prompt 1's activations
-registration.clear()
+edit.clear()
 ```
 
 There is no id to join on: the value is on the output of the request that
@@ -286,12 +286,12 @@ produced it. For a *traced* request, reach it through `tracer.result.saves`.
 
 The block is written exactly like a trace body — same envoy tree, same `.save()`.
 It belongs to no particular request, so there is **no `tracer.invoke(...)`**. The
-tracer is bound alongside the handle (as `model.edit()` binds `(tracer, edited)`)
-because `tracer.iter` / `tracer.all()` is what lets a registered block follow a
+tracer is bound alongside the handle (as `Envoy.edit()` binds `(tracer, edited)`)
+because `tracer.iter` / `tracer.all()` is what lets an installed block follow a
 request across its generated tokens rather than seeing only the prefill:
 
 ```python
-with model.register() as (tracer, registration):
+with model.edit() as (tracer, edit):
     readout = nnsight.save([])
     for step in tracer.all():
         readout.append(model.model.layers[16].output[0][-1])
@@ -299,13 +299,18 @@ with model.register() as (tracer, registration):
 
 | Member | Description |
 |---|---|
-| `registration.clear()` | Stop running the block. `await registration.aclear()` on an async engine. |
+| `edit.clear()` | Stop running the block. `await edit.aclear()` on an async engine. |
+| `model.clear_edits()` | Clear every edit still installed on the engine. |
 
 That is the whole handle — the values are not read through it. They are taken as
 they are collected, so nothing accumulates on the worker for as long as somebody
 is reading the outputs, which on the synchronous engine is every request there
-is. An error raised inside a registered block is re-raised where its values would
+is. An error raised inside an installed block is re-raised where its values would
 have arrived.
+
+If an edit saves under the same name as the trace reading it, `output.saves`
+keeps the trace's — but the edit's own is still there under
+`output.nnsight_saves`. Different names avoid the question.
 
 ### On an async engine
 
@@ -313,32 +318,31 @@ Installing the block is a `collective_rpc`, which on `mode="async"` can only be
 awaited from inside the running loop — so use `async with`, and `aclear`:
 
 ```python
-async with model.register() as (tracer, registration):
+async with model.edit() as (tracer, edit):
     hidden = model.model.layers[16].output[0].save()
 
 outputs = await model.generate(prompts, max_tokens=5)
 outputs[1].saves["hidden"]
 
-await registration.aclear()
+await edit.aclear()
 ```
 
 A plain `with` on an async engine raises rather than silently not installing it.
 
-### When to register instead of trace
+### When to edit instead of trace
 
-- Sweeping many prompts — registering pays the serialization once instead of per
+- Sweeping many prompts — an edit pays the serialization once instead of per
   request. Capturing one layer over 1024 prompts on Llama-3.1-8B: **2.04 s
-  traced, 1.43 s registered** (bare vLLM 0.87 s).
+  traced, 1.43 s edited** (bare vLLM 0.87 s).
 - Instrumenting traffic you don't control (a served endpoint, another client).
 - Keep tracing for one-off experiments, and whenever you want the values pushed
   back into your own variables.
 
 > **Prefix caching must be off.** A prefix-cached token is served from the KV
-> cache without a forward pass, so no hook fires and a registered block sees a
+> cache without a forward pass, so no hook fires and an installed block sees a
 > short activation with no error. A trace asks for its own request to be
-> recomputed; a registration rides requests it did not create and cannot. Build
-> with `enable_prefix_caching=False` — registering against an engine that has it
-> on warns.
+> recomputed; an edit rides requests it did not create and cannot. Build with
+> `enable_prefix_caching=False` — editing an engine that has it on warns.
 
 ## Remote / serve
 
@@ -362,7 +366,20 @@ with model.trace("The Eiffel Tower is in", serve="http://127.0.0.1:8000", api_ke
 print(model.tokenizer.decode(logits.argmax(dim=-1)))
 ```
 
-The server returns saved values only (not generated tokens); build and runtime errors come back with their real type and traceback. See `src/nnsight/modeling/vllm/serve/`.
+The server returns saved values only — save `tracer.result` to get the finished `RequestOutput` back with them. Build and runtime errors come back with their real type and traceback. See `src/nnsight/modeling/vllm/serve/`.
+
+`model.edit(serve=url, api_key=...)` installs a block on the server's engine the same way, over `POST /v1/nnsight/register/{id}`:
+
+```python
+with model.edit(serve="http://127.0.0.1:8000") as (tracer, edit):
+    hidden = model.transformer.h[5].output.save()
+
+with model.trace("The Eiffel Tower is in", serve="http://127.0.0.1:8000") as tracer:
+    result = tracer.result.save()
+result.saves["hidden"]        # the edit's value, on the request it ran on
+
+edit.clear()
+```
 
 ## Special properties
 
@@ -391,6 +408,7 @@ For GPT-2-style models: `model.transformer.h[i].attn.output`, `model.transformer
 
 - **`enforce_eager=True` is forced** — costs some decode throughput, required for hooks.
 - **One prompt per invoke** — no `tracer.invoke(["a", "b"])`.
+- **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
 - **No backward / gradients, no `.scan()`, no source tracing on fused CUDA kernels.**
 - **Text-only** — multimodal vLLM is not exposed.
 - **Version sensitivity** — targets vLLM's v1 architecture (`AsyncLLM` at `vllm.v1.engine.async_llm`).

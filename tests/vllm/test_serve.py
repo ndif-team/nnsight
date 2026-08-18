@@ -105,9 +105,13 @@ class TestGpulessClient:
 
         from nnsight.modeling.vllm import VLLM
 
+        # `max_memory_allocated` too (vLLM's loader reports peak memory around the
+        # load): on a host that really has no GPU it returns 0, but here CUDA may
+        # already be initialized by an earlier test in this process, and it then
+        # rejects the device index the mocked count implies.
         with mock.patch("torch.cuda.is_available", return_value=False), mock.patch(
             "torch.cuda.device_count", return_value=0
-        ):
+        ), mock.patch("torch.cuda.max_memory_allocated", return_value=0):
             model = VLLM("gpt2")
 
         assert model.tokenizer is not None
@@ -171,3 +175,59 @@ class TestServe:
         with serve_client.trace(ET_prompt, temperature=0.0, top_p=1, serve=serve_url):
             logits = serve_client.logits.save()
         assert serve_client.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+
+class TestServeResult:
+    @torch.no_grad()
+    def test_result_comes_back(self, serve_client, serve_url, ET_prompt):
+        # The server hands the finished RequestOutput to the collect, so saving
+        # `tracer.result` is how a serve client reads generated tokens.
+        with serve_client.trace(
+            ET_prompt, temperature=0.0, top_p=1, max_tokens=3, serve=serve_url
+        ) as tracer:
+            result = tracer.result.save()
+
+        assert type(result).__name__ == "RequestOutput"
+        assert len(result.outputs[0].token_ids) == 3
+
+
+class TestServeEdit:
+    """`model.edit(serve=url)` — the block installs over HTTP, on the server's engine."""
+
+    @torch.no_grad()
+    def test_edit_runs_for_a_served_trace(self, serve_client, serve_url, ET_prompt):
+        with serve_client.edit(serve=serve_url) as (tracer, edit):
+            hidden = serve_client.transformer.h[5].output.save()
+        try:
+            with serve_client.trace(
+                ET_prompt, temperature=0.0, top_p=1, max_tokens=1, serve=serve_url
+            ) as tracer:
+                result = tracer.result.save()
+
+            # The edit's value rides the output of the request it ran on.
+            assert "hidden" in result.saves
+        finally:
+            edit.clear()
+
+    @torch.no_grad()
+    def test_clear_stops_it(self, serve_client, serve_url, ET_prompt):
+        with serve_client.edit(serve=serve_url) as (tracer, edit):
+            hidden = serve_client.transformer.h[5].output.save()
+        edit.clear()
+
+        with serve_client.trace(
+            ET_prompt, temperature=0.0, top_p=1, max_tokens=1, serve=serve_url
+        ) as tracer:
+            result = tracer.result.save()
+
+        assert "hidden" not in getattr(result, "saves", {})
+
+    @torch.no_grad()
+    def test_the_client_stays_gpuless(self, serve_client, serve_url):
+        # Installing must not dispatch an engine on the client — it has no weights.
+        with serve_client.edit(serve=serve_url) as (tracer, edit):
+            hidden = serve_client.transformer.h[5].output.save()
+        try:
+            assert not serve_client.dispatched
+        finally:
+            edit.clear()

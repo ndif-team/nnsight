@@ -18,14 +18,15 @@ import ast
 import asyncio
 import io
 import logging
-import pickle
 import uuid
+import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from fastapi import FastAPI, HTTPException, Request, Response
 
 from ....intervention.serialization import loads
+from ..engines.engine import merge_collected
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
@@ -103,14 +104,59 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.post("/v1/nnsight/register/{registration_id}")
+async def register(registration_id: str, request: Request) -> dict:
+    """Install a block on this server's engine, to run for every request it handles.
+
+    Body: the serialized block ``model.edit(serve=url)`` prepared on the client.
+    The client has no engine to ``collective_rpc`` into, so the install comes
+    over HTTP and this hands it to every rank — the same call the in-process form
+    makes. What the block saves rides the output of the request it ran on, so a
+    serve client reads it through ``tracer.result``.
+    """
+    if _model is None:
+        raise HTTPException(status_code=503, detail="Engine not ready")
+
+    # The client cannot check this — it has no engine — so the server does.
+    from ..registration import _warn_if_prefix_caching
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _warn_if_prefix_caching(_model)
+    for warning in caught:
+        logger.warning(str(warning.message))
+
+    payload = await request.body()
+    try:
+        await _model.vllm_entrypoint.collective_rpc(
+            "nnsight_register", args=(registration_id, payload)
+        )
+    except Exception as exception:
+        logger.exception("Failed to install edit %s", registration_id)
+        raise HTTPException(status_code=400, detail=str(exception))
+    return {"status": "ok", "id": registration_id}
+
+
+@app.post("/v1/nnsight/register/{registration_id}/clear")
+async def clear_registration(registration_id: str) -> dict:
+    """Stop running an installed block. Unknown ids are a no-op, so clearing twice is safe."""
+    if _model is None:
+        raise HTTPException(status_code=503, detail="Engine not ready")
+
+    await _model.vllm_entrypoint.collective_rpc(
+        "nnsight_clear_registered", args=(registration_id,)
+    )
+    return {"status": "ok", "id": registration_id}
+
+
 @app.post("/v1/nnsight/generate")
 async def generate(request: Request) -> Response:
     """Run a serialized trace and return its saved values.
 
     Body: ``RequestModel.serialize(tracer)`` bytes. Response: ``torch.save`` of
     ``{"saves": {name: value}, "error": <deferred error or None>}`` — saved values
-    only; generated tokens are not returned (a serve client reads ``.save()``d values,
-    not ``tracer.result``). A build error (a corrupt/incompatible trace) or a runtime
+    only, so read generated tokens by saving ``tracer.result``, which is served here
+    like anywhere else. A build error (a corrupt/incompatible trace) or a runtime
     intervention error both come back as the deferred ``error`` so the client re-raises
     the real exception type with its traceback, rather than an opaque HTTP error.
     """
@@ -145,20 +191,25 @@ async def generate(request: Request) -> Response:
         request_id = str(uuid.uuid4())
         collected = False
         try:
-            async for _ in engine.generate(
+            # The last streamed output is the finished ``RequestOutput``; the
+            # worker cannot build it and needs it to serve ``tracer.result``, so
+            # keep it and hand it back on the collect.
+            output = None
+            async for output in engine.generate(
                 prompt, param, request_id, lora_request=lora_request
             ):
                 pass
 
             results = await engine.collective_rpc(
-                "collect_nnsight", args=([request_id], [request_id])
+                "collect_nnsight",
+                args=([request_id], [request_id], {request_id: output}),
             )
             collected = True
-            payload = next((result for result in results if result is not None), None)
-            if payload is not None:
-                entry = pickle.loads(payload).get(request_id)
-                if entry is not None:
-                    return entry["saves"], entry["error"]
+            # Merged, not first-non-empty: under pipeline parallelism a trace's
+            # values and an installed block's come from different ranks.
+            entry = merge_collected(results).get(request_id)
+            if entry is not None:
+                return entry["saves"], entry["error"]
             return {}, None
         finally:
             # If this task is cancelled mid-generation (server shutdown, or a

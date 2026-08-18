@@ -13,8 +13,8 @@ a local run would, so reading a ``.save()``d value after the block just works::
 
 ``api_key`` (optional) is sent as the ``ndif-api-key`` header. The server's response
 is a ``torch.save`` of ``{"saves": {name: value}, "error": <deferred or None>}`` —
-saved values only; generated tokens are not returned. A build or runtime error comes
-back as ``error`` and is re-raised at the client with its real type and traceback; a
+saved values only, so read generated tokens by saving ``tracer.result``. A build or
+runtime error comes back as ``error`` and is re-raised at the client with its real type and traceback; a
 transport/service failure (e.g. the engine not ready) surfaces as ``ConnectionError``.
 """
 

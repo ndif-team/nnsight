@@ -26,7 +26,7 @@ class TestRegistration:
         model = vllm_gpt2_uncached
         prompts = ["The Eiffel Tower is in", "Hello world", "A"]
 
-        with model.register() as (tracer, registration):
+        with model.edit() as (tracer, registration):
             hidden = model.transformer.h[5].output.save()
         try:
             outputs = model.generate(prompts, max_tokens=3, temperature=0.0,
@@ -48,7 +48,7 @@ class TestRegistration:
     def test_clear_stops_it(self, vllm_gpt2_uncached, ET_prompt):
         model = vllm_gpt2_uncached
 
-        with model.register() as (tracer, registration):
+        with model.edit() as (tracer, registration):
             hidden = model.transformer.h[5].output.save()
         registration.clear()
 
@@ -61,9 +61,9 @@ class TestRegistration:
                                                         ET_prompt):
         model = vllm_gpt2_uncached
 
-        with model.register() as (tracer, deep_reg):
+        with model.edit() as (tracer, deep_reg):
             deep = model.transformer.h[8].output.save()
-        with model.register() as (tracer, shallow_reg):
+        with model.edit() as (tracer, shallow_reg):
             shallow = model.transformer.h[2].output.save()
         try:
             saves = model.generate([ET_prompt], max_tokens=2, temperature=0.0,
@@ -83,7 +83,7 @@ class TestRegistration:
         model = vllm_gpt2_uncached
         steps = 4
 
-        with model.register() as (tracer, registration):
+        with model.edit() as (tracer, registration):
             readout = nnsight.save([])
             for step in tracer.iter[:steps]:
                 readout.append(model.transformer.h[5].output[-1])
@@ -100,7 +100,7 @@ class TestRegistration:
         before = model.generate([ET_prompt], max_tokens=3, temperature=0.0,
                                 ignore_eos=True)[0].outputs[0].text
 
-        with model.register() as (tracer, registration):
+        with model.edit() as (tracer, registration):
             model.transformer.h[5].output[:] = 0
         try:
             during = model.generate([ET_prompt], max_tokens=3, temperature=0.0,
@@ -119,7 +119,7 @@ class TestRegistration:
     ):
         model = vllm_gpt2_uncached
 
-        with model.register() as (tracer, registration):
+        with model.edit() as (tracer, registration):
             hidden = model.transformer.h[5].output.save()
         try:
             with model.trace(ET_prompt, temperature=0.0, max_tokens=2,
@@ -139,6 +139,63 @@ class TestRegistration:
             assert result.outputs[0].token_ids
         finally:
             registration.clear()
+
+
+class TestEditHandles:
+    @torch.no_grad()
+    def test_clear_edits_clears_every_one(self, vllm_gpt2_uncached, ET_prompt):
+        model = vllm_gpt2_uncached
+
+        with model.edit() as (tracer, deep):
+            deep_hidden = model.transformer.h[8].output.save()
+        with model.edit() as (tracer, shallow):
+            shallow_hidden = model.transformer.h[2].output.save()
+
+        model.clear_edits()
+
+        assert deep.cleared and shallow.cleared
+        assert model._installed_edits == []
+        saves = getattr(
+            model.generate([ET_prompt], max_tokens=2, temperature=0.0,
+                           ignore_eos=True)[0],
+            "saves",
+            {},
+        )
+        assert "deep_hidden" not in saves and "shallow_hidden" not in saves
+
+    @torch.no_grad()
+    def test_a_cleared_edit_drops_out_of_the_list(self, vllm_gpt2_uncached):
+        model = vllm_gpt2_uncached
+
+        with model.edit() as (tracer, edit):
+            hidden = model.transformer.h[5].output.save()
+        assert model._installed_edits == [edit]
+
+        edit.clear()
+        assert model._installed_edits == []
+        # Clearing twice is a no-op, not an error.
+        edit.clear()
+
+    def test_inplace_false_is_refused(self, vllm_gpt2_uncached):
+        # There is no copy to edit instead — the engine is what every caller shares.
+        with pytest.raises(ValueError, match="inplace"):
+            vllm_gpt2_uncached.edit(inplace=False)
+
+
+class TestBarrierIsRefused:
+    """Each invoke is its own request, so the blocks never meet — say so."""
+
+    def test_in_a_trace(self, vllm_gpt2):
+        with pytest.raises(NotImplementedError, match="barrier"):
+            with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+                barrier = tracer.barrier(2)
+
+    def test_in_an_edit(self, vllm_gpt2_uncached):
+        # Not entered: an edit's body runs per request on the worker, so calling
+        # it there would only surface as that request's deferred error.
+        tracer = vllm_gpt2_uncached.edit()
+        with pytest.raises(NotImplementedError, match="barrier"):
+            tracer.barrier(2)
 
 
 class TestGenerateWithoutABlock:
