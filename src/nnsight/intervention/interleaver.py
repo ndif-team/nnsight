@@ -54,6 +54,14 @@ if TYPE_CHECKING:
     from .fragments import Fragments
 
 
+# Location the driver serves once per generation step, per worker. An
+# open-ended ``tracer.iter[:]`` whose step body never parks reads this between
+# steps, so the loop advances at the model's pace instead of spinning the
+# thread; when generation ends, the read is left dangling and the standard
+# dangling-worker unwind ends the loop.
+STEP_GATE = "__nnsight_step__"
+
+
 class Event(enum.Enum):
     """What a parked worker is asking for.
 
@@ -190,6 +198,10 @@ class Mediator:
         # has reached it. See `handle` for how the two are matched up.
         self.iteration: int | None = 0
         self.iterations: dict[str, int] = defaultdict(int)
+        # How many times this worker has parked. tracer.iter reads it to tell
+        # whether a step's body parked at all; a park-free body under an
+        # open-ended loop must be paced by the step gate (see STEP_GATE).
+        self.parks: int = 0
         # Caches created by this worker's `tracer.cache()`. They observe every
         # location this run reaches (post-intervention); see Interleaver.handle.
         self.caches: list = []
@@ -305,6 +317,7 @@ class Mediator:
             if mediator.iteration is not None
             else mediator.iterations[location]
         )
+        mediator.parks += 1
         return worker.parent.switch((event, f"{location}.i{iteration}", *rest))
 
     @classmethod
@@ -349,7 +362,9 @@ class Mediator:
         [`Barrier`][nnsight.intervention.barrier.Barrier]). Its pending event carries
         no location, so the model side never serves it.
         """
-        getcurrent().parent.switch((Event.BARRIER, None))
+        worker = getcurrent()
+        worker.mediator().parks += 1
+        worker.parent.switch((Event.BARRIER, None))
 
     @property
     def alive(self) -> bool:
@@ -374,6 +389,7 @@ class Mediator:
         self.interleaver = interleaver
         self.iteration = 0
         self.iterations = defaultdict(int)
+        self.parks = 0
         self.caches = []
         self.transform = None
         self.worker = greenlet(run=self._run)

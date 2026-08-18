@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
+from ....intervention.interleaver import STEP_GATE
+
 if os.environ.get("NNSIGHT_PP_DEBUG_STACKS") == "1":
     # kill -USR1 <worker pid> dumps every thread's stack to stderr. Debug aid
     # for wedged workers on machines where ptrace (py-spy/gdb) is blocked.
@@ -39,6 +41,13 @@ if os.environ.get("NNSIGHT_PP_DEBUG_STACKS") == "1":
     import signal
 
     faulthandler.register(signal.SIGUSR1, all_threads=True)
+
+if os.environ.get("NNSIGHT_PP_DEBUG_NOGC") == "1":
+    # Diagnostic: run the worker with the cyclic garbage collector off, to
+    # test whether a wedge involves a collection.
+    import gc
+
+    gc.disable()
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -270,6 +279,14 @@ class Requests:
                 "check the count it was created with"
             )
             over_iterated = False
+        elif requester.startswith(STEP_GATE):
+            # An open-ended tracer.iter loop parked between steps and the
+            # generation ended: the loop's designed exit, phrased for the user
+            # rather than by the gate's internal location.
+            error = OutOfOrderError(
+                "generation ended before the loop's next step"
+            )
+            over_iterated = True
         else:
             error = OutOfOrderError(
                 f"'{requester}' was requested but the model already ran past it"
@@ -626,6 +643,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
             output = super().execute_model(scheduler_output, intermediate_tensors)
             # The forward is done; what follows it is per-request, not per-token.
             self.nnsight_requests.unflatten(self.nnsight_model)
+            # One step-gate serve per generation step: paces open-ended
+            # tracer.iter loops whose bodies never park (see STEP_GATE).
+            interleaver.handle(STEP_GATE, None)
             # PP: serve whatever pulls have already landed — NON-blocking: a
             # downstream stage's value is produced only after this method
             # returns and lets the next stage run, so waiting here would

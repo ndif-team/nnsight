@@ -43,7 +43,7 @@ from typing import Any, Optional
 import torch
 from torch.utils._pytree import tree_map
 
-from ...intervention.interleaver import Event, Interleaver, Mediator
+from ...intervention.interleaver import STEP_GATE, Event, Interleaver, Mediator
 from .lazy_remote_tensor import (
     PULL_LOCATION_PREFIX,
     LazyRemoteTensor,
@@ -190,8 +190,12 @@ class PPInterleaver(Interleaver):
             for mediator in self.mediators
         ]
         value = super().handle(provider, value)
-        if self.listener is not None and self.module_map.is_local(
-            provider, self.local_rank
+        # The step gate is served on every rank each step; it carries no data
+        # and must not enter the pull buffer.
+        if (
+            provider != STEP_GATE
+            and self.listener is not None
+            and self.module_map.is_local(provider, self.local_rank)
         ):
             self._publish(provider, value, visits)
         return value
