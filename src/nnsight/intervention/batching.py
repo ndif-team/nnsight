@@ -8,8 +8,9 @@ A [`Batcher`][nnsight.intervention.batching.Batcher] (one per trace) collects ea
 ``batch_group`` — a ``[start, size]`` row range in the combined batch. At run time
 [`Batcher.narrow`][nnsight.intervention.batching.Batcher.narrow] slices a full batched activation down to a block's rows when
 it reads, and [`Batcher.widen`][nnsight.intervention.batching.Batcher.widen] splices an edit back into the full tensor. The row math
-is dim-0 only; the model's `_batch` equalizes everything else (e.g. sequence
-length) when it builds the combined input.
+runs along the axis `Batcher._batch_dim` reports (dim 0 in the base layout);
+the model's `_batch` equalizes everything else (e.g. sequence length) when it
+builds the combined input.
 
 Batching only actually narrows when there are two or more non-empty invokes — a
 lone invoke *is* the whole batch, so it sees every row untouched.
@@ -100,16 +101,30 @@ class Batcher:
             return value
         return apply(value, lambda tensor: self._narrow_tensor(tensor, group), torch.Tensor)
 
+    def _batch_dim(self, tensor: torch.Tensor) -> Optional[int]:
+        """Axis of ``tensor`` the batch groups index, or ``None`` when it isn't batched.
+
+        Base layout: a tensor whose leading dim is [`total`][nnsight.intervention.batching.Batcher.total] is a dim-0 stack of
+        every invoke's rows; anything else isn't batched. Overridden when the
+        batched axis can sit elsewhere (see
+        [`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher], whose
+        Transformers-backend activations are ``[1, total_tokens, hidden]``).
+        """
+        if tensor.shape[0] == self.total:
+            return 0
+        return None
+
     def _narrow_tensor(self, tensor: torch.Tensor, group: list) -> torch.Tensor:
         """Slice one batched tensor down to ``group``'s rows.
 
-        Base layout: a tensor whose leading dim is [`total`][nnsight.intervention.batching.Batcher.total] is a dim-0 stack of
-        every invoke's rows, so narrow it to ``[start, start + size)``; anything else
-        isn't batched and passes through. Overridden for non-stacked layouts.
+        Narrows to ``[start, start + size)`` along the axis `_batch_dim`
+        reports; a tensor it calls unbatched passes through. Overridden for
+        non-stacked layouts.
         """
         start, size = group
-        if tensor.shape[0] == self.total:
-            view = tensor.narrow(0, start, size)
+        dim = self._batch_dim(tensor)
+        if dim is not None:
+            view = tensor.narrow(dim, start, size)
             # Mark the slice so a `.backward()` gradient hook can tell it apart from a
             # user-made view: it isn't in the loss graph (the model runs on the full
             # batch), so its hook must redirect to the storage-owning base that is
@@ -152,19 +167,20 @@ class Batcher:
         return merge(full, edited)
 
     def _widen_tensor(self, full: torch.Tensor, group: list, edited: torch.Tensor) -> torch.Tensor:
-        """Write ``edited`` into ``full``'s ``group`` rows (base dim-0-stack layout).
+        """Write ``edited`` into ``full``'s ``group`` rows.
 
-        A tensor is batched only when its leading dim is [`total`][nnsight.intervention.batching.Batcher.total]; otherwise it
-        passes through. Overridden for non-stacked layouts.
+        Splices along the axis `_batch_dim` reports; a tensor it calls
+        unbatched passes through. Overridden for non-stacked layouts.
         """
-        if full.shape[0] != self.total:
+        dim = self._batch_dim(full)
+        if dim is None:
             return full
         start, size = group
         # cat (not in-place) keeps autograd correct for leaves/views and avoids
         # aliasing when `edited` is a narrowed view of `full`.
-        pre = full.narrow(0, 0, start)
-        post = full.narrow(0, start + size, self.total - start - size)
-        return torch.cat([pre, edited, post], dim=0)
+        pre = full.narrow(dim, 0, start)
+        post = full.narrow(dim, start + size, self.total - start - size)
+        return torch.cat([pre, edited, post], dim=dim)
 
     def gather_skip(self, running: Any, group: BatchGroup, replacement: Any) -> Any:
         """Collect one invoke's skip ``replacement`` for its ``group``'s rows.
