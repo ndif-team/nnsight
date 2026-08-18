@@ -501,7 +501,7 @@ For GPT-2-style models: `model.transformer.h[i].attn.output`, `model.transformer
 - **Mode is fixed at construction.** Build with `mode="async"` if you want streaming.
 - **`tracer.backend` is iterable only in async mode.** In sync mode, results land in your local variables when the block exits.
 - **`logits` / `samples` don't exist on a vanilla `vllm.LLM`** — use them only inside a trace.
-- **Per-invoke kwargs override root kwargs.**
+- **Per-invoke kwargs override trace-level ones**, including when the value an invoke names happens to be vLLM's own default (`temperature=1.0`, `max_tokens=16`). Trace-level settings only fill in what an invoke did not name.
 - **`gpu_memory_utilization` defaults to 0.9** — lower it for small/shared GPUs (tests use 0.1).
 - **Async saves are finished-only** — for per-step saves, accumulate inside `tracer.iter[:]`.
 

@@ -315,7 +315,13 @@ class VLLM(Remotable):
             kwargs = dict(kwargs)
             lora_requests.append(kwargs.pop("lora_request", None))
             prompts.append(self._prompt(*inputs))
-            params.append(SamplingParams(**kwargs))
+            param = SamplingParams(**kwargs)
+            # Which settings this invoke named, for `_attach_mediators` to leave
+            # alone. Recorded rather than inferred: the value a caller passed
+            # cannot be told from the one it would have had by default, and half
+            # of vLLM's defaults are the obvious thing to type.
+            param.nnsight_named = frozenset(kwargs)
+            params.append(param)
 
         return (prompts, params, lora_requests), {}
 
@@ -720,6 +726,12 @@ class VLLM(Remotable):
         keyword arguments (a typo'd sampling setting) are refused too, rather than
         silently ignored the way the fill loop otherwise would.
 
+        "Did not set them" is what the invoke recorded in `_batch`, not "still
+        equals vLLM's default". The two are not the same: ``temperature=1.0`` and
+        ``max_tokens=16`` *are* the defaults, so an invoke asking for either used
+        to have it overwritten by the trace-level setting while a neighbouring
+        ``temperature=0.99`` was honoured.
+
         Returns:
             The workers that were attached, in request order.
         """
@@ -760,8 +772,9 @@ class VLLM(Remotable):
             # consulted this way and the read is whole anyway.
             if hasattr(param, "skip_reading_prefix_cache"):
                 param.skip_reading_prefix_cache = True
+            named = getattr(param, "nnsight_named", frozenset())
             for attr, value in kwargs.items():
-                if getattr(param, attr) == getattr(default, attr):
+                if attr not in named:
                     setattr(param, attr, value)
 
         return attached

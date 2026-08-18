@@ -397,3 +397,55 @@ class TestSameNameAcrossInvokes:
         assert rows[0] is not None and rows[1] is not None
         assert rows[0].shape[0] == len(vllm_gpt2.tokenizer.encode(ET_prompt))
         assert rows[1].shape[0] == len(vllm_gpt2.tokenizer.encode(MSG_prompt))
+
+
+class TestPerInvokeSampling:
+    """An invoke's own sampling settings survive the trace-level ones.
+
+    Trace-level settings fill in for whatever an invoke did not name. Working out
+    "did not name" by comparing against a fresh `SamplingParams` cannot tell the
+    value a caller passed from the one it would have had anyway — so an invoke
+    asking for a setting that happens to be vLLM's default had it silently
+    replaced, which is most of the values anyone types.
+    """
+
+    @torch.no_grad()
+    def test_a_default_valued_setting_is_still_the_invokes(self, vllm_gpt2,
+                                                           ET_prompt, MSG_prompt):
+        # 16 is vLLM's own default max_tokens, and 3 is not; both are this
+        # invoke's business, and the trace-level 4 applies to neither.
+        with vllm_gpt2.trace(temperature=0.0, max_tokens=4) as tracer:
+            with tracer.invoke(ET_prompt, max_tokens=16, ignore_eos=True):
+                long = tracer.result.save()
+            with tracer.invoke(MSG_prompt, max_tokens=3, ignore_eos=True):
+                short = tracer.result.save()
+
+        assert len(long.outputs[0].token_ids) == 16
+        assert len(short.outputs[0].token_ids) == 3
+
+    @torch.no_grad()
+    def test_the_trace_level_setting_still_fills_in(self, vllm_gpt2, ET_prompt,
+                                                    MSG_prompt):
+        with vllm_gpt2.trace(temperature=0.0, max_tokens=4, ignore_eos=True) as tracer:
+            with tracer.invoke(ET_prompt):
+                first = tracer.result.save()
+            with tracer.invoke(MSG_prompt, max_tokens=2):
+                second = tracer.result.save()
+
+        assert len(first.outputs[0].token_ids) == 4
+        assert len(second.outputs[0].token_ids) == 2
+
+    @torch.no_grad()
+    def test_a_default_valued_temperature_is_kept(self, vllm_gpt2, ET_prompt):
+        # temperature=1.0 is the default, and asking for it against a greedy
+        # trace has to mean sampling. Two draws at temperature 1 diverge; two
+        # greedy ones cannot.
+        texts = set()
+        for seed in (0, 1, 2, 3):
+            with vllm_gpt2.trace(temperature=0.0, max_tokens=6) as tracer:
+                with tracer.invoke(ET_prompt, temperature=1.0, seed=seed,
+                                   ignore_eos=True):
+                    result = tracer.result.save()
+            texts.add(result.outputs[0].text)
+
+        assert len(texts) > 1, f"every draw came back identical: {texts}"
