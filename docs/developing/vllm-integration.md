@@ -181,7 +181,18 @@ registered name — tensor parallelism, where each gathers the same whole value 
 the earliest rank's is kept, so the value lands on the device a traced one would.
 
 `collect_nnsight(request_ids, finished_request_ids, outputs=None)` runs on the
-worker and returns `pickle.dumps({engine_id: {"saves", "registered", "error"}})`.
+worker and returns
+`pickle.dumps({engine_id: {"saves", "registered", "error", "sequences"}})`.
+`sequences` is keyed by sampled-sequence index: `n > 1` fans a request into a child
+per sequence (`"{index}_{parent}"`, vLLM's `ParentRequest`), each of which runs its
+own copy of the block, so each is owed values of its own. `Requests.engine_key`
+resolves a worker id to `(engine_id, index)` — taking the child reading only when
+the parent it names is one the engine asked about, so an id that merely starts with
+digits and an underscore is not mistaken for somebody's second sequence. `saves` /
+`registered` stay the primary sequence's, so nothing changes for a caller that never
+sets `n`; `attach` puts each sequence's on `output.outputs[i].saves` and the trace's
+own on `output.nnsight_sequences`, which is what `VLLM._collect` pushes back as a
+list.
 It harvests what finished, takes the registered values, serves `tracer.result`,
 throws `finish_dangling` into whatever is still parked, collects the saves, and
 pops finished mediators.

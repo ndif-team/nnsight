@@ -13,6 +13,8 @@ import torch
 
 pytest.importorskip("vllm")
 
+import nnsight  # noqa: E402
+
 
 def _worker_request_state(worker):
     """Read a worker's request bookkeeping, run there via ``collective_rpc``.
@@ -248,3 +250,150 @@ class TestConcurrentGeneration:
         assert len(et) == 3
         assert len(msg) == 3
         assert vllm_gpt2.tokenizer.batch_decode(msg) == [" New", " York", " City"]
+
+
+class TestSeveralSequences:
+    """``n > 1``: one prompt, several sampled continuations.
+
+    vLLM fans the request into a child per sequence, each of which runs its own
+    copy of the block against its own rows. So there are `n` of every saved
+    value, and they come back as a list — one entry per sequence, in order.
+    """
+
+    @torch.no_grad()
+    def test_saves_come_back_one_per_sequence(self, vllm_gpt2, ET_prompt):
+        with vllm_gpt2.trace(ET_prompt, max_tokens=3, temperature=1.0, seed=0, n=2):
+            hidden = vllm_gpt2.transformer.h[5].output.save()
+
+        assert isinstance(hidden, list) and len(hidden) == 2
+        prompt_rows = len(vllm_gpt2.tokenizer.encode(ET_prompt))
+        for value in hidden:
+            assert value.shape[0] == prompt_rows
+
+    @torch.no_grad()
+    def test_one_sequence_is_still_one_value(self, vllm_gpt2, ET_prompt):
+        # The list is what "more than one" looks like; n=1 is unchanged.
+        with vllm_gpt2.trace(ET_prompt, max_tokens=3, temperature=0.0):
+            hidden = vllm_gpt2.transformer.h[5].output.save()
+
+        assert isinstance(hidden, torch.Tensor)
+
+    @torch.no_grad()
+    def test_the_result_is_one_object_not_one_per_sequence(
+        self, vllm_gpt2, ET_prompt
+    ):
+        # A request has one output carrying n completions, and every sequence's
+        # block is served that same object — so it is not n values of anything.
+        with vllm_gpt2.trace(
+            ET_prompt, max_tokens=3, temperature=1.0, seed=0, n=2
+        ) as tracer:
+            result = tracer.result.save()
+
+        assert type(result).__name__ == "RequestOutput"
+        assert len(result.outputs) == 2
+
+    @torch.no_grad()
+    def test_each_completion_carries_its_own(self, vllm_gpt2_uncached, ET_prompt):
+        # An installed block runs once per sequence too, and its values ride the
+        # completion they belong to — next to that sequence's text and token ids.
+        # This is the shape an async or serve caller reads, where there is no
+        # variable to push a list into.
+        model = vllm_gpt2_uncached
+
+        with model.edit() as (tracer, edit):
+            hidden = model.transformer.h[5].output.save()
+        try:
+            output = model.generate([ET_prompt], max_tokens=3, temperature=1.0,
+                                    seed=0, n=2)[0]
+
+            assert len(output.outputs) == 2
+            prompt_rows = len(model.tokenizer.encode(ET_prompt))
+            for completion in output.outputs:
+                assert completion.saves["hidden"].shape[0] == prompt_rows
+            # Each sequence's own object, not one shared between them.
+            assert (
+                output.outputs[0].saves["hidden"]
+                is not output.outputs[1].saves["hidden"]
+            )
+        finally:
+            edit.clear()
+
+    @torch.no_grad()
+    def test_the_sequences_diverge_where_they_should(self, vllm_gpt2, ET_prompt):
+        # Same prompt, so the prefill matches; the sampled steps are each
+        # sequence's own.
+        with vllm_gpt2.trace(
+            ET_prompt, max_tokens=4, temperature=1.0, seed=0, n=2
+        ) as tracer:
+            steps = nnsight.save([])
+            for _ in tracer.iter[:4]:
+                steps.append(vllm_gpt2.samples)
+            result = tracer.result.save()
+
+        assert isinstance(steps, list) and len(steps) == 2
+        first, second = (
+            [int(step.flatten()[0]) for step in sequence] for sequence in steps
+        )
+        assert first == list(result.outputs[0].token_ids)
+        assert second == list(result.outputs[1].token_ids)
+
+    @torch.no_grad()
+    def test_no_worker_is_left_behind(self, vllm_gpt2, ET_prompt):
+        # The child requests are named "{index}_{parent}"; when that went
+        # unmatched nothing was collected and nothing was ever freed.
+        engine = vllm_gpt2.vllm_entrypoint.llm_engine
+
+        for _ in range(3):
+            with vllm_gpt2.trace(ET_prompt, max_tokens=2, temperature=1.0,
+                                 seed=0, n=2):
+                hidden = vllm_gpt2.transformer.h[5].output.save()
+
+        assert engine.collective_rpc("nnsight_request_count") == [0]
+
+
+class TestSameNameAcrossInvokes:
+    """Several invokes saving one name: separate values, not copies of one."""
+
+    @torch.no_grad()
+    def test_each_invoke_keeps_its_own(self, vllm_gpt2, ET_prompt, MSG_prompt):
+        # This is the shape every steering/patching recipe has. Merging them kept
+        # only the last, so three prompts came back holding one prompt's value.
+        with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+            with tracer.invoke(ET_prompt):
+                hidden = vllm_gpt2.transformer.h[5].output.save()
+            with tracer.invoke(MSG_prompt):
+                hidden = vllm_gpt2.transformer.h[5].output.save()
+
+        assert isinstance(hidden, list) and len(hidden) == 2
+        # In invoke order, each sized to its own prompt.
+        assert hidden[0].shape[0] == len(vllm_gpt2.tokenizer.encode(ET_prompt))
+        assert hidden[1].shape[0] == len(vllm_gpt2.tokenizer.encode(MSG_prompt))
+
+    @torch.no_grad()
+    def test_distinct_names_are_untouched(self, vllm_gpt2, ET_prompt, MSG_prompt):
+        with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+            with tracer.invoke(ET_prompt):
+                et = vllm_gpt2.transformer.h[5].output.save()
+            with tracer.invoke(MSG_prompt):
+                msg = vllm_gpt2.transformer.h[5].output.save()
+
+        assert isinstance(et, torch.Tensor) and isinstance(msg, torch.Tensor)
+        assert et.shape[0] != msg.shape[0]
+
+    @torch.no_grad()
+    def test_a_container_saved_above_the_invokes_still_merges(
+        self, vllm_gpt2, ET_prompt, MSG_prompt
+    ):
+        # One object locally, so its per-request copies merge slot-wise rather
+        # than coming back as a list of copies.
+        with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+            rows = nnsight.save([None, None])
+            with tracer.invoke(ET_prompt):
+                rows[0] = vllm_gpt2.transformer.h[5].output
+            with tracer.invoke(MSG_prompt):
+                rows[1] = vllm_gpt2.transformer.h[5].output
+
+        assert len(rows) == 2
+        assert rows[0] is not None and rows[1] is not None
+        assert rows[0].shape[0] == len(vllm_gpt2.tokenizer.encode(ET_prompt))
+        assert rows[1].shape[0] == len(vllm_gpt2.tokenizer.encode(MSG_prompt))

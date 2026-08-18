@@ -169,10 +169,21 @@ One prompt per invoke: a string, a list of token ids, a tokenizer's `{input_ids,
 ### Continuous batching (multiple invokes)
 
 Each invoke is one request; vLLM's continuous batcher processes them together.
-**Collect each invoke's values into its own saved variable** — a container declared
-outside the invokes and appended inside them does *not* merge back, because each
-invoke's intervention is serialized into its own request separately (unlike the
-in-process local path):
+Your block runs once per request, so a name saved in every invoke comes back as a
+**list**, one entry per invoke in order:
+
+```python
+with model.trace(temperature=0.0, max_tokens=1) as tracer:
+    for prompt in prompts:
+        with tracer.invoke(prompt):
+            hidden = model.transformer.h[5].output.save()
+
+hidden[0]        # the first invoke's, sized to its own prompt
+len(hidden)      # == len(prompts)
+```
+
+A name saved by exactly one invoke is that value, not a list of one — so giving
+each invoke a distinct name works too, and reads as it always did:
 
 ```python
 with model.trace(max_tokens=3) as tracer:
@@ -188,10 +199,52 @@ with model.trace(max_tokens=3) as tracer:
 print(model.tokenizer.decode(paris), model.tokenizer.decode(tokyo))
 ```
 
-For a **dynamic** number of prompts you can't give each invoke a distinct name in one
-trace, and a shared container won't merge. Instead fire each prompt as its **own**
-async trace concurrently (`asyncio.gather`) — the engine still batches the concurrent
-requests, and each one's saves arrive on its own finished `output`.
+For a **dynamic** number of prompts, save one name in every invoke and read the
+list — that is what the loop above does. Firing each prompt as its own async trace
+concurrently (`asyncio.gather`) also works, and each one's saves then arrive on its
+own finished `output`.
+
+A container bound *and saved* **above** the invokes is one object locally, so it
+stays one object here: its per-request copies are merged back element-wise, which
+is what makes the pre-sized-slot idiom work.
+
+```python
+with model.trace(temperature=0.0, max_tokens=1) as tracer:
+    rows = nnsight.save([None, None])
+    with tracer.invoke(prompt_a):
+        rows[0] = model.transformer.h[5].output
+    with tracer.invoke(prompt_b):
+        rows[1] = model.transformer.h[5].output
+```
+
+### Several sampled sequences (`n > 1`)
+
+`n=k` asks vLLM for k continuations of one prompt, and it fans the request into a
+child per sequence — so your block runs k times, once per sequence, against that
+sequence's own rows. Saved names come back as a list here for the same reason:
+
+```python
+with model.trace(prompt, max_tokens=5, temperature=1.0, n=3) as tracer:
+    hidden = model.transformer.h[5].output.save()
+    result = tracer.result.save()
+
+hidden[1]                        # sequence 1's
+result.outputs[1].text           # what sequence 1 sampled
+```
+
+`tracer.result` is **not** a list: a request has one `RequestOutput`, and the
+sequences are its `outputs[i]`.
+
+Where you hold outputs rather than variables — async, `serve=`, plain `generate`
+with an edit installed — the values ride the completion they belong to:
+
+```python
+output.outputs[i].saves["hidden"]   # sequence i's
+output.saves["hidden"]              # the primary sequence's, unchanged for n=1
+```
+
+Since the prompt is shared, each sequence's *prefill* agrees to kernel tolerance;
+they diverge over the tokens they go on to sample.
 
 ### Tensor parallelism is transparent
 
@@ -441,8 +494,8 @@ For GPT-2-style models: `model.transformer.h[i].attn.output`, `model.transformer
   ```
 
 - **A saved value comes back by its variable *name* — bind it.** `logits = model.logits.save()` works; a bare `model.logits.save()` marks the value but has no name to return it under, so `output.saves["logits"]` (async/serve) or the pushed-back local is silently missing. This is the most common "saves don't come back" bug on vLLM.
-- **Cross-invoke shared state does not merge.** A container declared outside the invokes and appended inside each one is serialized per request, so the appends don't come back — save per invoke (see [Continuous batching](#continuous-batching-multiple-invokes)).
-- **`tracer.result` is the finished `RequestOutput`, not per-step.** It carries the generation but not `.saves`; use `model.logits` / `model.samples` under `tracer.iter` for per-step values.
+- **One name saved by several runs comes back as a list** — one entry per invoke, and per sampled sequence when `n > 1`, in submission order. A name saved once stays that value. A container saved *above* the invokes is one object and merges instead (see [Continuous batching](#continuous-batching-multiple-invokes)).
+- **`tracer.result` is the finished `RequestOutput`, not per-step.** Use `model.logits` / `model.samples` under `tracer.iter` for per-step values. It is one object however many sequences `n` asked for, and it carries an installed edit's values but not the trace's own — those come back as your variables.
 - **An empty `tracer.invoke()` with interventions raises** (its work would vanish); a do-nothing empty invoke is a harmless no-op.
 - **A typo'd sampling kwarg raises** (`trace(temperatur=0.0)` → `TypeError`), rather than being silently ignored.
 - **Mode is fixed at construction.** Build with `mode="async"` if you want streaming.

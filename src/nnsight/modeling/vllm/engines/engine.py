@@ -39,11 +39,19 @@ def merge_collected(payloads: list) -> dict:
             continue
         for request_id, entry in pickle.loads(payload).items():
             into = merged.setdefault(
-                request_id, {"saves": {}, "error": None, "registered": {}}
+                request_id,
+                {"saves": {}, "error": None, "registered": {}, "sequences": {}},
             )
             into["saves"].update(entry.get("saves") or {})
             for name, value in (entry.get("registered") or {}).items():
                 into["registered"].setdefault(name, value)
+            for index, sequence in (entry.get("sequences") or {}).items():
+                target = into["sequences"].setdefault(
+                    index, {"saves": {}, "registered": {}}
+                )
+                target["saves"].update(sequence.get("saves") or {})
+                for name, value in (sequence.get("registered") or {}).items():
+                    target["registered"].setdefault(name, value)
             if into["error"] is None:
                 into["error"] = entry.get("error")
     return merged
@@ -57,10 +65,27 @@ def attach(output: Any, entry: dict) -> None:
     apart, because that is what gets pushed back into the trace's variables and a
     registered value must not land there — see
     [`collect_nnsight`][nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner.collect_nnsight].
+
+    A request that asked for several sampled sequences ran the block once per
+    sequence, so each has values of its own. They go on the completion they
+    belong to — ``output.outputs[i].saves``, alongside that sequence's text and
+    token ids — while ``output.saves`` stays the primary sequence's, which is all
+    there is unless ``n`` was set.
     """
     output.saves = {**entry["registered"], **entry["saves"]}
     output.nnsight_saves = entry["saves"]
     output.nnsight_error = entry["error"]
+
+    sequences = entry.get("sequences") or {}
+    for completion in getattr(output, "outputs", ()) or ():
+        sequence = sequences.get(getattr(completion, "index", 0))
+        if sequence is not None:
+            completion.saves = {**sequence["registered"], **sequence["saves"]}
+    # The trace's own, per sequence and in order, for the push back into the
+    # caller's variables.
+    output.nnsight_sequences = [
+        sequences[index]["saves"] for index in sorted(sequences)
+    ]
 
 
 async def acollect(engine: Any, request_id: str, output: Any = None) -> Optional[dict]:

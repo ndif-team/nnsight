@@ -243,32 +243,47 @@ class Requests:
         model.interleaver.batcher.total = row
 
     @staticmethod
-    def engine_key(worker_id: str, request_ids) -> Optional[str]:
-        """The name the engine knows this request by, or None if it is not asking.
+    def engine_key(worker_id: str, request_ids) -> Optional[tuple[str, int]]:
+        """What the engine calls this request, and which of its sequences this is.
 
-        The two sides name the same request differently: vLLM appends a hash of the
-        request's content on the way in, so a request the engine calls ``"0"``
-        arrives here as ``"0-a2460f0e"``. Saves have to go home under the name the
-        engine will recognize — which is usually the stripped one, but a runtime
-        that does not append the hash (or an id with a ``-`` of its own, as the
-        serve path mints) is known by the whole thing.
+        The two sides name the same request differently, in two ways.
+
+        vLLM appends a hash of the request's content on the way in, so a request
+        the engine calls ``"0"`` arrives here as ``"0-a2460f0e"``. And ``n > 1``
+        fans one request out into a child per sampled sequence, named
+        ``"{index}_{parent}"`` (vLLM's ``ParentRequest``), while the engine only
+        ever asks about — and only ever returns — the parent.
+
+        The child reading is taken only when the parent it names is one the engine
+        is actually asking about, so a request whose own id happens to start with
+        digits and an underscore is not mistaken for somebody's second sequence.
+
+        Returns:
+            ``(engine_id, sequence_index)``, or None if this is not one of theirs.
         """
         engine_id = worker_id.rsplit("-", 1)[0]
         if engine_id in request_ids:
-            return engine_id
-        return worker_id if worker_id in request_ids else None
+            return engine_id, 0
+        index, _, parent = engine_id.partition("_")
+        if parent and index.isdigit() and parent in request_ids:
+            return parent, int(index)
+        if worker_id in request_ids:
+            return worker_id, 0
+        return None
 
-    def match(self, request_ids: set[str]) -> list[tuple[str, str]]:
+    def match(self, request_ids: set[str]) -> list[tuple[str, str, int]]:
         """Pair the engine's name for each of our requests with this worker's.
 
         Returns:
-            ``(engine_id, worker_id)`` for each requested id that is ours.
+            ``(engine_id, worker_id, sequence_index)`` for each requested id that
+            is ours. One engine id can appear several times — once per sampled
+            sequence, when the request asked for more than one.
         """
         matched = []
         for worker_id in self.mediators:
-            engine_id = self.engine_key(worker_id, request_ids)
-            if engine_id is not None:
-                matched.append((engine_id, worker_id))
+            key = self.engine_key(worker_id, request_ids)
+            if key is not None:
+                matched.append((key[0], worker_id, key[1]))
         return matched
 
     def record_saves(self) -> None:
@@ -336,7 +351,6 @@ class Requests:
         quietly and whatever it did save is kept.
         """
         for worker_id in list(self.registered):
-            engine_id = worker_id.rsplit("-", 1)[0]
             # Named either way: the scheduler says "0-a2460f0e", a collect asks
             # with the engine's "0".
             if self.engine_key(worker_id, finished) is None:
@@ -357,7 +371,7 @@ class Requests:
                 # results and a broken registration would look like an idle one.
                 error = getattr(mediator, "nnsight_error", None)
                 if saved or error is not None:
-                    self.harvested[registration_id][engine_id] = {
+                    self.harvested[registration_id][worker_id] = {
                         "saves": saved,
                         "error": error,
                     }
@@ -694,8 +708,21 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         def entry_for(request_id: str) -> dict:
             return collected.setdefault(
-                request_id, {"saves": {}, "error": None, "registered": {}}
+                request_id,
+                {"saves": {}, "error": None, "registered": {}, "sequences": {}},
             )
+
+        def sequence_of(entry: dict, index: int) -> dict:
+            """One sampled sequence's values. Index 0 also fills the flat keys.
+
+            ``saves``/``registered`` are the request's primary sequence, which is
+            all there is unless it asked for several — so a caller that never uses
+            ``n`` reads exactly what it always did.
+            """
+            sequence = entry["sequences"].setdefault(
+                index, {"saves": {}, "registered": {}}
+            )
+            return entry if index == 0 else sequence
 
         # Harvest anything finished that the scheduler has not got to yet, so a
         # collect never reads an empty shelf for a request that is over.
@@ -709,12 +736,17 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # it reads live, which under pipeline parallelism is not only rank 0 — and
         # the caller merges what the ranks return.
         for harvested in requests.harvested.values():
-            for engine_id in list(harvested):
-                if engine_id not in wanted:
+            for worker_id in list(harvested):
+                key = requests.engine_key(worker_id, wanted)
+                if key is None:
                     continue
-                taken = harvested.pop(engine_id)
+                engine_id, index = key
+                taken = harvested.pop(worker_id)
                 entry = entry_for(engine_id)
-                entry["registered"].update(taken["saves"])
+                target = sequence_of(entry, index)
+                target["registered"].update(taken["saves"])
+                if index == 0:
+                    entry["sequences"][0]["registered"].update(taken["saves"])
                 if entry["error"] is None:
                     entry["error"] = taken["error"]
 
@@ -738,7 +770,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # block runs here in the worker and the value is a `RequestOutput` the
         # *engine* assembles, so this is the first moment both exist. Served per
         # request, since each has its own.
-        for engine_id, worker_id in matched:
+        for engine_id, worker_id, index in matched:
             if engine_id in finished and outputs and engine_id in outputs:
                 output = outputs[engine_id]
                 # What a registered block saved for this request, put on the copy
@@ -749,23 +781,28 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 # The trace's own saves are not here and cannot be: they are what
                 # this call is collecting, and one of them may be the output
                 # itself.
-                registered = collected.get(engine_id, {}).get("registered")
+                # This sequence's own, when the request asked for several: each
+                # child ran its own copy of the block and is owed its own values.
+                entry = collected.get(engine_id) or {}
+                sequence = (entry.get("sequences") or {}).get(index) or entry
+                registered = sequence.get("registered")
                 if registered:
                     output.saves = dict(registered)
                 requests.serve_result(worker_id, output)
 
         # A worker still parked when its request finishes was waiting on a location the
         # model never reached; surface that as its deferred error before it is read.
-        for engine_id, worker_id in matched:
+        for engine_id, worker_id, _ in matched:
             if engine_id in finished:
                 requests.finish_dangling(worker_id)
 
         saved = _saves()
-        for engine_id, worker_id in matched:
+        for engine_id, worker_id, index in matched:
             values = requests.saves(worker_id)
             if reporting:
                 entry = entry_for(engine_id)
-                entry["saves"] = values
+                sequence_of(entry, index)["saves"] = values
+                entry["sequences"][index]["saves"] = values
                 if entry["error"] is None:
                     entry["error"] = requests.error(worker_id)
             if engine_id in finished:

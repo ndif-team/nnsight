@@ -270,6 +270,10 @@ class Mediator:
         presaved = {
             name for name, value in reduced[2].items() if id(value) in _saves()
         }
+        # Kept on this side too: it is the only record of which names were bound
+        # (and saved) *above* the block, which is what tells a value shared by
+        # every request apart from one each request computed for itself.
+        self.presaved = presaved
         return {"reduced": reduced, "copy": self.copy, "presaved": presaved}
 
     def __setstate__(self, state: dict) -> None:
