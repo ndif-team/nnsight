@@ -125,23 +125,20 @@ class VLLMFragments(Fragments):
         Applied to whatever intervention code left behind, so an edit made to the
         assembled tensor is carried back into the model rather than dropped.
         """
-        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.linear import (
             ColumnParallelLinear,
             split_tensor_along_last_dim,
         )
 
         module, side = self.rules[location]
+        moe = _moe_layer()
 
-        if isinstance(module, FusedMoE):
+        if moe is not None and isinstance(module, moe):
             # The block all-reduces this right after the module returns, so hand
             # back an equal share rather than the whole: dividing by the
             # collective's group size gives partials the block's own reduce sums
             # back to the value exactly once instead of double-counting it.
-            # Expert parallelism reassigns the same ranks (the module-internal
-            # tp_size becomes 1 and ep_size becomes the group), so the product is
-            # the group size under both layouts.
-            group_size = module.tp_size * module.ep_size
+            group_size = _moe_group_size(module)
             return apply(whole, lambda tensor: tensor / group_size, torch.Tensor)
 
         if isinstance(module, ColumnParallelLinear) or side == "input":
@@ -157,17 +154,50 @@ class VLLMFragments(Fragments):
         return apply(whole, lambda tensor: tensor / module.tp_size, torch.Tensor)
 
 
+def _moe_layer() -> Any:
+    """The class a model's fused-experts module is, or None if there isn't one.
+
+    ``FusedMoE`` through vLLM 0.26; from 0.27 the layer was rebuilt around a
+    factory and a modular kernel, and the thing a model holds is a ``MoERunner``.
+    Absent is not an error — it only means nothing in this tree can be a
+    fused-experts module, which is the right answer for a vLLM that has neither.
+    """
+    from vllm.model_executor.layers import fused_moe
+
+    for name in ("FusedMoE", "MoERunner"):
+        found = getattr(fused_moe, name, None)
+        if isinstance(found, type):
+            return found
+    return None
+
+
+def _moe_group_size(module: Any) -> int:
+    """How many ranks this MoE layer's experts are spread over.
+
+    Expert parallelism reassigns the same ranks — the module-internal ``tp_size``
+    drops to 1 and ``ep_size`` becomes the group — so the product is the group
+    size under both layouts. From 0.27 these live on the layer's config rather
+    than on the layer.
+    """
+    config = getattr(module, "moe_config", None)
+    if config is not None:
+        parallel = config.moe_parallel_config
+        return parallel.tp_size * parallel.ep_size
+    return module.tp_size * module.ep_size
+
+
 def _is_piece(module: torch.nn.Module, side: str) -> bool:
     """Whether ``module``'s ``side`` really holds one rank's piece.
 
     Asked once per module at load rather than on every forward, so it may be as
     particular as it likes about the cases vLLM already handles itself.
     """
-    from vllm.model_executor.layers.fused_moe import FusedMoE
     from vllm.model_executor.layers.linear import (
         ColumnParallelLinear,
         RowParallelLinear,
     )
+
+    moe = _moe_layer()
 
     # A layer built with `disable_tp=True` is replicated on every rank rather than
     # sharded — vLLM sets its `tp_size` to 1 and guards its own collectives on
@@ -187,17 +217,24 @@ def _is_piece(module: torch.nn.Module, side: str) -> bool:
             return module.input_is_parallel
         return not module.reduce_results
 
-    if isinstance(module, FusedMoE):
+    if moe is not None and isinstance(module, moe):
         # Only the output is ever a piece: the inputs (hidden states, router
         # logits) are full replicated tensors under both expert layouts.
         # `reduce_results=True` (Mixtral) reduces inside forward, and a combine
         # kernel that already reduced across ranks
         # (must_reduce_shared_expert_outputs) leaves nothing to gather — neither
         # was ever exposed as a partial.
+        #
+        # Neither flag exists from 0.27, where the combine moved into the modular
+        # kernel. Until it is settled there whether the layer's output is still a
+        # deferred partial, say no: leaving a value alone reads back whatever vLLM
+        # produced, while gathering one that was never split invents data.
+        if not hasattr(module, "reduce_results"):
+            return False
         return (
             side == "output"
             and not module.reduce_results
-            and module.tp_size * module.ep_size > 1
+            and _moe_group_size(module) > 1
             and not module.must_reduce_shared_expert_outputs()
         )
 
