@@ -66,6 +66,8 @@ VLLM(
 
 `enforce_eager=True` and the NNsight worker class are always forced internally (`vllm.py:205`, `:189`) — CUDA graphs freeze the ops they replay, so hooks can't fire inside one.
 
+`enable_prefix_caching` defaults to `False` (`vllm.py:_load`): prefix caching reuses KV values from previous requests, so cached tokens skip the forward pass and interventions on them are silently skipped. Pass `enable_prefix_caching=True` to opt back in when your trace never hooks prefill tokens.
+
 ## Canonical pattern (sync)
 
 ```python
