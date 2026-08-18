@@ -295,6 +295,17 @@ every rank via `collective_rpc("nnsight_register", ...)` and kept there.
 Worker RPCs are exposed on `NNsightGPUWorker`, not the runner —
 `collective_rpc` resolves method names on the worker.
 
+**Which runner.** vLLM has two GPU model runners: the original
+(`vllm/v1/worker/gpu_model_runner.py`), which `NNsightGPUModelRunner` subclasses,
+and a second one (`vllm/v1/worker/gpu/model_runner.py`) added later. From 0.27 the
+worker picks the second for every non-MoE model — `use_v2_model_runner` resolves to
+`is_default_v2_architecture or not is_moe`, so the architecture allow-list only
+governs MoE. `VLLM._require_v1_model_runner` sets vLLM's own
+`VLLM_USE_V2_MODEL_RUNNER=0` before the engine is built (the worker processes
+inherit it) and refuses an explicit `1`, since the alternative is an engine with no
+instrumentation whose first collect dies on a missing `collect_nnsight`. Porting
+the subclass to the V2 runner is the way out; until then this is the seam.
+
 **Prefix caching.** A cached token runs no forward, so no hook fires for it. A
 trace sets `skip_reading_prefix_cache` on its own request (`_attach_mediators`);
 a registration rides requests it did not create, so it cannot, and

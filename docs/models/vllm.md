@@ -246,6 +246,12 @@ output.saves["hidden"]              # the primary sequence's, unchanged for n=1
 Since the prompt is shared, each sequence's *prefill* agrees to kernel tolerance;
 they diverge over the tokens they go on to sample.
 
+On an **async** engine the sequences finish at different steps, and each streamed
+output carries only the completions that ended in that step — so the last one need
+not have all `n`. Accumulate across the stream by `completion.index`, or read the
+whole set off the finished output's `nnsight_sequences`, which is one dict of the
+trace's own saves per sequence, in order.
+
 ### Tensor parallelism is transparent
 
 ```python
@@ -466,6 +472,32 @@ model.model.norm.output
 ```
 
 For GPT-2-style models: `model.transformer.h[i].attn.output`, `model.transformer.h[i].mlp.output`. Print `model` to see the actual tree.
+
+## vLLM versions
+
+Tested against **0.16 through 0.27**, which is what nnsight's own suite runs on.
+Two things about newer engines are worth knowing, because nnsight arranges the
+first for you and cannot arrange the second:
+
+- **The model runner.** vLLM 0.27 ships a second GPU model runner and defaults to
+  it for every non-MoE model. nnsight's hooks arrive by subclassing the original
+  one, so it asks vLLM for that one (`VLLM_USE_V2_MODEL_RUNNER=0`) when it builds
+  the engine. Setting that variable to `1` yourself is refused rather than
+  overridden — the engine would otherwise come up with no interventions installed
+  and fail at the first collect with a missing method. Instrumenting the V2 runner
+  is not done yet.
+- **Tensor parallelism on 0.27 needs `VLLM_WORKER_MULTIPROC_METHOD=spawn`.** vLLM
+  forks its workers there by default, and a forked process cannot re-initialize
+  CUDA (`RuntimeError: Cannot re-initialize CUDA in forked subprocess`). This is
+  vLLM's own setting and applies with or without nnsight.
+
+**MoE on 0.27 is the one gap.** That release rebuilt the fused-experts layer
+around a factory and a modular kernel, and the flags that said whether its output
+was still a per-rank partial (`reduce_results`,
+`must_reduce_shared_expert_outputs`) are gone. Rather than guess at a collective,
+nnsight leaves those values alone there — so an MoE expert output read under
+tensor parallelism on 0.27 is one rank's, not the whole. On 0.26 and earlier it is
+gathered as documented above.
 
 ## Limitations
 

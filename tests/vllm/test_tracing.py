@@ -130,9 +130,13 @@ class TestSampling:
                 for _ in tracer.iter[0:3]:
                     greedy.append(vllm_gpt2.samples.item())
 
-        assert vllm_gpt2.tokenizer.batch_decode(
-            greedy
-        ) == [" New", " York", " City"]
+        # One id at a time: these are plain ints, and `batch_decode` reads a flat
+        # list of them as a sequence each in transformers 4 but as one sequence in
+        # transformers 5, so it cannot state this across both. (The other decodes
+        # in this suite pass tensors, which are unambiguous.)
+        assert [
+            vllm_gpt2.tokenizer.decode([token]) for token in greedy
+        ] == [" New", " York", " City"]
         assert sampled != greedy
 
     @torch.no_grad()
@@ -699,3 +703,31 @@ class TestPromptForms:
 
         assert vllm_gpt2.tokenizer.decode(et.argmax(dim=-1)) == " Paris"
         assert vllm_gpt2.tokenizer.decode(msg.argmax(dim=-1)) == " New"
+
+
+class TestModelRunnerSelection:
+    """nnsight instruments one of vLLM's two GPU model runners, and says so."""
+
+    def test_it_asks_for_the_runner_it_instruments(self):
+        # Set before the engine is built, since the worker processes inherit it.
+        import os
+
+        from nnsight.modeling.vllm import VLLM
+
+        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+        VLLM._require_v1_model_runner()
+        assert os.environ["VLLM_USE_V2_MODEL_RUNNER"] == "0"
+
+    def test_asking_for_the_other_one_is_refused(self):
+        # Overriding it silently would be worse: the engine comes up with no
+        # instrumentation and the first collect fails with a missing method.
+        import os
+
+        from nnsight.modeling.vllm import VLLM
+
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        try:
+            with pytest.raises(NotImplementedError, match="V2 GPU model runner"):
+                VLLM._require_v1_model_runner()
+        finally:
+            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)

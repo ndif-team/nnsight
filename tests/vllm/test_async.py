@@ -370,14 +370,23 @@ class TestAsyncSeveralSequences:
             async for output in tracer.backend:
                 last = output
 
-            assert len(last.outputs) == 2
             prompt_rows = len(model.tokenizer.encode(ET_prompt))
+
+            # Every sequence's values, which is what the collect produced. Not
+            # `last.outputs`: vLLM streams a request's sequences as they finish,
+            # so the final streamed output carries only the completions that
+            # ended in that step — often one of the two.
+            assert len(last.nnsight_sequences) == 2
+            for saves in last.nnsight_sequences:
+                assert saves["hidden"].shape[0] == prompt_rows
+            assert (
+                last.nnsight_sequences[0]["hidden"]
+                is not last.nnsight_sequences[1]["hidden"]
+            )
+
+            # Whichever completions this output does carry have theirs attached.
             for completion in last.outputs:
                 assert completion.saves["hidden"].shape[0] == prompt_rows
-            assert (
-                last.outputs[0].saves["hidden"]
-                is not last.outputs[1].saves["hidden"]
-            )
 
         async_loop.run_until_complete(run())
 

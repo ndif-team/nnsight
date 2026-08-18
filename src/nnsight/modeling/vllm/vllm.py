@@ -245,6 +245,8 @@ class VLLM(Remotable):
         if meta_model is None:
             meta_model = self._load_meta(repo_id, **kwargs)
 
+        self._require_v1_model_runner()
+
         # The real engine brings up its own process group; the one __init__ made
         # to build the meta tree would collide with it. Only tear down a group this
         # construction created — never one the caller already had running.
@@ -257,6 +259,40 @@ class VLLM(Remotable):
             self.vllm_entrypoint = self._load_sync(repo_id, **kwargs)
 
         return meta_model
+
+    @staticmethod
+    def _require_v1_model_runner() -> None:
+        """Ask vLLM for the model runner nnsight instruments.
+
+        vLLM has two GPU model runners. nnsight's hooks arrive by subclassing the
+        original one and rebinding the name the worker resolves
+        ([`NNsightGPUWorker`][nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker]),
+        so on the other one the engine comes up with no instrumentation at all —
+        traces then fail at the first collect with a missing method rather than
+        anything that explains itself.
+
+        From vLLM 0.27 the second runner is the *default* for every non-MoE model
+        (`use_v2_model_runner` in vLLM's config: ``is_default_v2_architecture or
+        not is_moe``), so this is the ordinary case rather than an exotic one. The
+        switch is vLLM's own environment variable, which it consults ahead of its
+        defaults, and the engine's worker processes inherit it.
+
+        A caller who has asked for the other runner explicitly is told so, rather
+        than silently overridden or silently uninstrumented.
+        """
+        import os
+
+        key = "VLLM_USE_V2_MODEL_RUNNER"
+        asked = os.environ.get(key)
+        if asked not in (None, "", "0"):
+            raise NotImplementedError(
+                f"{key}={asked!r} selects vLLM's V2 GPU model runner, which "
+                "nnsight does not instrument yet — the engine would run with no "
+                "interventions installed. Unset it to trace, or drop nnsight and "
+                "use vLLM directly for that run."
+            )
+        # Older vLLM has no such setting and ignores it.
+        os.environ[key] = "0"
 
     def _load_sync(self, repo_id: str, **kwargs: Any) -> Any:
         from vllm import LLM
