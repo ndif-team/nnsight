@@ -636,3 +636,66 @@ class TestLazyDispatch:
             assert output.saves["hidden"].shape[0] == len(output.prompt_token_ids)
         finally:
             edit.clear()
+
+
+class TestPromptForms:
+    """What one invoke will take as its prompt.
+
+    vLLM's own prompt dicts are `TypedDict`s — plain dicts at runtime — so they
+    used to be taken for a tokenizer's output and die on `KeyError: 'input_ids'`.
+    """
+
+    @torch.no_grad()
+    def test_a_string(self, vllm_gpt2, ET_prompt):
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_token_id_list(self, vllm_gpt2, ET_prompt):
+        ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+        with vllm_gpt2.trace(ids, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_tokenizer_output(self, vllm_gpt2, ET_prompt):
+        inputs = vllm_gpt2.tokenizer(ET_prompt)
+        with vllm_gpt2.trace(inputs, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_vllm_tokens_prompt(self, vllm_gpt2, ET_prompt):
+        from vllm import TokensPrompt
+
+        ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+        with vllm_gpt2.trace(
+            TokensPrompt(prompt_token_ids=ids), temperature=0.0, top_p=1
+        ):
+            hidden = vllm_gpt2.transformer.h[5].output.save()
+            logits = vllm_gpt2.logits.save()
+
+        assert hidden.shape[0] == len(ids)
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_vllm_text_prompt(self, vllm_gpt2, ET_prompt):
+        with vllm_gpt2.trace({"prompt": ET_prompt}, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_each_invoke_takes_its_own_form(self, vllm_gpt2, ET_prompt, MSG_prompt):
+        # The forms mix freely, since each invoke is converted on its own.
+        from vllm import TokensPrompt
+
+        ids = vllm_gpt2.tokenizer.encode(MSG_prompt)
+        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+            with tracer.invoke(ET_prompt):
+                et = vllm_gpt2.logits.save()
+            with tracer.invoke(TokensPrompt(prompt_token_ids=ids)):
+                msg = vllm_gpt2.logits.save()
+
+        assert vllm_gpt2.tokenizer.decode(et.argmax(dim=-1)) == " Paris"
+        assert vllm_gpt2.tokenizer.decode(msg.argmax(dim=-1)) == " New"

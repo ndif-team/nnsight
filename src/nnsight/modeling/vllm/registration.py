@@ -139,9 +139,10 @@ class Registration:
             result.close()
             raise NotImplementedError(
                 f"{method} has to reach the engine's workers, and on an async "
-                "engine (mode='async') that call is a coroutine this cannot "
-                "await. Registration is synchronous-engine only for now; build "
-                "with mode='sync', or trace the requests you want to instrument."
+                "engine (mode='async') that call is a coroutine, which can only "
+                "be awaited from inside the loop the engine already runs on. Use "
+                "the awaited forms there: `async with model.edit()`, "
+                "`await edit.aclear()`, `await model.aclear_edits()`."
             )
         return result
 

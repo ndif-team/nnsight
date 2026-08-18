@@ -307,3 +307,46 @@ class TestAsyncEngine:
             assert vllm_gpt2_async.tokenizer.decode(last.saves["steps"][0]) == " Paris"
 
         async_loop.run_until_complete(run())
+
+
+class TestAsyncClearEdits:
+    """Clearing installed edits on an engine whose workers can only be awaited."""
+
+    @torch.no_grad()
+    def test_aclear_edits_clears_every_one(self, vllm_gpt2_async, async_loop,
+                                           ET_prompt):
+        model = vllm_gpt2_async
+
+        async def run():
+            async with model.edit() as (tracer, deep):
+                deep_hidden = model.transformer.h[8].output.save()
+            async with model.edit() as (tracer, shallow):
+                shallow_hidden = model.transformer.h[2].output.save()
+
+            assert model._installed_edits == [deep, shallow]
+
+            await model.aclear_edits()
+
+            assert deep.cleared and shallow.cleared
+            assert model._installed_edits == []
+
+        async_loop.run_until_complete(run())
+
+    @torch.no_grad()
+    def test_the_synchronous_form_refuses(self, vllm_gpt2_async, async_loop):
+        # It would have to await the workers from outside the loop they run on.
+        # Refusing beats half-clearing, or clearing nothing and saying so.
+        model = vllm_gpt2_async
+
+        async def install():
+            async with model.edit() as (tracer, edit):
+                hidden = model.transformer.h[5].output.save()
+            return edit
+
+        edit = async_loop.run_until_complete(install())
+        try:
+            with pytest.raises(NotImplementedError, match="aclear_edits"):
+                model.clear_edits()
+            assert not edit.cleared
+        finally:
+            async_loop.run_until_complete(model.aclear_edits())

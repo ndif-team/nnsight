@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable
 
 import torch
@@ -321,9 +322,10 @@ class VLLM(Remotable):
     def _prompt(self, *inputs: Any) -> Any:
         """Convert one invoke's input into a vLLM prompt.
 
-        Accepts a string, a list of token ids, or a tokenizer's output dict. A
-        request is one sequence, so anything carrying several prompts is rejected
-        here rather than silently generating from the first.
+        Accepts a string, a list of token ids, a tokenizer's output, or one
+        of vLLM's own prompt dicts (``TokensPrompt``, ``TextPrompt``, and the
+        multimodal forms). A request is one sequence, so anything carrying several
+        prompts is rejected here rather than silently generating from the first.
         """
         from vllm.inputs import TokensPrompt
 
@@ -334,8 +336,17 @@ class VLLM(Remotable):
             )
         prompt = inputs[0]
 
-        if isinstance(prompt, dict):
-            return self._tokenized_prompt(prompt)
+        # `Mapping`, not `dict`: a tokenizer hands back a `BatchEncoding`, which is
+        # a `UserDict` and so fails an `isinstance(..., dict)` test — which is why
+        # the tokenizer-output path below was unreachable from an actual tokenizer.
+        if isinstance(prompt, Mapping):
+            # That output is ours to convert. Anything else is one of vLLM's own
+            # prompt dicts — `TypedDict`s, so plain dicts at runtime — and the
+            # engine knows them better than we do; taking those for tokenizer
+            # output is how `TokensPrompt(...)` came back as `KeyError: 'input_ids'`.
+            if "input_ids" in prompt:
+                return self._tokenized_prompt(prompt)
+            return prompt
         if isinstance(prompt, str):
             return prompt
         if isinstance(prompt, (list, tuple)):
@@ -349,7 +360,7 @@ class VLLM(Remotable):
             )
         return prompt
 
-    def _tokenized_prompt(self, inputs: dict) -> Any:
+    def _tokenized_prompt(self, inputs: Any) -> Any:
         """Convert a tokenizer's ``{input_ids, attention_mask}`` output to a prompt.
 
         vLLM has no padding to mask — a request is exactly its own tokens — so a
@@ -501,11 +512,23 @@ class VLLM(Remotable):
 
         The local form drops a list held on the envoy; here each edit lives on
         the workers, so each is cleared through its own handle — which means this
-        is synchronous-engine only, like `clear` itself. On ``mode="async"`` clear
-        each handle with ``await edit.aclear()`` instead.
+        is synchronous-engine only, like `clear` itself. Use `aclear_edits` on an
+        async engine, where it raises rather than half-clearing.
         """
         for edit in list(self._installed_edits):
             edit.clear()
+
+    async def aclear_edits(self) -> None:
+        """`clear_edits`, awaited — the async engine's form.
+
+        A separate method rather than a `clear_edits` that returns something
+        awaitable on an async engine: a coroutine nobody awaits never runs at
+        all, so the sync-looking call would leave every edit installed and say
+        nothing. That is the failure `Registration._rpc` refuses, and it is worth
+        refusing here too — `clear`/`aclear` already come in this pair.
+        """
+        for edit in list(self._installed_edits):
+            await edit.aclear()
 
     def generate(self, *inputs: Any, **kwargs: Any) -> Any:
         """Generate — as a trace when used as a ``with`` block, plainly when not.

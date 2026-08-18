@@ -164,7 +164,7 @@ Common kwargs: `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `stop`, `
 
 ### Input forms per invoke
 
-One prompt per invoke (`vllm.py:266`): a string, a list of token ids, or a tokenizer's `{input_ids, attention_mask}` dict. A list of strings / multiple prompts is rejected — use one invoke each.
+One prompt per invoke: a string, a list of token ids, a tokenizer's `{input_ids, attention_mask}` output, or one of vLLM's own prompt dicts (`TokensPrompt`, `TextPrompt`). A list of strings / multiple prompts is rejected — use one invoke each.
 
 ### Continuous batching (multiple invokes)
 
@@ -300,7 +300,7 @@ with model.edit() as (tracer, edit):
 | Member | Description |
 |---|---|
 | `edit.clear()` | Stop running the block. `await edit.aclear()` on an async engine. |
-| `model.clear_edits()` | Clear every edit still installed on the engine. |
+| `model.clear_edits()` | Clear every edit still installed. `await model.aclear_edits()` on an async engine. |
 
 That is the whole handle — the values are not read through it. They are taken as
 they are collected, so nothing accumulates on the worker for as long as somebody
@@ -327,7 +327,9 @@ outputs[1].saves["hidden"]
 await edit.aclear()
 ```
 
-A plain `with` on an async engine raises rather than silently not installing it.
+A plain `with` on an async engine raises rather than silently not installing it,
+and so does `clear_edits()` — a coroutine nobody awaits never runs, so a
+sync-looking call would leave every edit in place and say nothing.
 
 ### When to edit instead of trace
 
