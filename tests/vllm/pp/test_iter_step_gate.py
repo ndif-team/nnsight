@@ -64,6 +64,40 @@ for s in STEPS:
     assert not mediator.alive
 
 
+def test_pin_relaxing_body_still_advances_one_step_per_serve():
+    # A remote read under PP is served in place by the intercept, which
+    # relaxes the iteration pin without parking. The gate park must re-pin to
+    # its step: a relaxed gate park is tagged from a count the driver's serve
+    # loop has not advanced yet, lands on the same location, and the serve
+    # loop re-serves the worker forever (the second generation-patching
+    # wedge).
+    class Intercepting(Interleaver):
+        def intercept(self, mediator, event, location, rest):
+            if location == "model.remote.output":
+                if mediator.iteration:
+                    mediator.iteration = None
+                return ("remote-value",)
+            return None
+
+    interleaver = Intercepting()
+    mediator = make_mediator(
+        interleaver,
+        """
+seen = []
+for s in STEPS:
+    seen.append(Mediator.value("model.remote.output"))
+""",
+        {"STEPS": Iterations(0, None)},
+    )
+    with interleaver:
+        for _ in range(3):
+            interleaver.handle(STEP_GATE, None)
+    with pytest.warns(UserWarning):
+        interleaver.check_dangling_mediators()
+    assert mediator.lcls["seen"] == ["remote-value"] * 4
+    assert not mediator.alive
+
+
 def test_parking_body_never_touches_the_gate():
     interleaver = Interleaver()
     mediator = make_mediator(

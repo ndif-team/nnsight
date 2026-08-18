@@ -139,6 +139,15 @@ class Iterations(Tracer):
                     # step; when generation ends, this read dangles and the
                     # dangling-worker unwind ends the loop — the same exit a
                     # parking body has always had.
+                    #
+                    # Re-pin first: a body that created a lazy relaxed the pin
+                    # without parking, and a relaxed gate park is tagged from
+                    # a count the driver's serve loop has not advanced yet, so
+                    # it lands on the SAME location and the serve loop
+                    # re-serves it forever. Pinned to the step, each gate park
+                    # is a new location and one serve releases exactly one
+                    # step.
+                    mediator.iteration = step
                     Mediator.event(Event.VALUE, STEP_GATE)
                 step += 1
         finally:
