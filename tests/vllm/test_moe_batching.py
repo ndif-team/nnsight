@@ -237,7 +237,13 @@ class TestFragmentPolicy:
         group, and ``tp_size``/``ep_size`` are properties off that group — none of
         which exists off-engine, so bypass it and answer for them directly.
         """
-        from vllm.model_executor.layers.fused_moe import FusedMoE
+        FusedMoE = getattr(
+            __import__("vllm.model_executor.layers.fused_moe", fromlist=["x"]),
+            "FusedMoE",
+            None,
+        )
+        if FusedMoE is None:
+            pytest.skip("this vLLM has no FusedMoE; see TestModularMoEPolicy")
 
         class StubMoE(FusedMoE):
             def __init__(self):
@@ -350,3 +356,86 @@ class TestReplicatedLinearsAreNotPieces:
 
         assert _is_piece(replicated, side) is False
         assert _is_piece(sharded, side) is True
+
+
+class TestModularMoEPolicy:
+    """The 0.27 layer reduces its own output; what it leaves partial, and when.
+
+    vLLM 0.27 rebuilt the fused-experts layer around a factory and a modular
+    kernel. The flags that used to say whether the output was still a per-rank
+    partial are gone, replaced by the guard in ``MoERunner._maybe_all_reduce`` —
+    so the layer is whole unless one of that guard's conditions says otherwise.
+
+    Runs on any vLLM: `_is_piece` picks its branch on whether the layer carries a
+    ``moe_config``, so a stub with one exercises the 0.27 rule wherever it is run.
+    """
+
+    @staticmethod
+    def _stub(tp=2, ep=1, skip_final_all_reduce=False, is_sequence_parallel=False,
+              fused_output_is_reduced=False):
+        """A layer with the config `_is_piece` reads, and nothing else.
+
+        Deliberately not a subclass of the real one: 0.27's `MoERunner` is
+        abstract and answers some of these names with read-only properties, and
+        0.26's class does not exist on 0.27. `_is_piece` finds the class through
+        `_moe_layer`, so the test points that at the stub instead — which leaves
+        the policy itself as the only thing under test, on either version.
+        """
+
+        class Parallel:
+            pass
+
+        class Config:
+            pass
+
+        parallel = Parallel()
+        parallel.tp_size, parallel.ep_size = tp, ep
+        config = Config()
+        config.moe_parallel_config = parallel
+        config.skip_final_all_reduce = skip_final_all_reduce
+        config.is_sequence_parallel = is_sequence_parallel
+
+        class Stub:
+            pass
+
+        stub = Stub()
+        stub.moe_config = config
+        stub._fused_output_is_reduced = fused_output_is_reduced
+        return stub
+
+    @staticmethod
+    def _is_piece(stub, side):
+        from unittest import mock
+
+        from nnsight.modeling.vllm import fragments
+
+        with mock.patch.object(
+            fragments, "_moe_layer", return_value=type(stub)
+        ):
+            return fragments._is_piece(stub, side)
+
+    @pytest.mark.parametrize(
+        "config, expected, why",
+        [
+            (dict(), False, "the layer all-reduces its own output"),
+            (dict(skip_final_all_reduce=True), True, "the reduce was deferred"),
+            (dict(skip_final_all_reduce=True, tp=1, ep=1), False, "one rank"),
+            (dict(skip_final_all_reduce=True, fused_output_is_reduced=True), False,
+             "the kernel already reduced it"),
+            (dict(skip_final_all_reduce=True, is_sequence_parallel=True), False,
+             "split by rows, not a partial sum"),
+        ],
+    )
+    def test_only_a_deferred_reduce_leaves_a_piece(self, config, expected, why):
+        assert self._is_piece(self._stub(**config), "output") is expected, why
+
+    def test_the_input_is_never_a_piece(self):
+        assert self._is_piece(self._stub(skip_final_all_reduce=True), "input") is False
+
+    def test_the_group_size_comes_off_the_config(self):
+        from nnsight.modeling.vllm.fragments import _moe_group_size
+
+        # Expert parallelism moves the ranks from tp to ep; the product is the
+        # group either way.
+        assert _moe_group_size(self._stub(tp=2, ep=1)) == 2
+        assert _moe_group_size(self._stub(tp=1, ep=4)) == 4

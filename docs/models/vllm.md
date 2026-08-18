@@ -491,13 +491,19 @@ first for you and cannot arrange the second:
   CUDA (`RuntimeError: Cannot re-initialize CUDA in forked subprocess`). This is
   vLLM's own setting and applies with or without nnsight.
 
-**MoE on 0.27 is the one gap.** That release rebuilt the fused-experts layer
-around a factory and a modular kernel, and the flags that said whether its output
-was still a per-rank partial (`reduce_results`,
-`must_reduce_shared_expert_outputs`) are gone. Rather than guess at a collective,
-nnsight leaves those values alone there — so an MoE expert output read under
-tensor parallelism on 0.27 is one rank's, not the whole. On 0.26 and earlier it is
-gathered as documented above.
+**MoE reads differently on 0.27, and needs nothing from you.** That release
+rebuilt the fused-experts layer around a factory and a modular kernel, and moved
+the final all-reduce *inside* the layer — so its output is already the whole
+value, and there is nothing for nnsight to gather. Measured on a two-rank
+Qwen1.5-MoE: both ranks hand back the identical tensor. Through 0.26 the layer
+left a per-rank partial and nnsight gathered it, as described above; either way
+what you read is the whole thing.
+
+The one case 0.27 still leaves partial is a layer built to defer its reduce
+(`skip_final_all_reduce`), which nnsight gathers as before. A
+sequence-parallel MoE layer is split by rows rather than summed — a different
+correction, and one nnsight does not make yet, so that value is read as one rank's
+rows.
 
 ## Limitations
 

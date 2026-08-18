@@ -219,23 +219,38 @@ def _is_piece(module: torch.nn.Module, side: str) -> bool:
 
     if moe is not None and isinstance(module, moe):
         # Only the output is ever a piece: the inputs (hidden states, router
-        # logits) are full replicated tensors under both expert layouts.
-        # `reduce_results=True` (Mixtral) reduces inside forward, and a combine
-        # kernel that already reduced across ranks
-        # (must_reduce_shared_expert_outputs) leaves nothing to gather — neither
-        # was ever exposed as a partial.
-        #
-        # Neither flag exists from 0.27, where the combine moved into the modular
-        # kernel. Until it is settled there whether the layer's output is still a
-        # deferred partial, say no: leaving a value alone reads back whatever vLLM
-        # produced, while gathering one that was never split invents data.
-        if not hasattr(module, "reduce_results"):
+        # logits) are full replicated tensors under every expert layout.
+        if side != "output" or _moe_group_size(module) <= 1:
             return False
-        return (
-            side == "output"
-            and not module.reduce_results
-            and _moe_group_size(module) > 1
-            and not module.must_reduce_shared_expert_outputs()
-        )
+
+        # Which vLLM's layer this is, asked by the flag that decides it rather
+        # than by a `moe_config`, which both eras have.
+        if hasattr(module, "reduce_results"):
+            # Through 0.26 the layer carries its own flags. `reduce_results=True`
+            # (Mixtral) reduces inside forward, and a combine kernel that already
+            # reduced across ranks leaves nothing to gather — neither was ever
+            # exposed as a partial.
+            return not module.reduce_results and (
+                not module.must_reduce_shared_expert_outputs()
+            )
+
+        config = getattr(module, "moe_config", None)
+        if config is None:
+            return False
+
+        # From 0.27 the layer reduces its own output, and the conditions under
+        # which it does not are the ones below — the negation of the guard in
+        # `MoERunner._maybe_all_reduce`. Measured on a two-rank Qwen1.5-MoE: with
+        # none of them set, both ranks hand back the identical tensor, so there is
+        # nothing to gather.
+        if getattr(module, "_fused_output_is_reduced", False):
+            return False
+        if getattr(config, "is_sequence_parallel", False):
+            # Split by rows rather than left as a partial sum: a real fragment,
+            # but one wanting concatenation rather than a sum, which nothing here
+            # does yet. Leaving it alone reads one rank's rows; gathering it as a
+            # partial would be arithmetic on unrelated tokens.
+            return False
+        return bool(getattr(config, "skip_final_all_reduce", False))
 
     return False
