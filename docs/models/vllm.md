@@ -308,9 +308,17 @@ is reading the outputs, which on the synchronous engine is every request there
 is. An error raised inside an installed block is re-raised where its values would
 have arrived.
 
-If an edit saves under the same name as the trace reading it, `output.saves`
-keeps the trace's — but the edit's own is still there under
-`output.nnsight_saves`. Different names avoid the question.
+Two different objects carry these, which matters when the names collide:
+
+- **`tracer.result`** is the copy the *worker* hands your block, and it carries the
+  edit's values only — `result.saves["hidden"]` is the edit's even if your trace
+  saved `hidden` too, and there is no `nnsight_saves` on it. Your trace's own value
+  is not missing; it comes back as your variable, the way every traced value does.
+- **An output from `model.generate(...)`** is the engine's copy, assembled after the
+  fact: `output.saves` holds both kinds with the trace's winning a collision, and
+  `output.nnsight_saves` holds the trace's own apart.
+
+Different names avoid the question entirely.
 
 ### On an async engine
 
