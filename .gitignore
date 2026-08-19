@@ -11,3 +11,6 @@ __pycache__/
 nnsight.log
 src/nnsight/_c/**.so
 src/nnsight/_version.py
+venv/
+*.pyd
+src/nnsight/_version.py
