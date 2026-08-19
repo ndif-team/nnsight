@@ -66,6 +66,8 @@ VLLM(
 
 `enforce_eager=True` and the NNsight worker class are always forced internally (`vllm.py:205`, `:189`) — CUDA graphs freeze the ops they replay, so hooks can't fire inside one.
 
+`enable_prefix_caching` defaults to `False` (`vllm.py:_load`): prefix caching reuses KV values from previous requests, so cached tokens skip the forward pass and interventions on them are silently skipped. Pass `enable_prefix_caching=True` to opt back in when your trace never hooks prefill tokens.
+
 ## Canonical pattern (sync)
 
 ```python
@@ -228,7 +230,7 @@ print(last.saves["logits"].shape)
 
 ### Async notes
 
-- Async tracing takes a **single prompt** (one invoke or a direct input) — several invokes raise `NotImplementedError` (`async_backend.py:64`).
+- A multi-invoke async trace submits **one engine request per invoke**; the stream interleaves all requests' outputs in arrival order, each invoke's saves arrive on its own finished output, and saves shared across invokes arrive merged on the **last** finished output (`async_backend.py:_merge_shared`).
 - The stream is single-shot; once drained it won't restart.
 - A stream closed before it finishes aborts the request and frees its worker (`async_backend.py:91`).
 - Errors in the block surface when you iterate the stream (a `1/0` raises `RuntimeError: ...ZeroDivisionError`).

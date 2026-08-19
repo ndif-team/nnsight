@@ -571,3 +571,21 @@ class TestCache:
         assert outputs[0].shape[0] == n_prompt
         assert outputs[1].shape[0] == 1
         assert outputs[2].shape[0] == 1
+
+
+class TestSaveCloning:
+    @torch.no_grad()
+    def test_saved_activation_survives_downstream_inplace_kernels(
+        self, vllm_qwen_ref, ET_prompt
+    ):
+        # Qwen's forward runs fused_add_rms_norm, which mutates the layer's
+        # hidden-state buffer in place after the save point. save() clones
+        # inference-mode tensors, so the saved value must equal an explicit
+        # snapshot taken at the same point rather than the post-mutation
+        # buffer the reference would otherwise alias (#661).
+        with vllm_qwen_ref.trace(ET_prompt, temperature=0.0, top_p=1):
+            out = vllm_qwen_ref.model.layers[0].mlp.output
+            snapshot = out.detach().clone().save()
+            saved = out.save()
+
+        assert torch.equal(saved, snapshot)

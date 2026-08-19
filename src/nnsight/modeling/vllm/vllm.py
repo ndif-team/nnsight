@@ -229,6 +229,13 @@ class VLLM(Remotable):
     # meta tree; the caller sets the tokenizer.
 
     def _load(self, repo_id: str, **kwargs: Any) -> "Module":
+        # Disable prefix caching by default. Prefix caching reuses KV values
+        # from previous requests, so cached tokens skip the forward pass —
+        # hooks don't fire and interventions on those tokens are silently
+        # skipped. Pass enable_prefix_caching=True to opt back in (e.g. for
+        # throughput on workloads that never hook prefill tokens).
+        kwargs.setdefault("enable_prefix_caching", False)
+
         meta_model = self._load_meta(repo_id, **kwargs)
 
         # The real engine brings up its own process group; the one __init__ made

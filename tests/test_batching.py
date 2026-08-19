@@ -759,3 +759,63 @@ class TestCppBacktraceGuard:
                 "the crash doesn't reproduce on this interpreter/toolchain "
                 f"(returncode {result.returncode}), so the guard's effect can't be shown"
             )
+
+
+class TestVLLMBatcherAxis:
+    """Axis selection in ``VLLMBatcher.narrow``/``widen``.
+
+    A native vLLM model emits 2-D activations ``[total_tokens, hidden]``: the
+    token axis is dim 0. A model routed through vLLM's Transformers backend
+    (one without a native vLLM definition) runs the wrapped HF model with a
+    leading singleton batch dim, so its decoder-layer activations are
+    ``[1, total_tokens, hidden]``: the token axis is dim 1. The base dim-0
+    rule calls those unbatched (``shape[0] == 1 != total``), so reads return
+    every request's tokens and writes are silently dropped.
+
+    CPU-only; no engine. ``total`` is stamped directly, the way the model
+    runner does every scheduled step.
+    """
+
+    @staticmethod
+    def _batcher(total: int = 8):
+        from nnsight.modeling.vllm.batching import VLLMBatcher
+
+        batcher = VLLMBatcher()
+        batcher.total = total
+        return batcher
+
+    def test_native_2d_narrow(self):
+        batcher = self._batcher()
+        slab = torch.arange(8.0).unsqueeze(1).expand(8, 4)
+        span = batcher.narrow(slab, [3, 5])
+        assert span.shape == (5, 4)
+        assert torch.equal(span[:, 0], torch.arange(3.0, 8.0))
+
+    def test_native_2d_widen(self):
+        batcher = self._batcher()
+        full = torch.zeros(8, 4)
+        merged = batcher.widen(full, [3, 5], torch.ones(5, 4))
+        assert merged.shape == (8, 4)
+        assert torch.all(merged[:3] == 0)
+        assert torch.all(merged[3:] == 1)
+
+    def test_transformers_backend_3d_narrow(self):
+        batcher = self._batcher()
+        slab = torch.arange(8.0).reshape(1, 8, 1).expand(1, 8, 4)
+        span = batcher.narrow(slab, [3, 5])
+        assert span.shape == (1, 5, 4)
+        assert torch.equal(span[0, :, 0], torch.arange(3.0, 8.0))
+
+    def test_transformers_backend_3d_widen(self):
+        batcher = self._batcher()
+        full = torch.zeros(1, 8, 4)
+        merged = batcher.widen(full, [3, 5], torch.ones(1, 5, 4))
+        assert merged.shape == (1, 8, 4)
+        assert torch.all(merged[0, :3] == 0)
+        assert torch.all(merged[0, 3:] == 1)
+
+    def test_unrelated_tensor_passes_through(self):
+        batcher = self._batcher()
+        stats = torch.zeros(3, 4)  # no axis matches total: not batched
+        assert batcher.narrow(stats, [3, 5]) is stats
+        assert batcher.widen(stats, [3, 5], torch.ones(3, 4)) is stats

@@ -166,3 +166,44 @@ class TestThreadSafety:
         assert not errors
         for i in range(8):
             assert torch.allclose(results[i], torch.full((2, 8), float(i)))
+
+
+class TestSaveCloning:
+    """``save()`` clones inference-mode tensors.
+
+    A saved reference would otherwise alias a buffer that downstream in-place
+    kernels (vLLM's ``fused_add_rms_norm`` among them) overwrite after the
+    save point, so the value surviving the trace would be post-mutation state
+    rather than what was saved (#661). Normal tensors keep the return-same-
+    object contract pinned by ``test_save_returns_the_same_object``.
+    """
+
+    def test_save_clones_inference_mode_tensors(self):
+        from nnsight.tracing import tracer as tracing
+
+        # save() only runs inside a trace scope; enter one without a model.
+        tracing.inc()
+        try:
+            with torch.inference_mode():
+                t = torch.randn(8)
+                saved = nnsight.save(t)
+                t.mul_(1000)
+        finally:
+            tracing.dec()
+
+        # The clone was taken before the in-place mul_, so it holds the
+        # pre-mutation values and has escaped inference mode.
+        assert saved is not t
+        assert not saved.is_inference()
+        assert torch.allclose(t, saved * 1000)
+
+    def test_module_save_under_inference_mode_returns_clone(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        with torch.inference_mode():
+            with envoy.trace(x):
+                hs = envoy.fc1.output.save()
+
+        assert isinstance(hs, torch.Tensor)
+        assert not hs.is_inference()
+        assert torch.allclose(hs, model.fc1(x))

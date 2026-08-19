@@ -9,8 +9,11 @@ changes from step to step as they arrive and finish.
 So a worker's group is a *token span*, recomputed every step by
 [`NNsightGPUModelRunner`][nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner]
 rather than assigned once up front. The row math itself is unchanged from
-[`Batcher`][nnsight.intervention.batching.Batcher]: dim 0 is the token axis, so
-narrowing to ``[start, size]`` selects exactly a request's tokens.
+[`Batcher`][nnsight.intervention.batching.Batcher]: narrowing to ``[start,
+size]`` along the token axis selects exactly a request's tokens. For a native
+vLLM model that axis is dim 0; a model served through vLLM's Transformers
+backend carries a leading singleton batch dim, so its token axis is dim 1 (see
+`VLLMBatcher._batch_dim`).
 
 Gathering a sharded value is *not* here — see
 [`fragments`][nnsight.modeling.vllm.fragments]. It used to be, and the split is
@@ -21,6 +24,8 @@ happen once per value however many workers read it.
 from __future__ import annotations
 
 from typing import Optional
+
+import torch
 
 from ...intervention.batching import Batcher
 
@@ -46,3 +51,24 @@ class VLLMBatcher(Batcher):
         handing it the whole slab is right.
         """
         return True
+
+    def _batch_dim(self, tensor: torch.Tensor) -> Optional[int]:
+        """Locate the token axis, accounting for the Transformers backend.
+
+        A native vLLM model emits 2-D activations ``[total_tokens, hidden]``:
+        the token axis is dim 0, which the base rule handles.
+
+        A model without a native vLLM definition runs through vLLM's
+        Transformers backend, which wraps the HuggingFace model and adds a
+        leading singleton batch dim (``inputs_embeds[None, ...]``). Its
+        decoder-layer activations are ``[1, total_tokens, hidden]``, so the
+        token axis is dim 1. Without this, the base rule sees ``shape[0] == 1
+        != total``, calls the tensor unbatched, and every read returns all
+        requests' tokens while every write is silently dropped.
+        """
+        dim = super()._batch_dim(tensor)
+        if dim is not None:
+            return dim
+        if tensor.ndim >= 2 and tensor.shape[0] == 1 and tensor.shape[1] == self.total:
+            return 1
+        return None

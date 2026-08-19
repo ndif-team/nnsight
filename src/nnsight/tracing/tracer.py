@@ -166,10 +166,18 @@ def mark(value: Any) -> Any:
 def save(value: Any, _: Any = None) -> Any:
     """Mark ``value`` to be returned to the user after the outermost trace.
 
-    Marks the concrete object by identity and returns it unchanged, so the idiom
-    is to save the value you bind: ``h = model.layer1.output.save()``. A value
+    Marks the concrete object by identity and returns it, so the idiom is to
+    save the value you bind: ``h = model.layer1.output.save()``. A value
     built from a saved one is not itself saved — ``(x.save() * 2)`` returns ``x``,
     not the product; write ``(x * 2).save()`` instead.
+
+    An inference-mode tensor (a forward run under ``torch.inference_mode()``,
+    e.g. vLLM's) is cloned first, and the clone is what is marked and returned.
+    Downstream fused kernels (vLLM's ``fused_add_rms_norm`` among them) mutate
+    activation buffers in place, so an un-cloned reference would read back
+    post-mutation state rather than the value at the save point. The clone is
+    taken outside inference mode so the returned tensor is an ordinary one.
+    Everything else is returned unchanged.
 
     Only meaningful inside a trace — a saved value is what the ``with
     model.trace(...):`` block hands back — so calling it with no trace running
@@ -177,11 +185,11 @@ def save(value: Any, _: Any = None) -> Any:
     no-op whose mark is cleared before anything reads it.
 
     Args:
-        value: The object to mark. Returned unchanged so it can be bound in the
-            same expression that saves it.
+        value: The object to mark. The marked object is returned so it can be
+            bound in the same expression that saves it.
 
     Returns:
-        ``value`` itself.
+        ``value`` itself, or its clone for an inference-mode tensor.
 
     Raises:
         ValueError: If called outside a ``with model.trace(...):`` block.
@@ -201,6 +209,14 @@ def save(value: Any, _: Any = None) -> Any:
             "value to return from the enclosing `with model.trace(...):` block, so "
             "it only works inside one — move the save into the trace block."
         )
+    import torch
+
+    if isinstance(value, torch.Tensor) and value.is_inference():
+        # The clone must escape inference mode: on the vLLM worker the saving
+        # code runs interleaved on the forward's own thread, inside its
+        # ``inference_mode()``, where a plain clone is another inference tensor.
+        with torch.inference_mode(False):
+            value = value.clone()
     return mark(value)
 
 
