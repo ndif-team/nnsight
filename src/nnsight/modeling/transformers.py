@@ -41,6 +41,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from torch._guards import detect_fake_mode
 
 from ..intervention.envoy import Envoy, traceable
 from .huggingface import HuggingFaceModel
@@ -994,15 +995,24 @@ class TransformersModel(HuggingFaceModel):
         model (GPT-2 family) would mispredict a short prompt padded up to a longer
         one. Deriving ``position_ids`` from the attention mask keeps every real token
         at its true 0-based position. Only applied to a genuinely left-padded,
-        multi-row, text-only batch: a single or unpadded row needs no correction, a
-        right-padded (encoder) batch is already correct, and a multimodal model
-        derives its own positions from the image-expanded sequence.
+        text-only batch: an *unpadded* batch needs no correction (caught by
+        ``mask.all()``), a right-padded (encoder) batch is already correct, and a
+        multimodal model derives its own positions from the image-expanded sequence.
+        Row count is deliberately not part of this test -- a single padded row needs
+        the correction just as much as a padded batch does, and gating on
+        ``shape[0] > 1`` made the same prompt answer differently depending on whether
+        another row happened to share its batch.
         """
         mask = encoding.get("attention_mask")
+        # Under `scan` the forward runs on fake tensors to propagate shapes only, so
+        # there are no real mask values to read -- `bool(mask.all())` would raise
+        # GuardOnDataDependentSymNode. position_ids do not affect shapes, so skipping
+        # the correction here changes nothing a scan can observe.
+        if detect_fake_mode() is not None:
+            return
         if (
             not isinstance(mask, torch.Tensor)
             or mask.dim() != 2
-            or mask.shape[0] <= 1
             or bool(mask.all())
             or getattr(self.tokenizer, "padding_side", None) != "left"
             or any(key not in self._TEXT_KEYS for key in encoding)
