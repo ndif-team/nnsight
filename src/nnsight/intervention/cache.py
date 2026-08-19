@@ -75,7 +75,7 @@ class Cache:
         detach: bool = True,
         include_output: bool = True,
         include_inputs: bool = False,
-        non_blocking: bool = True,
+        non_blocking: bool = False,
     ) -> None:
         self.model = model
         self.device = device

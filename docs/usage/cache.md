@@ -85,16 +85,32 @@ with model.trace("Hello") as tracer:
         detach=True,                 # detach from autograd (default)
         include_output=True,
         include_inputs=False,
-        non_blocking=True,           # async device transfer (default); set False to
-                                     # synchronize the copy (see note below)
+        non_blocking=False,          # default: synchronous copy. True is async and
+                                     # requires your own sync (see note below)
     )
 ```
 
-`non_blocking=True` (the default) makes the move to `device` asynchronous, which is
-faster and safe under nnsight's single-stream execution — captured values are read
-after the run (and any Python read syncs anyway). Set `non_blocking=False` only if
-you move captured tensors across CUDA streams yourself and need the copy finished
-before another stream reads them.
+!!! warning "`non_blocking=True` is opt-in, and unsafe unless you synchronise"
+
+    The move to `device` is enqueued asynchronously and **nothing synchronises
+    before you read the result**, so a capture off a CUDA device can be read while
+    the copy is still in flight. Reading a CPU tensor does *not* synchronise CUDA.
+
+    Measured on GPT-2, batch 128 x 64 tokens, 12 blocks captured, idle GPU:
+
+    | | differs from a plain `register_forward_hook` |
+    |---|---|
+    | `non_blocking=True` | **10/10 batches**, up to 100% of elements wrong |
+    | `non_blocking=False` (the default) | 0/10, bit-identical |
+
+    The values are not permanently wrong -- they arrive late; a
+    `torch.cuda.synchronize()` after the trace makes the same capture bit-exact.
+    The window scales with copy size, so a small example looks fine while a
+    corpus-scale run is silently corrupted. This is why the default is
+    `False`: correctness costs roughly 15-20% throughput, and the failure it
+    prevents is invisible.
+
+    Pass `non_blocking=True` only if you synchronise yourself before reading.
 
 ### Cache across generation steps
 
@@ -163,7 +179,7 @@ tracer.cache(
     detach=True,
     include_output=True,
     include_inputs=False,
-    non_blocking=True,            # async device transfer; False synchronizes it
+    non_blocking=False,           # default; True is async but needs your own sync
 )
 ```
 

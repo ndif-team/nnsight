@@ -183,7 +183,7 @@ class InterleavingTracer(Tracer):
         detach: bool = True,
         include_output: bool = True,
         include_inputs: bool = False,
-        non_blocking: bool = True,
+        non_blocking: bool = False,
     ) -> CacheView:
         """Record activations of many modules at once during the run.
 
@@ -206,7 +206,12 @@ class InterleavingTracer(Tracer):
             detach: Detach captured tensors from the autograd graph.
             include_output: Capture each module's output.
             include_inputs: Capture each module's inputs.
-            non_blocking: Use an async (non-blocking) device transfer (default True).
+            non_blocking: Use an async (non-blocking) device transfer (default
+                ``False``). ``True`` enqueues the copy and returns without
+                synchronising, so a capture off a CUDA device can be read while the
+                copy is still in flight -- reading a CPU tensor does not synchronise
+                CUDA. Only pass ``True`` if you
+                synchronise yourself before reading the cache.
                 Safe under nnsight's single-stream execution and faster; set False if
                 you move captured tensors across CUDA streams yourself and want the
                 copy synchronized before use.
