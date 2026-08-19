@@ -25,6 +25,38 @@ Calling `model.lm_head(...)` inside a trace runs `forward()` directly and
 out of order without re-triggering the model. See
 `docs/usage/access-and-modify.md` ("Calling modules directly inside a trace").
 
+!!! warning "`lm_head.output` is not always the model's logits"
+
+    Some architectures post-process the head's output. **Gemma-2 and Gemma-3 apply
+    `tanh` logit softcapping after `lm_head`** (`final_logit_softcapping=30.0` in
+    the config), and `transformers` does it in `Gemma2ForCausalLM.forward`, *not*
+    inside `lm_head`:
+
+    ```python
+    logits = self.lm_head(hidden_states[:, slice_indices, :])
+    if self.config.final_logit_softcapping is not None:
+        logits = logits / self.config.final_logit_softcapping
+        logits = torch.tanh(logits)
+        logits = logits * self.config.final_logit_softcapping
+    ```
+
+    So on those models `model.lm_head.output` is the *pre-cap* logits: the top-1
+    token usually survives, but probabilities, entropies and perplexities do not —
+    one measured run reported a 46x perplexity error from this alone, with nothing
+    raising.
+
+    Check `model.config` for `final_logit_softcapping` before trusting any
+    probability you compute from `lm_head`. For the true logits use
+    `model.output.logits`; for a *lens* at layer L, apply the same cap yourself
+    after the head, so intermediate layers are read on the model's own scale:
+
+    ```python
+    cap = getattr(model.config, "final_logit_softcapping", None)
+    logits = model.lm_head(model.model.norm(hs))
+    if cap is not None:
+        logits = torch.tanh(logits / cap) * cap
+    ```
+
 Tutorial mirror: https://nnsight.net/notebooks/tutorials/logit_lens/
 
 ## When to use

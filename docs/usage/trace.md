@@ -62,9 +62,9 @@ ValueError: trace() needs an input, or at least one `with tracer.invoke(...)` bl
 ```python
 with model.trace() as tracer:
     with tracer.invoke("The Eiffel Tower is in"):
-        out_a = model.transformer.h[0].output[0].save()
+        out_a = model.transformer.h[0].output.save()
     with tracer.invoke("The Colosseum is in"):
-        out_b = model.transformer.h[0].output[0].save()
+        out_b = model.transformer.h[0].output.save()
 ```
 
 Each invoke's body sees only its own rows of the batch. See `docs/usage/invoke-and-batching.md` for empty invokes, batching constraints, and barriers.

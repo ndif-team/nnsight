@@ -96,9 +96,9 @@ In-place modifications happen on the live tensor — reading `.output` again aft
 
 ```python
 with model.trace("Hello world"):
-    before = model.transformer.h[0].output[0].clone().save()  # pre-mod
-    model.transformer.h[0].output[0][:] = 0
-    after = model.transformer.h[0].output[0].save()           # post-mod
+    before = model.transformer.h[0].output.clone().save()  # pre-mod
+    model.transformer.h[0].output[:] = 0
+    after = model.transformer.h[0].output.save()           # post-mod
 # before is not all-zeros; after is all-zeros
 ```
 

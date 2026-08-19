@@ -35,12 +35,12 @@ model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 # Store the edit on a copy; `model` stays clean.
 with model.edit() as (tracer, edited):
-    edited.transformer.h[0].output[0][:] = 0
+    edited.transformer.h[0].output[:] = 0
 
 with edited.trace("Hello world"):
-    out_edited = edited.transformer.h[0].output[0].save()    # zeros
+    out_edited = edited.transformer.h[0].output.save()    # zeros
 with model.trace("Hello world"):
-    out_original = model.transformer.h[0].output[0].save()   # unchanged
+    out_original = model.transformer.h[0].output.save()   # unchanged
 
 # len(model._edits) == 0 ; len(edited._edits) == 1
 ```
@@ -49,11 +49,11 @@ with model.trace("Hello world"):
 
 ```python
 with model.edit(inplace=True) as tracer:
-    model.transformer.h[1].output[0][:] = 0
+    model.transformer.h[1].output[:] = 0
 
 # Now every trace through model replays the edit
 with model.trace("Hello world"):
-    out = model.transformer.h[1].output[0].save()            # zeros
+    out = model.transformer.h[1].output.save()            # zeros
 ```
 
 ## Clearing edits
@@ -76,9 +76,9 @@ On every later trace, `Envoy.interleave` prepends `self._edits` to the run's med
 
 ```python
 with model.edit(inplace=True):
-    model.transformer.h[0].output[0][:] = 0     # first edit
+    model.transformer.h[0].output[:] = 0     # first edit
 with model.edit(inplace=True):
-    model.transformer.h[1].output[0][:] = 0     # second edit — both apply
+    model.transformer.h[1].output[:] = 0     # second edit — both apply
 
 # len(model._edits) == 2 ; they run in registration order on every trace
 ```
@@ -109,9 +109,9 @@ Edits ride with the model to a remote server — they live in `envoy._edits`, wh
 
 ```python
 with model.edit() as (tracer, edited):
-    edited.transformer.h[0].output[0][:] = 0
+    edited.transformer.h[0].output[:] = 0
 with edited.trace("The Eiffel Tower is in", remote="local"):
-    out = edited.transformer.h[0].output[0].save()   # zeros
+    out = edited.transformer.h[0].output.save()   # zeros
 ```
 
 ## Gotchas

@@ -49,8 +49,8 @@ with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
 with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
     hidden = nnsight.save([])
     for step in tracer.all():                     # == tracer.iter[:]
-        model.transformer.h[0].output[0][:] = 0   # zero-ablate layer 0 every step
-        hidden.append(model.transformer.h[-1].output[0])
+        model.transformer.h[0].output[:] = 0   # zero-ablate layer 0 every step
+        hidden.append(model.transformer.h[-1].output)
 ```
 
 ## Variations
@@ -89,7 +89,7 @@ with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
 with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
     for step in tracer.iter[:5]:
         if step == 2:
-            model.transformer.h[0].output[0][:] = 0
+            model.transformer.h[0].output[:] = 0
         # other steps pass through
 ```
 
@@ -110,7 +110,7 @@ Prefer `for step in tracer.iter[...]:`.
 ```python
 with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
     with tracer.iter[:3]:            # DeprecationWarning
-        x = model.transformer.h[0].output[0].save()
+        x = model.transformer.h[0].output.save()
 ```
 
 ## Gotchas

@@ -149,7 +149,7 @@ The cache observes post-intervention values:
 ```python
 with model.trace("Hello") as tracer:
     cache = tracer.cache()
-    model.transformer.h[0].output[0][:] = 0
+    model.transformer.h[0].output[:] = 0
 
 (cache["model.transformer.h.0"].output == 0).all()   # True
 ```

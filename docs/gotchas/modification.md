@@ -14,6 +14,7 @@ sources: [src/nnsight/intervention/envoy.py:448, src/nnsight/intervention/eprope
 - Assigning into a tuple output — `attn.output[0] = t` — raises `TypeError` (tuples don't support item assignment). Rebuild the tuple and assign the whole thing, or edit in place: `attn.output[0][:] = ...`.
 - To keep the "before" state of a value you're about to mutate, `.clone().save()` it first — otherwise `before` and `after` alias the same modified tensor.
 - Prefer replacing a **whole** tensor over an in-place slice-assign into a *tuple element* view across a barrier — the latter can crash. Assign the whole value instead.
+- Editing an **activation** is scoped to that run; editing a **weight** is permanent, and the syntax looks identical. There is no warning.
 
 ---
 
@@ -155,6 +156,59 @@ when the replacement is a new tensor (a reshape, a stack, an arithmetic result)
 that has to take the element's place.
 
 ---
+
+## A weight edit inside a trace is permanent
+
+### Symptom
+Two edits that read almost identically behave completely differently across runs:
+
+```python
+with model.trace(ids):                       # ACTIVATION -- scoped to this run
+    model.transformer.h[5].output[:] = 0
+
+with model.trace(ids):                       # WEIGHT -- permanent
+    model.transformer.wte.weight[100] = 0.0
+```
+
+```
+activation write: run differs from base: True | NEXT run back to baseline: True
+weight write    : run differs from base: True | NEXT run back to baseline: False
+                                              | wte[100] still zero: True
+```
+
+Every later trace in the process — and anything else holding that model — now runs
+against a modified checkpoint.
+
+### Cause
+Not an nnsight behaviour: `.output` is a value the interleaver hands you for the
+duration of the run, while `.weight` is the module's real `nn.Parameter`. Writing
+to it is an ordinary in-place mutation of the loaded model, and the trace block
+does not scope it. The trap is that `with model.trace(...)` reads like a scope for
+everything inside it.
+
+### Fix
+Save and restore around the edit, or work on a copy:
+
+```python
+saved = model.transformer.wte.weight[100].clone()
+try:
+    with model.trace(ids):
+        model.transformer.wte.weight[100] = 0.0
+        out = model.lm_head.output.save()
+finally:
+    model.transformer.wte.weight.data[100] = saved
+```
+
+For a persistent-but-reversible change, prefer [`model.edit()`](../usage/edit.md),
+which stores the intervention and can be undone with `clear_edits()`. For a
+genuine weight edit (ROME-style), do it deliberately and outside a trace, so the
+permanence is visible at the call site.
+
+Reading weights is of course fine, and composes with activations inside a trace.
+One related trap: before dispatch, a model's parameters are **meta** tensors —
+correct shape and dtype, no storage. Shape-preserving arithmetic on them succeeds
+silently and fails somewhere later, in torch's words rather than nnsight's. Pass
+`dispatch=True` (or run a trace) before reading weights.
 
 ## Related
 - [docs/usage/access-and-modify.md](../usage/access-and-modify.md) — reading and writing module values.
