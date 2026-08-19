@@ -40,6 +40,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
+import warnings
+
 import torch
 from torch._guards import detect_fake_mode
 
@@ -125,6 +127,40 @@ def _infer_task(module: torch.nn.Module) -> str:
     raise ValueError(
         f"Could not infer a pipeline task for a pre-loaded {type(module).__name__}; "
         "pass task=... explicitly (e.g. TransformersModel(model, task='text-generation'))."
+    )
+
+
+def _refuse_noop_peft(peft_id: str, caught: list) -> None:
+    """Turn peft's "missing adapter keys" warning into an error.
+
+    peft places adapter weights by **name** and drops the ones it cannot match. As
+    ``lora_B`` initialises to zeros, an adapter whose weights did not land is
+    exactly the identity -- the model behaves like the base checkpoint, so a
+    base-vs-adapter comparison silently becomes base-vs-base with every number in
+    it plausible. peft warns about this precisely because ``from_pretrained``
+    cannot return its load result (see `PeftModel.from_pretrained`), but a warning
+    is easy to miss in a long load, and by the time it matters the run is finished.
+
+    Only the mismatch warns: an adapter whose keys all place -- including a freshly
+    initialised one whose ``lora_B`` is legitimately still zero -- produces none.
+    """
+    missing = [
+        warning
+        for warning in caught
+        if "missing adapter keys" in str(warning.message).lower()
+    ]
+    if not missing:
+        return
+
+    raise ValueError(
+        f"The PEFT adapter {peft_id!r} did not attach: peft could not match its "
+        "weights to this model's modules by name, dropped them, and left the "
+        "adapter at its zero initialisation -- so it is a no-op and the model "
+        "would behave exactly like the base checkpoint. The usual cause is a "
+        "`task=` that builds a different architecture than the adapter was trained "
+        "against: e.g. task='text-generation' where the adapter targets a "
+        "multimodal config, which needs task='image-text-to-text'. peft reported: "
+        f"{str(missing[0].message)[:400]}"
     )
 
 
@@ -449,9 +485,14 @@ class TransformersModel(HuggingFaceModel):
         if self.peft is not None:
             # The pipeline loaded the base weights; wrap them with the adapter's
             # real weights so the dispatched model runs with the adapter applied.
-            self.pipeline.model = _import_peft().PeftModel.from_pretrained(
-                self.pipeline.model, self.peft
-            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                self.pipeline.model = _import_peft().PeftModel.from_pretrained(
+                    self.pipeline.model, self.peft
+                )
+            for warning in caught:
+                warnings.warn(warning.message, warning.category)
+            _refuse_noop_peft(self.peft, caught)
         self._sync()
         return self.pipeline.model
 
@@ -604,8 +645,22 @@ class TransformersModel(HuggingFaceModel):
 
         if self.peft is not None:
             rebind(self._module.unload())
+            # The module is the base checkpoint from here; keep `self.peft` honest
+            # so a refused load below leaves this envoy self-consistent.
+            self.peft = None
+
         if requested:
-            rebind(_import_peft().PeftModel.from_pretrained(self._module, requested))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                adapted = _import_peft().PeftModel.from_pretrained(self._module, requested)
+            for warning in caught:
+                warnings.warn(warning.message, warning.category)
+            # Check before rebinding, so a no-op adapter never becomes this envoy's
+            # module. A swap is where this matters most: sweeping several adapters
+            # over one loaded base is exactly the workload where every organism
+            # silently collapsing to the base checkpoint looks like a real result.
+            _refuse_noop_peft(requested, caught)
+            rebind(adapted)
 
         self.peft = requested
 
