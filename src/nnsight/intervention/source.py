@@ -265,6 +265,46 @@ def _rewrap(chain: list[tuple[Callable, int]], innermost: Callable) -> Callable:
     return result
 
 
+def _closure_diagnostic(func: Callable) -> str:
+    """Describe *why* a callable has free variables, when we can tell.
+
+    A decorator's wrapper always closes over the function it wraps, so this is the
+    usual reason `.source` refuses a `forward`. When the decorator forgot
+    ``functools.wraps`` there is no ``__wrapped__`` to peel, but the wrapper's
+    ``__qualname__`` still names the decorator that built it and its closure still
+    holds the function it wraps -- both worth saying, since the bare "free
+    variables" message sends people to debug their own code.
+    """
+    parts = []
+    qualname = getattr(func, "__qualname__", "")
+    if "<locals>" in qualname:
+        decorator = qualname.split(".<locals>.")[0]
+        module = getattr(func, "__module__", None)
+        where = f" ({module})" if module else ""
+        parts.append(f"it is a wrapper built by @{decorator}{where}")
+    wrapped = next(
+        (
+            cell.cell_contents
+            for cell in (getattr(func, "__closure__", None) or ())
+            if callable(cell.cell_contents) and hasattr(cell.cell_contents, "__code__")
+        ),
+        None,
+    )
+    if wrapped is not None:
+        parts.append(f"wrapping {getattr(wrapped, '__qualname__', wrapped)}")
+    if not parts:
+        return ""
+    tail = (
+        " It could not be peeled because the decorator does not use "
+        "`functools.wraps`, so there is no `__wrapped__` to follow. Instrument a "
+        "real submodule's `.source` instead, or have the decorator apply "
+        "`@functools.wraps`."
+        if not hasattr(func, "__wrapped__")
+        else ""
+    )
+    return " -- " + ", ".join(parts) + "." + tail
+
+
 def _compile_instrumented(func: Callable, decorated: bool = False) -> Compiled:
     """Parse, instrument, and compile a Python ``func`` (a ``forward`` or a drilled-into
     callable), or raise.
@@ -287,7 +327,11 @@ def _compile_instrumented(func: Callable, decorated: bool = False) -> Compiled:
         # Recompiled at module level, free variables would become globals and
         # break. A decorator's wrapper always closes over the function it wraps,
         # so this is also what rejects one we couldn't peel.
-        raise SourceNotAvailable("callable closes over free variables")
+        names = ", ".join(repr(name) for name in code_object.co_freevars)
+        raise SourceNotAvailable(
+            f"callable closes over free variables ({names})"
+            + _closure_diagnostic(func)
+        )
     try:
         lines, start = inspect.getsourcelines(func)
     except (OSError, TypeError) as error:
