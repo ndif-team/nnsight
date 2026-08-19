@@ -50,7 +50,15 @@ with model.trace() as tracer:
 ```
 
 Each invoke's `.output` carries only that invoke's row(s). A batched last-token
-logit from an invoke equals the same prompt run on its own.
+logit from an invoke matches the same prompt run on its own **up to floating-point
+kernel selection** — not bit-for-bit. Measured drift on fp32 CUDA is ~2e-4 (GPT-2)
+and ~2e-5 (Llama-3.2-1B); it is a property of torch, not nnsight (nnsight's logits
+are `torch.equal` to raw HuggingFace at every batch size), it does not grow with
+batch size, and reruns are bit-identical. It is driven by the *shape* the kernel
+sees, so lengthening a sequence perturbs earlier positions by the same magnitude.
+In fp32 this is far below any real effect size; in **bf16** it is comparable to the
+metric quantum and can reorder a head ranking, so read a ranking metric through an
+fp32 head.
 
 ## Batched input (single invoke, list of strings)
 

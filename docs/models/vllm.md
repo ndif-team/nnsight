@@ -274,6 +274,19 @@ The router (`mlp.gate`, a `ReplicatedLinear`) is full and identical on every ran
 
 Individual experts are **not** addressable as submodules: vLLM stacks all local experts into fused weight tensors consumed by one grouped kernel, so there is no `experts[3]` to hook at any parallelism level. To ablate an expert, mask its router logit to `-inf` in `mlp.gate.output` instead.
 
+!!! warning "This recipe is vLLM-specific"
+    On **`TransformersModel`** it is a silent no-op. A transformers MoE block calls its
+    router as `_, top_k_weights, top_k_index = self.gate(hidden_states)` — element `[0]`,
+    the logits, is **discarded**, so masking it changes nothing (setting all 64 logits to
+    `-inf` gives `max|delta| = 0.0`). There, edit the *selection* instead: write the
+    routing weights or expert indices in `mlp.gate.output[1]` / `[2]`.
+
+    Two further transformers-side traps: with `norm_topk_prob=False` masking a weight
+    rescales all surviving experts, so a never-selected expert appears to have an effect
+    larger than a real below-median one — ablate by selection, not by weight. And the
+    router's `.input`/`.output` have **no batch axis** (`(B*T, E)`), so per-token stats
+    over a padded batch silently mix in pad rows.
+
 ## Async mode
 
 Construct with `mode="async"`; a trace then streams `RequestOutput`s. Iterate `tracer.backend` (an attribute, not a call):
