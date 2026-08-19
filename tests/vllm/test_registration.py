@@ -141,6 +141,37 @@ class TestRegistration:
             registration.clear()
 
 
+class TestAnEditThatRaises:
+    """An installed block's error ends its request, not the engine.
+
+    This is the case edits exist for — requests from something that has never
+    heard of nnsight — so a broken block gets to run on traffic that cannot
+    anticipate it, once per request, for as long as it stays installed.
+    """
+
+    @torch.no_grad()
+    def test_the_engine_survives_and_keeps_answering(self, vllm_gpt2_uncached,
+                                                     ET_prompt):
+        model = vllm_gpt2_uncached
+
+        with model.edit() as (tracer, edit):
+            hidden = model.transformer.h[5].output.save()
+            raise ValueError("boom, every request")
+        try:
+            # Long enough to run the forwards that used to trip it.
+            outputs = model.generate([ET_prompt], max_tokens=4, temperature=0.0,
+                                     ignore_eos=True)
+            assert len(outputs) == 1
+            assert outputs[0].outputs[0].token_ids
+        finally:
+            edit.clear()
+
+        # And once it is gone, everything is as before.
+        after = model.generate([ET_prompt], max_tokens=2, temperature=0.0,
+                               ignore_eos=True)
+        assert after[0].outputs[0].token_ids
+
+
 class TestEditHandles:
     @torch.no_grad()
     def test_clear_edits_clears_every_one(self, vllm_gpt2_uncached, ET_prompt):

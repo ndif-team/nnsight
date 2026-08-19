@@ -455,6 +455,43 @@ class TestDeferredErrors:
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
+    def test_a_raise_after_the_first_read_spares_the_engine(self, vllm_gpt2,
+                                                            ET_prompt):
+        # Both halves matter, and the test above has neither: the raise lands
+        # *after* the block has parked once, so its worker is dead while still
+        # holding a location, and `ignore_eos` keeps the request running past the
+        # step that would have retired it. The dead worker is then served again —
+        # and switching into a finished greenlet returns the arguments straight
+        # back, which used to store an activation where an event belongs and kill
+        # the engine core inside vLLM's own state update, taking every tenant's
+        # request with it.
+        with pytest.raises(RuntimeError, match="ValueError"):
+            with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=4,
+                                 ignore_eos=True):
+                hidden = vllm_gpt2.transformer.h[5].output.save()
+                raise ValueError("after the first read")
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_raise_inside_an_iter_loop_spares_the_engine(self, vllm_gpt2,
+                                                           ET_prompt):
+        # The same, reached the way a generation loop reaches it.
+        with pytest.raises(RuntimeError, match="ValueError"):
+            with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=6,
+                                 ignore_eos=True) as tracer:
+                for step in tracer.iter[:6]:
+                    logits = vllm_gpt2.logits.save()
+                    if step == 1:
+                        raise ValueError("mid-loop")
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
     def test_out_of_order_read_surfaces(self, vllm_gpt2, ET_prompt):
         # Reading a layer the forward already ran past leaves the worker parked with
         # nowhere to be served. When the request finishes it is surfaced as an

@@ -452,6 +452,21 @@ class Mediator:
         another worker's greenlet, e.g. an ``Envoy.__call__(hook=True)`` adapter
         run whose submodule hooks serve a second worker mid-call.
         """
+        # A worker that has already finished has nothing to resume, and switching
+        # into a dead greenlet does not run anything — greenlet hands the
+        # arguments straight back. The caller would then store an activation
+        # tensor where an event belongs, and the next `reindex` would read
+        # `.provider` off it. That happens inside the model runner's own state
+        # update, where nothing catches it, so it takes the whole engine down —
+        # every tenant's request, not just the one whose block raised. Finished is
+        # finished: say so the way a worker that ran off the end does.
+        #
+        # This is reachable because an erred worker is deliberately kept scheduled
+        # (see `_finish_erred`), so it is still routed to for as long as its
+        # request lives.
+        if self.worker is not None and self.worker.dead:
+            return None
+
         self.worker.parent = getcurrent()
         try:
             return self.worker.switch(*args)
