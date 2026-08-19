@@ -85,7 +85,7 @@ class Barrier:
                 # raiser's request ends. Otherwise re-raise; the raiser's
                 # traceback is already stashed by Mediator.switch.
                 other.pending = None
-                other.exception = exception
                 interleaver = other.interleaver
                 if interleaver is None or not interleaver.defer_exceptions:
                     raise
+                other.exception = exception

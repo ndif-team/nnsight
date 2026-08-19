@@ -885,9 +885,9 @@ class Interleaver:
                     # occurrence when it re-parks on this provider.
                     mediator.iterations[provider] += 1
                 except Exception as exception:
-                    mediator.exception = exception
                     if not self.defer_exceptions:
                         raise
+                    mediator.exception = exception
         else:
             for mediator in self._mediators:
                 mediator.iterations[provider] += 1
