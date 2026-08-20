@@ -261,7 +261,7 @@ with model.trace("Hello", temperature=0.0):
     hidden = model.model.layers[16].output.save()   # full unsharded tensor
 ```
 
-`VLLMBatcher` (`batching.py`) gathers a `ColumnParallelLinear`/`RowParallelLinear` shard into the full tensor before your intervention reads it and re-splits on write, so every rank runs the same code on the same complete tensor. Verified in `tests/vllm/test_tensor_parallel.py`.
+`VLLMFragments` (`fragments.py`) gathers a `ColumnParallelLinear`/`RowParallelLinear` shard into the full tensor before your intervention reads it and re-splits on write, so every rank runs the same code on the same complete tensor. Calling one of those layers ad hoc (a logit lens) is corrected the same way. Parameters are not: `layer.weight` is this rank's slice. Verified in `tests/vllm/test_tensor_parallel.py`.
 
 ### Mixture-of-experts models and expert parallelism
 

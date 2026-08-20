@@ -283,6 +283,19 @@ class TransformersModel(HuggingFaceModel):
         # per request via _remoteable_set_env without redeploying the base.
         self.peft = peft
 
+        # A sharded module called ad hoc — a logit lens — deals in one rank's
+        # slices either side, where the caller is holding whole tensors.
+        # `TPEnvoy` corrects that, but it is keyed by module *type* (every Linear
+        # and Embedding in the tree) because the style that decides the
+        # correction is stamped on the instance at load rather than carried by a
+        # class. So it goes on only when this construction is actually going to
+        # shard something; an ordinary model keeps the plain `Envoy` it always
+        # had. A caller passing `envoys` of their own replaces it wholesale.
+        from .tp.envoys import tp_envoys, wants_tensor_parallel
+
+        if wants_tensor_parallel(repo_id, kwargs):
+            kwargs.setdefault("envoys", tp_envoys())
+
         super().__init__(repo_id, *args, **kwargs)
 
         # A standalone module (not part of the HF model) that generation output is

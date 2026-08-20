@@ -109,6 +109,14 @@ class VLLM(Remotable):
             # and not once per construction (atexit does not dedupe).
             atexit.register(VLLM._cleanup_distributed)
 
+        # A vLLM parallel layer called ad hoc — a logit lens — takes and returns
+        # one rank's piece, where the caller is holding whole tensors.
+        # `ParallelEnvoy` puts that right; a caller passing `envoys` of their own
+        # replaces it wholesale.
+        from .envoys import parallel_envoys
+
+        kwargs.setdefault("envoys", parallel_envoys())
+
         super().__init__(*args, **kwargs)
 
     @staticmethod
