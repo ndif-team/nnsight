@@ -3,7 +3,7 @@ title: Envoy
 one_liner: Envoy wraps a torch.nn.Module and mirrors its submodule tree, exposing .input / .inputs / .output as eproperty descriptors over Mediator.value / Mediator.swap, plus .skip (method) and .source (property).
 tags: [concept, mental-model, envoy]
 related: [docs/concepts/interleaver-and-hooks.md, docs/concepts/source-tracing.md, docs/concepts/threading-and-mediators.md]
-sources: [src/nnsight/intervention/envoy.py:105, src/nnsight/intervention/envoy.py:417, src/nnsight/intervention/envoy.py:494, src/nnsight/intervention/envoy.py:612, src/nnsight/intervention/envoy.py:682, src/nnsight/modeling/base.py:6]
+sources: [src/nnsight/intervention/envoy.py:105, src/nnsight/intervention/envoy.py:417, src/nnsight/intervention/envoy.py:494, src/nnsight/intervention/envoy.py:612, src/nnsight/intervention/envoy.py:726, src/nnsight/modeling/base.py:6]
 ---
 
 # Envoy
@@ -112,7 +112,7 @@ ValueError: Cannot access `model.0.output` outside of interleaving
 
 ## Calling a module inside a trace
 
-`Envoy.__call__(*args, hook=False, **kwargs)` (`envoy.py:682`) runs a module ad hoc, out of its place in the forward pass — the logit-lens idiom:
+`Envoy.__call__(*args, hook=False, **kwargs)` (`envoy.py:726`) runs a module ad hoc, out of its place in the forward pass — the logit-lens idiom:
 
 ```python
 with model.trace("The Eiffel Tower is in"):
@@ -121,7 +121,7 @@ with model.trace("The Eiffel Tower is in"):
     tok = logits[:, -1].argmax(-1).save()            # -> [262]  (" the")
 ```
 
-- **`hook=False` (default) while interleaving:** calls `module.forward(...)` directly, skipping PyTorch's hook dispatch. This both avoids re-firing the interleaver's hooks (which would try to switch into the very worker making the call) and leaves the module's real place in the forward untouched.
+- **`hook=False` (default) while interleaving:** runs the module the ordinary way, with this trace stood down for the duration. Its own hooks still fire — a runtime that keeps collectives in them (transformers tensor parallelism) still works — while nnsight serves no value and spends no occurrence, for this module *or anything under it*, so the call leaves its real place in the forward untouched.
 - **`hook=True`:** calls the full `module(...)` so its hooks fire and its submodules become addressable at `.submodule.output`. Use it for a module *attached* to the tree that isn't part of the real forward — an adapter, LoRA, or SAE applied in an edit.
 - **Outside a trace:** always the full `module(...)`.
 

@@ -127,7 +127,7 @@ with model.trace("The Eiffel Tower is in the city of"):
 # model.tokenizer.decode(tok) -> ' Paris'
 ```
 
-While interleaving, `Envoy.__call__` calls `module.forward(...)` directly. Pass `hook=True` to opt back into the full `module(...)` path (its hooks fire, its submodules become observable) — used for a module attached to the tree that isn't part of the real forward pass (an adapter/LoRA/SAE applied in an edit). See `Envoy.__call__`.
+While interleaving, `Envoy.__call__` runs the module normally but stands the trace down, so nothing the call touches — the module or its submodules — serves a value or spends an occurrence. Pass `hook=True` to let the trace watch it too (its submodules become observable) — used for a module attached to the tree that isn't part of the real forward pass (an adapter/LoRA/SAE applied in an edit). See `Envoy.__call__`.
 
 ## Overloaded names
 

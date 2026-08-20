@@ -734,17 +734,20 @@ class Envoy:
                 hidden = model.transformer.h[-1].output
                 logits = model.lm_head(model.transformer.ln_f(hidden))
 
-        While interleaving, ``module.forward`` is called directly rather than
-        ``module(...)``, so PyTorch's hook dispatch is skipped. That both keeps
-        this ad-hoc call from re-firing the interleaver's hooks (which would try to
-        switch into the very worker greenlet making the call) and leaves the
-        module's real place in the forward pass untouched. Outside a trace it is an
-        ordinary module call.
+        While interleaving the module is called the ordinary way, with this
+        trace stood down for the duration. Its own hooks still fire — a runtime
+        that keeps collectives in them (transformers tensor parallelism) needs
+        them to — while nnsight serves nothing and spends no occurrence, for this
+        module *or anything under it*. That keeps the call from switching into
+        the very worker greenlet making it, and leaves the module's real place in
+        the forward pass untouched: calling a whole layer ad hoc does not consume
+        the occurrence its children's real visit was going to fill. Outside a
+        trace it is an ordinary module call.
 
-        Pass ``hook=True`` to force the full ``module(...)`` call so the module's
-        own hooks *do* fire. Use it for a module attached to the tree that isn't
-        part of the real forward pass — an adapter, LoRA, or SAE applied in an
-        edit — so its internals become observable at ``.submodule.output``::
+        Pass ``hook=True`` to let the trace watch the call too. Use it for a
+        module attached to the tree that isn't part of the real forward pass —
+        an adapter, LoRA, or SAE applied in an edit — so its internals become
+        observable at ``.submodule.output``::
 
             model.transformer.h[0].adapter = MyAdapter()
             with model.edit() as (tracer, edited):
@@ -766,19 +769,39 @@ class Envoy:
 
         Args:
             *args: Inputs to run the module's forward on.
-            hook: If ``False`` (default), run the forward directly while
-                interleaving, leaving the module's hooks — and its real place in
-                the forward pass — untouched. If ``True``, run the full
-                ``module(...)`` so its hooks fire and its submodules become
-                addressable; use it for a module attached to the tree rather than
-                one the forward pass already runs.
+            hook: Whether *nnsight* watches the call. If ``False`` (default)
+                the module runs normally, its own hooks and all, but this trace
+                is stood down for the duration — so neither this module nor
+                anything under it serves a value or spends an occurrence, and
+                its real place in the forward pass is untouched. If ``True``,
+                the trace watches too, so the call's internals are addressable
+                at ``.submodule.output``; use it for a module attached to the
+                tree rather than one the forward pass already runs.
             **kwargs: Keyword inputs to the module's forward.
 
         Returns:
             The module's output for these inputs.
         """
         if self.interleaver.interleaving and not hook:
-            return self._module.forward(*args, **kwargs)
+            # Run the module the ordinary way — its own hooks included — with
+            # only *this* interleaver stood down, so nothing the call touches is
+            # mistaken for the real forward pass. Switching the flag rather than
+            # dodging `__call__` matters twice over: hooks the module's runtime
+            # installed still fire (transformers keeps its tensor-parallel
+            # collectives in them, so calling `forward` directly returns one
+            # rank's slice), and the suppression reaches *submodules* too — a
+            # direct `forward` on a composite module leaves its children
+            # instrumented, so the ad-hoc call feeds their locations and steals
+            # the occurrence the real forward was going to fill.
+            #
+            # Restores the previous value rather than True, so this composes if
+            # anything ever calls it while already stood down.
+            interleaving = self.interleaver.interleaving
+            self.interleaver.interleaving = False
+            try:
+                return self._module(*args, **kwargs)
+            finally:
+                self.interleaver.interleaving = interleaving
         return self._module(*args, **kwargs)
 
     def __setattr__(self, name: str, value: Any) -> None:

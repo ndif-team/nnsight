@@ -81,7 +81,7 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | Item | Signature | One-liner |
 |------|-----------|-----------|
 | `envoy.skip` | `envoy.skip(replacement)` | Bypass this module's forward, using `replacement` as its output. |
-| `envoy(...)` | `envoy(*args, hook=False, **kwargs)` | Ad-hoc apply the module to a value (e.g. logit lens). `hook=True` fires the module's own hooks — for adapters/SAEs/LoRA attached to the tree. |
+| `envoy(...)` | `envoy(*args, hook=False, **kwargs)` | Ad-hoc apply the module to a value (e.g. logit lens); the trace is stood down for the call, so it spends no occurrences. `hook=True` lets the trace watch it — for adapters/SAEs/LoRA attached to the tree. |
 | `envoy.get` | `envoy.get("transformer.h.0.mlp")` | Fetch a descendant envoy by dotted path. |
 | `envoy.modules` | `envoy.modules(include_fn=None, names=False)` | List all descendant envoys (optionally filtered / with paths). |
 | `envoy.named_modules` | `envoy.named_modules(include_fn=None)` | `modules(names=True)` — `(path, envoy)` pairs. |
