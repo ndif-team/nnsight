@@ -16,10 +16,12 @@ visits its own stage's modules. This interleaver closes the gap in three moves:
   cross-stage pull at that exact moment (issue-at-park: the transfer overlaps
   the rest of the forward) and lets the park stand.
 
-* **Publish** (producer side): as :meth:`handle` serves a location the rank
+* **Publish** (producer side): as :meth:`serve` offers a location the rank
   owns, each request's rows of the post-intervention value are cloned into the
   pull buffer under ``("{provider}.i{visit}", req_id)`` and any parked peer
-  pulls for that key are dispatched.
+  pulls for that key are dispatched. ``serve`` runs inside ``handle``'s
+  fragments bracket, so under TP within a stage the published value is the
+  assembled whole, matching what a local worker read.
 
 * **Serve** (driver side): at a serve point — after the local forward, before
   the next step — :meth:`serve_pulls` completes each worker's in-flight pull
@@ -81,8 +83,12 @@ class PPInterleaver(Interleaver):
         listener: Any,
         local_rank: int,
         module_meta: Optional[dict] = None,
+        fragments: Optional[Any] = None,
     ) -> None:
-        super().__init__()
+        # Fragments (the within-stage TP gather) ride the base bracket
+        # unchanged: `handle` assembles the whole before `serve` runs, so both
+        # the local workers and the publish below see the real tensor.
+        super().__init__(fragments=fragments)
         self.module_map = module_map
         self.module_meta = module_meta if module_meta is not None else {}
         self.listener = listener
@@ -181,7 +187,7 @@ class PPInterleaver(Interleaver):
     # Producer side: publish owned values into the pull buffer
     # ------------------------------------------------------------------
 
-    def handle(self, provider: str, value: Any) -> Any:
+    def serve(self, provider: str, value: Any) -> Any:
         # Snapshot each worker's visit count BEFORE the mediators run: their
         # handle() advances it, and the published key must carry the visit the
         # peers' reads were tagged with.
@@ -189,7 +195,11 @@ class PPInterleaver(Interleaver):
             (mediator, mediator.iterations[provider])
             for mediator in self.mediators
         ]
-        value = super().handle(provider, value)
+        value = super().serve(provider, value)
+        # Publishing from serve — inside handle's gather bracket — is what puts
+        # the post-intervention value into the pull buffer as the workers saw
+        # it: under TP-within-a-stage that is the assembled whole, where
+        # handle's return value is already re-split for the model.
         # The step gate is served on every rank each step; it carries no data
         # and must not enter the pull buffer.
         if (

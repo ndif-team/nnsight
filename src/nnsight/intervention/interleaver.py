@@ -730,6 +730,25 @@ class Interleaver:
                 gathering = True
                 value = self.fragments.whole(provider, value)
 
+        value = self.serve(provider, value)
+
+        # Back to the piece the model's own forward expects, carrying whatever
+        # the workers left behind — so an edit to the assembled tensor reaches
+        # the model rather than being dropped with the gather.
+        if gathering:
+            value = self.fragments.fragment(provider, value)
+        return value
+
+    def serve(self, provider: str, value: Any) -> Any:
+        """Offer ``value`` to every mediator, then to any active caches; return
+        what the workers left.
+
+        Runs inside `handle`'s gather bracket, so on a sharded model what it
+        serves — and what it returns — is the assembled whole; the re-split for
+        the model happens afterwards, in `handle`. That is the seam a
+        distributed interleaver needs: overriding this (rather than `handle`)
+        lets it record the post-intervention value exactly as workers saw it.
+        """
         for mediator in self.mediators:
             try:
                 value = mediator.handle(provider, value)
@@ -758,11 +777,6 @@ class Interleaver:
             for cache in mediator.caches:
                 cache.observe(provider, served)
 
-        # Back to the piece the model's own forward expects, carrying whatever
-        # the workers left behind — so an edit to the assembled tensor reaches
-        # the model rather than being dropped with the gather.
-        if gathering:
-            value = self.fragments.fragment(provider, value)
         return value
 
     def check_dangling_mediators(self) -> None:
