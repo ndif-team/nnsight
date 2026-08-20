@@ -483,7 +483,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
         self.pp_listener = listener
 
         return PPInterleaver(
-            module_map, listener, pp_group.rank_in_group, module_meta
+            module_map,
+            listener,
+            pp_group.rank_in_group,
+            module_meta,
+            fragments=VLLMFragments(),
         )
 
     def _graft_pp_missing_envoys(self, meta_model: torch.nn.Module) -> None:
