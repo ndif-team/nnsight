@@ -54,6 +54,14 @@ if TYPE_CHECKING:
     from .fragments import Fragments
 
 
+# Location the driver serves once per generation step, per worker. An
+# open-ended ``tracer.iter[:]`` whose step body never parks reads this between
+# steps, so the loop advances at the model's pace instead of spinning the
+# thread; when generation ends, the read is left dangling and the standard
+# dangling-worker unwind ends the loop.
+STEP_GATE = "__nnsight_step__"
+
+
 class Event(enum.Enum):
     """What a parked worker is asking for.
 
@@ -190,6 +198,10 @@ class Mediator:
         # has reached it. See `handle` for how the two are matched up.
         self.iteration: int | None = 0
         self.iterations: dict[str, int] = defaultdict(int)
+        # How many times this worker has parked. tracer.iter reads it to tell
+        # whether a step's body parked at all; a park-free body under an
+        # open-ended loop must be paced by the step gate (see STEP_GATE).
+        self.parks: int = 0
         # Caches created by this worker's `tracer.cache()`. They observe every
         # location this run reaches (post-intervention); see Interleaver.handle.
         self.caches: list = []
@@ -290,12 +302,22 @@ class Mediator:
         sequentially.
         """
         mediator = cls.current(location)
+        # A distributed run may own only part of the model: give the interleaver a
+        # look at the raw event before the worker parks on it. Serving here (a
+        # remote-owned read answered with a lazy handle, a remote-owned write
+        # absorbed) keeps the worker off a location no local hook will ever fire.
+        # A mediator started bare (no interleaver) has no one to consult.
+        if mediator.interleaver is not None:
+            intercepted = mediator.interleaver.intercept(mediator, event, location, rest)
+            if intercepted is not None:
+                return intercepted[0]
         worker = getcurrent()
         iteration = (
             mediator.iteration
             if mediator.iteration is not None
             else mediator.iterations[location]
         )
+        mediator.parks += 1
         return worker.parent.switch((event, f"{location}.i{iteration}", *rest))
 
     @classmethod
@@ -340,7 +362,9 @@ class Mediator:
         [`Barrier`][nnsight.intervention.barrier.Barrier]). Its pending event carries
         no location, so the model side never serves it.
         """
-        getcurrent().parent.switch((Event.BARRIER, None))
+        worker = getcurrent()
+        worker.mediator().parks += 1
+        worker.parent.switch((Event.BARRIER, None))
 
     @property
     def alive(self) -> bool:
@@ -365,6 +389,7 @@ class Mediator:
         self.interleaver = interleaver
         self.iteration = 0
         self.iterations = defaultdict(int)
+        self.parks = 0
         self.caches = []
         self.transform = None
         self.worker = greenlet(run=self._run)
@@ -607,6 +632,24 @@ class Interleaver:
                 return True
         return False
 
+    def intercept(
+        self, mediator: Mediator, event: Event, location: str, rest: tuple
+    ) -> tuple | None:
+        """Look at a worker's event before it parks; optionally serve it in place.
+
+        Called from :meth:`Mediator.event` on the worker greenlet, with the raw
+        (untagged) ``location``. Returning ``None`` lets the worker park normally.
+        Returning a 1-tuple ``(value,)`` serves the event immediately: the worker
+        gets ``value`` back without parking and keeps running. The tuple wrapper is
+        what lets an intercept serve ``None`` itself (an absorbed write).
+
+        The base interleaver owns every location, so it never intercepts. A
+        distributed interleaver overrides this to answer reads of locations owned
+        by another rank (with a lazy handle resolved later) and to absorb writes to
+        them (the owning rank performs the same write locally).
+        """
+        return None
+
     def instrument(self, envoy: Envoy) -> None:
         """Install this interleaver's forward hooks on an envoy's module.
 
@@ -687,6 +730,25 @@ class Interleaver:
                 gathering = True
                 value = self.fragments.whole(provider, value)
 
+        value = self.serve(provider, value)
+
+        # Back to the piece the model's own forward expects, carrying whatever
+        # the workers left behind — so an edit to the assembled tensor reaches
+        # the model rather than being dropped with the gather.
+        if gathering:
+            value = self.fragments.fragment(provider, value)
+        return value
+
+    def serve(self, provider: str, value: Any) -> Any:
+        """Offer ``value`` to every mediator, then to any active caches; return
+        what the workers left.
+
+        Runs inside `handle`'s gather bracket, so on a sharded model what it
+        serves — and what it returns — is the assembled whole; the re-split for
+        the model happens afterwards, in `handle`. That is the seam a
+        distributed interleaver needs: overriding this (rather than `handle`)
+        lets it record the post-intervention value exactly as workers saw it.
+        """
         for mediator in self.mediators:
             try:
                 value = mediator.handle(provider, value)
@@ -715,11 +777,6 @@ class Interleaver:
             for cache in mediator.caches:
                 cache.observe(provider, served)
 
-        # Back to the piece the model's own forward expects, carrying whatever
-        # the workers left behind — so an edit to the assembled tensor reaches
-        # the model rather than being dropped with the gather.
-        if gathering:
-            value = self.fragments.fragment(provider, value)
         return value
 
     def check_dangling_mediators(self) -> None:

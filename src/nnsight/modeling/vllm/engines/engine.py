@@ -8,7 +8,6 @@ the output the request produced.
 
 from __future__ import annotations
 
-import pickle
 from typing import Any
 
 from vllm.v1.engine.llm_engine import LLMEngine
@@ -27,12 +26,14 @@ class NNsightLLMEngine(LLMEngine):
         results = self.engine_core.collective_rpc(
             "collect_nnsight", args=(finished, finished)
         )
-        # Ranks that hold no sampled output return nothing.
-        payload = next((result for result in results if result is not None), None)
-        if payload is None:
+        # Under PP every stage ships its own slots; merge them (a single-rank
+        # run reduces to that rank's payload).
+        from ..collect import merge_collected
+
+        collected = merge_collected(results)
+        if collected is None:
             return outputs
 
-        collected = pickle.loads(payload)
         for output in outputs:
             entry = collected.get(output.request_id)
             if entry is not None:

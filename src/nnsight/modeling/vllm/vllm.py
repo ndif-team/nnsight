@@ -249,6 +249,13 @@ class VLLM(Remotable):
 
         from .engines.engine import NNsightLLMEngine
 
+        # Cached prefix blocks skip the forward for the tokens they cover, so
+        # a repeated prompt's hooks see only the uncached tail (a 19-token
+        # prompt after one repetition presents a 3-token slab: 19 minus one
+        # 16-token block). Prompt-position reads and writes then bind to the
+        # wrong rows with no error anywhere. Off by default, exactly as on
+        # 0.7; an explicit caller choice still wins.
+        kwargs.setdefault("enable_prefix_caching", False)
         llm = LLM(
             repo_id,
             worker_cls=self._WORKER_CLS,
@@ -268,6 +275,9 @@ class VLLM(Remotable):
         # AsyncLLM runs its own output-handler loop rather than a synchronous
         # step(), so saves are collected by the streaming backend instead (see
         # nnsight.modeling.vllm.async_backend), and no engine subclass is needed.
+        # Same reasoning as _load_sync: cached prefix blocks hide prompt
+        # positions from the hooks on repeated prompts.
+        kwargs.setdefault("enable_prefix_caching", False)
         engine_args = AsyncEngineArgs(
             model=repo_id,
             worker_cls=self._WORKER_CLS,
