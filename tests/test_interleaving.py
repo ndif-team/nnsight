@@ -5,12 +5,14 @@ import nnsight
 import torch.nn as nn
 from greenlet import getcurrent
 
+from nnsight.intervention.barrier import Barrier
 from nnsight.intervention.envoy import Envoy
 from nnsight.intervention.interleaver import (
     Event,
     Interleaver,
     Mediator,
     OutOfOrderError,
+    Pending,
 )
 
 
@@ -71,7 +73,7 @@ class TestMediator:
         assert med.alive
         # A park carries the occurrence tag for the iteration the worker wants
         # (0 by default).
-        assert med.pending == (Event.VALUE, "loc.i0")
+        assert med.pending == Pending(Event.VALUE, "loc", 0)
 
     def test_handle_value_match_resumes_and_finishes(self):
         store = {}
@@ -88,7 +90,7 @@ class TestMediator:
         med.start()
         med.handle("other", 1)
         assert med.alive
-        assert med.pending == (Event.VALUE, "loc.i0")
+        assert med.pending == Pending(Event.VALUE, "loc", 0)
         assert "got" not in store
 
     def test_handle_is_noop_when_done(self):
@@ -100,24 +102,33 @@ class TestMediator:
         assert not med.alive
 
     def test_value_helper_parks_on_value_event(self):
-        # Mediator.value(loc) should yield a (VALUE, loc.i0) event and return the
-        # served value back into the worker.
+        # Mediator.value(loc) should park on (VALUE, loc, occurrence 0) and
+        # return the served value back into the worker.
         store = {}
         med = make_mediator("store['got'] = Mediator.value('here')", store=store)
         med.start()
-        assert med.pending == (Event.VALUE, "here.i0")
+        assert med.pending == Pending(Event.VALUE, "here", 0)
         med.handle("here", 42)
         assert store["got"] == 42
 
     def test_event_tags_location_with_iteration(self):
-        # Mediator.event(kind, location) tags the location with the worker's
-        # current iteration before switching the tuple to the parent.
+        # Mediator.event(kind, location) records the worker's current iteration
+        # alongside the location before switching to the parent.
         store = {}
         med = make_mediator(
             "store['got'] = Mediator.event(Event.VALUE, 'loc')", store=store
         )
         med.start()
-        assert med.pending == (Event.VALUE, "loc.i0")
+        assert med.pending == Pending(Event.VALUE, "loc", 0)
+
+    def test_pending_prints_as_location_and_occurrence(self):
+        # The location and occurrence are separate fields so the model side can
+        # match on either without building a string, but an error message wants
+        # them rejoined — printing is what OutOfOrderError interpolates.
+        assert str(Pending(Event.VALUE, "model.layers.16.output", 2)) == (
+            "model.layers.16.output.i2"
+        )
+        assert f"{Pending(Event.SWAP, 'loc', 0, 'edit')}" == "loc.i0"
 
     def test_iteration_binds_read_to_that_occurrence(self):
         # With iteration set to 1, a read waits past the model's first visit to a
@@ -128,11 +139,17 @@ class TestMediator:
             "store['got'] = Mediator.value('loc')",
             store=store,
         )
-        med.start()
-        assert med.pending == (Event.VALUE, "loc.i1")
-        med.handle("loc", "first")  # occurrence 0 — ignored, worker stays parked
-        assert med.alive and "got" not in store
-        med.handle("loc", "second")  # occurrence 1 — served
+        # Driven through an Interleaver rather than by calling `med.handle`
+        # directly: counting the visits is the interleaver's job (a worker parked
+        # elsewhere is never asked, so it could not count them itself), and this
+        # test is about which visit the read binds to.
+        il = Interleaver()
+        il.mediators.append(med)
+        with il:
+            assert med.pending == Pending(Event.VALUE, "loc", 1)
+            il.handle("loc", "first")  # occurrence 0 — ignored, worker stays parked
+            assert med.alive and "got" not in store
+            il.handle("loc", "second")  # occurrence 1 — served
         assert store["got"] == "second"
         assert not med.alive
 
@@ -159,6 +176,7 @@ class TestInterleaver:
         il.mediators.append(requester(s1))
         il.mediators.append(requester(s2))
         with il:
+            assert il.waiting == {"loc": 2}
             il.handle("loc", 7)
         assert s1["got"] == 7
         assert s2["got"] == 7
@@ -168,6 +186,128 @@ class TestInterleaver:
         il.mediators.append(make_mediator("pass"))  # never started -> not dangling
         il.cancel()
         assert il.mediators == []
+
+    def test_waiting_index_is_rebuilt_each_run(self):
+        # A prior run's wait count must not leak into the next run.
+        il = Interleaver()
+        first = requester({}, "a")
+        il.mediators.append(first)
+        with il:
+            assert il.waiting == {"a": 1}
+        il.cancel()
+
+        second = requester({}, "b")
+        il.mediators.append(second)
+        with il:
+            assert il.waiting == {"b": 1}
+
+    def test_cache_routes_do_not_stick_across_runs(self):
+        class Cache:
+            def subscriptions(self):
+                return {"a.output": ("a", "output")}
+
+        il = Interleaver()
+        first = requester({}, "a")
+        il.mediators.append(first)
+        with il:
+            first.caches.append(Cache())
+            il.reindex()
+            assert "a.output" in il.observers
+        il.cancel()
+
+        second = requester({}, "b")
+        il.mediators.append(second)
+        with il:
+            assert not il.observers
+
+    def test_only_ready_waiters_are_served(self):
+        il = Interleaver()
+        target, other = requester({}, "target"), requester({}, "other")
+        il.mediators.extend([target, other])
+        called = []
+        original = other.handle
+
+        def spy(*args):
+            called.append(args)
+            return original(*args)
+
+        other.handle = spy
+        with il:
+            il.handle("target", 1)
+
+        assert not called
+        assert other.iterations["target"] == 1
+
+    def test_waiting_route_moves_with_a_worker(self):
+        store = {}
+        mediator = make_mediator(
+            "store['a'] = Mediator.value('a')\n"
+            "store['b'] = Mediator.value('b')",
+            store=store,
+        )
+        il = Interleaver()
+        il.mediators.append(mediator)
+
+        with il:
+            assert il.waiting == {"a": 1}
+            il.handle("a", 1)
+            assert il.waiting == {"b": 1}
+            il.handle("b", 2)
+
+        assert store == {"a": 1, "b": 2}
+
+    def test_barrier_repark_uses_the_next_provider_occurrence(self):
+        # The first worker has already had its current occurrence counted when
+        # the second worker releases it from the barrier. Its next read of loc
+        # must therefore wait for the next hook, not be stranded on occurrence 0.
+        store = {}
+        barrier = Barrier(2)
+        first = make_mediator(
+            "store['first'] = Mediator.value('loc')\n"
+            "getcurrent().mediator().iteration = None\n"
+            "barrier()\n"
+            "store['after'] = Mediator.value('loc')",
+            store=store,
+            barrier=barrier,
+        )
+        second = make_mediator(
+            "store['second'] = Mediator.value('loc')\nbarrier()",
+            store=store,
+            barrier=barrier,
+        )
+        il = Interleaver()
+        il.mediators.extend([first, second])
+
+        with il:
+            il.handle("loc", 1)
+            assert first.pending == Pending(Event.VALUE, "loc", 1)
+            il.handle("loc", 2)
+
+        assert store == {"first": 1, "second": 1, "after": 2}
+
+    def test_targeted_cache_observes_only_its_subscription(self):
+        class Cache:
+            def __init__(self):
+                self.observed = []
+
+            def subscriptions(self):
+                return {"target.output": ("target", "output")}
+
+            def observe_selected(self, selected, value):
+                self.observed.append((selected, value))
+
+        il = Interleaver()
+        mediator = make_mediator("pass")
+        il.mediators.append(mediator)
+        cache = Cache()
+
+        with il:
+            mediator.caches.append(cache)
+            il.reindex()
+            il.handle("other.output", 1)
+            il.handle("target.output", 2)
+
+        assert cache.observed == [(('target', 'output'), 2)]
 
     def test_check_dangling_throws_into_parked_worker(self):
         il = Interleaver()
@@ -556,14 +696,11 @@ class TestCache:
         assert torch.equal(cache.model.l1.output, cache["model.l1"].output)
         assert torch.equal(cache.l1.output, cache["model.l1"].output)
 
-    def test_cache_after_partial_run_misses_earlier(self, envoy, model, x):
-        # A cache created after an intervention that parks at l2 misses the earlier
-        # l1 (already run this forward) but still captures l2 (the park point).
-        with envoy.trace(x) as tracer:
-            envoy.l2.output = envoy.l2.output  # parks at l2.output, past l1
-            cache = tracer.cache()
-        assert "model.l1" not in cache
-        assert cache["model.l2"].output is not None
+    def test_cache_must_be_created_before_model_access(self, envoy, x):
+        with pytest.raises(ValueError, match="before reading or modifying"):
+            with envoy.trace(x) as tracer:
+                envoy.l2.output = envoy.l2.output
+                tracer.cache(modules=[envoy.l2])
 
     def test_cache_captures_skipped_output(self, envoy, x):
         with envoy.trace(x) as tracer:

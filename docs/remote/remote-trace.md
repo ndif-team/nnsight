@@ -136,7 +136,7 @@ with model.trace("...", backend=backend):
 
 - Variables created **outside** the trace and mutated inside it won't be transmitted back. Create and `.save()` the value *inside* the block — see [remote-session.md](./remote-session.md).
 - The model identifier passed to `TransformersModel` must match an NDIF deployment. Run `nnsight.is_model_running("...")` before submitting.
-- A GPT-2 block's `.output` is a plain tensor `(batch, seq, hidden)` in current transformers — `model.transformer.h[i].output[0]` selects the first batch row. Attention submodules still return a tuple; don't assume — check `model.transformer.h[i].source`.
+- A GPT-2 block's `.output` is a plain tensor `(batch, seq, hidden)` in current transformers — `model.transformer.h[i].output` selects the first batch row. Attention submodules still return a tuple; don't assume — check `model.transformer.h[i].source`.
 - A `LOG` line that prints a multi-megabyte tensor floods the websocket. Print summaries, not raw tensors.
 - Local helper modules (anything not installed on the server) ship automatically via `pull_env`, or register them with `nnsight.register(...)`. See [register-local-modules.md](./register-local-modules.md).
 - Define helpers at module scope. Dynamically created functions (lambdas built in loops, `exec`-ed code) can confuse the source-based serializer.

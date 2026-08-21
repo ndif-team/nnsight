@@ -14,7 +14,6 @@ from __future__ import annotations
 from types import CodeType
 from typing import Any
 
-from ...intervention.batching import Batcher
 from ...intervention.interleaver import Mediator
 from ...intervention.tracer import InterleavingTracer
 from ...tracing.tracer import push_result
@@ -22,8 +21,30 @@ from ...intervention.util import clear_shared_locals, shared_locals
 from ...tracing.util import Scope
 
 
+def no_barrier(n: int) -> None:
+    """Refuse a barrier, which this runtime cannot hold.
+
+    A barrier releases when ``n`` of a trace's blocks have reached it, which
+    needs them all running against one forward. Here each invoke is a separate
+    vLLM request, scheduled independently and possibly in different steps
+    entirely, so the blocks never coexist and the barrier would simply never
+    release — a hang rather than an error. Say so at the call instead.
+    """
+    raise NotImplementedError(
+        f"tracer.barrier({n}) cannot work on vLLM: each invoke is its own "
+        "request and the engine schedules them independently, so the blocks "
+        "never run against the same forward and the barrier would never "
+        "release. Compute the shared value outside the trace, or put both "
+        "prompts in one invoke."
+    )
+
+
 class VLLMTracer(InterleavingTracer):
     """An [`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer] whose worker-building is callable on its own."""
+
+    def barrier(self, n: int) -> None:
+        """Not available here — see [`no_barrier`][nnsight.modeling.vllm.tracer.no_barrier]."""
+        no_barrier(n)
 
     def prepare(self, code: CodeType) -> tuple:
         """Build the trace's workers and combined call input, without running the model.
@@ -43,7 +64,7 @@ class VLLMTracer(InterleavingTracer):
         interleaver = self.envoy.interleaver
         # The batcher belongs to this trace; each Invoker adds its input to it through
         # self.tracer.batcher while the body runs to collect invokes.
-        self.batcher = Batcher(self.envoy)
+        self.batcher = self.envoy._batcher_class(self.envoy, self.kwargs)
         # >0 rows means direct input (one implicit invoke); 0 means invoke mode
         # (the body defines the batch via tracer.invoke(...)). Trace-level params
         # that aren't data go to the call.
@@ -75,9 +96,15 @@ class VLLMTracer(InterleavingTracer):
         """Build the workers, run the forward interleaved, push results back."""
         try:
             mediators, args, kwargs = self.prepare(code)
-            self.envoy.interleave(self.fn, *args, **kwargs)
-            for mediator in mediators:
-                push_result(self.info.frame, mediator.lcls)
+            try:
+                self.envoy.interleave(self.fn, *args, **kwargs)
+            finally:
+                # Pushed even when the run raises. A block's error is deferred to
+                # the collect and re-raised out of `interleave`, so pushing only
+                # on success would hand back a frame with none of the values that
+                # did arrive — including the ones from the invokes that finished.
+                for mediator in mediators:
+                    push_result(self.info.frame, mediator.lcls)
         finally:
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before it doesn't leave workers/batcher behind.

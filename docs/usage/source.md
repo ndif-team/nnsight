@@ -153,6 +153,26 @@ within one forward (e.g. an MoE expert loop) is indexed per fire.
   and on which versions.
 - **Requesting an operation out of execution order deadlocks → `OutOfOrderError`.**
   Reading `self_fc2_0.output` then `self_fc1_0.output` (fc1 runs first) is late.
+- **The *first* `.source` access on a module also raises `OutOfOrderError`, and it
+  is not an ordering mistake.** Instrumenting an operation rewrites the module's
+  forward, which can only happen *before* that forward runs. If the trace body
+  already read something, the model is mid-pass by the time the request lands, so
+  the instrumentation misses this pass and the interleaver reports it as having
+  run past the location. It is **per module** — warming `h[5].attn` does nothing
+  for `h[7].attn`, so a layer sweep hits it once per layer. Warm it up in a
+  throwaway trace first:
+
+    ```python
+    with model.trace(prompt):                        # warm-up: nothing else read
+        _ = model.transformer.h[5].attn.source.attention_interface_0.output[1].save()
+
+    with model.trace(prompt):                        # now the real trace works
+        qkv     = model.transformer.h[5].attn.c_attn.output.save()
+        pattern = model.transformer.h[5].attn.source.attention_interface_0.output[1].save()
+    ```
+
+    Accessing the source *first* in the block works too, but only when nothing you
+    need runs earlier in the forward — the warm-up trace has no such constraint.
 - **Skipping a whole module drops its source ops.** A skipped module's body never
   runs, so reading `skipped_module.source.<op>.output` is out of order. See
   [skip.md](skip.md).

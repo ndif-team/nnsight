@@ -57,7 +57,7 @@ print(model.tokenizer.decode(ids[0]))   # "...the city of New York City"
 
 # trace -> one forward
 with model.trace(PROMPT):
-    hidden = model.transformer.h[-1].output[0].save()
+    hidden = model.transformer.h[-1].output.save()
 ```
 
 - `generate` returns **token ids** (old nnsight's `generate` returned decoded records — that is now `model.pipe(...)`).

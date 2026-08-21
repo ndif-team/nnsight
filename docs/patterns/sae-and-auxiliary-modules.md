@@ -263,8 +263,83 @@ accessor in `tests/test_language.py` (`Heads` / `TestCustomEnvoys`) and
   trace runs `forward` and skips hooks — the right default for `model.lm_head(...)`
   in a logit-lens recipe, but it means `.output`/`.input` on the aux module's
   submodules are never populated. Pass `hook=True` to opt into the hook path.
+- **`hook=True` only exposes `nn.Module` children.** It runs the attachment's
+  `__call__` so its *submodules* fire; bare `nn.Parameter`s and plain Python
+  methods are not hook points and never will be. Most pretrained SAEs ship as an
+  array file (Gemma Scope is a `.npz` of `W_enc`/`W_dec`/`threshold`), so a
+  faithful loader has no submodules at all and `sae.encode.output` raises
+  `AttributeError: 'function' object has no attribute 'output'`. Give each step
+  you want to read its own module — see below.
 - **Device placement** of the SAE must match the activation site
   (`sae.to(model.device)`).
+
+## Making a parameter-based SAE observable
+
+The SAE above is built from `torch.nn.Linear` submodules, so `sae.encoder.output`
+is a hook point for free. Real pretrained dictionaries usually are not: they ship
+as an array file, and a faithful loader holds bare parameters and does the work in
+plain methods.
+
+```python
+class RawSAE(torch.nn.Module):                     # nothing here is hookable
+    def __init__(self):
+        super().__init__()
+        self.W_enc = torch.nn.Parameter(...)
+        self.W_dec = torch.nn.Parameter(...)
+    def encode(self, x):
+        return torch.relu(x @ self.W_enc)
+    def forward(self, x):
+        return self.encode(x) @ self.W_dec
+```
+
+`encode` is a method, so `sae.encode.output` raises
+`AttributeError: 'function' object has no attribute 'output'`. The values are
+computed — there is just nowhere to hang a hook.
+
+**Fix: make every value you want to read pass through a module.** `WrapperModule`
+is an identity module that exists for exactly this — it returns its input
+unchanged, so routing a value through it costs nothing and makes it hookable.
+
+```python
+from nnsight.modeling.transformers import WrapperModule
+
+class ModuleSAE(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encode = WrapperModule()              # now a hook point
+        self.decode = WrapperModule()
+        self.W_enc = torch.nn.Parameter(...)
+        self.W_dec = torch.nn.Parameter(...)
+        self.threshold = torch.nn.Parameter(...)
+
+    def forward(self, x):
+        pre = x @ self.W_enc
+        acts = self.encode(torch.relu(pre) * (pre > self.threshold))
+        return self.decode(acts @ self.W_dec)
+```
+
+Attach it, splice it in with an `edit`, and read its internals from any later
+trace:
+
+```python
+model.transformer.h[LAYER].sae = ModuleSAE().to(model.device)
+
+with model.edit(inplace=True):
+    acts = model.transformer.h[LAYER].output
+    model.transformer.h[LAYER].output[:] = model.transformer.h[LAYER].sae(acts, hook=True)
+
+with model.trace(prompt):
+    feats = model.transformer.h[LAYER].sae.encode.output.save()   # (B, S, n_features)
+    recon = model.transformer.h[LAYER].sae.decode.output.save()   # (B, S, d_model)
+```
+
+The `edit` matters: calling `sae(acts, hook=True)` inline and then reading
+`sae.encode.output` in the *same* trace body raises `OutOfOrderError`, because the
+call has already run the encoder by the time you ask for it.
+
+The same trick applies to anything you want to observe that is not already a
+module — an intermediate in a custom loss, a probe's pre-activation, a step inside
+an adapter. If you want to read it, route it through a module.
 
 ## Related
 

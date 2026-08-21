@@ -130,9 +130,13 @@ class TestSampling:
                 for _ in tracer.iter[0:3]:
                     greedy.append(vllm_gpt2.samples.item())
 
-        assert vllm_gpt2.tokenizer.batch_decode(
-            greedy
-        ) == [" New", " York", " City"]
+        # One id at a time: these are plain ints, and `batch_decode` reads a flat
+        # list of them as a sequence each in transformers 4 but as one sequence in
+        # transformers 5, so it cannot state this across both. (The other decodes
+        # in this suite pass tensors, which are unambiguous.)
+        assert [
+            vllm_gpt2.tokenizer.decode([token]) for token in greedy
+        ] == [" New", " York", " City"]
         assert sampled != greedy
 
     @torch.no_grad()
@@ -451,6 +455,43 @@ class TestDeferredErrors:
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
+    def test_a_raise_after_the_first_read_spares_the_engine(self, vllm_gpt2,
+                                                            ET_prompt):
+        # Both halves matter, and the test above has neither: the raise lands
+        # *after* the block has parked once, so its worker is dead while still
+        # holding a location, and `ignore_eos` keeps the request running past the
+        # step that would have retired it. The dead worker is then served again —
+        # and switching into a finished greenlet returns the arguments straight
+        # back, which used to store an activation where an event belongs and kill
+        # the engine core inside vLLM's own state update, taking every tenant's
+        # request with it.
+        with pytest.raises(RuntimeError, match="ValueError"):
+            with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=4,
+                                 ignore_eos=True):
+                hidden = vllm_gpt2.transformer.h[5].output.save()
+                raise ValueError("after the first read")
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_raise_inside_an_iter_loop_spares_the_engine(self, vllm_gpt2,
+                                                           ET_prompt):
+        # The same, reached the way a generation loop reaches it.
+        with pytest.raises(RuntimeError, match="ValueError"):
+            with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=6,
+                                 ignore_eos=True) as tracer:
+                for step in tracer.iter[:6]:
+                    logits = vllm_gpt2.logits.save()
+                    if step == 1:
+                        raise ValueError("mid-loop")
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
     def test_out_of_order_read_surfaces(self, vllm_gpt2, ET_prompt):
         # Reading a layer the forward already ran past leaves the worker parked with
         # nowhere to be served. When the request finishes it is surfaced as an
@@ -571,3 +612,159 @@ class TestCache:
         assert outputs[0].shape[0] == n_prompt
         assert outputs[1].shape[0] == 1
         assert outputs[2].shape[0] == 1
+
+
+class TestLazyDispatch:
+    """Building without ``dispatch=True``, then tracing.
+
+    The path a user takes when they construct a model and only later run
+    something on it: `__init__` builds the meta tree, and the first trace calls
+    `dispatch`, which brings up the engine and re-points the tree at it. Every
+    other test here dispatches eagerly, so nothing else covers it.
+    """
+
+    @torch.no_grad()
+    def test_first_trace_dispatches_and_reads(self, ET_prompt):
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM("gpt2", gpu_memory_utilization=0.1)
+        assert not model.dispatched
+        # The meta tree is there to write interventions against before any engine.
+        assert model.tokenizer is not None
+        assert model.transformer.h[5] is not None
+
+        with model.trace(ET_prompt, temperature=0.0, top_p=1):
+            hidden = model.transformer.h[5].output.save()
+            logits = model.logits.save()
+
+        assert model.dispatched
+        assert hidden.shape[0] == len(model.tokenizer.encode(ET_prompt))
+        assert model.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_dispatch_does_not_rebuild_the_meta_tree(self, ET_prompt):
+        # `__init__` already built one, and dispatch is about to re-point the envoy
+        # tree at whatever `_load` returns — so building a second, identical tree
+        # is a whole architecture instantiation for nothing.
+        from unittest import mock
+
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM("gpt2", gpu_memory_utilization=0.1)
+        tree = model._module
+
+        with mock.patch.object(
+            model, "_load_meta", side_effect=AssertionError("rebuilt the meta tree")
+        ):
+            model.dispatch()
+
+        assert model.dispatched
+        assert model._module is tree
+
+    @torch.no_grad()
+    def test_an_edit_written_before_dispatch_still_lands(self, ET_prompt):
+        # `edit()` dispatches for itself, since the block has to go to an engine.
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM("gpt2", gpu_memory_utilization=0.1,
+                     enable_prefix_caching=False)
+        with model.edit() as (tracer, edit):
+            hidden = model.transformer.h[5].output.save()
+        try:
+            assert model.dispatched
+            output = model.generate([ET_prompt], max_tokens=2, temperature=0.0,
+                                    ignore_eos=True)[0]
+            assert output.saves["hidden"].shape[0] == len(output.prompt_token_ids)
+        finally:
+            edit.clear()
+
+
+class TestPromptForms:
+    """What one invoke will take as its prompt.
+
+    vLLM's own prompt dicts are `TypedDict`s — plain dicts at runtime — so they
+    used to be taken for a tokenizer's output and die on `KeyError: 'input_ids'`.
+    """
+
+    @torch.no_grad()
+    def test_a_string(self, vllm_gpt2, ET_prompt):
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_token_id_list(self, vllm_gpt2, ET_prompt):
+        ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+        with vllm_gpt2.trace(ids, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_tokenizer_output(self, vllm_gpt2, ET_prompt):
+        inputs = vllm_gpt2.tokenizer(ET_prompt)
+        with vllm_gpt2.trace(inputs, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_vllm_tokens_prompt(self, vllm_gpt2, ET_prompt):
+        from vllm import TokensPrompt
+
+        ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+        with vllm_gpt2.trace(
+            TokensPrompt(prompt_token_ids=ids), temperature=0.0, top_p=1
+        ):
+            hidden = vllm_gpt2.transformer.h[5].output.save()
+            logits = vllm_gpt2.logits.save()
+
+        assert hidden.shape[0] == len(ids)
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_vllm_text_prompt(self, vllm_gpt2, ET_prompt):
+        with vllm_gpt2.trace({"prompt": ET_prompt}, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_each_invoke_takes_its_own_form(self, vllm_gpt2, ET_prompt, MSG_prompt):
+        # The forms mix freely, since each invoke is converted on its own.
+        from vllm import TokensPrompt
+
+        ids = vllm_gpt2.tokenizer.encode(MSG_prompt)
+        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+            with tracer.invoke(ET_prompt):
+                et = vllm_gpt2.logits.save()
+            with tracer.invoke(TokensPrompt(prompt_token_ids=ids)):
+                msg = vllm_gpt2.logits.save()
+
+        assert vllm_gpt2.tokenizer.decode(et.argmax(dim=-1)) == " Paris"
+        assert vllm_gpt2.tokenizer.decode(msg.argmax(dim=-1)) == " New"
+
+
+class TestModelRunnerSelection:
+    """nnsight instruments one of vLLM's two GPU model runners, and says so."""
+
+    def test_it_asks_for_the_runner_it_instruments(self):
+        # Set before the engine is built, since the worker processes inherit it.
+        import os
+
+        from nnsight.modeling.vllm import VLLM
+
+        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+        VLLM._require_v1_model_runner()
+        assert os.environ["VLLM_USE_V2_MODEL_RUNNER"] == "0"
+
+    def test_asking_for_the_other_one_is_refused(self):
+        # Overriding it silently would be worse: the engine comes up with no
+        # instrumentation and the first collect fails with a missing method.
+        import os
+
+        from nnsight.modeling.vllm import VLLM
+
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        try:
+            with pytest.raises(NotImplementedError, match="V2 GPU model runner"):
+                VLLM._require_v1_model_runner()
+        finally:
+            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)

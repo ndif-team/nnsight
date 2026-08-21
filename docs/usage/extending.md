@@ -109,9 +109,9 @@ with model.trace(torch.rand(1, 5)):
     lens = model.logit_lens(h0).save()
 ```
 
-Calling `self[1](hidden)` inside a trace runs that module's forward directly,
-out of execution order, without re-firing the interleaver's hooks (see
-`Envoy.__call__`) — the logit-lens idiom.
+Calling `self[1](hidden)` inside a trace runs that module out of execution
+order with the trace stood down, so it serves no values and spends no
+occurrences (see `Envoy.__call__`) — the logit-lens idiom.
 
 ## 3. Attaching a standalone module
 

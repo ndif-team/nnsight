@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable
 
 import torch
@@ -41,8 +42,8 @@ class VLLM(Remotable):
     process. Sampling settings (``temperature``, ``max_tokens``, ``top_p``, ...)
     are passed to ``trace``/``invoke`` rather than configured on the model, since
     each invoke is its own vLLM request. Read generated tokens through
-    ``model.logits`` / ``model.samples`` (or the streamed output in async), not
-    ``tracer.result`` — the latter is not served here.
+    ``model.logits`` / ``model.samples`` under ``tracer.iter``, or the whole
+    finished request through ``tracer.result``.
 
     Examples:
         Single prompt, edit an activation, read the logits::
@@ -79,7 +80,8 @@ class VLLM(Remotable):
             ...     logits = model.logits.save()
 
     Attributes:
-        vllm_entrypoint: The underlying ``vllm.LLM``, or None until dispatch.
+        vllm_entrypoint: The underlying ``vllm.LLM`` (sync) or ``AsyncLLM``
+            (async), or None until dispatch.
         tokenizer: The tokenizer vLLM resolved for the checkpoint.
     """
 
@@ -93,6 +95,9 @@ class VLLM(Remotable):
         # Whether this construction brought up the process group — so only then do we
         # tear it down (on dispatch and at exit), never a group nnsight found running.
         self._owns_distributed = False
+        # Edits installed on the engine, so `clear_edits` can reach them; a
+        # cleared one drops out (see registration.Registration.clear).
+        self._installed_edits: list = []
 
         # Model-parallel init has to happen before `Meta.__init__` opens its
         # meta-device context: vLLM builds real rank tensors here and later calls
@@ -103,6 +108,14 @@ class VLLM(Remotable):
             # Tear down only the group nnsight brought up — not one already running,
             # and not once per construction (atexit does not dedupe).
             atexit.register(VLLM._cleanup_distributed)
+
+        # A vLLM parallel layer called ad hoc — a logit lens — takes and returns
+        # one rank's piece, where the caller is holding whole tensors.
+        # `ParallelEnvoy` puts that right; a caller passing `envoys` of their own
+        # replaces it wholesale.
+        from .envoys import parallel_envoys
+
+        kwargs.setdefault("envoys", parallel_envoys())
 
         super().__init__(*args, **kwargs)
 
@@ -180,7 +193,7 @@ class VLLM(Remotable):
         CPU-only host (no CUDA at all) selects a CPU backend that never probes, so
         this is a no-op there too.
         """
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+        if torch.cuda.is_available():
             yield
             return
         from unittest import mock
@@ -215,13 +228,13 @@ class VLLM(Remotable):
         _ROPE_DICT.clear()
 
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-        if getattr(self.tokenizer, "pad_token", None) is None:
+        if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         return model
 
-    # vLLM already carries interventions through to the worker in this field, so
-    # the worker needs no transport of its own.
+    # The worker class vLLM instantiates in each of its processes; it installs the
+    # nnsight model runner, which is what deserializes and runs the blocks.
     _WORKER_CLS = "nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker"
 
     # A ready module (the worker-side runner wrapping the module vLLM already
@@ -229,7 +242,18 @@ class VLLM(Remotable):
     # meta tree; the caller sets the tokenizer.
 
     def _load(self, repo_id: str, **kwargs: Any) -> "Module":
-        meta_model = self._load_meta(repo_id, **kwargs)
+        # A lazily built model already has its meta tree — `Meta.__init__` built one
+        # to write interventions against — and `_update` is about to re-point the
+        # envoy tree at whatever comes back. Building a second, structurally
+        # identical tree here only costs a full architecture instantiation and
+        # repopulates the global rope cache that `_load_meta` then has to clear
+        # again. `dispatch=True` skips `__init__`'s build and arrives here with
+        # nothing, so it still builds.
+        meta_model = self.__dict__.get("_module")
+        if meta_model is None:
+            meta_model = self._load_meta(repo_id, **kwargs)
+
+        self._require_v1_model_runner()
 
         # The real engine brings up its own process group; the one __init__ made
         # to build the meta tree would collide with it. Only tear down a group this
@@ -243,6 +267,40 @@ class VLLM(Remotable):
             self.vllm_entrypoint = self._load_sync(repo_id, **kwargs)
 
         return meta_model
+
+    @staticmethod
+    def _require_v1_model_runner() -> None:
+        """Ask vLLM for the model runner nnsight instruments.
+
+        vLLM has two GPU model runners. nnsight's hooks arrive by subclassing the
+        original one and rebinding the name the worker resolves
+        ([`NNsightGPUWorker`][nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker]),
+        so on the other one the engine comes up with no instrumentation at all —
+        traces then fail at the first collect with a missing method rather than
+        anything that explains itself.
+
+        From vLLM 0.27 the second runner is the *default* for every non-MoE model
+        (`use_v2_model_runner` in vLLM's config: ``is_default_v2_architecture or
+        not is_moe``), so this is the ordinary case rather than an exotic one. The
+        switch is vLLM's own environment variable, which it consults ahead of its
+        defaults, and the engine's worker processes inherit it.
+
+        A caller who has asked for the other runner explicitly is told so, rather
+        than silently overridden or silently uninstrumented.
+        """
+        import os
+
+        key = "VLLM_USE_V2_MODEL_RUNNER"
+        asked = os.environ.get(key)
+        if asked not in (None, "", "0"):
+            raise NotImplementedError(
+                f"{key}={asked!r} selects vLLM's V2 GPU model runner, which "
+                "nnsight does not instrument yet — the engine would run with no "
+                "interventions installed. Unset it to trace, or drop nnsight and "
+                "use vLLM directly for that run."
+            )
+        # Older vLLM has no such setting and ignores it.
+        os.environ[key] = "0"
 
     def _load_sync(self, repo_id: str, **kwargs: Any) -> Any:
         from vllm import LLM
@@ -301,16 +359,23 @@ class VLLM(Remotable):
             kwargs = dict(kwargs)
             lora_requests.append(kwargs.pop("lora_request", None))
             prompts.append(self._prompt(*inputs))
-            params.append(SamplingParams(**kwargs))
+            param = SamplingParams(**kwargs)
+            # Which settings this invoke named, for `_attach_mediators` to leave
+            # alone. Recorded rather than inferred: the value a caller passed
+            # cannot be told from the one it would have had by default, and half
+            # of vLLM's defaults are the obvious thing to type.
+            param.nnsight_named = frozenset(kwargs)
+            params.append(param)
 
         return (prompts, params, lora_requests), {}
 
     def _prompt(self, *inputs: Any) -> Any:
         """Convert one invoke's input into a vLLM prompt.
 
-        Accepts a string, a list of token ids, or a tokenizer's output dict. A
-        request is one sequence, so anything carrying several prompts is rejected
-        here rather than silently generating from the first.
+        Accepts a string, a list of token ids, a tokenizer's output, or one
+        of vLLM's own prompt dicts (``TokensPrompt``, ``TextPrompt``, and the
+        multimodal forms). A request is one sequence, so anything carrying several
+        prompts is rejected here rather than silently generating from the first.
         """
         from vllm.inputs import TokensPrompt
 
@@ -321,8 +386,17 @@ class VLLM(Remotable):
             )
         prompt = inputs[0]
 
-        if isinstance(prompt, dict):
-            return self._tokenized_prompt(prompt)
+        # `Mapping`, not `dict`: a tokenizer hands back a `BatchEncoding`, which is
+        # a `UserDict` and so fails an `isinstance(..., dict)` test — which is why
+        # the tokenizer-output path below was unreachable from an actual tokenizer.
+        if isinstance(prompt, Mapping):
+            # That output is ours to convert. Anything else is one of vLLM's own
+            # prompt dicts — `TypedDict`s, so plain dicts at runtime — and the
+            # engine knows them better than we do; taking those for tokenizer
+            # output is how `TokensPrompt(...)` came back as `KeyError: 'input_ids'`.
+            if "input_ids" in prompt:
+                return self._tokenized_prompt(prompt)
+            return prompt
         if isinstance(prompt, str):
             return prompt
         if isinstance(prompt, (list, tuple)):
@@ -336,7 +410,7 @@ class VLLM(Remotable):
             )
         return prompt
 
-    def _tokenized_prompt(self, inputs: dict) -> Any:
+    def _tokenized_prompt(self, inputs: Any) -> Any:
         """Convert a tokenizer's ``{input_ids, attention_mask}`` output to a prompt.
 
         vLLM has no padding to mask — a request is exactly its own tokens — so a
@@ -369,14 +443,25 @@ class VLLM(Remotable):
 
         return TokensPrompt(prompt_token_ids=input_ids)
 
+    @staticmethod
+    def _sampling_kwargs(kwargs: dict) -> dict:
+        """A copy of `kwargs` with generation length spelled the way vLLM spells it.
+
+        vLLM's is ``max_tokens``; ``max_new_tokens`` is the ``LanguageModel`` API's
+        and is accepted on trace and generate alike, rewritten before it reaches
+        SamplingParams — where an unknown keyword now raises rather than being
+        quietly ignored. The copy is what lets a caller pass its own dict through
+        twice (``generate`` hands one to ``trace`` and keeps the original).
+        """
+        kwargs = dict(kwargs)
+        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
+        return kwargs
+
     def trace(self, *inputs: Any, **kwargs: Any) -> Any:
         from .tracer import VLLMTracer
 
-        # vLLM generation length is `max_tokens`; accept `max_new_tokens` (from the
-        # LanguageModel API) on trace and generate alike, rewriting before it reaches
-        # SamplingParams (where an unknown kwarg now raises).
-        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
+        kwargs = self._sampling_kwargs(kwargs)
 
         # `serve=url` runs the trace on a remote nnsight-serve engine; `api_key`
         # rides along with it. Pop both before they reach the base trace.
@@ -405,16 +490,196 @@ class VLLM(Remotable):
         kwargs.setdefault("fn", self._call)
         return super().trace(*inputs, **kwargs)
 
-    def generate(self, *inputs: Any, **kwargs: Any) -> Any:
-        """Alias for `trace`, for parity with other models' ``generate``.
+    def edit(
+        self,
+        *,
+        inplace: bool = True,
+        serve: str | None = None,
+        api_key: str | None = None,
+        backend: Any = None,
+    ) -> Any:
+        """Install a block on the engine, to run for every request it handles.
 
-        vLLM generation is driven by ``max_tokens`` (``trace`` rewrites
-        ``max_new_tokens`` to it), so there is no forward/generate distinction to draw.
-        Read generated tokens through ``model.logits``/``model.samples`` under
-        ``tracer.iter``, not ``tracer.result`` — the latter is never served here and a
-        worker reading it would park forever.
+        The vLLM form of [`Envoy.edit`][nnsight.intervention.envoy.Envoy.edit].
+        An ordinary edit is replayed by the envoy that stores it, which here is
+        the client — where there are no weights, so it would never run. This
+        sends the block to the engine instead, where every request afterwards
+        gets its own copy: requests you trace, and requests submitted by
+        something that has never heard of nnsight.
+
+        What the block saves comes back on that request's output, as
+        ``output.saves`` — the same place a trace's values arrive. For a request
+        you are tracing, read it through ``tracer.result.saves``.
+
+        The block is written like a trace body against the same envoy tree. It
+        belongs to no particular request, so there is nothing to
+        ``tracer.invoke(...)``.
+
+        Args:
+            inplace: Only ``True``. An edit here lives on the engine every caller
+                shares, so unlike the local form there is no copy to edit
+                instead.
+            serve: An nnsight-serve URL to install the block on, the counterpart
+                of ``trace(..., serve=url)``. Without it the block goes to this
+                process's own engine.
+            api_key: Sent as the ``ndif-api-key`` header alongside ``serve``.
+            backend: Optional backend for the underlying trace.
+
+        Returns:
+            ``(tracer, edit)`` — the tracer, whose ``iter``/``all`` is what lets
+            the block follow a request across its generated tokens rather than
+            seeing only the prefill; and the handle to
+            [`clear`][nnsight.modeling.vllm.registration.Registration.clear] it
+            with. [`clear_edits`][nnsight.modeling.vllm.vllm.VLLM.clear_edits]
+            clears every one still installed.
+
+        Examples:
+            Read one layer out of everything the engine runs::
+
+                >>> with model.edit() as (tracer, edit):     # doctest: +SKIP
+                ...     hidden = model.model.layers[16].output[0].save()
+                >>> outputs = model.generate(prompts, max_tokens=5)  # doctest: +SKIP
+                >>> outputs[3].saves["hidden"]               # doctest: +SKIP
+                >>> edit.clear()                             # doctest: +SKIP
+
+            Against a served engine, from a client with no GPU::
+
+                >>> with model.edit(serve="http://host:8000") as (tracer, edit):
+                ...     model.model.layers[16].output[0][:] = 0  # doctest: +SKIP
         """
-        return self.trace(*inputs, **kwargs)
+        from .registration import RegisteringTracer
+
+        if not inplace:
+            raise ValueError(
+                "a vLLM edit is installed on the engine itself, which every "
+                "caller shares — there is no copy to edit instead. Drop "
+                "inplace=False, or trace the requests you want to change."
+            )
+        return RegisteringTracer(self, backend=backend, serve=serve, api_key=api_key)
+
+    def clear_edits(self) -> None:
+        """Clear every edit still installed on the engine.
+
+        The local form drops a list held on the envoy; here each edit lives on
+        the workers, so each is cleared through its own handle — which means this
+        is synchronous-engine only, like `clear` itself. Use `aclear_edits` on an
+        async engine, where it raises rather than half-clearing.
+        """
+        for edit in list(self._installed_edits):
+            edit.clear()
+
+    async def aclear_edits(self) -> None:
+        """`clear_edits`, awaited — the async engine's form.
+
+        A separate method rather than a `clear_edits` that returns something
+        awaitable on an async engine: a coroutine nobody awaits never runs at
+        all, so the sync-looking call would leave every edit installed and say
+        nothing. That is the failure `Registration._rpc` refuses, and it is worth
+        refusing here too — `clear`/`aclear` already come in this pair.
+        """
+        for edit in list(self._installed_edits):
+            await edit.aclear()
+
+    def generate(self, *inputs: Any, **kwargs: Any) -> Any:
+        """Generate — as a trace when used as a ``with`` block, plainly when not.
+
+        ``with model.generate(...)`` is `trace`: vLLM has no forward/generate
+        split, so the two are the same thing and generation length is
+        ``max_tokens`` (``max_new_tokens`` is accepted and rewritten). Read the
+        generated tokens through ``model.logits``/``model.samples`` under
+        ``tracer.iter``, or through ``tracer.result``.
+
+        Called without a ``with`` block it just runs the engine and hands back
+        vLLM's request outputs, so an edit's values — which arrive on the
+        output — can be read without reaching past the model for
+        ``model.vllm_entrypoint``::
+
+            >>> with model.edit() as (tracer, edit):              # doctest: +SKIP
+            ...     hidden = model.model.layers[16].output[0].save()
+            >>> outputs = model.generate(prompts, max_tokens=5)   # doctest: +SKIP
+            >>> outputs[5].saves["hidden"]                        # doctest: +SKIP
+
+        Which of the two it is comes from the call site — the same test
+        [`traceable`][nnsight.intervention.envoy.traceable] makes for a method
+        used either way: capturing a block that is not there raises, and that is
+        the signal to run plainly.
+        """
+        from ...tracing.tracer import WithBlockNotFoundError
+
+        tracer = self.trace(*inputs, **kwargs)
+        try:
+            # Idempotent, and reads the caller's frame from the same depth
+            # `__enter__` would — so this only asks the question, and entering
+            # the block later still captures normally.
+            tracer.capture()
+        except WithBlockNotFoundError:
+            return self._generate(*inputs, **kwargs)
+        return tracer
+
+    def _generate(self, *inputs: Any, **kwargs: Any) -> Any:
+        """Run the engine with no block of this caller's own.
+
+        Registered blocks still run — they belong to the engine, not to the
+        caller — so their values come back on the outputs this returns.
+
+        Args:
+            *inputs: One prompt, or a list of them. Unlike a trace there is no
+                invoke to be one-per-request, so a list is simply a batch.
+            **kwargs: Sampling settings for the whole batch.
+        """
+        from vllm import SamplingParams
+
+        if not self.dispatched:
+            self.dispatch()
+
+        kwargs = self._sampling_kwargs(kwargs)
+        lora_request = kwargs.pop("lora_request", None)
+        params = SamplingParams(**kwargs)
+
+        prompts = inputs[0] if len(inputs) == 1 else list(inputs)
+        if self._async_engine:
+            # An async engine has no call that runs to completion, so this cannot
+            # hand back outputs — it hands back the await that will. Same shape
+            # either way: `outputs = model.generate(...)` on a sync engine,
+            # `outputs = await model.generate(...)` on an async one.
+            return self._generate_async(prompts, params, lora_request)
+        return self.vllm_entrypoint.generate(
+            prompts, params, lora_request=lora_request
+        )
+
+    async def _generate_async(self, prompts: Any, params: Any, lora_request: Any) -> list:
+        """Drive the async engine to completion and collect, as the sync path does.
+
+        Each prompt is its own request, submitted together so the engine batches
+        them, and each is drained to its final output. The collect is done here
+        because nothing else will: the streaming backend runs only for traces
+        nnsight itself submitted, so without this a registered block's values
+        would have no way onto these outputs.
+        """
+        import asyncio
+        import uuid
+
+        from .engines.engine import acollect, attach
+
+        engine = self.vllm_entrypoint
+        if not isinstance(prompts, (list, tuple)):
+            prompts = [prompts]
+
+        async def run(prompt: Any) -> Any:
+            request_id = uuid.uuid4().hex
+            output = None
+            async for output in engine.generate(
+                prompt, params, request_id, lora_request=lora_request
+            ):
+                pass
+            if output is None:
+                return None
+            entry = await acollect(engine, request_id, output)
+            if entry is not None:
+                attach(output, entry)
+            return output
+
+        return list(await asyncio.gather(*(run(prompt) for prompt in prompts)))
 
     def _call(
         self, prompts: list, params: list, lora_requests: list, **kwargs: Any
@@ -436,26 +701,56 @@ class VLLM(Remotable):
         is where the tracer reads a block's results from once the run is over. A
         worker that raised carries its error back too; re-raise the first real one
         (a ``tracer.stop()`` is control flow and stays silent).
+
+        A name can come back more than once — one invoke per request, and one
+        sampled sequence per ``n`` within each — because the block ran once for
+        each. Those are separate values rather than copies of one thing, so they
+        come back as a list, in submission order. A name saved by exactly one run
+        stays that value, which is every trace that does not use several invokes
+        or ``n``; so does one whose runs all saved the same object, as they do for
+        ``tracer.result``, which is the request's single output however many
+        sequences sampled from it.
         """
         from ...intervention.errors import raise_deferred
         from ...tracing.tracer import mark
         from .collect import merge_shared_saves
 
         per_request_saves = []
-        for mediator, output in zip(mediators, outputs):
-            saves = getattr(output, "saves", {})
-            per_request_saves.append(saves)
-            for name, value in saves.items():
-                mark(value)  # marking results after the run; no trace active to guard
-                mediator.lcls[name] = value
+        values: dict[str, list] = {}
+        for output in outputs:
+            # The trace's own names only. `output.saves` also carries whatever a
+            # registered block saved for this request, and those must not be
+            # pushed into the trace's variables.
+            sequences = getattr(output, "nnsight_sequences", None)
+            if not sequences:
+                sequences = [getattr(output, "nnsight_saves", {})]
+            per_request_saves.append(sequences[0])
+            for saves in sequences:
+                for name, value in saves.items():
+                    mark(value)  # results marked after the run; no trace to guard
+                    values.setdefault(name, []).append(value)
 
-        # A name saved above the invoke blocks ships back once per request,
-        # each copy carrying that request's writes. Merge the copies
-        # element-wise so the result reads as if every invoke had mutated one
-        # shared object (the local semantics). The merged containers are new
-        # objects; mark them saved so the result push keeps them.
-        for value in merge_shared_saves(mediators, per_request_saves).values():
+        # A name bound and saved above the invoke blocks is one object locally,
+        # and ships back once per request with that request's writes; merge those
+        # copies element-wise so the result reads as it would locally. The merged
+        # containers are new objects; mark them so the result push keeps them.
+        shared = merge_shared_saves(mediators, per_request_saves)
+        for value in shared.values():
             mark(value)
+
+        for name, found in values.items():
+            if name in shared:
+                continue
+            value = found[0]
+            # Several runs, but one object: `tracer.result` is the request's one
+            # output, served to every sequence's block, so it is not `n` values
+            # of anything. Identity is preserved across the collect, which pickles
+            # them together.
+            if len(found) > 1 and any(other is not value for other in found):
+                value = found
+                mark(value)  # the list itself is new, and is what gets pushed
+            for mediator in mediators:
+                mediator.lcls[name] = value
 
         for output in outputs:
             raise_deferred(getattr(output, "nnsight_error", None))
@@ -475,6 +770,12 @@ class VLLM(Remotable):
         keyword arguments (a typo'd sampling setting) are refused too, rather than
         silently ignored the way the fill loop otherwise would.
 
+        "Did not set them" is what the invoke recorded in `_batch`, not "still
+        equals vLLM's default". The two are not the same: ``temperature=1.0`` and
+        ``max_tokens=16`` *are* the defaults, so an invoke asking for either used
+        to have it overwritten by the trace-level setting while a neighbouring
+        ``temperature=0.99`` was honoured.
+
         Returns:
             The workers that were attached, in request order.
         """
@@ -482,12 +783,11 @@ class VLLM(Remotable):
 
         from ...tracing.tracer import skippable
 
-        attached, orphaned = [], []
+        attached = []
         for mediator in self.interleaver.mediators:
-            (attached if mediator.batch_group is not None else orphaned).append(mediator)
-
-        for mediator in orphaned:
-            if mediator.node is not None and skippable(mediator.node):
+            if mediator.batch_group is not None:
+                attached.append(mediator)
+            elif mediator.node is not None and skippable(mediator.node):
                 raise ValueError(
                     "A `tracer.invoke(...)` with no prompt has no vLLM request to run "
                     "on, so its interventions would be silently dropped. Each invoke is "
@@ -505,8 +805,20 @@ class VLLM(Remotable):
 
         for mediator, param in zip(attached, params):
             param.extra_args = {"nnsight_mediator": dumps(mediator)}
+            # A prefix-cached token is served from the KV cache without a forward
+            # pass, so no hook fires for it and the intervention silently sees a
+            # short activation — the trace reads only the tokens that were
+            # recomputed. That is invisible at the call site (no error, just fewer
+            # rows), and it bites exactly when a prompt repeats or shares a prefix
+            # with an earlier one, which is the normal case for a dataset sweep.
+            # Interventions are worth more than the cache hit, so force the
+            # recompute. Older vLLM has no such field; there the cache is not
+            # consulted this way and the read is whole anyway.
+            if hasattr(param, "skip_reading_prefix_cache"):
+                param.skip_reading_prefix_cache = True
+            named = getattr(param, "nnsight_named", frozenset())
             for attr, value in kwargs.items():
-                if getattr(param, attr) == getattr(default, attr):
+                if attr not in named:
                     setattr(param, attr, value)
 
         return attached
@@ -542,14 +854,6 @@ class VLLM(Remotable):
         state = super().__getstate__()
         # The engine is a live process handle; the far side has its own.
         state["vllm_entrypoint"] = None
-        state["_async_engine"] = self._async_engine
         if self.tokenizer is not None:
             self.tokenizer._persistent_id = "Tokenizer"
-        state["tokenizer"] = self.tokenizer
         return state
-
-    def __setstate__(self, state: dict) -> None:
-        super().__setstate__(state)
-        self.vllm_entrypoint = state["vllm_entrypoint"]
-        self._async_engine = state.get("_async_engine", False)
-        self.tokenizer = state["tokenizer"]

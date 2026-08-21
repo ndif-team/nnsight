@@ -20,19 +20,11 @@ happen once per value however many workers read it.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from ...intervention.batching import Batcher
 
 
 class VLLMBatcher(Batcher):
     """A [`Batcher`][nnsight.intervention.batching.Batcher] over vLLM's flat token axis."""
-
-    def __init__(self, envoy: Optional[object] = None) -> None:
-        # The envoy is optional here alone: the model runner constructs this
-        # before there is a tree to hand it, and nothing in the row math needs
-        # one — the spans come from the scheduler, not from an invoke.
-        super().__init__(envoy)
 
     @property
     def batching(self) -> bool:

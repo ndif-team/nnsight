@@ -40,7 +40,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
+import warnings
+
 import torch
+from torch._guards import detect_fake_mode
 
 from ..intervention.envoy import Envoy, traceable
 from .huggingface import HuggingFaceModel
@@ -124,6 +127,40 @@ def _infer_task(module: torch.nn.Module) -> str:
     raise ValueError(
         f"Could not infer a pipeline task for a pre-loaded {type(module).__name__}; "
         "pass task=... explicitly (e.g. TransformersModel(model, task='text-generation'))."
+    )
+
+
+def _refuse_noop_peft(peft_id: str, caught: list) -> None:
+    """Turn peft's "missing adapter keys" warning into an error.
+
+    peft places adapter weights by **name** and drops the ones it cannot match. As
+    ``lora_B`` initialises to zeros, an adapter whose weights did not land is
+    exactly the identity -- the model behaves like the base checkpoint, so a
+    base-vs-adapter comparison silently becomes base-vs-base with every number in
+    it plausible. peft warns about this precisely because ``from_pretrained``
+    cannot return its load result (see `PeftModel.from_pretrained`), but a warning
+    is easy to miss in a long load, and by the time it matters the run is finished.
+
+    Only the mismatch warns: an adapter whose keys all place -- including a freshly
+    initialised one whose ``lora_B`` is legitimately still zero -- produces none.
+    """
+    missing = [
+        warning
+        for warning in caught
+        if "missing adapter keys" in str(warning.message).lower()
+    ]
+    if not missing:
+        return
+
+    raise ValueError(
+        f"The PEFT adapter {peft_id!r} did not attach: peft could not match its "
+        "weights to this model's modules by name, dropped them, and left the "
+        "adapter at its zero initialisation -- so it is a no-op and the model "
+        "would behave exactly like the base checkpoint. The usual cause is a "
+        "`task=` that builds a different architecture than the adapter was trained "
+        "against: e.g. task='text-generation' where the adapter targets a "
+        "multimodal config, which needs task='image-text-to-text'. peft reported: "
+        f"{str(missing[0].message)[:400]}"
     )
 
 
@@ -245,6 +282,19 @@ class TransformersModel(HuggingFaceModel):
         # model. Applied at load time (below); server-side it can be swapped
         # per request via _remoteable_set_env without redeploying the base.
         self.peft = peft
+
+        # A sharded module called ad hoc — a logit lens — deals in one rank's
+        # slices either side, where the caller is holding whole tensors.
+        # `TPEnvoy` corrects that, but it is keyed by module *type* (every Linear
+        # and Embedding in the tree) because the style that decides the
+        # correction is stamped on the instance at load rather than carried by a
+        # class. So it goes on only when this construction is actually going to
+        # shard something; an ordinary model keeps the plain `Envoy` it always
+        # had. A caller passing `envoys` of their own replaces it wholesale.
+        from .tp.envoys import tp_envoys, wants_tensor_parallel
+
+        if wants_tensor_parallel(repo_id, kwargs):
+            kwargs.setdefault("envoys", tp_envoys())
 
         super().__init__(repo_id, *args, **kwargs)
 
@@ -448,9 +498,14 @@ class TransformersModel(HuggingFaceModel):
         if self.peft is not None:
             # The pipeline loaded the base weights; wrap them with the adapter's
             # real weights so the dispatched model runs with the adapter applied.
-            self.pipeline.model = _import_peft().PeftModel.from_pretrained(
-                self.pipeline.model, self.peft
-            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                self.pipeline.model = _import_peft().PeftModel.from_pretrained(
+                    self.pipeline.model, self.peft
+                )
+            for warning in caught:
+                warnings.warn(warning.message, warning.category)
+            _refuse_noop_peft(self.peft, caught)
         self._sync()
         return self.pipeline.model
 
@@ -603,8 +658,22 @@ class TransformersModel(HuggingFaceModel):
 
         if self.peft is not None:
             rebind(self._module.unload())
+            # The module is the base checkpoint from here; keep `self.peft` honest
+            # so a refused load below leaves this envoy self-consistent.
+            self.peft = None
+
         if requested:
-            rebind(_import_peft().PeftModel.from_pretrained(self._module, requested))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                adapted = _import_peft().PeftModel.from_pretrained(self._module, requested)
+            for warning in caught:
+                warnings.warn(warning.message, warning.category)
+            # Check before rebinding, so a no-op adapter never becomes this envoy's
+            # module. A swap is where this matters most: sweeping several adapters
+            # over one loaded base is exactly the workload where every organism
+            # silently collapsing to the base checkpoint looks like a real result.
+            _refuse_noop_peft(requested, caught)
+            rebind(adapted)
 
         self.peft = requested
 
@@ -994,15 +1063,24 @@ class TransformersModel(HuggingFaceModel):
         model (GPT-2 family) would mispredict a short prompt padded up to a longer
         one. Deriving ``position_ids`` from the attention mask keeps every real token
         at its true 0-based position. Only applied to a genuinely left-padded,
-        multi-row, text-only batch: a single or unpadded row needs no correction, a
-        right-padded (encoder) batch is already correct, and a multimodal model
-        derives its own positions from the image-expanded sequence.
+        text-only batch: an *unpadded* batch needs no correction (caught by
+        ``mask.all()``), a right-padded (encoder) batch is already correct, and a
+        multimodal model derives its own positions from the image-expanded sequence.
+        Row count is deliberately not part of this test -- a single padded row needs
+        the correction just as much as a padded batch does, and gating on
+        ``shape[0] > 1`` made the same prompt answer differently depending on whether
+        another row happened to share its batch.
         """
         mask = encoding.get("attention_mask")
+        # Under `scan` the forward runs on fake tensors to propagate shapes only, so
+        # there are no real mask values to read -- `bool(mask.all())` would raise
+        # GuardOnDataDependentSymNode. position_ids do not affect shapes, so skipping
+        # the correction here changes nothing a scan can observe.
+        if detect_fake_mode() is not None:
+            return
         if (
             not isinstance(mask, torch.Tensor)
             or mask.dim() != 2
-            or mask.shape[0] <= 1
             or bool(mask.all())
             or getattr(self.tokenizer, "padding_side", None) != "left"
             or any(key not in self._TEXT_KEYS for key in encoding)

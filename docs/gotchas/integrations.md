@@ -3,7 +3,7 @@ title: Integration Pitfalls
 one_liner: Wrapper-specific traps — deprecated model aliases, .source can't drill into submodule calls, auxiliary modules need hook=True, vLLM specifics.
 tags: [gotcha, transformers, source, vllm, sae, lora]
 related: [docs/models/transformers-model.md, docs/usage/source.md, docs/models/vllm.md]
-sources: [src/nnsight/modeling/language.py:19, src/nnsight/intervention/source.py:536, src/nnsight/intervention/envoy.py:682, src/nnsight/modeling/vllm/vllm.py]
+sources: [src/nnsight/modeling/language.py:19, src/nnsight/intervention/source.py:536, src/nnsight/intervention/envoy.py:726, src/nnsight/modeling/vllm/vllm.py]
 ---
 
 # Integration Pitfalls
@@ -80,7 +80,7 @@ with model.trace("Hello world"):
 You attach an SAE/adapter, call it inside a trace, and reading `aux.submodule.output` raises `OutOfOrderError` / never fires.
 
 ### Cause
-`Envoy.__call__` defaults to `hook=False` (`src/nnsight/intervention/envoy.py:682`): while interleaving it runs `module.forward(...)` directly, skipping PyTorch's hook dispatch, so the module's submodules aren't observable. Pass `hook=True` to route through `module(...)` so its hooks fire. Apply the aux module in an `edit()` (a default intervention replayed on every trace) and observe its internals in a subsequent trace.
+`Envoy.__call__` defaults to `hook=False`: while interleaving it runs the module normally but stands the trace down, so the module's submodules aren't observable. Pass `hook=True` to let the trace watch the call. Apply the aux module in an `edit()` (a default intervention replayed on every trace) and observe its internals in a subsequent trace.
 
 ### Right code
 ```python

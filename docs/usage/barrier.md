@@ -120,21 +120,21 @@ with model.trace() as tracer:
     b = tracer.barrier(3)
 
     with tracer.invoke(source_a):
-        a5 = model.transformer.h[5].output[0]   # site 1: mine, read it now
+        a5 = model.transformer.h[5].output   # site 1: mine, read it now
         b()                                     # round 1
         b()                                     # round 2: not mine, still attend
 
     with tracer.invoke(source_b):
         b()                                     # round 1: not mine — wait first
-        a8 = model.transformer.h[8].output[0]   # site 2: only now may I read
+        a8 = model.transformer.h[8].output   # site 2: only now may I read
         b()                                     # round 2
 
     with tracer.invoke(base):
         b()
-        h5 = model.transformer.h[5].output[0]   # site 1
+        h5 = model.transformer.h[5].output   # site 1
         h5[:, -1] = a5[:, -1]
         b()
-        h8 = model.transformer.h[8].output[0]   # site 2
+        h8 = model.transformer.h[8].output   # site 2
         h8[:, -1] = a8[:, -1]
         logits = model.lm_head.output[:, -1].save()
 ```
@@ -148,10 +148,10 @@ written there, and the write raises `OutOfOrderError`:
 
 ```python
     with tracer.invoke(source_a):
-        a5 = model.transformer.h[5].output[0]
+        a5 = model.transformer.h[5].output
         b()
     with tracer.invoke(source_b):
-        a8 = model.transformer.h[8].output[0]   # too early — advances past h[5]
+        a8 = model.transformer.h[8].output   # too early — advances past h[5]
         b()
 ```
 
@@ -173,6 +173,10 @@ still at site *i*.
 - **A barrier is per-trace.** Create it inside the `with model.trace()` block.
 - **An early `return` that skips a `barrier()` in one invoke hangs that round** —
   every participant must reach it.
+- **Not available on vLLM.** Each invoke there is a separate engine request,
+  scheduled independently, so the blocks never run against one forward — a barrier
+  could not release. `tracer.barrier(n)` raises `NotImplementedError` rather than
+  hanging.
 - **Reading a later site too early breaks an earlier one.** With several sites,
   put each source's read *after* the rounds for every site before it; requesting
   a location is what advances the model. See above.

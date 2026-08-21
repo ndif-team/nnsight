@@ -13,8 +13,8 @@ a local run would, so reading a ``.save()``d value after the block just works::
 
 ``api_key`` (optional) is sent as the ``ndif-api-key`` header. The server's response
 is a ``torch.save`` of ``{"saves": {name: value}, "error": <deferred or None>}`` —
-saved values only; generated tokens are not returned. A build or runtime error comes
-back as ``error`` and is re-raised at the client with its real type and traceback; a
+saved values only, so read generated tokens by saving ``tracer.result``. A build or
+runtime error comes back as ``error`` and is re-raised at the client with its real type and traceback; a
 transport/service failure (e.g. the engine not ready) surfaces as ``ConnectionError``.
 """
 
@@ -34,9 +34,6 @@ if TYPE_CHECKING:
 class LocalServeBackend(Backend):
     """Send a trace to an nnsight-serve instance and bring its saves home."""
 
-    CONNECT_TIMEOUT: float = 10.0
-    READ_TIMEOUT: float = 600.0
-
     def __init__(self, model: Any, host: str, api_key: Optional[str] = None) -> None:
         self.model = model
         self.host = host.rstrip("/")
@@ -53,29 +50,15 @@ class LocalServeBackend(Backend):
         import httpx
 
         from ....intervention.errors import raise_deferred
+        from . import http
 
-        headers = {
-            "Content-Type": "application/octet-stream",
-            "nnsight-compress": "False",
-        }
-        if self.api_key:
-            headers["ndif-api-key"] = self.api_key
-
-        with httpx.Client(
-            timeout=httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
-        ) as client:
+        with httpx.Client(timeout=http.timeout()) as client:
             response = client.post(
-                f"{self.host}/v1/nnsight/generate", content=blob, headers=headers
+                f"{self.host}/v1/nnsight/generate",
+                content=blob,
+                headers=http.headers(self.api_key),
             )
-
-        if response.status_code != 200:
-            try:
-                detail = response.json().get("detail", response.reason_phrase)
-            except Exception:
-                detail = response.reason_phrase
-            raise ConnectionError(
-                f"nnsight-serve returned {response.status_code}: {detail}"
-            )
+        http.check(response)
 
         result = torch.load(
             io.BytesIO(response.content), map_location="cpu", weights_only=False

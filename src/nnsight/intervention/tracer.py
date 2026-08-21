@@ -183,7 +183,7 @@ class InterleavingTracer(Tracer):
         detach: bool = True,
         include_output: bool = True,
         include_inputs: bool = False,
-        non_blocking: bool = True,
+        non_blocking: bool = False,
     ) -> CacheView:
         """Record activations of many modules at once during the run.
 
@@ -195,8 +195,8 @@ class InterleavingTracer(Tracer):
             cache["model.transformer.h.0"].output      # by path
             cache.transformer.h[0].output              # or by navigation
 
-        Only modules the run reaches *after* this call are captured. Values are
-        recorded post-intervention. In a generation loop a module is captured once
+        Declare the cache before reading or modifying a model value. Values are
+        recorded post-intervention; in a generation loop a module is captured once
         per step (``len(cache[path])`` is the step count).
 
         Args:
@@ -206,11 +206,23 @@ class InterleavingTracer(Tracer):
             detach: Detach captured tensors from the autograd graph.
             include_output: Capture each module's output.
             include_inputs: Capture each module's inputs.
-            non_blocking: Use an async (non-blocking) device transfer (default True).
+            non_blocking: Use an async (non-blocking) device transfer (default
+                ``False``). ``True`` enqueues the copy and returns without
+                synchronising, so a capture off a CUDA device can be read while the
+                copy is still in flight -- reading a CPU tensor does not synchronise
+                CUDA. Only pass ``True`` if you
+                synchronise yourself before reading the cache.
                 Safe under nnsight's single-stream execution and faster; set False if
                 you move captured tensors across CUDA streams yourself and want the
                 copy synchronized before use.
         """
+        mediator = Mediator.current("tracer.cache()")
+        if mediator.pending is not None:
+            raise ValueError(
+                "tracer.cache() must be declared before reading or modifying a "
+                "model value"
+            )
+
         cache = Cache(
             self.envoy,
             modules=modules,
@@ -221,9 +233,9 @@ class InterleavingTracer(Tracer):
             include_inputs=include_inputs,
             non_blocking=non_blocking,
         )
-        # The trace body runs in the worker greenlet; register the cache on its
-        # mediator so the interleaver feeds it every location from here on.
-        Mediator.current("tracer.cache()").caches.append(cache)
+        # The trace body runs in the worker greenlet; register the cache before
+        # the interleaver builds this run's fixed observer routes.
+        mediator.caches.append(cache)
         # Save so the view survives past the trace (like a .save()d value). The
         # view is a virtual root above the model (see CacheView).
         return save(CacheView(cache, None))

@@ -15,14 +15,18 @@ from __future__ import annotations
 def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
     """Merge same-name saves across a multi-invoke trace's requests, in place.
 
-    A name shipped by MORE than one request is a shared outer save; its copies
-    merge element-wise — same-length lists slot-wise with ``None`` as the
+    A name that was bound and saved ABOVE the invokes (``mediator.presaved``) is
+    one object locally, so its per-request copies merge element-wise — same-length lists slot-wise with ``None`` as the
     unwritten marker (the common pattern: a pre-sized slot list each invoke
     fills at its own index), dicts by key-union, everything else (and any
     conflicting slot several requests wrote) keeping the later request's copy —
     and the merged value is written into every mediator's scope so results push
-    identically whichever mediator they're read from. A name only one request
-    shipped stays exactly as that request returned it.
+    identically whichever mediator they're read from.
+
+    A name each block saved for itself is NOT merged, however many requests
+    shipped it: those are separate values, not copies of one, and merging them
+    kept only the last — which is how three prompts came back holding one
+    prompt's activation. The caller returns those as a list instead.
 
     Returns the merged shared values by name (the caller re-marks them saved:
     the merge builds new containers the save-gate hasn't seen).
@@ -39,10 +43,16 @@ def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
             return {**a, **b}
         return b
 
+    presaved: set = set()
+    for mediator in mediators:
+        presaved |= getattr(mediator, "presaved", set())
+
     counts: dict = {}
     merged: dict = {}
     for saves in per_request_saves:
         for name, value in saves.items():
+            if name not in presaved:
+                continue
             counts[name] = counts.get(name, 0) + 1
             merged[name] = merge_pair(merged[name], value) if name in merged else value
     shared = {name: value for name, value in merged.items() if counts[name] > 1}

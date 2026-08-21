@@ -31,7 +31,7 @@ needed: no memo, no ``watch``/``release``, no extra hooks.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 
@@ -42,14 +42,18 @@ from ...util import apply
 def _tp_world_size() -> int:
     """How many ranks this engine's tensor-parallel group spans.
 
-    ``1`` when there is no group yet — a client building a meta tree has vLLM's
-    single-rank gloo group and nothing model-parallel — which is also the answer
-    that means "nothing here is a fragment".
+    The one caller is `VLLMFragments.instrument`, which runs while a worker builds
+    its tree in `NNsightGPUModelRunner.load_model` — after vLLM has initialized the
+    group. The fallback is for a tree built anywhere else: ``1`` is also the answer
+    that means "nothing here is a fragment", so degrading to it leaves an
+    unsharded tree rather than failing the load.
     """
     try:
-        from vllm.distributed.parallel_state import get_tp_group
+        from vllm.distributed.parallel_state import (
+            get_tensor_model_parallel_world_size,
+        )
 
-        return get_tp_group().world_size
+        return get_tensor_model_parallel_world_size()
     except Exception:
         return 1
 
@@ -78,8 +82,7 @@ class VLLMFragments(Fragments):
         once, after ``load_model``, and does not swap modules under it — a hook
         registered on a swapped-out module would have gone just as dead.
         """
-        world_size = _tp_world_size()
-        if world_size < 2:
+        if _tp_world_size() < 2:
             return
 
         module = envoy._module
@@ -97,25 +100,21 @@ class VLLMFragments(Fragments):
             tensor_model_parallel_all_gather,
             tensor_model_parallel_all_reduce,
         )
-        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.linear import ColumnParallelLinear
 
         module, side = self.rules[location]
 
-        if isinstance(module, ColumnParallelLinear):
+        if isinstance(module, ColumnParallelLinear) or side == "input":
             # Column sharding splits the output features, so the ranks hold
-            # different columns of the same rows.
+            # different columns of the same rows; a row-parallel layer takes its
+            # input already split by feature. Either way the whole is the ranks'
+            # concatenation.
             collective = tensor_model_parallel_all_gather
-        elif side == "input":
-            # A row-parallel layer takes its input already split by feature.
-            collective = tensor_model_parallel_all_gather
-        elif isinstance(module, FusedMoE):
-            # Each rank holds a partial sum of the experts' combined output —
-            # the same collective the outer block runs right afterwards.
-            collective = tensor_model_parallel_all_reduce
         else:
-            # Row sharding splits the summed terms, so each rank holds a partial
-            # sum and the whole is their total.
+            # Row sharding splits the summed terms, and a deferred-combine FusedMoE
+            # leaves each rank a partial sum of the experts' output — either way
+            # each rank holds part of the total and the whole is their sum. For the
+            # MoE it is the same collective the outer block runs right afterwards.
             collective = tensor_model_parallel_all_reduce
 
         return apply(value, collective, torch.Tensor)
@@ -126,23 +125,20 @@ class VLLMFragments(Fragments):
         Applied to whatever intervention code left behind, so an edit made to the
         assembled tensor is carried back into the model rather than dropped.
         """
-        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.linear import (
             ColumnParallelLinear,
             split_tensor_along_last_dim,
         )
 
         module, side = self.rules[location]
+        moe = _moe_layer()
 
-        if isinstance(module, FusedMoE):
+        if moe is not None and isinstance(module, moe):
             # The block all-reduces this right after the module returns, so hand
             # back an equal share rather than the whole: dividing by the
             # collective's group size gives partials the block's own reduce sums
             # back to the value exactly once instead of double-counting it.
-            # Expert parallelism reassigns the same ranks (the module-internal
-            # tp_size becomes 1 and ep_size becomes the group), so the product is
-            # the group size under both layouts.
-            group_size = module.tp_size * module.ep_size
+            group_size = _moe_group_size(module)
             return apply(whole, lambda tensor: tensor / group_size, torch.Tensor)
 
         if isinstance(module, ColumnParallelLinear) or side == "input":
@@ -158,39 +154,103 @@ class VLLMFragments(Fragments):
         return apply(whole, lambda tensor: tensor / module.tp_size, torch.Tensor)
 
 
+def _moe_layer() -> Any:
+    """The class a model's fused-experts module is, or None if there isn't one.
+
+    ``FusedMoE`` through vLLM 0.26; from 0.27 the layer was rebuilt around a
+    factory and a modular kernel, and the thing a model holds is a ``MoERunner``.
+    Absent is not an error — it only means nothing in this tree can be a
+    fused-experts module, which is the right answer for a vLLM that has neither.
+    """
+    from vllm.model_executor.layers import fused_moe
+
+    for name in ("FusedMoE", "MoERunner"):
+        found = getattr(fused_moe, name, None)
+        if isinstance(found, type):
+            return found
+    return None
+
+
+def _moe_group_size(module: Any) -> int:
+    """How many ranks this MoE layer's experts are spread over.
+
+    Expert parallelism reassigns the same ranks — the module-internal ``tp_size``
+    drops to 1 and ``ep_size`` becomes the group — so the product is the group
+    size under both layouts. From 0.27 these live on the layer's config rather
+    than on the layer.
+    """
+    config = getattr(module, "moe_config", None)
+    if config is not None:
+        parallel = config.moe_parallel_config
+        return parallel.tp_size * parallel.ep_size
+    return module.tp_size * module.ep_size
+
+
 def _is_piece(module: torch.nn.Module, side: str) -> bool:
     """Whether ``module``'s ``side`` really holds one rank's piece.
 
     Asked once per module at load rather than on every forward, so it may be as
     particular as it likes about the cases vLLM already handles itself.
     """
-    from vllm.model_executor.layers.fused_moe import FusedMoE
     from vllm.model_executor.layers.linear import (
         ColumnParallelLinear,
         RowParallelLinear,
     )
 
+    moe = _moe_layer()
+
+    # A layer built with `disable_tp=True` is replicated on every rank rather than
+    # sharded — vLLM sets its `tp_size` to 1 and guards its own collectives on
+    # `tp_size > 1` for exactly that reason (DeepSeek-V2's `fused_qkv_a_proj` is
+    # one; the branch beside it uses a `ReplicatedLinear` for the same role). The
+    # engine's world size says nothing about it, so ask the module.
+    if isinstance(module, (ColumnParallelLinear, RowParallelLinear)):
+        if module.tp_size == 1:
+            return False
+
     if isinstance(module, ColumnParallelLinear):
         # vLLM gathers this itself when asked to, and then it isn't a piece.
-        return not module.gather_output if side == "output" else False
+        return side == "output" and not module.gather_output
 
     if isinstance(module, RowParallelLinear):
         if side == "input":
             return module.input_is_parallel
         return not module.reduce_results
 
-    if isinstance(module, FusedMoE):
+    if moe is not None and isinstance(module, moe):
         # Only the output is ever a piece: the inputs (hidden states, router
-        # logits) are full replicated tensors under both expert layouts.
-        # `reduce_results=True` (Mixtral) reduces inside forward, and a combine
-        # kernel that already reduced across ranks
-        # (must_reduce_shared_expert_outputs) leaves nothing to gather — neither
-        # was ever exposed as a partial.
-        return (
-            side == "output"
-            and not module.reduce_results
-            and module.tp_size * module.ep_size > 1
-            and not module.must_reduce_shared_expert_outputs()
-        )
+        # logits) are full replicated tensors under every expert layout.
+        if side != "output" or _moe_group_size(module) <= 1:
+            return False
+
+        # Which vLLM's layer this is, asked by the flag that decides it rather
+        # than by a `moe_config`, which both eras have.
+        if hasattr(module, "reduce_results"):
+            # Through 0.26 the layer carries its own flags. `reduce_results=True`
+            # (Mixtral) reduces inside forward, and a combine kernel that already
+            # reduced across ranks leaves nothing to gather — neither was ever
+            # exposed as a partial.
+            return not module.reduce_results and (
+                not module.must_reduce_shared_expert_outputs()
+            )
+
+        config = getattr(module, "moe_config", None)
+        if config is None:
+            return False
+
+        # From 0.27 the layer reduces its own output, and the conditions under
+        # which it does not are the ones below — the negation of the guard in
+        # `MoERunner._maybe_all_reduce`. Measured on a two-rank Qwen1.5-MoE: with
+        # none of them set, both ranks hand back the identical tensor, so there is
+        # nothing to gather.
+        if getattr(module, "_fused_output_is_reduced", False):
+            return False
+        if getattr(config, "is_sequence_parallel", False):
+            # Split by rows rather than left as a partial sum: a real fragment,
+            # but one wanting concatenation rather than a sum, which nothing here
+            # does yet. Leaving it alone reads one rank's rows; gathering it as a
+            # partial would be arithmetic on unrelated tokens.
+            return False
+        return bool(getattr(config, "skip_final_all_reduce", False))
 
     return False

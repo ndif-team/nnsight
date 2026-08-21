@@ -80,6 +80,18 @@ final norm all arrive complete. Only two kinds of value are really a slice:
 | Whole modules | no | `model.layers[i].output`, `mlp.output`, `norm.output` |
 | The LM head | no — gathered by transformers | `lm_head.output` |
 | Embeddings | no — all-reduced | `embed_tokens.output` |
+| **Parameters** | **yes — not gathered** | `q_proj.weight`, `down_proj.weight` |
+
+Calling a sharded module **ad hoc** — the logit lens, `model.lm_head(hidden)` —
+is corrected the same way its activations are, so it returns the full-width
+result it would on one GPU.
+
+Parameters are the exception, and the one place a trace does not read as it would
+on one GPU: `layer.weight` is this rank's slice, at `1/tp_size` of the real
+width. Weights are what tensor parallelism exists to split, so nnsight does not
+quietly reassemble one — that would allocate the whole tensor on every rank, in
+the situation where memory was tight enough to reach for TP. Gather it yourself
+if you need it whole, and remember every rank must do so.
 
 The gather only fires when an intervention is actually parked on that location,
 so reading a handful of locations does not pay for the hundreds you ignored. A

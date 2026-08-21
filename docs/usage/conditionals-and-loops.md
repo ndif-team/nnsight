@@ -42,9 +42,9 @@ with model.trace("Hello world"):
 
     # real tensor -> torch.all returns a real bool
     if torch.all(out < 1e5):
-        model.transformer.h[-1].output[0][:] = 0
+        model.transformer.h[-1].output[:] = 0
 
-    final = model.transformer.h[-1].output[0].save()
+    final = model.transformer.h[-1].output.save()
 ```
 
 `final` is all zeros — the branch was taken because `out` is a real tensor.
@@ -57,7 +57,7 @@ with model.trace("Hello world"):
     norm = hs.norm(dim=-1).mean()
 
     if norm > 10.0:                      # real 0-d tensor; Python calls __bool__
-        model.transformer.h[6].output[0][:] = 0
+        model.transformer.h[6].output[:] = 0
 
     final = model.output.logits.save()
 ```
@@ -69,8 +69,8 @@ def normalize(x):
     return (x - x.mean()) / x.std()
 
 with model.trace("Hello world"):
-    norm  = normalize(model.transformer.h[0].output[0]).save()   # helper call
-    means = [model.transformer.h[i].output[0].mean() for i in range(12)]
+    norm  = normalize(model.transformer.h[0].output).save()   # helper call
+    means = [model.transformer.h[i].output.mean() for i in range(12)]
     means = nnsight.save(means)          # save a list of tensors in one call
 ```
 

@@ -27,11 +27,24 @@ class NNsightGPUWorker(Worker):
         super().__init__(*args, **kwargs)
 
     def collect_nnsight(
-        self, request_ids: list[str], finished_request_ids: Optional[list[str]] = None
+        self,
+        request_ids: list[str],
+        finished_request_ids: Optional[list[str]] = None,
+        outputs: Optional[dict] = None,
     ) -> Optional[bytes]:
         """Return this worker's saved values, as ``collective_rpc`` reaches it here."""
-        return self.model_runner.collect_nnsight(request_ids, finished_request_ids)
+        return self.model_runner.collect_nnsight(
+            request_ids, finished_request_ids, outputs
+        )
 
     def nnsight_request_count(self) -> int:
         """How many requests this worker's runner still tracks, via ``collective_rpc``."""
         return self.model_runner.nnsight_request_count()
+
+    def nnsight_register(self, registration_id: str, payload: bytes) -> None:
+        """Install a block this worker runs for every request (``collective_rpc``)."""
+        return self.model_runner.nnsight_register(registration_id, payload)
+
+    def nnsight_clear_registered(self, registration_id: str) -> None:
+        """Remove a registration from this worker (``collective_rpc``)."""
+        return self.model_runner.nnsight_clear_registered(registration_id)

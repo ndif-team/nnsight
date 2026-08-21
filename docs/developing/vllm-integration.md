@@ -31,14 +31,14 @@ runs it against the real module, and ships saved values back.
 
 ## Two-process layout
 
-`VLLM(Remotable)` (`vllm.py:36`) exists in two processes:
+`VLLM(Remotable)` (`vllm.py`) exists in two processes:
 
 - **Client process.** `VLLM("gpt2")` builds a **meta** model (via vLLM's
-  `DummyModelLoader` with `load_weights` patched to a no-op, `vllm.py:155`) plus the
+  `DummyModelLoader` with `load_weights` patched to a no-op, `vllm.py`) plus the
   tokenizer. Its Envoy tree is read only for structure — a client never runs a
   forward. Used for writing traces and serializing them.
 - **Worker process(es).** vLLM spawns these with `worker_cls =
-  "nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker"` (`vllm.py:189`). The
+  "nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker"` (`vllm.py`). The
   worker builds a *second* `VLLM` Envoy over the actually-loaded module
   (`GPUModelRunner.load_model`), which owns the `Interleaver`, its `VLLMFragments` and the `VLLMBatcher`, and
   is where interventions run.
@@ -46,15 +46,15 @@ runs it against the real module, and ships saved values back.
 Model-parallel init happens in the client process before the meta build (vLLM builds
 real rank tensors and calls `.tolist()` on them, which a meta tensor can't serve),
 then is torn down before the real engine starts (`_init_distributed`/
-`_cleanup_distributed`, `vllm.py:74`/`:96`). The engine runs `enforce_eager=True` —
+`_cleanup_distributed` in `vllm.py`). The engine runs `enforce_eager=True` —
 hooks can't fire inside a captured CUDA graph.
 
 ### `mode="sync"` vs `mode="async"`
 
 The only switch is the constructor kwarg: `VLLM(..., mode="sync")` (default) or
-`mode="async"` (`vllm.py:57`, sets `self._async_engine`). Sync builds an `LLM` whose
-engine class is rebound to `NNsightLLMEngine` (`vllm.py:205`); async builds an
-`AsyncLLM` (`vllm.py:222`) with no engine subclass — collection happens in the
+`mode="async"` (`vllm.py`, sets `self._async_engine`). Sync builds an `LLM` whose
+engine class is rebound to `NNsightLLMEngine` (`vllm.py`); async builds an
+`AsyncLLM` (`vllm.py`) with no engine subclass — collection happens in the
 streaming backend instead.
 
 ## The transport: `extra_args["nnsight_mediator"]`
@@ -63,7 +63,7 @@ The intervention is compiled in the client but must run in the worker. NNsight u
 vLLM's built-in `SamplingParams.extra_args` — a dict field that survives both Ray
 (pickle) and multiprocessing (msgpack) — so no `SamplingParams` subclass is needed.
 
-`VLLM._attach_mediators(params, **kwargs)` (`vllm.py:403`) is the serialization
+`VLLM._attach_mediators(params, **kwargs)` (`vllm.py`) is the serialization
 boundary. For each mediator with a non-`None` `batch_group`:
 
 ```python
@@ -75,31 +75,31 @@ the mediator's block recompiles against the worker's Python; its `__globals__`
 (including referenced user variables) travel with it. Trace-level sampling kwargs
 fill in any `SamplingParams` field still at its default.
 
-On the worker, `Requests.add` (`GPUModelRunner.py:115`) deserializes each new
+On the worker, `Requests.add` (`GPUModelRunner.py`) deserializes each new
 request's mediator with `loads(..., persistent_objects=model._remoteable_persistent_objects())`
 (the tokenizer resolves by persistent ID). Requests with no nnsight payload — other
 tenants sharing the engine — are skipped.
 
 ## The three interleaver entry points
 
-`NNsightGPUModelRunner(GPUModelRunner)` (`GPUModelRunner.py:324`) is installed by
+`NNsightGPUModelRunner(GPUModelRunner)` (`GPUModelRunner.py`) is installed by
 `NNsightGPUWorker`, which rebinds `gpu_model_runner.GPUModelRunner` to the nnsight
-subclass **before** `Worker.__init__` resolves it (`GPUWorker.py:24`) — vLLM's own
+subclass **before** `Worker.__init__` resolves it (`GPUWorker.py`) — vLLM's own
 startup is not patched. The runner enters the interleaver at three points:
 
-1. **Forward** — `execute_model` (`GPUModelRunner.py:378`): runs
+1. **Forward** — `execute_model` (`GPUModelRunner.py`): runs
    `super().execute_model(...)` inside `with interleaver:`, so the module's hooks
    serve parked workers. Afterward `Requests.unflatten` switches each worker's batch
    group from per-token to per-row.
-2. **Logits** — `sample_tokens` (`:437`): offers the logits via
+2. **Logits** — `sample_tokens`: offers the logits via
    `type(model).logits.provide(model, original)`; if edited, rebuilds the state with
    the new tensor. Then captures all workers' saves in one pass (`record_saves`)
    while still on the workers' own thread.
-3. **Sampling** — `_sample` (`:466`): after `super()._sample(...)`, offers
+3. **Sampling** — `_sample`: after `super()._sample(...)`, offers
    `sampler_output.sampled_token_ids = type(model).samples.provide(model, ...)`.
 
 `logits`/`samples` are surfaced with the `eproperty` extension pattern — `VLLM.logits`
-(`vllm.py:144`) is an `@eproperty(description=...)` whose stub is an identity
+(`vllm.py`) is an `@eproperty(description=...)` whose stub is an identity
 preprocess of the served value; the client reads it (parking on
 `Mediator.value("model.logits")`) and the runner's
 `type(model).logits.provide(model, original)` is the produce side, forwarding to
@@ -107,32 +107,32 @@ preprocess of the served value; the client reads it (parking on
 `description` is what makes `.logits`/`.samples` show up in the model's repr (see
 [extending-envoy.md](./extending-envoy.md)).
 
-`_still_running()` (`:458`) filters to `mediator.alive` workers so re-entering the
+`_still_running()` filters to `mediator.alive` workers so re-entering the
 interleaver after the forward doesn't restart completed blocks. Errors are deferred
 per request (`interleaver.defer_exceptions = True`) and surfaced to the client via
-`raise_deferred`; a `tracer.stop()` is silent control flow. `_finish_erred` (`:430`)
+`raise_deferred`; a `tracer.stop()` is silent control flow. `_finish_erred`
 retires an erred/stopped request by forcing its next token to EOS.
 
 ## Continuous batching & the `Requests` helper
 
 vLLM concatenates all in-flight tokens into one `[total_tokens, hidden]` slab.
-`Requests` (`GPUModelRunner.py:97`) maps each mediator onto its own token span,
+`Requests` (`GPUModelRunner.py`) maps each mediator onto its own token span,
 recomputed every step:
 
-- `add(new_reqs, model)` (`:115`) deserializes new mediators from `extra_args`.
-- `scope(model)` (`:132`) sets each scheduled worker's `batch_group = [start,
+- `add(new_requests, persistent_objects)` deserializes new mediators from `extra_args`.
+- `scope(model)` sets each scheduled worker's `batch_group = [start,
   tokens]`, `mediator.start(interleaver)` on first schedule, and keeps finished
   workers scheduled only if they still hold caches or an exception. It orders by
   `list(self.input_batch.req_ids)` — **input-batch order, not scheduler order**,
   which `condense`/reorders can diverge from.
-- `unflatten(model)` (`:188`) re-points each scheduled worker to `[row, 1]` for the
+- `unflatten(model)` re-points each scheduled worker to `[row, 1]` for the
   per-request logits/samples tensors.
-- `match(request_ids)` (`:209`) reconciles engine ids with worker ids — vLLM appends
+- `match(request_ids)` reconciles engine ids with worker ids — vLLM appends
   a content hash, so engine `"0"` maps to worker `"0-<hash>"`.
-- `record_saves()` (`:229`) / `saves`/`error` (`:308`/`:316`) capture and read back
+- `record_saves()` / `saves` / `error` capture and read back
   each worker's saved names and any error, on the workers' thread (required because
   final collection may run on a different thread under Ray).
-- `finish_dangling(worker_id)` (`:258`) throws a still-parked worker at request end
+- `finish_dangling(worker_id)` throws a still-parked worker at request end
   into a `ValueError` (barrier) or `OutOfOrderError` (the run already ran past its
   location); an over-iterated `tracer.iter` only warns.
 
@@ -165,43 +165,151 @@ so none of that is needed. See [batching-internals.md](./batching-internals.md).
 
 ## Sync result collection
 
-`NNsightLLMEngine(LLMEngine)` (`engine.py:17`) overrides only `step()`: after
+`NNsightLLMEngine(LLMEngine)` (`engines/engine.py`) overrides only `step()`: after
 `super().step()`, for any finished request it calls
-`engine_core.collective_rpc("collect_nnsight", args=(finished, finished))`, picks the
-first non-`None` payload (only rank 0 holds sampled output), `pickle.loads` it, and
-attaches `output.saves` / `output.nnsight_error` to each `RequestOutput`.
-`VLLM._collect` (`vllm.py:382`) then `mark`s each saved value and writes it into the
-mediator's locals, and `raise_deferred`s any error.
+`collective_rpc("collect_nnsight", args=(finished, finished, by_id))` — the third
+argument is the finished `RequestOutput`s, which the worker cannot build and needs
+in order to serve `tracer.result` — merges the ranks with `merge_collected`, and
+`attach`es `saves` / `nnsight_saves` / `nnsight_error` to each output.
+`VLLM._collect` then `mark`s each saved value and writes it into the mediator's
+locals, and `raise_deferred`s any error.
 
-`collect_nnsight(request_ids, finished_request_ids)` (`GPUModelRunner.py:471`) runs
-on the worker: it matches ids, drains `finish_dangling` for finished ones, builds
-`{engine_id: {"saves", "error"}}`, pops finished mediators, `torch.cuda.synchronize`s,
-and returns `pickle.dumps(collected)`. `nnsight_request_count()` (`:526`) is a leak
-gauge — it should return to 0.
+Merged, **not** first-non-empty: a trace's values come from the reporting rank
+while an installed block's come from whichever rank ran the layers it read, and
+taking one payload would silently drop the other. Where two ranks report the same
+registered name — tensor parallelism, where each gathers the same whole value —
+the earliest rank's is kept, so the value lands on the device a traced one would.
+
+`collect_nnsight(request_ids, finished_request_ids, outputs=None)` runs on the
+worker and returns
+`pickle.dumps({engine_id: {"saves", "registered", "error", "sequences"}})`.
+`sequences` is keyed by sampled-sequence index: `n > 1` fans a request into a child
+per sequence (`"{index}_{parent}"`, vLLM's `ParentRequest`), each of which runs its
+own copy of the block, so each is owed values of its own. `Requests.engine_key`
+resolves a worker id to `(engine_id, index)` — taking the child reading only when
+the parent it names is one the engine asked about, so an id that merely starts with
+digits and an underscore is not mistaken for somebody's second sequence. `saves` /
+`registered` stay the primary sequence's, so nothing changes for a caller that never
+sets `n`; `attach` puts each sequence's on `output.outputs[i].saves` and the trace's
+own on `output.nnsight_sequences`, which is what `VLLM._collect` pushes back as a
+list.
+It harvests what finished, takes the registered values, serves `tracer.result`,
+throws `finish_dangling` into whatever is still parked, collects the saves, and
+pops finished mediators.
+
+**Every rank winds up its own workers; only one reports.** Each rank ran the block,
+so each holds a worker, a greenlet, and whatever that greenlet captured — all of it
+has to be released. Only rank 0's values are reported, since the reads are gathered
+and every rank holds the same ones. This used to be an early `return` for
+`get_pp_group().rank != 0`, which leaked every other rank's workers for the life of
+the engine: with no pipeline, that rank is the *global* rank, so under plain tensor
+parallelism every rank but 0 skipped its own cleanup. `nnsight_request_count()` is
+the leak gauge — it should return to 0 **on every rank**, which is what
+`tests/vllm/test_tensor_parallel.py::TestEveryRankWindsUp` pins.
 
 ## Async streaming
 
-`VLLMTracer(InterleavingTracer)` (`tracer.py:24`) splits the base tracer's
-`execute` in two: `prepare(code)` (`:27`) builds the invoke workers and assembles the
+`VLLMTracer(InterleavingTracer)` (`tracer.py`) splits the base tracer's
+`execute` in two: `prepare(code)` builds the invoke workers and assembles the
 call input **without running the model**, returning `(mediators, args, kwargs)`.
 
-`AsyncVLLMBackend(Backend)` (`async_backend.py:40`), injected by `VLLM.trace` when
+`AsyncVLLMBackend(Backend)` (`async_backend.py`), injected by `VLLM.trace` when
 `mode="async"`:
 
-- `__call__(tracer)` (`:48`) runs on `__exit__` while the frame is live: dispatches,
+- `__call__(tracer)` runs on `__exit__` while the frame is live: dispatches,
   `tracer.prepare(...)`, `_attach_mediators`, then starts
   `model.vllm_entrypoint.generate(prompt, param, request_id)` and stores the async
   generator. One prompt only (`NotImplementedError` otherwise).
-- `__aiter__` (`:82`) — `async for output in tracer.backend:` yields each step's
+- `__aiter__` — `async for output in tracer.backend:` yields each step's
   `RequestOutput`; on `output.finished` it collects saves via `collective_rpc(
   "collect_nnsight", ...)`, attaches `output.saves`, and `raise_deferred`s. If the
-  consumer stops early, `_free_worker` (`:101`) frees the aborted request's worker.
-- `__await__` (`:109`) — `await tracer.backend` drains the stream and returns the last
+  consumer stops early, `_free_worker` frees the aborted request's worker.
+- `__await__` — `await tracer.backend` drains the stream and returns the last
   output.
 
 This mirrors `AsyncRemoteBackend`'s await/async-iterate shape. Sync differs by
 collecting inside `NNsightLLMEngine.step()`; async has no `step()` and collects
 per-request in the stream.
+
+## Reading a request's outputs
+
+`VLLM.generate` is `trace` when used as a `with` block and a plain run when not —
+the same test `traceable` makes, via `WithBlockNotFoundError` from a `capture()`
+that finds no block. The plain form returns vLLM's `RequestOutput`s (an awaitable
+on `mode="async"`, since the async engine has no call that runs to completion),
+and `_generate_async` does its own collect because the streaming backend only
+runs for traces nnsight submitted.
+
+`NNsightLLMEngine.step` collects for **every** finished request, not only traced
+ones, and `merge_collected` merges across ranks rather than taking the first
+answer — a trace's values come from the rank holding the sampled output, a
+registered block's from whichever rank ran the layers it read.
+
+`attach` puts both on the output: `output.saves` carries them together, while
+`output.nnsight_saves` keeps the trace's own apart. That separation is load-
+bearing — `_collect` feeds only the latter to `merge_shared_saves`, which reads a
+name saved across several requests as one shared container and would otherwise
+fold a sweep's per-request values into one.
+
+## Registered blocks — the `registration.py` module
+
+`model.edit()` is the persistent counterpart of the per-request transport
+above: instead of a mediator per request in `extra_args`, one block is sent to
+every rank via `collective_rpc("nnsight_register", ...)` and kept there.
+
+- `RegisteringTracer` (`registration.py`) captures the block like `EditingTracer`
+  but `execute` ships it rather than storing it on the envoy — an edit is
+  replayed by the envoy that holds it, which on vLLM leaves it in the client
+  where there are no weights.
+- `Requests.register` deserializes **once** and keeps `(code, glbls, lcls,
+  presaved)`; `Requests.add` builds a fresh `Mediator` per arriving request from
+  those pieces, so the source is compiled once rather than per request. That is
+  the whole performance argument for registering.
+- Registered copies are scoped, started, unflattened and `record_saves`-ed
+  alongside traced ones (`Requests.scope` runs them *first*, so a trace on the
+  same request sees what they left).
+- `Requests.harvest` moves a finished request's saves into `harvested`, driven by
+  `scheduler_output.finished_req_ids` in `_update_states` — **not** by
+  `collect_nnsight`, because a request nobody traced never triggers a collect.
+- Values are taken at collect, not held: `collect_nnsight` pops them from
+  `harvested` into the entry that rides home on the output. It also harvests on
+  demand, because the scheduler's own pass happens at the top of the *next* step,
+  which on the async path may come later or (for the last request in flight)
+  never.
+- The registered portion is answered from **every** rank, the traced portion only
+  from rank 0 — a registered block runs wherever its layers live, so under PP its
+  values are not on rank 0.
+- Installing is synchronous on `LLM` and a coroutine on `AsyncLLM`; the latter can
+  only be awaited from inside the engine's own loop (a foreign loop on another
+  thread times out, and none is exposed), hence `__aenter__`/`__aexit__` and
+  `aclear`. `__aenter__` spells out `__enter__`'s body rather than calling it,
+  because `capture` reads the caller's frame at a fixed depth.
+- `Registration.install`/`uninstall` (and their awaited forms) are the transport
+  seam. `ServeRegistration` overrides those four to POST instead, for
+  `model.edit(serve=url)` from a client with no engine to `collective_rpc` into;
+  the idempotence guard and the `_installed_edits` bookkeeping stay on the base's
+  `clear`/`aclear`, so a third transport cannot forget them.
+- `VLLM._installed_edits` holds the live handles so `clear_edits()` can reach
+  them; `Registration._forget` drops one as it clears.
+
+Worker RPCs are exposed on `NNsightGPUWorker`, not the runner —
+`collective_rpc` resolves method names on the worker.
+
+**Which runner.** vLLM has two GPU model runners: the original
+(`vllm/v1/worker/gpu_model_runner.py`), which `NNsightGPUModelRunner` subclasses,
+and a second one (`vllm/v1/worker/gpu/model_runner.py`) added later. From 0.27 the
+worker picks the second for every non-MoE model — `use_v2_model_runner` resolves to
+`is_default_v2_architecture or not is_moe`, so the architecture allow-list only
+governs MoE. `VLLM._require_v1_model_runner` sets vLLM's own
+`VLLM_USE_V2_MODEL_RUNNER=0` before the engine is built (the worker processes
+inherit it) and refuses an explicit `1`, since the alternative is an engine with no
+instrumentation whose first collect dies on a missing `collect_nnsight`. Porting
+the subclass to the V2 runner is the way out; until then this is the seam.
+
+**Prefix caching.** A cached token runs no forward, so no hook fires for it. A
+trace sets `skip_reading_prefix_cache` on its own request (`_attach_mediators`);
+a registration rides requests it did not create, so it cannot, and
+`_warn_if_prefix_caching` says so at register time.
 
 ## Serving over HTTP — the `serve/` package
 
@@ -214,13 +322,18 @@ the meta model, and a server holds one dispatched async `VLLM`.
   `ndif-api-key` header, and `uvicorn.run`s the app. Default host is loopback; it
   warns on `0.0.0.0` since it runs client-sent code.
 - `serve/server.py` — a FastAPI app. `POST /v1/nnsight/generate` takes a
-  `RequestModel.serialize(tracer)` blob, `_build_tracer` deserializes it (like
-  `RequestModel.deserialize`, plus restoring `tracer.node`), calls `prepare` +
+  `RequestModel.serialize(tracer)` blob, `_build_tracer` deserializes it
+  (`RequestModel.deserialize`, plus restoring `tracer.node`), calls `prepare` +
   `_attach_mediators`, runs each invoke through the engine, collects saves via
   `collect_nnsight`, and `torch.save`s `{"saves", "error"}` back (saved values only;
   a build or runtime error rides `error` with its real type + traceback). Worker
   building is synchronous (all before the first `await`), so concurrent requests
-  never interleave on the shared interleaver. `GET /health` reports readiness.
+  never interleave on the shared interleaver. `POST /v1/nnsight/register/{id}` and
+  `.../clear` install and drop a block on the server's engine — the HTTP form of the
+  `collective_rpc` an in-process `model.edit()` makes. `GET /health` reports
+  readiness, and `_ready()` is what every endpoint calls first.
+- `serve/http.py` — the headers, timeouts, and non-200 handling both client halves
+  share: `LocalServeBackend` sending a trace and `ServeRegistration` sending a block.
 - `serve/backend.py` — `LocalServeBackend(Backend)`, the client side of `serve=url`:
   serializes the trace, POSTs it, `torch.load`s the result, `raise_deferred`s any
   error, `mark`s the saves, and `push`es them into the caller's frame — so reading a
@@ -270,9 +383,13 @@ test guarding it):
 - **`defer_exceptions` must drop a worker on all TP ranks or none**, and the lazy
   gather in `VLLMFragments` assumes every rank runs identical mediators in lockstep — a
   rank-divergent error or a rank-local read hangs the collective.
-- **`tracer.result` is not served on vLLM.** Read generated tokens via `model.logits`/
-  `model.samples` (or the streamed `RequestOutput` in async), never `tracer.result`
-  (a worker would park on it forever).
+- **`tracer.result` is served from `collect_nnsight`, not `interleave`.** The block
+  runs in the worker and the `RequestOutput` is assembled by the engine, so the
+  collect is the first moment both exist — the engine passes `{request_id: output}`
+  alongside the ids and `Requests.serve_result` hands it to a worker parked on
+  `"result"`, before `finish_dangling` would throw into it. The worker binds its
+  name *after* the run's last `record_saves`, so `serve_result` re-takes that
+  snapshot (`Requests.record`) or the value comes home unbound.
 
 ## Testing
 
@@ -284,16 +401,16 @@ tests, and for the mediator payload to ride Ray's transport). See
 
 ## Key files
 
-- `src/nnsight/modeling/vllm/vllm.py` — `VLLM` (`:36`), `_attach_mediators` (`:403`),
-  `_collect` (`:382`), `trace` override (`:330`), `logits`/`samples` eproperties (`:144`)
+- `src/nnsight/modeling/vllm/vllm.py` — `VLLM`, `_attach_mediators`,
+  `_collect`, `trace` override, `logits`/`samples` eproperties
 - `src/nnsight/modeling/vllm/fragments.py` — `VLLMFragments`
 - `src/nnsight/modeling/vllm/batching.py` — `VLLMBatcher` (row scoping only)
-- `src/nnsight/modeling/vllm/model_runners/GPUModelRunner.py` — runner (`:324`),
-  `Requests` (`:97`), `collect_nnsight` (`:471`)
-- `src/nnsight/modeling/vllm/engines/engine.py:17` — `NNsightLLMEngine` (sync)
-- `src/nnsight/modeling/vllm/async_backend.py:40` — `AsyncVLLMBackend`
-- `src/nnsight/modeling/vllm/tracer.py:24` — `VLLMTracer`
-- `src/nnsight/modeling/vllm/workers/GPUWorker.py:21` — `NNsightGPUWorker`
+- `src/nnsight/modeling/vllm/model_runners/GPUModelRunner.py` — runner,
+  `Requests`, `collect_nnsight`
+- `src/nnsight/modeling/vllm/engines/engine.py` — `NNsightLLMEngine` (sync)
+- `src/nnsight/modeling/vllm/async_backend.py` — `AsyncVLLMBackend`
+- `src/nnsight/modeling/vllm/tracer.py` — `VLLMTracer`
+- `src/nnsight/modeling/vllm/workers/GPUWorker.py` — `NNsightGPUWorker`
 - `src/nnsight/modeling/vllm/serve/` — `cli.py`, `server.py`, `backend.py`
 
 ## Related

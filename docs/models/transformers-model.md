@@ -88,7 +88,7 @@ Any of them may be `None`. `model.pipeline` is always the underlying `transforme
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 with model.trace("The Eiffel Tower is in the city of"):
-    hidden = model.transformer.h[-1].output[0].save()
+    hidden = model.transformer.h[-1].output.save()
     logits = model.output.logits.save()
 
 print(hidden.shape)                                   # torch.Size([10, 768])
@@ -136,7 +136,7 @@ with vit.pipe(image) as tracer:
 model = TransformersModel("openai-community/gpt2")     # not dispatched (meta)
 
 with model.scan("Hello World"):
-    shape = model.transformer.h[0].output[0].shape     # torch.Size([2, 768])
+    shape = model.transformer.h[0].output.shape     # torch.Size([2, 768])
 
 assert model.dispatched is False                        # scan never loads weights
 ```
@@ -203,7 +203,7 @@ import nnsight
 with model.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
     per_step = nnsight.save([])
     for step in tracer.iter[:3]:
-        per_step.append(model.transformer.h[0].output[0])
+        per_step.append(model.transformer.h[0].output)
 # per_step[0] is the full prompt; per_step[1:] are one cached token each
 ```
 
@@ -212,7 +212,7 @@ with model.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
 ```python
 # in-place zeroing
 with model.trace(PROMPT):
-    model.transformer.h[-1].output[0][:] = 0
+    model.transformer.h[-1].output[:] = 0
     logits = model.output.logits.save()
 
 # replacement / logit lens (ad-hoc module call, out of order)
