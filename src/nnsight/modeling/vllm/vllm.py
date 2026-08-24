@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-from collections.abc import Mapping
+import os
+import re
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable
 
 import torch
@@ -72,6 +74,14 @@ class VLLM(Remotable):
             ...     last = output
             >>> last.saves["logits"]                 # doctest: +SKIP
 
+        CUDA graphs on, at the cost of declaring up front which locations a
+        trace may touch (see [`taps`][nnsight.modeling.vllm.interleaver])::
+
+            >>> model = VLLM("gpt2", dispatch=True, taps=["transformer.h.*.output"])
+            >>> with model.trace("The Eiffel Tower is in", temperature=0.0):
+            ...     model.transformer.h[8].output[:] = 0          # in place
+            ...     hidden = model.transformer.h[6].output.clone().save()
+
         A GPU-less client running a trace on a remote nnsight-serve engine — the
         client only builds a meta tree and never dispatches::
 
@@ -85,9 +95,19 @@ class VLLM(Remotable):
         tokenizer: The tokenizer vLLM resolved for the checkpoint.
     """
 
-    def __init__(self, *args: Any, mode: str = "sync", **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        mode: str = "sync",
+        taps: Iterable[str] = (),
+        **kwargs: Any,
+    ) -> None:
         self.vllm_entrypoint = None
         self.tokenizer = None
+        # Locations a CUDA-graph engine serves, as patterns until dispatch
+        # resolves them against the module tree (see `_resolve_taps`). Empty
+        # means the engine runs eagerly and every location is served.
+        self.taps: tuple[str, ...] = tuple(taps)
         # ``mode="async"`` builds vLLM's streaming ``AsyncLLM`` instead of the
         # synchronous ``LLM``; a trace then yields its outputs as they generate
         # through ``async for output in tracer.backend``.
@@ -210,7 +230,13 @@ class VLLM(Remotable):
 
         # The meta tree only needs the architecture, so build it single-rank
         # regardless of the parallelism the real engine will use.
-        kwargs = {**kwargs, "tensor_parallel_size": 1, "pipeline_parallel_size": 1}
+        kwargs = {
+            **kwargs,
+            "tensor_parallel_size": 1,
+            "pipeline_parallel_size": 1,
+            # Sub-groups of the TP ranks; meaningless — and refused — at tp=1.
+            "decode_context_parallel_size": 1,
+        }
 
         with self._meta_device():
             vllm_config = EngineArgs(model=repo_id, **kwargs).create_engine_config()
@@ -255,6 +281,47 @@ class VLLM(Remotable):
 
         self._require_v1_model_runner()
 
+        # A traced prompt has to be prefilled in one forward: chunked prefill
+        # would hand a block a slice of its prompt one step and the rest the
+        # next, and vLLM discards the sample of every chunk but the last. Off
+        # unless asked for; with it off a prompt that does not fit a step's token
+        # budget waits for the next step rather than being split (vLLM raises
+        # the budget to max_model_len so one prompt always fits). A caller who
+        # turns it on is told, per request, when a prompt was chunked.
+        kwargs.setdefault("enable_chunked_prefill", False)
+
+        if self.taps:
+            # vLLM's breakable graphs are what let a Python callable run at a
+            # point of every replay (see `.interleaver`). Without them a tap
+            # records nothing and a graph engine would serve no location at all,
+            # so refuse here rather than at the first trace.
+            try:
+                import vllm.compilation.breakable_cudagraph  # noqa: F401
+            except ImportError as error:
+                raise NotImplementedError(
+                    "taps need vLLM's breakable CUDA graphs "
+                    "(vllm.compilation.breakable_cudagraph), which this vLLM "
+                    "does not have. Upgrade vLLM, or drop `taps` for the eager engine."
+                ) from error
+            self.taps = self._resolve_taps(meta_model)
+            # The flag is read by the worker processes, which inherit the environment.
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            kwargs["additional_config"] = {
+                **(kwargs.get("additional_config") or {}),
+                "nnsight_taps": list(self.taps),
+            }
+
+        # Graph replay is what `taps` buy, and what an eager engine forgoes, so
+        # the engine's mode follows from whether there are taps; a caller who
+        # asks for the opposite is told rather than crashed on a duplicate kwarg.
+        asked = kwargs.pop("enforce_eager", None)
+        if asked is not None and bool(asked) == bool(self.taps):
+            raise ValueError(
+                f"enforce_eager={asked!r} contradicts taps={list(self.taps)!r}: "
+                "a tapped engine replays CUDA graphs, an untapped one runs eagerly "
+                "so every location is served. Drop enforce_eager, or change taps."
+            )
+
         # The real engine brings up its own process group; the one __init__ made
         # to build the meta tree would collide with it. Only tear down a group this
         # construction created — never one the caller already had running.
@@ -272,12 +339,11 @@ class VLLM(Remotable):
     def _require_v1_model_runner() -> None:
         """Ask vLLM for the model runner nnsight instruments.
 
-        vLLM has two GPU model runners. nnsight's hooks arrive by subclassing the
-        original one and rebinding the name the worker resolves
-        ([`NNsightGPUWorker`][nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker]),
-        so on the other one the engine comes up with no instrumentation at all —
-        traces then fail at the first collect with a missing method rather than
-        anything that explains itself.
+        vLLM has two GPU model runners. nnsight instruments the original one
+        ([`NNsightGPUWorker`][nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker]
+        swaps in its subclass once the worker has built it, and refuses any other),
+        so the client asks for that one up front rather than letting the engine
+        come up only to be refused in the worker.
 
         From vLLM 0.27 the second runner is the *default* for every non-MoE model
         (`use_v2_model_runner` in vLLM's config: ``is_default_v2_architecture or
@@ -302,6 +368,32 @@ class VLLM(Remotable):
         # Older vLLM has no such setting and ignores it.
         os.environ[key] = "0"
 
+    def _resolve_taps(self, module: "Module") -> tuple[str, ...]:
+        """Expand the tap patterns into full locations on the module tree.
+
+        A pattern is a module path relative to the model with ``.input`` or
+        ``.output`` on the end, ``*`` standing for one path segment:
+        ``"model.layers.*.output"`` is every decoder layer's output. Resolved
+        against the torch module rather than the envoy tree, which on
+        ``dispatch=True`` is not built yet; the paths are the same.
+        """
+        names = [name for name, _ in module.named_modules() if name]
+        taps = []
+        for tap in self.taps:
+            prefix, _, side = tap.rpartition(".")
+            pattern = re.escape(prefix).replace(r"\*", r"[^.]+")
+            matched = [name for name in names if re.fullmatch(pattern, name)]
+            if side not in ("input", "output") or not matched:
+                raise ValueError(
+                    f"Tap {tap!r} names no module. A tap is a module path ending in "
+                    ".input or .output, where * stands for one path segment — "
+                    "'model.layers.*.output' for every decoder layer's output."
+                )
+            # Under the worker's root envoy, which is built with Envoy's default
+            # path — the client's own is not set yet on `dispatch=True`.
+            taps.extend(f"model.{name}.{side}" for name in matched)
+        return tuple(taps)
+
     def _load_sync(self, repo_id: str, **kwargs: Any) -> Any:
         from vllm import LLM
 
@@ -311,8 +403,9 @@ class VLLM(Remotable):
             repo_id,
             worker_cls=self._WORKER_CLS,
             # Hooks cannot fire inside a captured CUDA graph, which freezes the
-            # ops it replays.
-            enforce_eager=True,
+            # ops it replays — unless the engine has taps, which are recorded
+            # into the graph and replayed with it.
+            enforce_eager=not self.taps,
             **kwargs,
         )
         # step() collects each finished request's saves; see NNsightLLMEngine.
@@ -329,7 +422,7 @@ class VLLM(Remotable):
         engine_args = AsyncEngineArgs(
             model=repo_id,
             worker_cls=self._WORKER_CLS,
-            enforce_eager=True,
+            enforce_eager=not self.taps,
             **kwargs,
         )
         return AsyncLLM.from_engine_args(engine_args)

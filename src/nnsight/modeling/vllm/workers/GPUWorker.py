@@ -1,18 +1,19 @@
 """The one place nnsight gets into a vLLM worker process.
 
-vLLM builds its model runner by looking the class up on the module at construction
-time, so rebinding that name before ``Worker.__init__`` resolves it is what puts an
-nnsight runner in the worker at all. Everything else in this package follows from
-the runner installed here; `_load` names this
-class as vLLM's ``worker_cls``, which is a supported engine argument, so no part of
-vLLM's own startup is patched.
+vLLM's worker builds its model runner in ``init_device``; once it has, the
+runner's class is swapped for nnsight's subclass, which adds behaviour and no
+constructor state. `_load` names this class as vLLM's ``worker_cls``, a supported
+engine argument, so no part of vLLM's own startup is patched — and a runner
+nnsight does not instrument is refused here, in the worker, rather than coming up
+silently uninstrumented.
 """
 
 from __future__ import annotations
 
+import pickle
 from typing import Any, Optional
 
-from vllm.v1.worker import gpu_model_runner
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 
 from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
@@ -21,18 +22,31 @@ from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
 class NNsightGPUWorker(Worker):
     """A vLLM GPU worker whose model runner interleaves interventions."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        # Rebind before super(), which resolves the runner class off this module.
-        gpu_model_runner.GPUModelRunner = NNsightGPUModelRunner
-        super().__init__(*args, **kwargs)
+    def init_device(self) -> None:
+        super().init_device()
+        runner = self.model_runner
+        if type(runner) is not GPUModelRunner:
+            raise NotImplementedError(
+                f"nnsight instruments vLLM's GPUModelRunner, but this worker built "
+                f"{type(runner).__module__}.{type(runner).__name__} (the V2 runner, "
+                "or a runner from another platform). Unset VLLM_USE_V2_MODEL_RUNNER "
+                "to trace, or drop nnsight and use vLLM directly for that run."
+            )
+        runner.__class__ = NNsightGPUModelRunner
 
     def collect_nnsight(
         self,
         request_ids: list[str],
         finished_request_ids: Optional[list[str]] = None,
-        outputs: Optional[dict] = None,
+        outputs: Optional[Any] = None,
     ) -> Optional[bytes]:
-        """Return this worker's saved values, as ``collective_rpc`` reaches it here."""
+        """Return this worker's saved values, as ``collective_rpc`` reaches it here.
+
+        ``outputs`` arrives pickled (see ``NNsightLLMEngine.step``): the RPC is
+        msgpack-encoded on the way in, and bytes are what it carries natively.
+        """
+        if isinstance(outputs, bytes):
+            outputs = pickle.loads(outputs)
         return self.model_runner.collect_nnsight(
             request_ids, finished_request_ids, outputs
         )

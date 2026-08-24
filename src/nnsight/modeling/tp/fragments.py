@@ -15,23 +15,27 @@ the module, not guessed. These rules are handed every envoy through
 ``instrument`` as the tree is built, so they record themselves — and learn whether
 there is anything to do at all — right there.
 
-**nnsight already sees the post-TP value.** transformers registers its own
-forward hooks at load; nnsight registers the interleaver's when the
-[`Envoy`][nnsight.intervention.envoy.Envoy] tree is built, i.e. afterwards. Hooks
-fire in registration order, so by the time
-[`TPFragments.whole`][nnsight.modeling.tp.fragments.TPFragments.whole]
-runs, a row-parallel output has already been all-reduced and a
-``colwise_gather_output`` head already all-gathered — those arrive whole and are
-left alone. Only the genuinely sharded sides are listed in
-[`SHARDED_SIDES`][nnsight.modeling.tp.fragments.SHARDED_SIDES].
+**nnsight sees the pre-collective value.** The interleaver's handoff runs inside
+a module's forward — after transformers' pre-hook, before its post-hook — so a
+row-parallel output is still this rank's *partial sum* there, and a
+``colwise_gather_output`` head still a shard. [`SIDES`][nnsight.modeling.tp.fragments.SIDES]
+says which, per style, and [`TPFragments.whole`][nnsight.modeling.tp.fragments.TPFragments.whole]
+all-gathers a shard or all-reduces a partial. What goes back is chosen so the
+module's own post-hook completes the picture: a shard's slice, or — for a
+partial — the whole on rank 0 and zeros elsewhere, which the post-hook's reduce
+turns into exactly the (possibly edited) whole on every rank.
+
+The rules describe module *boundaries*. A ``.source`` value between two ops
+inside a forward can be a shard split on an axis that moves through the forward,
+so it is handed over as-is: whole past the layer that all-reduces, this rank's
+slice between a column-parallel layer and it. Compare against a single-GPU run
+if it matters, and never branch on one — the ranks would diverge.
 
 Every rank runs the same intervention block, so every rank reaches ``handle`` at
 the same location with the same parked workers and makes the same decision to
-gather. That is what keeps the collectives matched; it is also why a block whose
-control flow diverges across ranks deadlocks, and why nothing here may branch on
-rank. For the same reason a run whose *sampling* diverges is not merely
-inconsistent but wrong — the ranks would go on to all-reduce activations computed
-from different tokens — so seed every rank identically before generating.
+gather — which is what keeps the collectives matched, why a block whose control
+flow diverges across ranks deadlocks, and why sampling must be seeded identically
+on every rank.
 
 Everything about *when* to gather — once per visit, only when something is
 waiting, re-split on the way out — belongs to
@@ -43,77 +47,54 @@ including why it is the interleaver's job and not the batcher's.
 
 from __future__ import annotations
 
-import warnings
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict
 
 import torch
 
 from ...intervention.fragments import Fragments
 from ...util import apply
 
-# Which side of a module carries this rank's slice, per transformers TP style.
-# A side listed here is sharded along the LAST dim and must be gathered before a
-# worker sees it; a side left out is already whole, because the style's own
-# collective (an all-reduce, or an all-gather for `gather_output`) ran in the TP
-# hook that fires before ours.
+# What each side of a module is at the interleaver's handoff, per transformers
+# TP style. The handoff runs inside the module's forward — after the style's
+# pre-hook, before its post-hook — so a side is one of:
 #
-# Starred entries were measured on Llama-3.2-3B at tp=4: the sharded sides came
-# back at 1/4 width and reassembled with a rank-order `cat(-1)`, and the whole
-# sides were bit-identical across ranks. The rest follow from
+#   "shard"    this rank's slice along the LAST dim; made whole by an all-gather
+#              and handed back as this rank's slice again.
+#   "partial"  this rank's term of a sum the style's post-hook will all-reduce
+#              (or reduce-scatter); made whole by an all-reduce and handed back as
+#              the whole on rank 0 and zeros elsewhere, so the post-hook's own
+#              reduce yields exactly the (possibly edited) whole on every rank.
+#
+# A side left out is already whole there. Starred entries were measured on
+# Llama-3.2-3B at tp=4; the rest follow from
 # transformers/integrations/tensor_parallel.py but no model in the test set
 # exercised them — treat them as unverified.
-SHARDED_SIDES: Dict[str, Tuple[str, ...]] = {
-    "colwise": ("output",),                   # * output features split
-    "packed_colwise": ("output",),            #   (fused gate_up, same split)
-    "colwise_gather_output": (),              # * gather_output=True -> whole
-    "rowwise": ("input",),                    # * input pre-split; output all-reduced
-    "rowwise_split_input": ("input",),        #   TP splits it in its own pre-hook
-    "packed_rowwise": ("input",),
-    "embedding_rowwise": (),                  # * vocab-parallel; output all-reduced
-    "embedding_colwise": (),                  # + output all-reduced (see below)
-    "sequence_parallel": ("output",),         # + reduce-scatter, on the LAST dim
-    "all_reduce": (),                         #   output all-reduced -> whole
-    "replicated_with_grad_allreduce": (),     #   params replicated; activations whole
-    "moe_tp_experts": (),                     # + output all-reduced (see below)
+SIDES: Dict[str, Dict[str, str]] = {
+    "colwise": {"output": "shard"},                       # * output features split
+    "packed_colwise": {"output": "shard"},                #   (fused gate_up, same split)
+    "colwise_gather_output": {"output": "shard"},         # * gathered by its post-hook, after us
+    "rowwise": {"input": "shard", "output": "partial"},   # * input pre-split; post-hook all-reduces
+    "rowwise_split_input": {"input": "shard", "output": "partial"},  # pre-hook splits the input
+    "packed_rowwise": {"input": "shard", "output": "partial"},
+    "embedding_rowwise": {"output": "partial"},           # * vocab-parallel; post-hook all-reduces
+    "embedding_colwise": {"output": "partial"},           # + post-hook all-reduces (see below)
+    "sequence_parallel": {"output": "partial"},           # + post-hook reduce-scatters, on the LAST dim
+    "all_reduce": {"output": "partial"},
+    "replicated_with_grad_allreduce": {},                 #   params replicated; activations whole
+    "moe_tp_experts": {"output": "partial"},              # + post-hook all-reduces (see below)
 }
 
-# Entries marked + were settled by reading transformers/integrations/
-# tensor_parallel.py rather than by running a model, because no checkpoint in the
-# test set exercises them. Each is a case where the obvious reading of the style's
-# *name* is wrong:
-#
-# * ``embedding_colwise`` splits the hidden dim, so its output looks like a
-#   fragment — but ``EmbeddingParallel._prepare_output_fn`` ends in an
-#   unconditional ``all_reduce_forward``; the ``embedding_dim_sharding == 0``
-#   branch above it guards only the vocab masking. Listing "output" here would
-#   all-gather an already-whole tensor and handed users one ``tp_size`` times too
-#   wide with a plausible first copy — the same failure as the tied-LM-head bug
-#   MINIMUM_TRANSFORMERS exists for, reintroduced by this table.
-# * ``moe_tp_experts`` is expert-parallel and was previously refused outright.
-#   Its forward needs nothing: ``_prepare_input_fn`` applies only
-#   ``all_reduce_backward`` (identity going forwards) and ``_prepare_output_fn``
-#   is ``all_reduce_forward``. Both sides are whole, exactly like ``all_reduce``.
-#   Refusing it cost every MoE checkpoint that uses it — 26 of the configs
-#   shipped with transformers 5.15, including Mixtral, DeepSeek-V3 and Qwen3-MoE,
-#   were refused for this and nothing else.
-# * ``sequence_parallel`` names a sequence dim and takes a ``sequence_dim=1``
-#   argument, which it stores and never uses: its reduce-scatter hardcodes
-#   ``x.dim() - 1``. The entry matches the implementation and contradicts the
-#   declared intent, so it is the one most likely to rot — see the shape check in
-#   `_gather_whole`, which is what would catch it.
+# Entries marked + follow from reading transformers/integrations/tensor_parallel.py
+# rather than from running a model: ``embedding_colwise`` and ``moe_tp_experts``
+# end in an unconditional ``all_reduce_forward`` post-hook (so a partial, not the
+# shard its name suggests), and ``sequence_parallel`` reduce-scatters on the last
+# dim in its post-hook (whole-width partial at the handoff).
 
-# Styles refused rather than guessed at, with the reason a user is shown. These
+# Styles refused rather than guessed at, with the reason a user is shown: these
 # slice something other than the last dim — by expert, or into a fused kv
 # projection — so neither the gather nor the re-split above means anything for
-# them. A model using one fails at load rather than silently handing users a
-# fragment.
-#
-# Being on this list is a claim that the style *needs* a rule nnsight doesn't
-# have, not merely that no one has checked it. ``moe_tp_experts`` was here on the
-# strength of its name and did not belong: it is expert-parallel and still needs
-# nothing, because its forward all-reduces (see SHARDED_SIDES). Prefer reading
-# the style's ``_prepare_input_fn``/``_prepare_output_fn`` to inferring from the
-# family it belongs to — the two do not track each other.
+# them. Read the style's ``_prepare_input_fn``/``_prepare_output_fn`` before
+# adding one; the name alone misled on ``moe_tp_experts``.
 UNSUPPORTED: Dict[str, str] = {
     "grouped_gemm": "expert-parallel (MoE)",
     "ep_router": "expert-parallel (MoE)",
@@ -181,66 +162,47 @@ class UnsupportedParallelStyle(Exception):
 def _shardable(tensor: torch.Tensor, world_size: int) -> bool:
     """Whether ``tensor`` can be this rank's slice of a last-dim shard.
 
-    The sharded activation is always a float tensor whose last dim divides the
-    mesh — transformers' own all-gather assumes equal shards. Anything else (an
-    integer mask, a scalar, a ragged width) cannot be what was split, so it
-    passes through untouched rather than being corrupted by a collective.
+    A sharded activation is a float tensor with a last dim; anything else (an
+    integer mask, a scalar) cannot be what was split, so it passes through
+    untouched rather than being corrupted by a collective. Only the whole being
+    split back has to chunk evenly — a shard's own width need not divide.
     """
-    return (
-        tensor.is_floating_point()
-        and tensor.dim() >= 1
-        and tensor.shape[-1] % world_size == 0
-    )
+    return tensor.is_floating_point() and tensor.dim() >= 1 and tensor.shape[-1] % world_size == 0
 
 
 def _gather(value: Any, mesh: Any) -> Any:
     """Every rank's slice of ``value``, concatenated back into the whole tensor."""
     from transformers.integrations.tensor_parallel import all_gather
 
-    world_size = mesh.size()
     return apply(
         value,
-        lambda tensor: (
-            all_gather(tensor, mesh) if _shardable(tensor, world_size) else tensor
-        ),
+        lambda tensor: all_gather(tensor, mesh) if tensor.is_floating_point() and tensor.dim() else tensor,
         torch.Tensor,
     )
 
 
-def _last_dim(value: Any) -> Optional[int]:
-    """The last dimension of the one shardable tensor in ``value``, if there is one.
+def _reduce(value: Any, mesh: Any) -> Any:
+    """Every rank's partial of ``value`` summed — the tensor the post-hook would make."""
+    import torch.distributed as dist
 
-    A location's value is often a tuple or a dataclass, most of whose members
-    are not fragments — a mask, a cache, ``None``. Exactly one shardable tensor
-    makes the width comparable before and after a gather; anything else (none, or
-    several of different widths) is not something to draw a conclusion from, and
-    the caller skips the check rather than guessing.
-    """
-    widths = []
-    apply(
-        value,
-        lambda tensor: widths.append(tensor.shape[-1])
-        if tensor.is_floating_point() and tensor.dim() >= 1
-        else None,
-        torch.Tensor,
-    )
-    return widths[0] if len(widths) == 1 else None
+    group = mesh.get_group()
+
+    def summed(tensor: torch.Tensor) -> torch.Tensor:
+        if not tensor.is_floating_point():
+            return tensor
+        total = tensor.clone()
+        dist.all_reduce(total, group=group)
+        return total
+
+    return apply(value, summed, torch.Tensor)
 
 
 def _reshard(value: Any, mesh: Any) -> Any:
     """This rank's slice of ``value``, as the model's own forward expects it.
 
-    transformers' ``split`` is the exact inverse of its ``all_gather`` — chunk
-    along the last dim, take this rank's — so a value no worker touched comes back
-    unchanged, and an edited one carries the edit. Both are autograd functions, so
-    the pair is transparent to a backward pass as well.
-
-    Guarded by the same predicate as the gather, and it must be: what goes back
-    is what the model's own forward consumes. A tensor ``_gather`` declined to
-    touch was never a fragment, so splitting it here hands the model a slice of
-    something whole. Divisibility alone is not enough to tell those apart — an
-    integer ``position_ids`` of width 8 at tp=4 divides perfectly, and every rank
-    would silently continue on a quarter of it. Wrong answers, not a hang.
+    transformers' ``split`` is the exact inverse of its ``all_gather``, and both
+    are autograd functions. Guarded by the same predicate as the gather: a tensor
+    that was never a fragment must not be cut down here.
     """
     from transformers.integrations.tensor_parallel import split
 
@@ -254,71 +216,31 @@ def _reshard(value: Any, mesh: Any) -> Any:
     )
 
 
-def is_sharded(module: torch.nn.Module) -> bool:
-    """Whether ``module``'s tree has anything split across a multi-rank mesh.
-
-    A caller's way to ask whether a loaded model is sharded at all, without
-    reaching into transformers' stamps itself. Nothing in nnsight branches on it
-    — a [`TPFragments`][nnsight.modeling.tp.fragments.TPFragments] is built
-    for every HuggingFace model and stays inert until
-    [`instrument`][nnsight.modeling.tp.fragments.TPFragments.instrument] finds
-    a sharded module — but a server deciding how to run a replica wants it.
-
-    A degenerate 1-rank mesh reads as not sharded: there is nothing to gather.
-    """
-    for child in module.modules():
-        if getattr(child, "_hf_tp_plan", None) is None:
-            continue
-        mesh = getattr(child, "_hf_device_mesh", None)
-        if mesh is not None and mesh.size() > 1:
-            return True
-    return False
-
-
 class TPFragments(Fragments):
     """Which values a transformers-sharded model splits, and how to reassemble them.
 
-    A [`HuggingFaceModel`][nnsight.modeling.huggingface.HuggingFaceModel] is built
-    with one of these whether or not it is sharded, because whether it *is* only
-    becomes knowable as the model loads. It starts
-    [`enabled`][nnsight.intervention.fragments.Fragments.enabled]``=False`` and
-    does nothing at all until
-    [`instrument`][nnsight.modeling.tp.fragments.TPFragments.instrument] finds
-    something actually split across ranks.
+    Built for every HuggingFace model and inert (``enabled=False``) until
+    `instrument` finds a module actually split across ranks.
 
     Attributes:
-        enabled: Whether anything in this tree is sharded. False costs one
-            attribute check per handled location.
-        tp_rules: Sharded location -> the device mesh it is split over. A location
-            absent from it is already whole.
+        enabled: Whether anything in this tree is sharded.
+        tp_rules: Location -> ``(mesh, kind)``, ``kind`` being ``"shard"`` or
+            ``"partial"`` (see `SIDES`). A location absent from it is already whole.
     """
 
     def __init__(self) -> None:
         self.enabled = False
         self.tp_rules: Dict[str, Any] = {}
-        # Source locations already warned about; see `read`.
-        self._warned: set = set()
-        # Locations whose gather has been shape-checked; see `whole`.
-        # The rule for a location is a property of the loaded model, so
-        # re-checking it every trace buys nothing.
-        self._checked: set = set()
 
     def instrument(self, envoy: Any) -> None:
-        """Install the hooks, and record whether this envoy's value is a shard.
+        """Record what each side of this envoy's module is at the handoff.
 
-        Called once per envoy as the tree is built, and again through
-        [`_update`][nnsight.intervention.envoy.Envoy._update] when real weights are
-        dispatched under a tree built on meta. That is the one moment both the
-        module — carrying transformers' ``_hf_tp_plan`` — and its path are in
-        hand, and it covers both load paths without either having to say so: a
-        meta module carries no plan and registers nothing, and the same envoy
-        re-instrumented over real weights registers then.
+        Called as the tree is built and again on dispatch (`Envoy._update`), which
+        is when a module first carries transformers' ``_hf_tp_plan`` stamp.
 
         Raises:
-            UnsupportedParallelStyle: if this module is sharded in a way there is
-                no rule for. Refused as the tree is built rather than papered
-                over, since the alternative is silently handing users a fragment
-                of a tensor.
+            UnsupportedParallelStyle: for a style there is no rule for — refused
+                up front rather than silently handing users a fragment.
         """
         super().instrument(envoy)
 
@@ -327,16 +249,11 @@ class TPFragments(Fragments):
         if style is None:
             return
 
-        if style in UNSUPPORTED:
+        if style not in SIDES:
+            why = UNSUPPORTED.get(style, "not a parallel style this version of nnsight recognizes")
             raise UnsupportedParallelStyle(
-                f"'{envoy.path}' is sharded as '{style}' ({UNSUPPORTED[style]}), "
-                "which interventions can't be shown whole, so this model can't "
-                "be traced tensor-parallel."
-            )
-        if style not in SHARDED_SIDES:
-            raise UnsupportedParallelStyle(
-                f"'{envoy.path}' is sharded as '{style}', which is not a parallel "
-                "style this version of nnsight recognizes."
+                f"'{envoy.path}' is sharded as '{style}' ({why}), which interventions "
+                "can't be shown whole, so this model can't be traced tensor-parallel."
             )
 
         mesh = getattr(module, "_hf_device_mesh", None)
@@ -351,14 +268,8 @@ class TPFragments(Fragments):
         _check_transformers_version()
 
         self.enabled = True
-        for side in SHARDED_SIDES[style]:
-            self.tp_rules[f"{envoy.path}.{side}"] = mesh
-
-    def begin(self) -> None:
-        # A fresh run warns again about anything it reads. A model actor serves
-        # request after request from one process, and the second user deserves
-        # the same caveat as the first.
-        self._warned.clear()
+        for side, kind in SIDES[style].items():
+            self.tp_rules[f"{envoy.path}.{side}"] = (mesh, kind)
 
     def fragmented(self, location: str) -> bool:
         """Whether this location's value is one rank's slice.
@@ -368,102 +279,23 @@ class TPFragments(Fragments):
         """
         return location in self.tp_rules
 
-    def read(self, location: str) -> None:
-        """Warn that a ``.source`` read is this rank's shard, and hand it over.
-
-        `.source` exposes a module's *intermediate* values, and the rules here
-        describe module *boundaries* — a different question. Measured at tp=2:
-        ``mlp.output`` and ``gate_proj.output`` arrive whole, while
-        ``mlp.source.self_gate_proj_0`` comes back at half width.
-
-        These cannot be gathered for the reader. Knowing a value is sharded is
-        not enough to reassemble it: which axis it is split on changes through a
-        module's forward — a fused qkv projection is split by head on the way out
-        of the linear and by hidden dim after the reshape — and the axis is not
-        recoverable from the tensor at runtime. So the value is handed over as-is
-        with a warning, rather than refused (a `.source` read is often exactly
-        what someone debugging a sharded model wants) or silently corrected.
-
-        **Do not branch on one.** This is the only rank-dependent value nnsight
-        ever gives intervention code, and every rank must reach the same
-        collectives in the same order. ``if x.source.self_k_proj_0.output.max() >
-        t:`` takes different branches on different ranks and deadlocks the group.
-        """
-        if ".source." not in location or location in self._warned:
-            return
-
-        self._warned.add(location)
-        # This module's registry entry is cleared first because a model actor
-        # serves request after request from one process: Python's default filter
-        # shows a warning once per source line, so without this only the first
-        # user of a replica would ever see it.
-        globals().pop("__warningregistry__", None)
-        warnings.warn(
-            f"'{location}' reads inside a module's forward on a model split "
-            "across ranks. `.source` values can be this rank's shard, and which "
-            "axis they are split on changes through the forward, so they are "
-            "handed over as-is rather than gathered. A value past the layer that "
-            "all-reduces (a module's own `.input`/`.output`) is whole; one "
-            "between a column-parallel layer and it is not. Do not branch on one "
-            "— the ranks would diverge. Compare against a single-GPU run if it "
-            "matters.",
-            UserWarning,
-            stacklevel=2,
-        )
-
     def whole(self, location: str, value: Any) -> Any:
-        """Every rank's slice of ``value``, concatenated into the real tensor."""
-        return self._gather_whole(location, value, self.tp_rules[location])
+        """The real tensor: every rank's slice gathered, or every rank's partial summed."""
+        mesh, kind = self.tp_rules[location]
+        return _reduce(value, mesh) if kind == "partial" else _gather(value, mesh)
 
     def fragment(self, location: str, whole: Any) -> Any:
-        """This rank's slice again, carrying whatever the workers left behind."""
-        return _reshard(whole, self.tp_rules[location])
+        """What this rank hands its forward back, carrying whatever the workers left.
 
-    def _gather_whole(self, provider: str, value: Any, mesh: Any) -> Any:
-        """``value`` gathered, checked once per location against the rule used.
-
-        The rules in [`SHARDED_SIDES`][nnsight.modeling.tp.fragments.SHARDED_SIDES]
-        are a claim about a transformers version, and most of them were settled by
-        reading its source rather than by running a model. This is what turns a
-        wrong claim from silent into loud.
-
-        The check is cheap and total: a side listed as sharded must actually grow
-        by ``world_size`` when gathered. A rule that named a whole value leaves
-        the width unchanged after the collective — which is precisely the shape of
-        the failure that motivated
-        [`MINIMUM_TRANSFORMERS`][nnsight.modeling.tp.fragments.MINIMUM_TRANSFORMERS]:
-        a value already made whole by the model's own hook, gathered a second time
-        and handed back ``tp_size`` times too wide with a plausible first copy.
-        A version floor catches that for one known version; this catches it for
-        every version, including the one after next.
-
-        Once per location per run, not per visit — the answer is a property of
-        the rule, and a generation loop revisits the same location hundreds of
-        times.
-
-        Raises:
-            UnsupportedParallelStyle: if the gather did not widen the value.
+        A shard's slice again; for a partial, the whole on rank 0 and zeros on the
+        others, so the module's own post-hook reduce yields the whole everywhere.
         """
-        gathered = _gather(value, mesh)
-
-        if provider in self._checked:
-            return gathered
-        self._checked.add(provider)
-
-        before, after = _last_dim(value), _last_dim(gathered)
-        if before is None or after is None:
-            return gathered
-
-        expected = before * mesh.size()
-        if after != expected:
-            raise UnsupportedParallelStyle(
-                f"'{provider}' is listed as carrying this rank's shard, but "
-                f"gathering it across {mesh.size()} ranks gave a last dimension "
-                f"of {after} where {expected} was expected (it was {before} "
-                "before). Either this transformers version already makes the "
-                "value whole — in which case gathering it hands out a tensor "
-                f"{mesh.size()} times too wide — or it is split on an axis these "
-                "rules don't describe. Refusing rather than returning it."
+        mesh, kind = self.tp_rules[location]
+        if kind == "partial":
+            keep = mesh.get_local_rank() == 0
+            return apply(
+                whole,
+                lambda tensor: tensor if keep or not tensor.is_floating_point() else torch.zeros_like(tensor),
+                torch.Tensor,
             )
-        return gathered
-
+        return _reshard(whole, mesh)

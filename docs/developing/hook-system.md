@@ -1,6 +1,6 @@
 ---
 title: Hook System
-one_liner: Forward pre/forward hooks installed once per module at instrument time, pass-through when idle; plus the per-module source/skip controller.
+one_liner: One controller forward per module, installed at instrument time, carries the input/output handoff and the skip gate; no PyTorch hooks anywhere.
 tags: [internals, dev]
 related: [docs/developing/interleaver-internals.md, docs/developing/architecture-overview.md, docs/developing/source-internals.md]
 sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/source.py, src/nnsight/intervention/envoy.py]
@@ -8,52 +8,53 @@ sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/sour
 
 # Hook System
 
-> **Renamed.** This page was `lazy-hook-system.md`. The "lazy, one-shot,
-> mediator-ordered hook" design it described does not exist in this codebase — no
-> `hooks.py`, no `add_ordered_hook`, no per-mediator hook lists, no sentinel hook.
-> The current system installs two ordinary PyTorch hooks per module *once* and
-> gates them on a flag. The page is rewritten to match.
+> **Renamed, twice over.** This page was `lazy-hook-system.md`, and then described
+> two PyTorch hooks per module gated on a flag. Neither exists now: the module's
+> **controller** (its replaced `forward`) carries the handoff itself, and no
+> PyTorch hooks are registered.
 
 ## What this covers
 
 How nnsight makes a module's forward pass observable and editable:
 
-- The two forward hooks `Interleaver.instrument` installs per module, at
-  construction time, and why they pass through when no trace is running.
-- The source/skip controller that replaces a module's `forward` to add the `.skip`
-  gate and (on demand) operation-level access.
-- Why there is no fast-path or sentinel problem to work around.
+- The controller `Interleaver.instrument` installs as each module's `forward`, at
+  construction time, which hands `.input`/`.output` to the interleaver, gates
+  `.skip`, and (on demand) runs the source-instrumented body.
+- Why it passes through when no trace is running, and why there are no PyTorch
+  hooks on an ordinary module — the whole reason an instrumented model stays on
+  PyTorch's fast call path.
+- How tensor parallelism fits: the controller runs inside transformers' own
+  hooks, so it sees the pre-collective value, which `TPFragments` knows how to
+  make whole.
 
 ## Architecture
 
-### Hooks are installed at instrument time, not on demand
+### The controller is installed at instrument time, not on demand
 
 `Interleaver.instrument(envoy)` (`src/nnsight/intervention/interleaver.py:521`) runs
 from `Envoy.__init__` (`envoy.py:135`) for every module in the tree, and again from
 `Envoy._update` (`envoy.py:257`) when meta weights are swapped for real ones. It
-registers exactly two hooks per module:
+installs one controller as the module's `forward` (`install_controller` →
+`_make_controller`, `source.py`):
 
 ```python
-def pre_forward(module, args, kwargs):
-    if not self.interleaving:
-        return None
-    return self.handle(f"{path}.input", (args, kwargs))
-
-def forward(module, args, kwargs, output):
-    if not self.interleaving:
-        return None
-    return self.handle(f"{path}.output", output)
-
-self.handles[path] = [
-    module.register_forward_pre_hook(pre_forward, with_kwargs=True),
-    module.register_forward_hook(forward, with_kwargs=True),
-]
+def controller(*args, **kwargs):
+    interleaver, path, locations = state.active()     # the trace reaching this module now
+    if interleaver is None or not interleaver.busy:   # no trace, or no workers
+        return body(module, *args, **kwargs)
+    args, kwargs = interleaver.handle(locations[0], (args, kwargs))   # "{path}.input"
+    output = interleaver.handle(locations[1], NO_SKIP)                # the .skip gate
+    if output is NO_SKIP:
+        output = body(module, *args, **kwargs)
+    return interleaver.handle(locations[2], output)                   # "{path}.output"
 ```
 
-Both are registered with `with_kwargs=True`, so they receive and can rewrite the
-full `(args, kwargs)` / `output`. Because each hook **returns** the handled value,
-an intervention can edit the module's input (return `(args, kwargs)`) or output
-(return a value) in place.
+The handoffs see and can rewrite the full `(args, kwargs)` / `output`. Because
+each **returns** the handled value, an intervention can edit the module's input or
+output in place. There are no PyTorch hooks at all, tensor parallelism included:
+the controller runs inside transformers' own hooks, so `TPFragments` describes
+the value at that point (a shard, or a partial sum its post-hook will reduce) and
+makes it whole only when a worker is waiting.
 
 ### Pass-through when idle
 
@@ -85,16 +86,15 @@ across *workers* for the same location is the order of `interleaver.mediators`
 on the calling worker's mediator (`mediator.caches`, set in
 `InterleavingTracer.cache`, `tracer.py:201`), and `Interleaver.handle` feeds every
 location's post-intervention value to each active cache after serving the workers
-(`interleaver.py:593`). So a cache observes exactly what the existing forward hooks
+(`interleaver.py:593`). So a cache observes exactly what the controllers
 already surface — no extra registration, and it always sees post-intervention
 values scoped to its worker's batch rows.
 
 ## The source/skip controller
 
-The forward hooks only surface two locations per module: `.input` and `.output`.
-Everything else — the `.skip` gate and operation-level access — is added by
-replacing the module's `forward` with a controller. This is installed by
-`install_skip(envoy)` (`source.py:437`), called from `instrument` up front so the
+The controller surfaces `.input` and `.output`, gates `.skip`, and on demand runs
+the source-instrumented body for operation-level access. It is installed by
+`install_controller(envoy)` (`source.py:437`), called from `instrument` up front so the
 gate is in place before `nn.Module.__call__` binds `forward`.
 
 ### `_State` — per-module, shared across interleavers
@@ -136,7 +136,7 @@ the skip gate is an ordinary `handle` on a `.skip` location, served by a worker'
 `Event.SKIP` (from `envoy.skip(replacement)` → `Mediator.skip`). If no worker is
 parked on `.skip`, `handle` returns the `_NO_SKIP` sentinel unchanged and the body
 runs. This is why `envoy.skip(...)` can read the module's own input first: the input
-is offered by the pre-hook before the controller's skip gate.
+is offered before the skip gate.
 
 This replaces the OLD `__nnsight_skip__`-kwarg trick and the even older
 `SkipException`. There is no exception unwinding and no magic kwarg — a skip is just
@@ -153,13 +153,12 @@ controller is unchanged; only its `body` swaps. Details are in
 
 ## Key files / classes
 
-- `src/nnsight/intervention/interleaver.py:521` — `Interleaver.instrument`. Installs the two hooks + skip controller.
-- `:566` — `Interleaver.handle`. Fan-out that the hooks call.
+- `src/nnsight/intervention/interleaver.py:521` — `Interleaver.instrument`. Installs the controller.
+- `:566` — `Interleaver.handle`. Fan-out that the controller calls.
 - `:489`/`:509` — `interleaving` flag (`__enter__`/`__exit__`).
-- `:663`/`:668` — `remove`/`clear`. Drop hooks per path / all.
-- `src/nnsight/intervention/source.py:437` — `install_skip`. Registers the controller.
-- `:80` — `_State`. Per-module state; weak interleaver keys.
-- `:362` — `_make_controller`. The installed forward: skip gate then body.
+- `src/nnsight/intervention/source.py:437` — `install_controller`. Registers the controller.
+- `:80` — `_State`. Per-module state; weakly-held interleaver routes.
+- `:362` — `_make_controller`. The installed forward: input handoff, skip gate, body, output handoff.
 - `:266` — `_skipped`. The `.skip` gate as a `handle` call.
 - `:414` — `install_source`. Upgrades `body` to the instrumented forward.
 
@@ -167,19 +166,17 @@ controller is unchanged; only its `body` swaps. Details are in
 
 For `with model.trace("hi"): model.layer.skip(model.layer.input)`:
 
-1. At `Envoy` construction, `instrument` installed the pre/forward hooks and
-   `install_skip` put the controller on `model.layer`'s `forward`. All inert
-   (`interleaving` is `False`).
+1. At `Envoy` construction, `instrument` put the controller on `model.layer`'s
+   `forward`. Inert (`interleaving` is `False`).
 2. The trace enters; `interleaving` flips `True`; the worker starts.
 3. The worker reads `model.layer.input` → parks on `model.layer.input.i0`.
-4. `nn.Module.__call__` on `model.layer` runs the pre-hook → `handle("layer.input",
-   (args, kwargs))` serves the input to the worker; the worker computes
-   `replacement` and calls `model.layer.skip(replacement)` → parks on
-   `model.layer.skip.i0`.
-5. `nn.Module.__call__` binds and calls the controller, which calls
-   `_skipped` → `handle("layer.skip", _NO_SKIP)`; the worker's `SKIP` event
-   substitutes `replacement`; the controller returns it without running `body`.
-6. The forward hook still fires on the returned value (`handle("layer.output",
+4. `nn.Module.__call__` on `model.layer` calls the controller, whose
+   `handle("layer.input", (args, kwargs))` serves the input to the worker; the
+   worker computes `replacement` and calls `model.layer.skip(replacement)` →
+   parks on `model.layer.skip.i0`.
+5. The controller's `_skipped` → `handle("layer.skip", _NO_SKIP)`; the worker's
+   `SKIP` event substitutes `replacement`; `body` is not run.
+6. The controller still hands off the returned value (`handle("layer.output",
    replacement)`), so downstream reads of `model.layer.output` see the skip result.
 
 ## Extension points

@@ -1,6 +1,6 @@
 ---
 title: Interleaver and Hooks
-one_liner: One shared Interleaver installs a pre-forward and a forward hook on every wrapped module; they pass through when idle and route input/output through Interleaver.handle when interleaving, tagging each visit with an occurrence index.
+one_liner: One shared Interleaver installs a controller forward on every wrapped module; it passes through when idle and hands input/output to Interleaver.handle when interleaving, counting each visit once on the interleaver.
 tags: [concept, mental-model, hooks]
 related: [docs/concepts/threading-and-mediators.md, docs/concepts/envoy.md, docs/concepts/source-tracing.md]
 sources: [src/nnsight/intervention/interleaver.py:430, src/nnsight/intervention/interleaver.py:521, src/nnsight/intervention/interleaver.py:566, src/nnsight/intervention/interleaver.py:375, src/nnsight/intervention/interleaver.py:605]
@@ -12,11 +12,13 @@ sources: [src/nnsight/intervention/interleaver.py:430, src/nnsight/intervention/
 
 How values get from the running model into a parked worker. One `Interleaver` (`interleaver.py:430`) is shared across an entire `Envoy` tree, so every module reports into the same set of workers.
 
-The hook model in this rewrite:
+How a module reaches it:
 
-- **Two hooks per module, installed at wrap time.** When an `Envoy` is built it calls `interleaver.instrument(self)` (`interleaver.py:521`), registering a `register_forward_pre_hook` and a `register_forward_hook` on the module.
-- **Pass-through when idle.** Both hooks check `self.interleaving` first; outside a trace they return `None` and the module runs untouched. So an instrumented model runs at normal speed when you're not tracing.
-- **Routed when interleaving.** Inside a trace, the pre-hook routes the module's `(args, kwargs)` through `handle("{path}.input", ...)` and the forward hook routes the output through `handle("{path}.output", ...)`. Because both hooks *return* the handled value, an intervention can edit input or output in place.
+- **One controller per module, installed at wrap time.** When an `Envoy` is built it calls `interleaver.instrument(self)`, which installs the module's **controller** as its `forward` (`source.py`, `_make_controller`). The controller is the whole per-module mechanism: it hands the input to `handle("{path}.input", ...)`, consults the `.skip` gate, runs the real forward, and hands the output to `handle("{path}.output", ...)`. No PyTorch forward hooks are registered — a module with none is called on PyTorch's fast path, which is most of what makes an instrumented model cheap.
+- **Pass-through when idle.** The controller first checks that its interleaver is `interleaving` *and* `busy` (has workers); otherwise it runs the body and nothing else. So an instrumented model runs at engine speed when you're not tracing, and a vLLM step with no nnsight requests in it costs each module one attribute test.
+- **Routed when interleaving.** Inside a trace, the handoffs return the handled value, so an intervention can edit input or output in place.
+- **No hooks under tensor parallelism either.** transformers TP all-reduces and all-gathers in *its* forward hooks, which run after the controller — so the controller sees a row-parallel output as this rank's partial sum and a gathered head as a shard. `TPFragments` records which, and makes the value whole (all-reduce or all-gather) only when a worker is actually waiting there.
+- **One occurrence counter per location**, on the interleaver, bumped once per visit; each worker holds the counts it started at, so its own occurrence of a location is a subtraction, not a per-worker increment at every handoff.
 
 This is simpler than the older lazy one-shot hook design: there is **one** primitive — a location string plus `Interleaver.handle` — and modules, source operations, `.skip`, and `result` all ride on it.
 
@@ -24,30 +26,28 @@ This is simpler than the older lazy one-shot hook design: there is **one** primi
 
 You never call these directly — `Envoy` properties do. Read this to:
 
-- Understand why an untraced module is cheap (its hooks short-circuit on `interleaving == False`).
+- Understand why an untraced module is cheap (no hooks; the controller short-circuits on `interleaving`/`busy`).
 - Debug `OutOfOrderError`.
 - Plumb values into the interleaver from a custom driver (vLLM logits, generation results) via `Interleaver.handle`.
 
 ## Instrumenting a module
 
-`Interleaver.instrument(envoy)` (`interleaver.py:521`):
+`Interleaver.instrument(envoy)`:
 
-1. Calls `install_skip(envoy)` (see [Source Tracing](source-tracing.md)) to install the per-module **controller** forward and register this interleaver on the module — so the module can be skipped or source-drilled, even when several envoys share it.
-2. Removes any hooks previously installed for this path (`remove`), then registers the pre-forward and forward hooks (both `with_kwargs=True`).
+1. Lets `fragments.instrument(envoy)` record what this module's values are at the handoff (a shard or a partial sum, on a TP-split module).
+2. Calls `install_controller(envoy)` (see [Source Tracing](source-tracing.md)) to install the controller forward and register this interleaver on the module under its path — so the module hands off, can be skipped or source-drilled, even when several envoys share it.
 
 ```python
-def pre_forward(module, args, kwargs):
-    if not self.interleaving:
-        return None
-    return self.handle(f"{path}.input", (args, kwargs))   # editable input
-
-def forward(module, args, kwargs, output):
-    if not self.interleaving:
-        return None
-    return self.handle(f"{path}.output", output)          # editable output
+def controller(*args, **kwargs):                      # the module's forward, per module
+    interleaver, path, locations = state.active()     # which trace reaches this module now
+    if interleaver is None or not interleaver.busy:   # no trace, or no workers: straight through
+        return body(module, *args, **kwargs)
+    args, kwargs = interleaver.handle(locations[0], (args, kwargs))   # "{path}.input"
+    output = interleaver.handle(locations[1], NO_SKIP)                # the .skip gate
+    if output is NO_SKIP:
+        output = body(module, *args, **kwargs)
+    return interleaver.handle(locations[2], output)                   # "{path}.output"
 ```
-
-`instrument` runs again on `Envoy._update` (dispatch swapping meta weights for real ones): it drops the old path's hooks and re-installs on the new module.
 
 ## Interleaver.handle: one call, every worker
 
@@ -83,13 +83,13 @@ After the model returns, `check_dangling_mediators` (`interleaver.py:605`) inspe
 
 ## Skip is a gate, not a hook
 
-`.skip(value)` parks on `Event.SKIP` at `"{path}.skip"`. The module's **controller** forward (installed by `install_skip`) queries that gate *before* running the body: if a replacement is pending, the body is skipped and the replacement returned. This is why a skip can even read the module's own `.input` first — the controller is bound before `nn.Module.__call__` runs its pre-hooks. See [Source Tracing](source-tracing.md) for the controller.
+`.skip(value)` parks on `Event.SKIP` at `"{path}.skip"`. The module's **controller** forward (installed by `install_controller`) queries that gate *before* running the body: if a replacement is pending, the body is skipped and the replacement returned. This is why a skip can even read the module's own `.input` first — the controller is bound before `nn.Module.__call__` runs its pre-hooks. See [Source Tracing](source-tracing.md) for the controller.
 
 ## Gotchas
 
-- **Hooks are always installed, not lazy.** Overhead when idle is a single `if not self.interleaving: return None` per hook. Don't remove the module's hooks by hand — reassign the module through the envoy so `instrument` re-runs.
-- **`with_kwargs=True` on both hooks.** The pre-hook sees `(args, kwargs)` and can rewrite either; `.inputs` exposes the full pair, `.input` the first positional-or-keyword argument.
-- **One interleaver per tree, reused across runs.** `cancel()` clears mediators and the batcher after each run; the hooks stay installed. A server keeps the same interleaver across requests.
+- **The controller is always installed, not lazy.** Overhead when idle is one frame and one `interleaving`/`busy` check per module call, on PyTorch's hook-free fast path. Don't replace a module's `forward` by hand — reassign the module through the envoy so `instrument` re-runs.
+- **The input handoff sees `(args, kwargs)`** and can rewrite either; `.inputs` exposes the full pair, `.input` the first positional-or-keyword argument.
+- **One interleaver per tree, reused across runs.** `cancel()` clears mediators and the batcher after each run; the controllers stay installed. A server keeps the same interleaver across requests.
 - **Occurrence tags are strings.** A request pinned to a later step simply doesn't string-match earlier visits and waits — there is no numeric comparison in the hot path.
 
 ## Related

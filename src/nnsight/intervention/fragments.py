@@ -62,24 +62,10 @@ class Fragments:
         Called for every envoy from
         [`Interleaver.instrument`][nnsight.intervention.interleaver.Interleaver.instrument],
         which is the one moment both the module — carrying whatever its runtime
-        stamped on it — and its path are in hand. Default: nothing to learn.
-        """
-
-    def begin(self) -> None:
-        """Called as a run starts, for whatever is per-run rather than per-model.
-
-        The rules themselves are a property of the loaded model and outlive a
-        run; anything a *reader* should be told about is not. Default: nothing to
-        reset.
-        """
-
-    def read(self, location: str) -> None:
-        """Called when something is about to read ``location``.
-
-        Only for locations something is actually waiting on, and regardless of
-        whether they are fragments — which is what makes this the place to say
-        something about a value the runtime *cannot* make whole. Default: nothing
-        to say.
+        stamped on it — and its path are in hand. The handoff runs inside the
+        module's forward, after its runtime's pre-hooks and before its post-hooks,
+        so what is recorded here is what the value is at *that* point. Default:
+        nothing to learn.
         """
 
     def fragmented(self, location: str) -> bool:

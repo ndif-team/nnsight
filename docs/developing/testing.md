@@ -116,7 +116,7 @@ paths in `test_language.py` (`skipif(not peft_installed)`).
 ### `tests/vllm/` (GPU + `vllm` required)
 
 Run separately: `python -m pytest tests/vllm/`. Its `conftest.py` sets
-`VLLM_ALLOW_INSECURE_SERIALIZATION=1` (for the `collective_rpc` request-state tests).
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1` (only for the request-state tests, which ship a function to the workers through `collective_rpc`; tracing itself needs no such flag).
 Files: `test_tracing.py` (logits/generation/sampling/interventions/input forms/early
 stop/deferred errors/cache), `test_async.py` (async engine streaming), `test_serve.py`
 (the `nnsight-serve` HTTP path + GPU-less client), `test_tensor_parallel.py` (sharded

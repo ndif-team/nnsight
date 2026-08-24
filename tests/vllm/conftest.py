@@ -17,6 +17,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 # The request-cleanup tests read worker-side state by passing a function to
 # vLLM's collective_rpc, which its default serializer rejects.
+# Only for the tests that ship a *function* to the workers through
+# collective_rpc (request-state probes): an ordinary trace, its saves and its
+# result need no such flag — test_requests.py proves that in a clean subprocess.
 os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 import pytest

@@ -75,12 +75,38 @@ class TestUpdate:
         assert getattr(envoy.layers, "0").mlp._module is not old.layers[0].mlp
 
     def test_no_double_instrument(self):
+        from nnsight.intervention.source import _STATE
+
         envoy = Envoy(Model(n_layers=1))
-        before = {p: len(h) for p, h in envoy.interleaver.handles.items()}
         envoy._update(Model(n_layers=1))
-        after = {p: len(h) for p, h in envoy.interleaver.handles.items()}
-        assert before == after
-        assert all(count == 2 for count in after.values())
+        # Each module routes to this interleaver exactly once, however many times
+        # it was instrumented.
+        for _, child in envoy.named_modules():
+            routes = child._module.__dict__[_STATE].routes
+            assert [r[0]() for r in routes] == [envoy.interleaver]
+
+    def test_a_module_reachable_by_two_paths_has_one_envoy(self):
+        # The second path is an alias of the first (as torch's named_modules lists
+        # a shared module once), so the module has one location and either
+        # spelling reads it.
+        class Tied(nn.Module):
+            def __init__(self):
+                super().__init__()
+                shared = nn.Linear(8, 8)
+                self.a = shared
+                self.b = shared
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        envoy = Envoy(Tied())
+        assert envoy.b is envoy.a
+        assert envoy._aliases == {"b": "model.a"}
+        assert [e.path for e in envoy.modules()] == ["model.a", "model"]
+        x = torch.randn(1, 8)
+        with envoy.trace(x):
+            first = envoy.b.output.save()
+        assert torch.allclose(first, envoy._module.a(x))
 
     def test_shared_modules_stay_shared(self):
         old, _ = tied_model()

@@ -11,12 +11,11 @@ they are reassembled, and
 
 from .fragments import (
     MINIMUM_TRANSFORMERS,
-    SHARDED_SIDES,
+    SIDES,
     UNSUPPORTED,
     TPFragments,
     UnsupportedParallelStyle,
     UnsupportedTransformersVersion,
-    is_sharded,
 )
 from .plan import (
     UnshardableCheckpoint,
@@ -27,12 +26,11 @@ from .plan import (
 
 __all__ = [
     "MINIMUM_TRANSFORMERS",
-    "SHARDED_SIDES",
+    "SIDES",
     "UNSUPPORTED",
     "TPFragments",
     "UnsupportedParallelStyle",
     "UnsupportedTransformersVersion",
-    "is_sharded",
     "UnshardableCheckpoint",
     "check_tp_request",
     "max_tp_size",

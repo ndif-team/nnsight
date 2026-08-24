@@ -266,7 +266,7 @@ For `with model.trace("hi") as tracer: hidden = model.layer.output.save()`:
    → `tracer.execute(tracer.info.code)`.
 5. `InterleavingTracer.execute`: builds the `Batcher`; `_batch_size("hi")` > 0,
    so one `Mediator` runs the whole block; `Envoy.interleave` runs the forward.
-6. The worker parks on `model.layer.output.i0`; the module's forward hook fires
+6. The worker parks on `model.layer.output.i0`; the module's controller calls
    `handle`, serving the value; the worker `.save()`s it and finishes.
 7. `push_result(frame, mediator.lcls)` writes back; `__exit__`'s outermost `dec()`
    filters to `.save()`-ed names. `hidden` is now in the caller's frame.

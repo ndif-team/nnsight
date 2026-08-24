@@ -33,12 +33,12 @@ anywhere else under transformers tensor parallelism.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
 from ...intervention.envoy import Envoy
-from .fragments import is_sharded
+from .fragments import _gather
 
 #: Styles whose own pre-hook splits the input for them.
 #:
@@ -55,25 +55,23 @@ from .fragments import is_sharded
 #: styles transformers registers.
 SPLITS_ITS_OWN_INPUT = ("rowwise_split_input",)
 
-
-def _style(module: torch.nn.Module) -> Optional[str]:
-    """The tensor-parallel style transformers sharded ``module`` with, if any."""
-    return getattr(module, "_hf_tp_plan", None)
-
-
-def _mesh(module: torch.nn.Module) -> Any:
-    """``module``'s device mesh, or None if it spans fewer than two ranks."""
-    mesh = getattr(module, "_hf_device_mesh", None)
-    if mesh is None or mesh.size() < 2:
-        return None
-    return mesh
+#: Styles whose output is still this rank's slice *after* the module's own
+#: post-hook has run. An ad-hoc call runs those hooks, so the value it returns
+#: is the post-hook one: a row-parallel output has been all-reduced and a
+#: ``colwise_gather_output`` head gathered (both whole, nothing to do), while a
+#: plain column-parallel output is never gathered by transformers and a
+#: ``sequence_parallel`` one has just been reduce-scattered — both come back
+#: sharded on the last dim. This is the one place the post-hook view is needed;
+#: [`SIDES`][nnsight.modeling.tp.fragments.SIDES] describes the handoff's
+#: pre-hook view and must not be consulted for the output here.
+SHARDED_AFTER_CALL = ("colwise", "packed_colwise", "sequence_parallel")
 
 
 class TPEnvoy(Envoy):
     """An envoy over a module transformers may have sharded.
 
-    Inert on an unsharded model and on a one-rank mesh — the correction is gated
-    on the module actually carrying a style — so this is a safe envoy class for
+    Inert on an unsharded model and on a one-rank mesh — `TPFragments` records
+    a rule only for a module actually split — so this is a safe envoy class for
     every ``Linear`` and ``Embedding`` in a tree that was loaded across ranks.
     """
 
@@ -84,21 +82,14 @@ class TPEnvoy(Envoy):
         the same order — as long as the call is not under rank-dependent control
         flow, the condition every collective in a block carries.
         """
-        module = self._module
         fragments = self.interleaver.fragments
-
-        if (
-            hook
-            or fragments is None
-            or not fragments.enabled
-            or _style(module) is None
-            or _mesh(module) is None
-        ):
+        if hook or fragments is None or not fragments.enabled:
             return super().__call__(*args, hook=hook, **kwargs)
 
-        into, outof = f"{self.path}.input", f"{self.path}.output"
-
-        if fragments.fragmented(into) and _style(module) not in SPLITS_ITS_OWN_INPUT:
+        module = self._module
+        style = getattr(module, "_hf_tp_plan", None)
+        into = f"{self.path}.input"
+        if fragments.fragmented(into) and style not in SPLITS_ITS_OWN_INPUT:
             args, kwargs = fragments.fragment(into, (args, kwargs))
 
         # The module's own hooks run inside this — the interleaver stands itself
@@ -106,9 +97,8 @@ class TPEnvoy(Envoy):
         # here without being restated.
         result = super().__call__(*args, hook=False, **kwargs)
 
-        if fragments.fragmented(outof):
-            result = fragments.whole(outof, result)
-
+        if style in SHARDED_AFTER_CALL:
+            result = _gather(result, module._hf_device_mesh)
         return result
 
 
@@ -139,7 +129,11 @@ def wants_tensor_parallel(target: Any, load_kwargs: dict) -> bool:
     handing back slices. Hence ``tp_plan`` counts even with no ``tp_size``.
     """
     if isinstance(target, torch.nn.Module):
-        return is_sharded(target)
+        return any(
+            getattr(m, "_hf_tp_plan", None) is not None
+            and getattr(getattr(m, "_hf_device_mesh", None), "size", lambda: 1)() > 1
+            for m in target.modules()
+        )
 
     config = load_kwargs.get("distributed_config")
     if config is None:

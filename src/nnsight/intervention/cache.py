@@ -136,21 +136,17 @@ class Cache:
         """
         return self._select(location) is not None
 
-    def subscriptions(self) -> "dict[str, tuple[str, str]] | None":
-        """The fixed locations this cache observes, or ``None`` for a wildcard.
+    def subscriptions(self) -> "dict[str, tuple[str, str]]":
+        """Every location this cache keeps, named before the model starts.
 
-        A cache with an explicit module list can name every location it will ever
-        keep before the model starts. The interleaver uses that to route a value
-        directly to its caches instead of asking every cache about every hook.
-        ``modules=None`` deliberately remains a wildcard: it preserves the
-        existing behaviour of selecting every matching ``.input``/``.output``
-        location, including locations introduced later by source tracing.
+        The interleaver routes a value straight to the caches subscribed to its
+        location, so a cache has to know its locations up front: an explicit
+        module list names them, and ``modules=None`` means every module in the
+        tree, read off the model here.
         """
-        if self.targets is None:
-            return None
-
+        targets = self.targets if self.targets is not None else [envoy.path for envoy in self.model.modules()]
         subscriptions = {}
-        for path in self.targets:
+        for path in targets:
             if self.include_output:
                 subscriptions[f"{path}.output"] = (path, "output")
             if self.include_inputs:

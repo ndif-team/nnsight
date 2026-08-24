@@ -97,7 +97,7 @@ async def acollect(engine: Any, request_id: str, output: Any = None) -> Optional
     call that winds the request's workers up and frees what they held.
     """
     ids = [request_id]
-    args = (ids, ids) if output is None else (ids, ids, {request_id: output})
+    args = (ids, ids) if output is None else (ids, ids, pickle.dumps({request_id: output}))
     return merge_collected(await engine.collective_rpc("collect_nnsight", args=args)).get(
         request_id
     )
@@ -115,10 +115,13 @@ class NNsightLLMEngine(LLMEngine):
         if not by_id:
             return outputs
 
+        # Pickled here: the utility call is msgpack-encoded on its way to the
+        # engine core, which refuses a plain object like RequestOutput unless
+        # VLLM_ALLOW_INSECURE_SERIALIZATION is set; bytes pass natively.
         finished = list(by_id)
         collected = merge_collected(
             self.engine_core.collective_rpc(
-                "collect_nnsight", args=(finished, finished, by_id)
+                "collect_nnsight", args=(finished, finished, pickle.dumps(by_id))
             )
         )
         for output in outputs:

@@ -381,20 +381,22 @@ concept pages are
 
 An `Interleaver` drives the model side. One is shared across an entire
 [`Envoy`](#5-the-envoy) tree, so every module in the model reports into the same set
-of workers. It owns two things: the PyTorch hooks that turn a forward pass into a
-stream of events, and the list of `Mediator` workers those events feed.
+of workers. It owns two things: the per-module controllers that turn a forward
+pass into a stream of events, and the list of `Mediator` workers those events feed.
 
-**Two persistent hooks per module.** When an envoy is built, the interleaver's
-`instrument` method registers a `register_forward_pre_hook` and a
-`register_forward_hook` on that module — once, at construction time, and they stay
-installed for the model's lifetime. The pre-hook routes the module's `(args,
-kwargs)` through `handle("{path}.input", ...)`; the forward hook routes the output
-through `handle("{path}.output", ...)`. Because both hooks *return* the value they
-handle, an intervention can edit the input or the output in place (a pre-hook that
-returns `(args, kwargs)` rewrites the input; a forward hook that returns a value
-rewrites the output). Both are registered `with_kwargs=True`, so the full argument
-pair is visible and editable — `.inputs` exposes the pair, `.input` the first
-argument.
+**One controller per module.** When an envoy is built, the interleaver's
+`instrument` method installs a *controller* as that module's `forward` — once, at
+construction time, for the model's lifetime. On every call the controller hands
+the module's `(args, kwargs)` through `handle("{path}.input", ...)`, consults the
+`.skip` gate, runs the real forward, and hands the output through
+`handle("{path}.output", ...)`. Because both handoffs *return* the value they
+handle, an intervention can edit the input or the output in place. `.inputs`
+exposes the full argument pair, `.input` the first argument. There are no PyTorch
+forward hooks — that is deliberate: a module with no hooks is called on PyTorch's
+fast path, and the controller costs one frame and one check when no trace is
+running. Under transformers tensor parallelism the controller runs inside the
+model's own collective hooks, so it sees a partial sum or a shard there, which
+`TPFragments` makes whole only when a worker is waiting for it.
 
 The single most important property of these hooks is that they **pass through when
 idle**. The first line of each is `if not self.interleaving: return None`, and
@@ -506,7 +508,7 @@ exception propagating out of `switch`. The protocol is only these four requests.
 to `hidden = model.transformer.h[5].output`, which calls `Mediator.value(...)`; that
 switches `(Event.VALUE, "model.transformer.h.5.output.i0")` to the parent and
 blocks. Control is now on the model side, which runs the forward until layer 5's
-forward hook fires `Interleaver.handle`, which calls the worker's `handle` for that
+controller hands its output to `Interleaver.handle`, which calls the worker's `handle` for that
 location. The worker's pending event matches, so `handle` switches the value into
 the worker, which resumes with the tensor in `hidden`, runs to its next park (or
 finishes), and hands control back. A write is the same shape: `swap` parks the same
@@ -783,7 +785,7 @@ model.transformer.h[0].output = my_new_tensor
 ```
 
 In-place editing works because the base `.output` preprocess returns the live
-tensor and the forward hook returns whatever the worker left it as; replacement
+tensor and the controller returns whatever the worker left it as; replacement
 works because assigning to the eproperty fires its setter, which issues a swap.
 
 **Know the shape of what you're editing.** A module's `.output` is exactly the object
@@ -1492,7 +1494,7 @@ except IndexError as error:
 
 What nnsight does adjust is the *traceback*, not the exception. A raw traceback
 from a worker is buried under nnsight's own frames — the interleaver, the
-mediator, the forward hooks — plus the model's forward stack. So when a trace
+mediator, the module controllers — plus the model's forward stack. So when a trace
 body raises, `clean_traceback` (`src/nnsight/tracing/util.py`) rebuilds the
 traceback keeping only the frames whose source file lives *outside* the nnsight
 package, leaving your own frames across whatever files your intervention code
@@ -2265,7 +2267,7 @@ are the pipeline-backed references. The full walkthrough is
 nnsight's cost is per-value-access bookkeeping wrapped *around* the model's own
 compute, and the model's compute dominates by orders of magnitude. When you read
 or write a location, the machinery parks the intervention greenlet, switches to
-the model, dispatches a forward hook when the location is reached, narrows the
+the model, hands off when the location is reached, narrows the
 activation to the invoke's rows, hands it to your code, takes back whatever you
 wrote, widens it back into the full batch, and switches back. That is real work —
 a greenlet switch, a hook call, a narrow/widen pair, an `eproperty`'s
@@ -2285,12 +2287,13 @@ regime is exactly what the benchmark harness under `tests/performance/`
 isolates, by wrapping a stack of small linear layers so what remains in the
 timings is the pipeline rather than the model.
 
-One consequence worth internalizing: the per-module forward hooks nnsight
-installs are persistent, but they **no-op when you are not interleaving**. A
-model that has been traced still carries its hooks; outside a `with model.trace()`
-block they short-circuit and cost effectively nothing, so a model isn't "slowed
-down" by having been used with nnsight. The cost is paid per trace, and inside a
-trace it is paid per value you actually touch.
+One consequence worth internalizing: the per-module controller nnsight installs
+is persistent, but it **no-ops when you are not interleaving** — and, because it
+is the module's `forward` rather than a hook, the module stays on PyTorch's fast
+call path. A model that has been traced still carries its controllers; outside a
+`with model.trace()` block they cost one frame and one check per module call, so a
+model isn't "slowed down" by having been used with nnsight. The cost is paid per
+trace, and inside a trace it is paid per value you actually touch.
 
 ### 11.2 Best practices
 
