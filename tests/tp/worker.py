@@ -96,6 +96,17 @@ def main() -> None:
         layer.mlp.gate_proj.output[..., : width // 2 + 1] = 0
         record("partial_edit_logits", model.lm_head.output.save())
 
+    # Ad-hoc calls run a sharded module on whole tensors, through its own
+    # hooks: a column-parallel linear (never gathered by transformers), a
+    # row-parallel one (all-reduced by its post-hook) and the gathered head.
+    with model.trace(PROMPT):
+        mlp_in = layer.mlp.input
+        down_in = layer.mlp.down_proj.input
+        hidden = layer.output[0]
+        record("adhoc_colwise", layer.mlp.gate_proj(mlp_in).save())
+        record("adhoc_rowwise", layer.mlp.down_proj(down_in).save())
+        record("adhoc_lens", model.lm_head(model.model.norm(hidden)).save())
+
     # A cache must record whole tensors too, and only for what it selects.
     with model.trace(PROMPT) as tracer:
         cache = tracer.cache(modules=[layer.mlp.gate_proj], include_inputs=True).save()

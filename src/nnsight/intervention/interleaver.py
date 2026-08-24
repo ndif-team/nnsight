@@ -22,8 +22,8 @@ This module implements that dance with `greenlets <https://greenlet.readthedocs.
   no location at all, waiting on the other workers rather than the model
   ([`Mediator.barrier`][nnsight.intervention.interleaver.Mediator.barrier]).
 
-* An [`Interleaver`][nnsight.intervention.interleaver.Interleaver] installs PyTorch hooks on the model's modules. As the
-  forward pass reaches each location, the hook calls
+* An [`Interleaver`][nnsight.intervention.interleaver.Interleaver] installs a controller on each of the model's modules.
+  As the forward pass reaches each location, the controller calls
   [`Interleaver.handle(location, value)`][nnsight.intervention.interleaver.Interleaver.handle], which offers
   the value to the workers and caches interested in that location. A worker
   waiting on it is served the value (read) or has its replacement substituted in
@@ -41,10 +41,8 @@ from __future__ import annotations
 import enum
 import warnings
 import weakref
-from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
 
-import torch
 from greenlet import getcurrent, greenlet
 
 from ..tracing.util import Scope
@@ -75,17 +73,9 @@ class Event(enum.Enum):
 class Pending(NamedTuple):
     """What a worker is parked on, waiting for the model to reach.
 
-    The occurrence is kept apart from the location rather than glued onto it.
-    A worker parks once per intervention read, but a location is *visited* on
-    every forward through every module, and the model side's question at each
-    visit — is anyone waiting on this location? — is about the location alone. As
-    its own field that is a plain comparison; folded into a
-    ``"{provider}.i{n}"`` string it would have to be rebuilt, per worker, at
-    every visit, only to be thrown away.
-
-    Printing rejoins them, because that form is the one worth reading in an
-    error: ``'model.layers.16.output.i2' was requested but...`` says which pass
-    was waited for, where the bare location would not.
+    The occurrence is its own field so that matching a visit is a plain
+    comparison; printing rejoins them (``'model.layers.16.output.i2'``), which is
+    the form worth reading in an error.
 
     Attributes:
         event: What the worker wants done at ``provider`` — see
@@ -175,9 +165,9 @@ class Mediator:
             next occurrence the model hasn't handled). Stays ``0`` (the first
             occurrence) with no ``tracer.iter``. Relaxes to ``None`` after the
             first hit of a pinned non-zero step (see `handle`).
-        iterations: Per-location count of how many times the model has reached
-            each location so far this run, used to tag each visit with its
-            occurrence index. Keyed by the undecorated provider string.
+        base: The interleaver's per-location counts when this worker started;
+            its own occurrence of a location is the interleaver's count minus this
+            (see [`occurrence`][nnsight.intervention.interleaver.Mediator.occurrence]).
         caches: The caches this worker's ``tracer.cache()`` created. They observe
             every location the run reaches, after interventions have had it.
     """
@@ -218,14 +208,14 @@ class Mediator:
         self.worker: greenlet | None = None
         # What the worker is currently parked on waiting to be served (a
         # [`Pending`][nnsight.intervention.interleaver.Pending]), or None when it
-        # isn't parked. Assigned through the `pending` property, which keeps the
-        # interleaver's index of who is parked where up to date.
-        self._pending: Pending | None = None
+        # isn't parked.
+        self.pending: Pending | None = None
         # Which occurrence of a location the worker is currently asking for (or
-        # None when relaxed), and a per-location tally of how many times the model
-        # has reached it. See `handle` for how the two are matched up.
+        # None when relaxed). See `handle` for how it is matched.
         self.iteration: int | None = 0
-        self.iterations: dict[str, int] = defaultdict(int)
+        # The interleaver's counts when this worker started; its own occurrence
+        # of a location is the interleaver's count minus this.
+        self.counts_at_start: dict[str, int] = {}
         # Caches created by this worker's `tracer.cache()`. They observe every
         # location this run reaches (post-intervention); see Interleaver.handle.
         self.caches: list = []
@@ -236,9 +226,9 @@ class Mediator:
         # The exception this worker raised, if any — a tracer.stop()'s
         # EarlyStopException or a genuine error in intervention code. Set only under
         # a deferring interleaver (see Interleaver.defer_exceptions): a driver that
-        # keeps running past a worker's error (vLLM, whose engine schedules the next
-        # step itself) reads this to end the request and, for a real error, carry it
-        # back to the trace that wrote it.
+        # keeps running past a worker's error — one whose forward is a step of a
+        # run it schedules itself — reads this to end that worker's run and, for a
+        # real error, carry it back to the trace that wrote it.
         self.exception: Optional[BaseException] = None
         # Names whose values were `.save()`d in the process that serialized
         # this worker (see __getstate__); a receiving driver unions them into
@@ -334,9 +324,15 @@ class Mediator:
         iteration = (
             mediator.iteration
             if mediator.iteration is not None
-            else mediator.iterations[location]
+            else mediator.occurrence(location)
         )
         return worker.parent.switch(Pending(event, location, iteration, *rest))
+
+    def occurrence(self, location: str) -> int:
+        """How many times the model has reached ``location`` since this worker started."""
+        counts = {} if self.interleaver is None else self.interleaver.counts
+        return counts.get(location, 0) - self.counts_at_start.get(location, 0)
+
 
     @classmethod
     def value(cls, location: str) -> Any:
@@ -383,25 +379,6 @@ class Mediator:
         getcurrent().parent.switch(Pending(Event.BARRIER, None))
 
     @property
-    def pending(self) -> Pending | None:
-        """What this worker is parked on, or None when it isn't parked.
-
-        A property so every transition is routed through
-        [`Interleaver.park`][nnsight.intervention.interleaver.Interleaver.park].
-        That keeps the interleaver's provider wait counts current from the one
-        place that assigns a pending event.
-        """
-        return self._pending
-
-    @pending.setter
-    def pending(self, pending: Pending | None) -> None:
-        previous = self._pending
-        self._pending = pending
-        interleaver = self.interleaver
-        if interleaver is not None:
-            interleaver.park(self, previous, pending)
-
-    @property
     def alive(self) -> bool:
         """Whether the worker exists and still has intervention code left to run.
 
@@ -423,7 +400,7 @@ class Mediator:
         """
         self.interleaver = interleaver
         self.iteration = 0
-        self.iterations = defaultdict(int)
+        self.counts_at_start = dict(interleaver.counts) if interleaver is not None else {}
         self.caches = []
         self.transform = None
         self.worker = greenlet(run=self._run)
@@ -452,21 +429,6 @@ class Mediator:
         another worker's greenlet, e.g. an ``Envoy.__call__(hook=True)`` adapter
         run whose submodule hooks serve a second worker mid-call.
         """
-        # A worker that has already finished has nothing to resume, and switching
-        # into a dead greenlet does not run anything — greenlet hands the
-        # arguments straight back. The caller would then store an activation
-        # tensor where an event belongs, and the next `reindex` would read
-        # `.provider` off it. That happens inside the model runner's own state
-        # update, where nothing catches it, so it takes the whole engine down —
-        # every tenant's request, not just the one whose block raised. Finished is
-        # finished: say so the way a worker that ran off the end does.
-        #
-        # This is reachable because an erred worker is deliberately kept scheduled
-        # (see `_finish_erred`), so it is still routed to for as long as its
-        # request lives.
-        if self.worker is not None and self.worker.dead:
-            return None
-
         self.worker.parent = getcurrent()
         try:
             return self.worker.switch(*args)
@@ -486,29 +448,26 @@ class Mediator:
         ([`Event.SWAP`][nnsight.intervention.interleaver.Event.SWAP]) replaces ``value`` with the worker's. The worker may
         do both in turn (read a location, then assign it), so loop until it parks
         somewhere else or finishes. The returned value flows back up through
-        [`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle] to the hook, which substitutes it into the run.
+        [`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle] to the controller, which substitutes it into the run.
 
         A location can be reached many times in one run — e.g. a module revisited
         on every step of a generation loop. This visit is the
-        ``iterations[provider]``-th, so it serves the workers waiting for that
+        `occurrence(provider)`-th, so it serves the workers waiting for that
         occurrence of it. A worker parks already carrying the occurrence it wants
         (see [`event`][nnsight.intervention.interleaver.Mediator.event]) — pinned to a step, or resolved to the next
         occurrence when relaxed — so this is a location match and an integer
         match: a request pinned to a later step doesn't match yet and waits while
         earlier visits pass by. With no ``tracer.iter`` the occurrence is always
-        ``0``, so every
-        request binds to the first visit — the original behavior. Once a pinned
-        non-zero step is hit, the mediator is relaxed to ``None`` so the rest of
-        that step's requests follow the model sequentially rather than re-forcing
-        the index.
+        ``0``, so every request binds to the first visit. Once a pinned non-zero
+        step is hit, the mediator is relaxed to ``None`` so the rest of that
+        step's requests follow the model sequentially rather than re-forcing the
+        index.
         """
-        # The interleaver normally calls this only for a worker routed to this
-        # location. Keep the guard for direct/unit calls and nested transitions.
-        pending = self._pending
+        pending = self.pending
         if pending is None or pending.provider != provider:
             return value
 
-        iteration = self.iterations[provider]
+        iteration = self.occurrence(provider)
         # The batcher (if this run is batching) scopes a value to this worker's rows.
         batcher = None if self.interleaver is None else self.interleaver.batcher
         while (
@@ -550,15 +509,15 @@ class Mediator:
                         value, self.batch_group, pending.value
                     )
                 self.pending = self.switch()
-            pending = self._pending
+            pending = self.pending
         return value
 
 
 class Interleaver:
     """Drives the model side of interleaving: model hooks in, workers served.
 
-    An interleaver owns the PyTorch hooks that turn a model's forward pass into a
-    stream of `handle` calls, and the list of [`Mediator`][nnsight.intervention.interleaver.Mediator] workers
+    An interleaver owns the module controllers that turn a model's forward pass
+    into a stream of `handle` calls, and the list of [`Mediator`][nnsight.intervention.interleaver.Mediator] workers
     those calls feed. One interleaver is shared across an [`Envoy`][nnsight.intervention.envoy.Envoy] tree, so
     every module's hooks report into the same set of workers.
 
@@ -569,7 +528,7 @@ class Interleaver:
     2. Entering the interleaver (``with interleaver:``) flips
        [`interleaving`][nnsight.intervention.interleaver.Interleaver.interleaving] on and [`start`][nnsight.intervention.interleaver.Mediator.start]\\ s every worker so each
        parks on its first requested location.
-    3. The model runs. Each module hook installed by [`instrument`][nnsight.intervention.interleaver.Interleaver.instrument] calls
+    3. The model runs. Each module's controller (see [`instrument`][nnsight.intervention.interleaver.Interleaver.instrument]) calls
        `handle`, serving reads and applying swaps for any worker parked
        there, and returns the (possibly edited) value into the forward pass.
     4. [`check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators] surfaces any worker still waiting for a
@@ -577,8 +536,6 @@ class Interleaver:
        [`cancel`][nnsight.intervention.interleaver.Interleaver.cancel] clears the workers so the next run starts clean.
 
     Attributes:
-        handles: Module path -> the PyTorch hook handles installed for it, so
-            they can be removed on re-instrument or teardown.
         mediators: The workers to serve this run.
         batcher: The [`Batcher`][nnsight.intervention.batching.Batcher] for this run,
             which assembled the combined input and owns the row scoping
@@ -597,15 +554,26 @@ class Interleaver:
     """
 
     def __init__(self, fragments: Optional["Fragments"] = None) -> None:
-        self.handles: dict[str, list[torch.utils.hooks.RemovableHandle]] = {}
-        self._mediators: list[Mediator] = []
-        # Exact number of workers waiting on each provider. An explicit-target
-        # cache is in one list per location it keeps. Wildcard caches remain
-        # separate because their target locations are only known when a hook fires.
-        # `reindex` rebuilds all three whenever the active worker list changes.
-        self.waiting: dict[str, int] = {}
+        # The workers this run serves. Local tracing appends to it before the run
+        # is entered, and `__enter__` indexes it; a driver that swaps the list
+        # while a run is in progress calls `reindex` itself afterwards.
+        self.mediators: list[Mediator] = []
+        # The envoy wrapping each module of this tree, by module id, so a module
+        # reachable by two paths gets one envoy (the first path) and an alias.
+        # Weak: the tree's parent links own the envoys; this only looks them up.
+        self.envoys: "weakref.WeakValueDictionary[int, Any]" = weakref.WeakValueDictionary()
+        # The locations some worker is parked on, so a visit with nobody waiting
+        # costs one set lookup. Rebuilt from the workers by `reindex` at the run
+        # boundaries and by `handle` after it has served anyone (the only time a
+        # worker can park outside those).
+        self.parked: set[str] = set()
+        # How many times each location has been handled, for the life of the
+        # tree. A worker's own count of a location is this minus what it stood at
+        # when the worker started (`Mediator.occurrence`), so one increment per
+        # visit serves every worker however many are live.
+        self.counts: dict[str, int] = {}
+        # Location -> the caches that keep it, as (worker, cache, what to store).
         self.observers: dict[str, list[tuple[Mediator, Any, tuple[str, str]]]] = {}
-        self.wildcard_observers: list[tuple[Mediator, Any]] = []
         # What, if anything, makes a value at a location whole before workers see
         # it — see intervention/fragments.py. None on an ordinary model, and on a
         # distributed one it is the runtime's own object. Kept as a collaborator
@@ -618,6 +586,12 @@ class Interleaver:
         # it for its row scoping. Cleared by cancel().
         self.batcher: Any = None
         self.interleaving = False
+        # Whether a module's handoff has anything to reach: recomputed with the
+        # worker list (`reindex`), and the gate every module checks before handing
+        # off, so a run with no workers costs a module one attribute test. A
+        # runtime that needs the handoff to run with no workers present sets it
+        # itself.
+        self.busy = False
         # Recursive source (see intervention/source.py). Maps an op-location path a
         # worker asked to drill into to its instrumented callable + Compiled, or to
         # `None` while requested-but-not-yet-built: `None` tells the model side to
@@ -626,101 +600,43 @@ class Interleaver:
         # steps). Per-run — cleared on entry.
         self.sourced: dict[str, tuple | None] = {}
         # When True, a worker's exception is caught and recorded on its mediator
-        # rather than raised out of the hook. A driver whose forward is one step of
-        # a run it doesn't control (vLLM) sets this so one worker's error ends only
-        # its own request instead of tearing down the shared engine.
+        # rather than raised out of the handoff. A driver whose forward is one step
+        # of a run shared by several workers sets this so one worker's error ends
+        # only its own run instead of tearing down the others'.
         self.defer_exceptions = False
 
-    @property
-    def mediators(self) -> list["Mediator"]:
-        """The workers this run serves.
-
-        Replacing the list rebuilds the wait counts and cache indexes, so a driver
-        that hands over a different set each step (vLLM reschedules per step, and
-        a worker can stay parked across several) never leaves an old worker in a
-        provider's route.
-        """
-        return self._mediators
-
-    @mediators.setter
-    def mediators(self, mediators: list["Mediator"]) -> None:
-        self._mediators = mediators
-        self.reindex()
-
     def reindex(self) -> None:
-        """Rebuild provider wait counts and cache routes from active workers.
+        """Rebuild the parked set, cache routes and `busy` from `mediators`.
 
-        The list is intentionally mutable — local tracing appends workers, while
-        vLLM replaces it as the scheduler changes the active requests — so the
-        execution boundaries call this before hooks run. Individual parks then
-        update `waiting` incrementally through [`Mediator.pending`][nnsight.intervention.interleaver.Mediator.pending].
+        Called by `__enter__` once the workers have started, and by a driver that
+        replaces the list while a run is in progress (a scheduler reshuffling
+        which workers are in the batch), since nothing else notices the swap.
         """
-        self.waiting = {}
         self.observers = {}
-        self.wildcard_observers = []
+        self.busy = bool(self.mediators)
+        self._reindex_parked()
 
-        for mediator in self._mediators:
-            pending = mediator.pending
-            if pending is not None and pending.provider is not None:
-                self.waiting[pending.provider] = (
-                    self.waiting.get(pending.provider, 0) + 1
-                )
+        for mediator in self.mediators:
             for cache in mediator.caches:
-                subscriptions = cache.subscriptions()
-                if subscriptions is None:
-                    self.wildcard_observers.append((mediator, cache))
-                else:
-                    for provider, selected in subscriptions.items():
-                        self.observers.setdefault(provider, []).append(
-                            (mediator, cache, selected)
-                        )
+                for provider, selected in cache.subscriptions().items():
+                    self.observers.setdefault(provider, []).append((mediator, cache, selected))
 
-    def park(
-        self,
-        mediator: Mediator,
-        previous: Pending | None,
-        pending: Pending | None,
-    ) -> None:
-        """Move one worker between provider waiting counts.
+    def _reindex_parked(self) -> None:
+        self.parked = {
+            pending.provider
+            for mediator in self.mediators
+            if (pending := mediator.pending) is not None and pending.provider is not None
+        }
 
-        This is the sole incremental mutation path: assigning `pending` is what a
-        worker does whenever it parks, resumes, reaches a barrier, or finishes.
-        `reindex` establishes the current workers at run boundaries; a count is
-        enough here because `handle` already walks every worker to bump its
-        occurrence counter.
-        """
-        # vLLM starts a request before it hands the new scheduled list to the
-        # interleaver. It will be included by that following reindex; until then,
-        # it must not affect the current step's counts.
-        if mediator not in self._mediators:
-            return
-        old_provider = None if previous is None else previous.provider
-        new_provider = None if pending is None else pending.provider
-        if old_provider == new_provider:
-            return
-        if old_provider is not None:
-            remaining = self.waiting.get(old_provider, 0) - 1
-            if remaining > 0:
-                self.waiting[old_provider] = remaining
-            else:
-                self.waiting.pop(old_provider, None)
-        if new_provider is not None:
-            self.waiting[new_provider] = self.waiting.get(new_provider, 0) + 1
-
-    def _observers_for(
-        self, provider: str
-    ) -> list[tuple[Mediator, Any, tuple[str, str]]]:
-        """The caches that keep this provider."""
-        selected = self.observers.get(provider, [])
-        if not self.wildcard_observers:
-            return selected
-
-        matched = list(selected)
-        for mediator, cache in self.wildcard_observers:
-            selection = cache._select(provider)
-            if selection is not None:
-                matched.append((mediator, cache, selection))
-        return matched
+    def _ready(self, provider: str) -> list[Mediator]:
+        """The workers parked on this visit of ``provider``."""
+        return [
+            mediator
+            for mediator in self.mediators
+            if (pending := mediator.pending) is not None
+            and pending.provider == provider
+            and pending.iteration == mediator.occurrence(provider)
+        ]
 
     def __enter__(self) -> Interleaver:
         """Begin interleaving: arm the hooks and start each not-yet-started worker.
@@ -733,8 +649,6 @@ class Interleaver:
         """
         self.interleaving = True
         self.sourced.clear()
-        if self.fragments is not None:
-            self.fragments.begin()
         try:
             for mediator in self.mediators:
                 if mediator.worker is not None:
@@ -764,27 +678,20 @@ class Interleaver:
         return exc_type is EarlyStopException
 
     def instrument(self, envoy: Envoy) -> None:
-        """Install this interleaver's forward hooks on an envoy's module.
+        """Route an envoy's module through this interleaver.
 
-        Registers a pre-forward and a forward hook that, while
-        [`interleaving`][nnsight.intervention.interleaver.Interleaver.interleaving], route the module's input and output through
-        `handle` under the locations ``"{path}.input"`` and
-        ``"{path}.output"``. Because both hooks *return* the handled value,
-        interventions can edit the module's input or output in place. Outside
-        interleaving the hooks pass everything through untouched.
-
-        Also installs the source/skip controller and registers this interleaver on
-        the module (see [`install_skip`][nnsight.intervention.source.install_skip]), so a
-        module can be skipped or source-drilled by this trace — and by another envoy
-        sharing the module at the same time.
+        Installs the module's controller (see
+        [`install_controller`][nnsight.intervention.source.install_controller]), which
+        hands the module's input and output to `handle` under the locations
+        ``"{path}.input"`` and ``"{path}.output"`` while
+        [`interleaving`][nnsight.intervention.interleaver.Interleaver.interleaving], and gates
+        ``.skip``. No forward hooks: a module with none is called on PyTorch's
+        fast path, which is what keeps an instrumented model's cost near zero
+        outside a trace. Also registers this interleaver on the module, so a
+        module can be skipped or source-drilled by this trace — and by another
+        envoy sharing the module at the same time.
         """
-        from .source import install_skip  # lazy: source imports this module
-
-        # Register the source/skip controller for this interleaver up front, so the
-        # module's forward is the controller before nn.Module.__call__ binds it
-        # (which happens before pre-hooks run) — needed when a skip's replacement is
-        # read from the module's own input first.
-        install_skip(envoy)
+        from .source import install_controller  # lazy: source imports this module
 
         # The one moment both the module — carrying whatever its runtime stamped
         # on it — and its path are in hand, which is what a distributed runtime
@@ -795,54 +702,25 @@ class Interleaver:
         if self.fragments is not None:
             self.fragments.instrument(envoy)
 
-        path = envoy.path
-
-        # Drop any existing hooks for this path before re-adding.
-        self.remove(path)
-
-        def pre_forward(module: torch.nn.Module, args: Any, kwargs: Any) -> Any:
-            if not self.interleaving:
-                return None
-            # Returning (args, kwargs) lets an intervention edit the module input.
-            return self.handle(f"{path}.input", (args, kwargs))
-
-        def forward(module: torch.nn.Module, args: Any, kwargs: Any, output: Any) -> Any:
-            if not self.interleaving:
-                return None
-            # Returning a value lets an intervention edit the module output.
-            return self.handle(f"{path}.output", output)
-
-        self.handles[path] = [
-            envoy._module.register_forward_pre_hook(pre_forward, with_kwargs=True),
-            envoy._module.register_forward_hook(forward, with_kwargs=True),
-        ]
+        install_controller(envoy)
 
     def handle(self, provider: str, value: Any) -> Any:
         """Route ``value`` to this provider's consumers; return it, edited if any
         intervention wrote to this location.
 
         The provider index picks only workers parked here and caches that selected
-        it. Iteration counts are deliberately different: they are still bumped for
-        *every active mediator on every hook*, because a worker that is waiting at
-        another location must know this occurrence has passed when it later asks
-        for ``provider``.
+        it. The visit is counted once, on the interleaver, after everyone parked on
+        it has been served — so a worker that arrives here *during* the visit
+        (released from a barrier by one that was served) asks for this occurrence
+        and is served in it too, whichever order the workers were written in.
         """
-        waiting = provider in self.waiting
-        # This is the common path: a location no worker waits on and no cache
-        # observes. Iteration semantics still require the all-worker bump, but the
-        # router itself adds one dict lookup and one boolean test.
-        if not waiting and not self.observers and not self.wildcard_observers:
-            for mediator in self._mediators:
-                mediator.iterations[provider] += 1
-            return value
-
-        if self.wildcard_observers:
-            observers = self._observers_for(provider)
-        else:
-            observers = self.observers.get(provider, [])
-        if not waiting and not observers:
-            for mediator in self._mediators:
-                mediator.iterations[provider] += 1
+        occurrence = self.counts.get(provider, 0)
+        observers = (
+            self.observers.get(provider, ())
+        )
+        # The common path: nobody parked here and no cache observing.
+        if provider not in self.parked and not observers:
+            self.counts[provider] = occurrence + 1
             return value
 
         # A fragment is made whole before any consumer sees it, but only when a
@@ -850,47 +728,26 @@ class Interleaver:
         # it. Every rank derives this from the same provider routes, keeping their
         # collectives matched.
         gathering = False
-        if (
-            self.fragments is not None
-            and self.fragments.enabled
-            and (
-                observers
-                or any(
-                    pending.provider == provider
-                    and pending.iteration == mediator.iterations[provider]
-                    for mediator in self._mediators
-                    if (pending := mediator.pending) is not None
-                )
-            )
-        ):
-            self.fragments.read(provider)
-            if self.fragments.fragmented(provider):
-                gathering = True
-                value = self.fragments.whole(provider, value)
+        if self.fragments is not None and self.fragments.enabled and self.fragments.fragmented(provider) and (observers or self._ready(provider)):
+            gathering = True
+            value = self.fragments.whole(provider, value)
 
-        if waiting:
-            # Keep the original list order for both serving and iteration bumps.
-            # The inline match replaces the old no-op `Mediator.handle` calls.
-            for mediator in self._mediators:
+        # Serving one worker can release another into parking here (a barrier),
+        # so keep serving until nobody is parked on this visit.
+        served = False
+        while ready := self._ready(provider):
+            served = True
+            for mediator in ready:
                 try:
-                    pending = mediator.pending
-                    if (
-                        pending is not None
-                        and pending.provider == provider
-                        and pending.iteration == mediator.iterations[provider]
-                    ):
-                        value = mediator.handle(provider, value)
-                    # Bump immediately after this worker's turn. In particular, a
-                    # later worker releasing it from a barrier will see the next
-                    # occurrence when it re-parks on this provider.
-                    mediator.iterations[provider] += 1
+                    value = mediator.handle(provider, value)
                 except Exception as exception:
                     if not self.defer_exceptions:
                         raise
                     mediator.exception = exception
-        else:
-            for mediator in self._mediators:
-                mediator.iterations[provider] += 1
+                    mediator.pending = None
+        if served:
+            self._reindex_parked()
+        self.counts[provider] = occurrence + 1
 
         # A batched skip leaves its invokes' replacements gathered rather than one
         # value; concatenate them into the combined output (see
@@ -938,7 +795,7 @@ class Interleaver:
             # Printed, so it renders as "{location}.i{n}" — which occurrence was
             # waited for is the part that explains an iter loop that outran the run.
             requester = mediator.pending
-            if mediator.pending.event is Event.BARRIER:
+            if requester.event is Event.BARRIER:
                 # Waiting on blocks that never all arrived — fewer of them reached
                 # the barrier than it was built for, so it was never going to
                 # release. Point at the line that waited.
@@ -949,21 +806,22 @@ class Interleaver:
                     )
                 )
                 continue
-            error = OutOfOrderError(
-                f"'{requester}' was requested but the model already ran past it"
-            )
-            if mediator.iteration != 0:
-                # Inside an iteration loop that outran the model — unwind and warn.
-                try:
-                    mediator.worker.throw(error)
-                except OutOfOrderError:
-                    warnings.warn(
-                        f"'{requester}' was never reached: the model ran fewer "
-                        f"iterations than the loop requested. Values from reached "
-                        f"iterations are kept."
-                    )
-            else:
-                mediator.worker.throw(error)
+            # Read the pin before the throw: unwinding the worker's iter loop
+            # restores it.
+            iterating = mediator.iteration != 0
+            try:
+                mediator.worker.throw(
+                    OutOfOrderError(f"'{requester}' was requested but the model already ran past it")
+                )
+            except OutOfOrderError:
+                if not iterating:
+                    raise
+                # Inside an iteration loop that outran the model — unwound; warn.
+                warnings.warn(
+                    f"'{requester}' was never reached: the model ran fewer "
+                    f"iterations than the loop requested. Values from reached "
+                    f"iterations are kept."
+                )
 
     def cancel(self) -> None:
         """Drop all mediators and the batcher so the next run starts clean.
@@ -979,16 +837,3 @@ class Interleaver:
         self.mediators = []
         self.batcher = None
 
-    def remove(self, path: str) -> None:
-        """Remove the forward hooks installed for ``path``."""
-        for handle in self.handles.pop(path, []):
-            handle.remove()
-
-    def clear(self) -> None:
-        """Remove every forward hook this interleaver has installed."""
-        for path in list(self.handles):
-            self.remove(path)
-
-    def __del__(self) -> None:
-        # Drop the module hooks when the interleaver is garbage-collected.
-        self.clear()

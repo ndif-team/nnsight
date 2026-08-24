@@ -755,6 +755,27 @@ class TestModelRunnerSelection:
         VLLM._require_v1_model_runner()
         assert os.environ["VLLM_USE_V2_MODEL_RUNNER"] == "0"
 
+    def test_the_worker_swaps_in_its_runner_and_refuses_any_other(self, monkeypatch):
+        # The worker builds vLLM's runner in init_device; nnsight's subclass is
+        # swapped onto that instance, and anything else is a hard error there
+        # rather than an engine that comes up uninstrumented.
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+        from vllm.v1.worker.gpu_worker import Worker
+
+        from nnsight.modeling.vllm.model_runners.GPUModelRunner import NNsightGPUModelRunner
+        from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
+
+        monkeypatch.setattr(Worker, "init_device", lambda self: None)
+        worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
+
+        worker.model_runner = object()
+        with pytest.raises(NotImplementedError, match="instruments vLLM's GPUModelRunner"):
+            worker.init_device()
+
+        worker.model_runner = GPUModelRunner.__new__(GPUModelRunner)
+        worker.init_device()
+        assert type(worker.model_runner) is NNsightGPUModelRunner
+
     def test_asking_for_the_other_one_is_refused(self):
         # Overriding it silently would be worse: the engine comes up with no
         # instrumentation and the first collect fails with a missing method.

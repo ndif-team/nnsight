@@ -16,7 +16,7 @@ from __future__ import annotations
 from math import gcd
 from typing import Any, Optional
 
-from .fragments import SHARDED_SIDES
+from .fragments import SIDES
 
 #: Config fields a tensor-parallel degree has to divide. Attention is split by
 #: head, so both head counts must divide; the MLP is split along its intermediate
@@ -49,7 +49,7 @@ def max_tp_size(config: Any) -> Optional[int]:
     *placed* as though it could be split.
 
     The two must refuse **the same set**, which is why this asks
-    [`SHARDED_SIDES`][nnsight.modeling.tp.fragments.SHARDED_SIDES] rather than
+    [`SIDES`][nnsight.modeling.tp.fragments.SIDES] rather than
     only [`UNSUPPORTED`][nnsight.modeling.tp.fragments.UNSUPPORTED]. A style in
     neither — one transformers added, or one it never registered in
     ``ALL_PARALLEL_STYLES`` — used to pass here and raise there, so a server
@@ -61,7 +61,7 @@ def max_tp_size(config: Any) -> Optional[int]:
     if not plan:
         return None
 
-    if any(style not in SHARDED_SIDES for style in plan.values()):
+    if any(style not in SIDES for style in plan.values()):
         return None
 
     dimensions = [

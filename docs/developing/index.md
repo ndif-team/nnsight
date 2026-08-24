@@ -24,9 +24,9 @@ the library. If you are looking for "how do I run a trace," start in
 the block's source, compiles the body to a standalone code object, and — on
 `__exit__` — runs it *interleaved* with the model's forward pass. The body runs in
 a **greenlet** (a `Mediator`); it parks whenever it reads or writes an activation
-(`model.layer.output`), the model runs until a forward hook reaches that location,
+(`model.layer.output`), the model runs until a module's controller reaches that location,
 the value is handed to the worker (edited on the way back if the worker wrote to
-it), and the worker resumes. One `Interleaver` owns the hooks and the workers; a
+it), and the worker resumes. One `Interleaver` owns the controllers and the workers; a
 `Backend` decides what "run the block" means (execute locally, ship to NDIF, store
 as an edit).
 
@@ -58,8 +58,8 @@ as an edit).
 
 - `docs/developing/interleaver-internals.md` — `Interleaver`, `Mediator`, the
   greenlet park/switch dance, `Event`, `handle()` fan-out, iteration tagging.
-- `docs/developing/hook-system.md` — how forward hooks are installed at instrument
-  time and pass through when idle; the source/skip controller.
+- `docs/developing/hook-system.md` — the per-module controller installed at
+  instrument time: the handoff, the skip gate, and when hooks are used instead.
 - `docs/developing/source-internals.md` — `.source` operation-level
   access via AST-instrumented forwards.
 

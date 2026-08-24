@@ -110,6 +110,13 @@ class VLLMFragments(Fragments):
             # input already split by feature. Either way the whole is the ranks'
             # concatenation.
             collective = tensor_model_parallel_all_gather
+            # A layer sharded across decode-context-parallel *groups* (vLLM's
+            # DCPGroupColumnParallelLinear) is replicated within each group, so
+            # the ranks' concatenation carries every shard `group_size` times.
+            groups = getattr(module, "group_size", 1)
+            if groups > 1:
+                world = groups * module.tp_size
+                collective = lambda tensor: _one_per_group(tensor_model_parallel_all_gather(tensor), world, groups)
         else:
             # Row sharding splits the summed terms, and a deferred-combine FusedMoE
             # leaves each rank a partial sum of the experts' output — either way
@@ -152,6 +159,17 @@ class VLLMFragments(Fragments):
         # An all-reduce summed every rank's partial; dividing evenly gives a set of
         # partials that sums back to it.
         return apply(whole, lambda tensor: tensor / module.tp_size, torch.Tensor)
+
+
+def _one_per_group(gathered: torch.Tensor, world: int, group_size: int) -> torch.Tensor:
+    """Drop the replicas from an all-gather over ranks that hold their shard in groups.
+
+    ``gathered`` is ``world`` shards along the last dim, rank order; ranks
+    ``g*group_size .. (g+1)*group_size-1`` hold the same shard, so one per group is
+    the whole.
+    """
+    chunks = gathered.chunk(world, dim=-1)
+    return torch.cat(chunks[::group_size], dim=-1)
 
 
 def _moe_layer() -> Any:

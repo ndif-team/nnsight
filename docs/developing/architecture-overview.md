@@ -45,7 +45,7 @@ flowchart TB
 
   subgraph Interleaving["Interleaving"]
     I1["Interleaver
-   forward hooks installed per module"]
+   a controller forward per module"]
     M1["Mediator (greenlet worker)
    the trace body runs here"]
   end
@@ -57,8 +57,8 @@ flowchart TB
   U --> T1 --> T2 --> T3 --> I1
   I1 --> M1
   M1 -- "park: VALUE/SWAP/SKIP/BARRIER" --> I1
-  I1 -- "arm pre/forward hooks" --> F
-  F -- "fires hook -> handle(location, value)" --> I1
+  I1 -- "install controller" --> F
+  F -- "controller -> handle(location, value)" --> I1
   I1 -- "serve value / apply edit" --> M1
   M1 -- "resume; edited value returned" --> F
 ```
@@ -113,9 +113,9 @@ handled by `EditingTracer.execute` overriding what happens. See
 `Interleaver` (`src/nnsight/intervention/interleaver.py:430`) is one per `Envoy`
 tree and persists for the model's lifetime. It:
 
-- Installs a forward-pre-hook and a forward-hook on every wrapped module
-  (`instrument`, `interleaver.py:521`); while a trace is running they route the
-  module's input/output through `handle()`.
+- Installs a controller as every wrapped module's `forward` (`instrument`,
+  `interleaver.py:521`); while a trace is running it hands the module's
+  input/output through `handle()`. No PyTorch hooks.
 - Holds the list of `Mediator` workers (`mediators`) and the run's `Batcher`.
 - On `handle(location, value)` (`interleaver.py:566`) offers the value to every
   worker parked on that location and returns it, edited if a worker wrote to it.
@@ -194,7 +194,7 @@ A typical `with model.trace("hello") as tracer: hidden = model.layer.output.save
    into the combined input (and registers it on the interleaver), prepends any
    registered edits, enters `with self.interleaver:` (which starts every worker up to
    its first park), then runs `fn(*args)` — the model's forward.
-7. Each module's forward hook fires `interleaver.handle("{path}.output", value)`,
+7. Each module's controller calls `interleaver.handle("{path}.output", value)`,
    serving any worker parked there and returning the (possibly edited) value.
 8. After the forward returns, `interleave` serves the return value at `"result"`,
    then `check_dangling_mediators()` surfaces any worker still parked on a location
@@ -228,7 +228,7 @@ under a `BackwardsTracer` that routes `.grad` reads/writes through it
 
 - `docs/developing/tracing-pipeline.md` — capture, parse, build, compile, execute.
 - `docs/developing/interleaver-internals.md` — the greenlet park/switch event loop.
-- `docs/developing/hook-system.md` — how forward hooks are installed and pass through.
+- `docs/developing/hook-system.md` — the per-module controller, and when hooks are used instead.
 - `docs/developing/backends.md` — the backend classes.
 - `docs/concepts/deferred-execution.md`, `docs/concepts/threading-and-mediators.md`
   — the mental-model versions.

@@ -63,7 +63,7 @@ from .interleaver import (
 from .batching import Batcher
 from .editing import EditingTracer
 from .eproperty import eproperty
-from .source import Source
+from .source import Source, install_source
 from .tracer import InterleavingTracer
 from .util import first_input, replace_first_input
 
@@ -137,6 +137,8 @@ class Envoy:
         self._module = module
         self.path = path
         self.interleaver = interleaver if interleaver is not None else Interleaver()
+        # This tree's envoy for the module, so a later path to it aliases this one.
+        self.interleaver.envoys[id(module)] = self
         # instrument installs the input/output hooks and the source/skip controller
         # (registering this interleaver on the module) — see Interleaver.instrument.
         self.interleaver.instrument(self)
@@ -170,6 +172,15 @@ class Envoy:
         if isinstance(existing, Envoy):
             self._children.remove(existing)
         child_path = f"{self.path}.{name}"
+        # A module the tree already holds under another path (a layer that a
+        # wrapper keeps a second reference to, tied weights) gets no second envoy:
+        # this name is an alias of the first, as torch's own named_modules lists
+        # it once, so the module has one location and either spelling reads it.
+        shared = self.interleaver.envoys.get(id(module))
+        if shared is not None and shared is not self:
+            self._aliases[name] = shared.path
+            object.__setattr__(self, name, shared)
+            return shared
         envoy = self._resolve_envoy_class(module, child_path)(
             module,
             path=child_path,
@@ -303,7 +314,9 @@ class Envoy:
         # (e.g. swapping meta weights for real ones). instrument() removes this
         # path's old hooks before re-adding, and we recurse over children by
         # name (as in __init__), so modules shared across paths line up.
+        self.interleaver.envoys.pop(id(self._module), None)
         self._module = module
+        self.interleaver.envoys[id(module)] = self
         # instrument re-installs the hooks and the source/skip controller on the new
         # module (its own forward; the previous module's controller doesn't carry
         # over) — see Interleaver.instrument.
@@ -564,7 +577,7 @@ class Envoy:
         # source.{name}_{occurrence} (e.g. source.relu_0.output). A class-level
         # property, so it wins over the __getattr__ module fallthrough. Building
         # it permanently source-instruments the module (inert outside a trace).
-        return Source(self)
+        return Source(self, self.path, install_source(self))  # raises SourceNotAvailable
 
     def to(self, device: torch.device) -> Envoy:
         """Move the wrapped module to ``device`` (in place).

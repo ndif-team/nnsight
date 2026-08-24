@@ -51,6 +51,7 @@ VLLM(
     dispatch=False,               # True = build the engine now
     tensor_parallel_size=1,
     gpu_memory_utilization=0.9,
+    taps=(),                      # locations to serve under CUDA graphs; empty = eager, every location
     **vllm_kwargs,                # forwarded to vllm.LLM / AsyncEngineArgs
 )
 ```
@@ -62,9 +63,10 @@ VLLM(
 | `dispatch` | `True` creates the real engine during `__init__`. `False` (default) builds only a meta-tensor tree (via vLLM's `DummyModelLoader`, `device="meta"`) — no GPU memory used until the first trace (`vllm.py:155`). |
 | `tensor_parallel_size` | GPUs to shard across. Transparent to your interventions (see [Tensor parallelism](#tensor-parallelism-is-transparent)). |
 | `gpu_memory_utilization` | vLLM KV-cache budget (default 0.9). Lower it (e.g. 0.1) for small models / shared GPUs. |
+| `taps` | Module locations to serve with CUDA graphs **on** — `"model.layers.*.output"`, `*` one path segment. Empty (default) runs the engine eagerly, where every location is served. See [CUDA graphs with taps](#cuda-graphs-with-taps). |
 | `**vllm_kwargs` | Anything valid for `vllm.LLM` / `AsyncEngineArgs`. |
 
-`enforce_eager=True` and the NNsight worker class are always forced internally (`vllm.py:205`, `:189`) — CUDA graphs freeze the ops they replay, so hooks can't fire inside one.
+The NNsight worker class is always forced internally, and so is `enforce_eager=True` unless you declare `taps` — CUDA graphs freeze the ops they replay, so an ordinary hook can't fire inside one.
 
 ## Canonical pattern (sync)
 
@@ -518,9 +520,34 @@ sequence-parallel MoE layer is split by rows rather than summed — a different
 correction, and one nnsight does not make yet, so that value is read as one rank's
 rows.
 
+## CUDA graphs with taps
+
+vLLM's decode throughput comes largely from CUDA-graph replay, which `enforce_eager=True` gives up because a replayed graph runs no Python and so no hooks. `taps` keeps the graphs: the locations you name are recorded *into* the graph as breaks (vLLM's `VLLM_USE_BREAKABLE_CUDAGRAPH`), and at each break the interleaver's normal handoff runs on every replay. Everything else is unchanged — the same trace syntax, per-request scoping, `tracer.iter`, `model.logits` / `model.samples`.
+
+```python
+model = VLLM(
+    "meta-llama/Llama-3.1-8B",
+    dispatch=True,
+    taps=["model.layers.*.output", "model.layers.10.mlp.input"],
+)
+
+with model.trace(prompt, max_tokens=20, temperature=0.0) as tracer:
+    model.model.layers[10].output[0][:] += 4 * steering_vector   # in place
+    hiddens = list().save()
+    for _ in tracer.iter[:20]:
+        hiddens.append(model.model.layers[16].output[0].clone())  # clone: see below
+```
+
+What changes under graphs, and why:
+
+- **Only taps are reachable.** A location you didn't declare is never visited by a replayed step, so a block that reads one parks until the request ends and the request's error says `'...' is not a tap on this engine`. Declare it, or drop `taps` for the eager engine. `model.taps` lists the resolved set after dispatch. Keep the set small: each tap splits the graph, and a break at every module would cost what replay bought.
+- **Edits land in place.** The next kernel reads the tap's tensor from a fixed address, so an in-place edit (`output[0][:] += v`, `output[0][:, i] = 0`) is exactly right and a replacement (`output = t`) is copied back into that memory — it has to have the same shape, else the request errors.
+- **Clone what you keep.** The value served at a tap *is* the graph's memory, rewritten next step. A tensor you `.save()` or append under `tracer.iter` aliases it; call `.clone()` if you read it after the step. The eager engine has a milder version of the same rule: a value served is the model's live tensor, and some of vLLM's layers keep writing into it after the module returns (DeepSeek's MLA attention rotates the `q_proj` output in place), so a saved alias can differ from what the module handed back — `.clone()` makes a read a read.
+- **`torch.compile` is off.** Breakable graphs keep replay and drop the compiled path; that is most of the throughput, not all of it. The flag is process-wide, so one process holds either graph engines or compiled ones.
+
 ## Limitations
 
-- **`enforce_eager=True` is forced** — costs some decode throughput, required for hooks.
+- **`enforce_eager=True` is forced unless you declare `taps`** — see [CUDA graphs with taps](#cuda-graphs-with-taps).
 - **One prompt per invoke** — no `tracer.invoke(["a", "b"])`.
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
 - **No backward / gradients, no `.scan()`, no source tracing on fused CUDA kernels.**

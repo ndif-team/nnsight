@@ -26,7 +26,7 @@ nnsight had two implementations of the same idea, sharing no code:
 |---|---|---|
 | where | `VLLMBatcher` | `TPInterleaver` |
 | extends | `Batcher` | `Interleaver` |
-| "is this a fragment?" | a module registered by `watch` | a `_hf_tp_plan` stamp, per `SHARDED_SIDES` |
+| "is this a fragment?" | a module registered by `watch` | a `_hf_tp_plan` stamp, per `SIDES` |
 | "make it whole" | all-gather, or all-reduce for a deferred MoE partial | `all_gather` |
 | "put it back" | re-shard, scaling a write-back by `tp_size * ep_size` | `split` |
 
@@ -71,8 +71,10 @@ would just have been called at the wrong granularity.)
 
 ## The shape
 
-A collaborator object, not a subclass. As built it also carries `enabled`,
-`begin` and `read` — see below for why:
+A collaborator object, not a subclass. As built it also carried `enabled`,
+`begin` and `read` — see below for why. (`begin` and `read` have since been
+removed: the `.source` caveat they carried as a runtime warning now lives in the
+docs instead, leaving `instrument`/`fragmented`/`whole`/`fragment`.)
 
 ```python
 # src/nnsight/intervention/fragments.py
@@ -122,7 +124,7 @@ location free.
 
 Then:
 
-- **`TPFragments`** is the `SHARDED_SIDES` table plus `_gather`/`_reshard`.
+- **`TPFragments`** is the `SIDES` table plus `_gather`/`_reshard`.
   `TPInterleaver` is gone, and with it the install-one-on-every-`HuggingFaceModel`
   dance — a HuggingFace model now gets an ordinary `Interleaver` carrying
   `TPFragments`. The interleaver no longer knows what a shard is.

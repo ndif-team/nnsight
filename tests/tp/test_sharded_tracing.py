@@ -138,6 +138,9 @@ VALUES = [
     "batched_first",
     "batched_edited_logits",
     "generated_steps",
+    "adhoc_colwise",
+    "adhoc_rowwise",
+    "adhoc_lens",
 ]
 
 

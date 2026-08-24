@@ -471,3 +471,21 @@ class TestModularMoEPolicy:
         # group either way.
         assert _moe_group_size(self._stub(tp=2, ep=1)) == 2
         assert _moe_group_size(self._stub(tp=1, ep=4)) == 4
+
+
+class TestDCPGroupGather:
+    """A column layer sharded across DCP groups: the gather drops the replicas."""
+
+    def test_one_shard_per_group_survives(self):
+        from nnsight.modeling.vllm.fragments import _one_per_group
+
+        a, b = torch.full((3, 4), 1.0), torch.full((3, 4), 2.0)
+        gathered = torch.cat([a, a, b, b], dim=-1)  # world 4, groups of 2
+        whole = _one_per_group(gathered, world=4, group_size=2)
+        assert torch.equal(whole, torch.cat([a, b], dim=-1))
+
+    def test_a_group_of_one_is_the_plain_gather(self):
+        from nnsight.modeling.vllm.fragments import _one_per_group
+
+        gathered = torch.arange(8.0).reshape(1, 8)
+        assert torch.equal(_one_per_group(gathered, world=4, group_size=1), gathered)

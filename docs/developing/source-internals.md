@@ -156,7 +156,7 @@ def controller(*args, **kwargs):
 
 `state.body` is the **unbound** forward (original or instrumented), so the
 controller passes `module` explicitly. It reads live `_State` every call, so
-re-wrapping and multiple wrappers just work. It's installed via `_ensure_controller`
+re-wrapping and multiple wrappers just work. It's installed via `install_controller`
 (`source.py:392`), which stores the controller under `module.__dict__["forward"]`
 (shadowing the class method for `nn.Module.__call__`) and, on every access,
 `state.register(envoy.interleaver, envoy.path)`.
@@ -198,7 +198,7 @@ nothing.
 
 `install_source(envoy)` (`source.py:414`) builds the instrumented forward once
 (`FunctionType(compiled.code, {**globals, OP: _make_op(module)}, ...)`), sets it as
-`state.body`, and flips `state.sourced = True`. `install_skip(envoy)` (`source.py:437`)
+`state.body`, and flips `state.sourced = True`. `install_controller(envoy)` (`source.py:437`)
 just installs the controller (no source needed to skip a whole module).
 
 ## Wiring from the interleaver — `instrument`
@@ -206,7 +206,7 @@ just installs the controller (no source needed to skip a whole module).
 `Interleaver.instrument(envoy)` (`interleaver.py:521`) is called from
 `Envoy.__init__` and again from `Envoy._update` (on dispatch). It:
 
-1. calls `install_skip(envoy)` **first**, so the module's `forward` is the
+1. calls `install_controller(envoy)` **first**, so the module's `forward` is the
    controller before `nn.Module.__call__` binds it — required so a skip whose
    replacement is read from the module's own input works;
 2. registers a forward-pre-hook serving `{path}.input` and a forward-hook serving

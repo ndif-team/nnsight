@@ -81,7 +81,7 @@ The result (`Compiled`) carries the op labels, their line numbers, and the deden
 
 ## The per-module controller and `_State`
 
-Installation is **lazy and permanent**. The first time a module is sourced *or* skipped, `_ensure_controller` (`source.py:392`) replaces its `forward` with a `controller` closure (`_make_controller`, `source.py:362`) and stores a `_State` on `module.__dict__["__nnsight__"]`.
+Installation is **lazy and permanent**. The first time a module is sourced *or* skipped, `install_controller` (`source.py:392`) replaces its `forward` with a `controller` closure (`_make_controller`, `source.py:362`) and stores a `_State` on `module.__dict__["__nnsight__"]`.
 
 `_State` holds:
 
@@ -157,4 +157,4 @@ The instrumented forward is never written onto the module's class — it lives a
 
 - [Envoy](envoy.md) — `SourceEnvoy` mirrors an `Envoy`'s `.input`/`.output`/`.skip`.
 - [Interleaver and Hooks](interleaver-and-hooks.md) — the `handle` primitive ops share with modules, and occurrence tagging.
-- Source: `src/nnsight/intervention/source.py` (`Source`, `SourceEnvoy`, `_State`, `_Instrument`, `_run_op`, `install_source`, `install_skip`).
+- Source: `src/nnsight/intervention/source.py` (`Source`, `SourceEnvoy`, `_State`, `_Instrument`, `_run_op`, `install_source`, `install_controller`).

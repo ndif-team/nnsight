@@ -14,14 +14,13 @@ uses it.
 
 from __future__ import annotations
 
-import warnings
 
 import pytest
 import torch
 
 from nnsight.intervention.interleaver import Interleaver
 from nnsight.modeling.tp import (
-    SHARDED_SIDES,
+    SIDES,
     UNSUPPORTED,
     TPFragments,
     UnsupportedParallelStyle,
@@ -66,24 +65,24 @@ class TestStyleCoverage:
     def test_no_upstream_style_is_unaccounted_for(self):
         # The one that matters: a new style upstream with no rule here is a model
         # nnsight will refuse at deploy time. Better to find out at test time.
-        missing = _upstream_styles() - (set(SHARDED_SIDES) | set(UNSUPPORTED))
+        missing = _upstream_styles() - (set(SIDES) | set(UNSUPPORTED))
         assert not missing, (
             f"transformers has parallel styles this version has no rule for: "
-            f"{sorted(missing)}. Add each to SHARDED_SIDES (with the sides that "
+            f"{sorted(missing)}. Add each to SIDES (with the sides that "
             f"carry a shard) or to UNSUPPORTED."
         )
 
     def test_no_rule_names_a_style_that_no_longer_exists(self):
-        stale = (set(SHARDED_SIDES) | set(UNSUPPORTED)) - _upstream_styles()
+        stale = (set(SIDES) | set(UNSUPPORTED)) - _upstream_styles()
         assert not stale, (
             f"rules name parallel styles transformers no longer has: "
             f"{sorted(stale)} — probably renamed upstream."
         )
 
     def test_a_style_is_either_handled_or_refused_never_both(self):
-        assert not (set(SHARDED_SIDES) & set(UNSUPPORTED))
+        assert not (set(SIDES) & set(UNSUPPORTED))
 
-    @pytest.mark.parametrize("sides", SHARDED_SIDES.values())
+    @pytest.mark.parametrize("sides", SIDES.values())
     def test_sides_are_input_or_output(self, sides):
         assert set(sides) <= {"input", "output"}
 
@@ -117,8 +116,10 @@ class TestInstrument:
 
         interleaver.instrument(_FakeEnvoy(_module("rowwise"), path="model.o_proj"))
 
-        assert "model.o_proj.input" in interleaver.tp_rules
-        assert "model.o_proj.output" not in interleaver.tp_rules
+        # At the handoff a row-parallel input is already this rank's slice and its
+        # output is this rank's partial sum — its own post-hook reduces it after us.
+        assert interleaver.tp_rules["model.o_proj.input"][1] == "shard"
+        assert interleaver.tp_rules["model.o_proj.output"][1] == "partial"
 
     @pytest.mark.parametrize("style", sorted(UNSUPPORTED))
     def test_a_refused_style_raises(self, style, monkeypatch):
@@ -134,76 +135,14 @@ class TestInstrument:
             interleaver.instrument(_FakeEnvoy(_module("something_new_upstream")))
 
 
-class TestSourceWarns:
-    """`.source` reads under a sharded model warn and hand the value over.
+def test_an_unsharded_model_is_never_asked():
+    # The interleaver checks `enabled` before anything else, so an unsharded
+    # model never reaches `read` at all.
+    from nnsight.modeling.tp import TPFragments
 
-    They cannot be gathered — the split axis moves through the forward — but
-    plenty of them are whole anyway (anything past the layer that all-reduces),
-    so refusing them all would block correct work. See
-    `TPFragments.read`.
-    """
+    assert TPFragments().enabled is False
 
-    def _sharded(self, monkeypatch):
-        fragments = TPFragments()
-        fragments.instrument(
-            _FakeEnvoy(_module("colwise"), path="model.layers.0.mlp.gate_proj")
-        )
-        return fragments
 
-    def test_a_source_read_warns(self, monkeypatch):
-        fragments = self._sharded(monkeypatch)
-
-        with pytest.warns(UserWarning, match="split across ranks"):
-            fragments.read("model.layers.0.mlp.source.self_gate_proj_0.output")
-
-    def test_a_source_location_is_not_treated_as_a_fragment(self, monkeypatch):
-        # The warning exists *because* it cannot be gathered: which axis a
-        # `.source` value is split on changes through the forward.
-        fragments = self._sharded(monkeypatch)
-
-        assert not fragments.fragmented(
-            "model.layers.0.mlp.source.self_gate_proj_0.output"
-        )
-
-    def test_it_warns_once_per_location_per_run(self, monkeypatch):
-        # A read inside a generation loop fires every token; one caveat is a
-        # caveat, hundreds are noise.
-        fragments = self._sharded(monkeypatch)
-        location = "model.layers.0.mlp.source.self_gate_proj_0.output"
-
-        with pytest.warns(UserWarning):
-            fragments.read(location)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            fragments.read(location)
-        assert not caught
-
-    def test_a_new_run_warns_again(self, monkeypatch):
-        # A long-lived model actor serves request after request; the second
-        # user deserves the same caveat as the first.
-        fragments = self._sharded(monkeypatch)
-        location = "model.layers.0.mlp.source.self_gate_proj_0.output"
-
-        with pytest.warns(UserWarning):
-            fragments.read(location)
-        fragments.begin()  # what Interleaver.__enter__ does at the start of a run
-        with pytest.warns(UserWarning):
-            fragments.read(location)
-
-    def test_a_plain_module_read_does_not_warn(self, monkeypatch):
-        fragments = self._sharded(monkeypatch)
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            fragments.read("model.layers.0.mlp.output")
-        assert not caught
-
-    def test_an_unsharded_model_is_never_asked(self, monkeypatch):
-        # The interleaver checks `enabled` before anything else, so an unsharded
-        # model never reaches `read` at all.
-        from nnsight.modeling.tp import TPFragments
-
-        assert TPFragments().enabled is False
 
 
 class TestMaxTpSize:
@@ -348,7 +287,7 @@ class TestTheTwoGatesAgree:
 
     `max_tp_size` decides whether a model is *placed* tensor-parallel;
     `instrument` decides whether it can be *traced* that way. They ran different
-    predicates -- one checked UNSUPPORTED, the other checked SHARDED_SIDES -- so a
+    predicates -- one checked UNSUPPORTED, the other checked SIDES -- so a
     style in neither list passed placement and raised at load, after a server had
     already allocated the cards and read the weights onto them.
     """
@@ -363,11 +302,11 @@ class TestTheTwoGatesAgree:
         return Config()
 
     def test_a_style_in_neither_list_is_refused(self):
-        from nnsight.modeling.tp import SHARDED_SIDES, UNSUPPORTED, max_tp_size
+        from nnsight.modeling.tp import SIDES, UNSUPPORTED, max_tp_size
 
         # Llama-4's actual plan. transformers does not register it in
         # ALL_PARALLEL_STYLES either, so the drift test below cannot see it.
-        assert "colwise_rep" not in SHARDED_SIDES
+        assert "colwise_rep" not in SIDES
         assert "colwise_rep" not in UNSUPPORTED
         assert max_tp_size(self._config({"layer.q_proj": "colwise_rep"})) is None
 
@@ -383,11 +322,11 @@ class TestTheTwoGatesAgree:
 
     def test_every_placeable_plan_is_instrumentable(self):
         # The property, stated directly: anything max_tp_size accepts, instrument
-        # must not raise on. Both now read SHARDED_SIDES, so this holds by
+        # must not raise on. Both now read SIDES, so this holds by
         # construction -- it is here to fail if they ever diverge again.
-        from nnsight.modeling.tp import SHARDED_SIDES, max_tp_size
+        from nnsight.modeling.tp import SIDES, max_tp_size
 
-        for style in SHARDED_SIDES:
+        for style in SIDES:
             assert max_tp_size(self._config({"layer.x": style})) == 8, style
 
 
@@ -406,10 +345,10 @@ class TestExpertParallelIsNotAutomaticallyRefused:
 
         assert "moe_tp_experts" not in UNSUPPORTED
 
-    def test_neither_side_is_gathered(self):
-        from nnsight.modeling.tp import SHARDED_SIDES
+    def test_its_output_is_reduced_not_gathered(self):
+        from nnsight.modeling.tp import SIDES
 
-        assert SHARDED_SIDES["moe_tp_experts"] == ()
+        assert SIDES["moe_tp_experts"] == {"output": "partial"}
 
     def test_an_moe_plan_can_now_be_placed(self):
         from nnsight.modeling.tp import max_tp_size
@@ -442,10 +381,10 @@ class TestEmbeddingColwiseIsWhole:
     MINIMUM_TRANSFORMERS exists for, reintroduced by this table.
     """
 
-    def test_its_output_is_not_gathered(self):
-        from nnsight.modeling.tp import SHARDED_SIDES
+    def test_its_output_is_reduced_not_gathered(self):
+        from nnsight.modeling.tp import SIDES
 
-        assert SHARDED_SIDES["embedding_colwise"] == ()
+        assert SIDES["embedding_colwise"] == {"output": "partial"}
 
 
 class FakeMesh:
@@ -510,69 +449,6 @@ class TestReshardGuard:
         split_seen = self._split_calls(monkeypatch)
         _reshard(torch.randn(1, 4, 8), FakeMesh(4))
         assert len(split_seen) == 1
-
-
-class TestGatherShapeCheck:
-    """A rule that names a whole value is caught the first time it fires.
-
-    The rules are a claim about a transformers version, and most were settled by
-    reading its source. This is what makes a wrong one loud: a side listed as
-    sharded must actually widen by `world_size` when gathered. A value the model
-    already made whole doesn't -- which is exactly the failure MINIMUM_TRANSFORMERS
-    exists for, caught here for every version rather than one known one.
-    """
-
-    def _fragments(self, monkeypatch, gathered):
-        import transformers.integrations.tensor_parallel as tp
-
-        from nnsight.modeling.tp import TPFragments
-
-        monkeypatch.setattr(tp, "all_gather", lambda tensor, mesh: gathered)
-        fragments = TPFragments()
-        fragments.enabled = True
-        return fragments
-
-    def test_a_value_that_did_not_widen_is_refused(self, monkeypatch):
-        from nnsight.modeling.tp import UnsupportedParallelStyle
-
-        mesh = FakeMesh(4)
-        # The model's own hook already made it whole; gathering returns the same
-        # width. Left unchecked, the user gets 4x the real tensor.
-        value = torch.randn(1, 4, 2048)
-        fragments = self._fragments(monkeypatch, torch.randn(1, 4, 2048))
-
-        with pytest.raises(UnsupportedParallelStyle, match="times too wide|expected"):
-            fragments._gather_whole("model.layer.output", value, mesh)
-
-    def test_a_real_shard_passes(self, monkeypatch):
-        mesh = FakeMesh(4)
-        value = torch.randn(1, 4, 2048)
-        fragments = self._fragments(monkeypatch, torch.randn(1, 4, 8192))
-
-        whole = fragments._gather_whole("model.layer.output", value, mesh)
-        assert whole.shape[-1] == 8192
-
-    def test_it_checks_once_per_location(self, monkeypatch):
-        # A generation loop revisits a location hundreds of times; the rule is a
-        # property of the model, not of the visit.
-        mesh = FakeMesh(4)
-        fragments = self._fragments(monkeypatch, torch.randn(1, 4, 8192))
-        fragments._gather_whole("model.layer.output", torch.randn(1, 4, 2048), mesh)
-
-        import transformers.integrations.tensor_parallel as tp
-
-        monkeypatch.setattr(tp, "all_gather", lambda t, m: torch.randn(1, 4, 2048))
-        # Would raise if re-checked; the second visit is not checked.
-        fragments._gather_whole("model.layer.output", torch.randn(1, 4, 2048), mesh)
-
-    def test_an_ambiguous_value_is_not_judged(self, monkeypatch):
-        # Two float tensors of different widths: nothing to compare, so the check
-        # abstains rather than guessing which one the rule meant.
-        mesh = FakeMesh(4)
-        fragments = self._fragments(monkeypatch, torch.randn(1, 4, 2048))
-        value = (torch.randn(1, 4, 2048), torch.randn(1, 4, 512))
-
-        fragments._gather_whole("model.layer.output", value, mesh)
 
 
 class TestHubFailuresAreDistinguishable:

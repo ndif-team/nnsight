@@ -28,19 +28,12 @@ class Recorder(Fragments):
         self.locations = set(locations)
         self.calls: list[tuple[str, str]] = []
         self.instrumented: list[str] = []
-        self.runs = 0
-
-    def begin(self):
-        self.runs += 1
 
     def instrument(self, envoy):
         self.instrumented.append(envoy.path)
 
     def fragmented(self, location):
         return location in self.locations
-
-    def read(self, location):
-        self.calls.append(("read", location))
 
     def whole(self, location, value):
         self.calls.append(("whole", location))
@@ -112,14 +105,6 @@ class TestGating:
         assert not [c for c in fragments.calls if c[0] == "whole"]
         assert captured.shape[-1] == 4
 
-    def test_a_read_is_announced_even_when_it_is_not_a_fragment(self, model):
-        # What lets a runtime say something about a value it *cannot* make whole
-        # -- nnsight's `.source` reads under tensor parallelism, for one.
-        fragments = Recorder(locations=set())
-        _traced(model, fragments, read=True)
-
-        assert ("read", "model.output") in fragments.calls
-
     def test_targeted_cache_gathers_its_subscription(self, model):
         fragments = Recorder(locations={"model.output"})
         model.interleaver.fragments = fragments
@@ -137,16 +122,6 @@ class TestLifecycle:
         NNsight(torch.nn.Linear(4, 4), interleaver=interleaver)
 
         assert fragments.instrumented, "no envoy reached the fragments"
-
-    def test_each_run_is_announced(self, model):
-        fragments = Recorder(locations={"model.output"})
-        model.interleaver.fragments = fragments
-
-        for _ in range(3):
-            with model.trace(torch.randn(1, 4)):
-                model.output.save()
-
-        assert fragments.runs == 3
 
 
 class TestTheDefault:

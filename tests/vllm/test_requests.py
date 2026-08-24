@@ -24,11 +24,10 @@ def _worker_request_state(worker):
     a finished request was cleaned up — collect drops the mediator, so both fall to 0.
     """
     requests = worker.model_runner.nnsight_requests
+    traced = [r.mediator for r in requests.requests.values() if r.mediator is not None]
     return {
-        "mediators": len(requests.mediators),
-        "started": sum(
-            1 for mediator in requests.mediators.values() if mediator.worker is not None
-        ),
+        "mediators": len(traced),
+        "started": sum(1 for mediator in traced if mediator.worker is not None),
     }
 
 
@@ -449,3 +448,63 @@ class TestPerInvokeSampling:
             texts.add(result.outputs[0].text)
 
         assert len(texts) > 1, f"every draw came back identical: {texts}"
+
+
+class TestRequestIds:
+    """The worker parses vLLM's request ids once, on arrival."""
+
+    @pytest.mark.parametrize(
+        "request_id, engine_id, index",
+        [
+            ("abc-deadbeef", "abc", 0),  # vLLM's eight-hex suffix
+            ("1_abc-deadbeef", "abc", 1),  # n>1 child of a suffixed parent
+            ("my-id-deadbeef", "my-id", 0),  # a dash of the caller's own, then the suffix
+            ("my-id", "my-id", 0),  # no suffix: randomization off, or a foreign id
+            ("12_abc", "abc", 12),
+        ],
+    )
+    def test_parsing(self, request_id, engine_id, index):
+        from nnsight.modeling.vllm.model_runners.GPUModelRunner import Request
+
+        request = Request(request_id)
+        assert (request.engine_id, request.index) == (engine_id, index)
+
+    def test_a_digits_underscore_id_of_its_own_is_not_a_child(self):
+        from nnsight.modeling.vllm.model_runners.GPUModelRunner import Request
+
+        request = Request("12_abc-deadbeef")
+        assert request.key({"12_abc"}) == ("12_abc", 0)
+        assert request.key({"abc"}) == ("abc", 12)
+        assert request.named({"12_abc"}) and request.named({"abc"})
+
+
+def test_a_trace_needs_no_insecure_serialization():
+    """The collect RPC pickles the outputs it sends; nothing about tracing needs the flag.
+
+    Run in a clean subprocess because the flag is read by the engine's processes
+    at spawn, and this suite's conftest sets it for the request-state probes.
+    """
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    if torch.cuda.device_count() < 1:
+        pytest.skip("vLLM tests need a GPU")
+    script = textwrap.dedent(
+        """
+        import os
+        assert "VLLM_ALLOW_INSECURE_SERIALIZATION" not in os.environ
+        from nnsight.modeling.vllm import VLLM
+        model = VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True)
+        with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1.0, max_tokens=2) as tracer:
+            h = model.transformer.h[3].output.clone().save()
+            out = tracer.result.save()
+        assert h.shape[-1] == 768, h.shape
+        assert len(out.outputs[0].token_ids) == 2, out
+        print("TRACE_OK")
+        """
+    )
+    env = {k: v for k, v in os.environ.items() if k != "VLLM_ALLOW_INSECURE_SERIALIZATION"}
+    proc = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=900)
+    assert proc.returncode == 0 and "TRACE_OK" in proc.stdout, proc.stderr[-4000:]

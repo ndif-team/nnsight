@@ -121,6 +121,14 @@ it puts two obligations on the code:
    Many checkpoints ship `do_sample: true` in `generation_config.json`, so this
    bites without you asking for sampling.
 
+3. **`.source` values are handed over as-is.** The gathering rules describe
+   module boundaries; a value between two ops *inside* a forward can be this
+   rank's shard, split on an axis that moves through the forward, so it is not
+   gathered. Anything past the layer that all-reduces (a module's own
+   `.input`/`.output`) is whole; a value between a column-parallel layer and it
+   is not. Compare against a single-GPU run if it matters — and, per rule 1,
+   never branch on one.
+
 **Every rank produces the same saved values**, since they are computed from
 gathered tensors. Print or write results from one rank, or you get N copies.
 

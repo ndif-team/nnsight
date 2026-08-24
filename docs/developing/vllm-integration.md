@@ -47,7 +47,13 @@ Model-parallel init happens in the client process before the meta build (vLLM bu
 real rank tensors and calls `.tolist()` on them, which a meta tensor can't serve),
 then is torn down before the real engine starts (`_init_distributed`/
 `_cleanup_distributed` in `vllm.py`). The engine runs `enforce_eager=True` —
-hooks can't fire inside a captured CUDA graph.
+hooks can't fire inside a captured CUDA graph — unless the client declared
+`taps`. Then graphs are on and the worker's interleaver is a
+`VLLMInterleaver` (`interleaver.py`): at each tap it registers its own `handle`
+with vLLM's breakable graph capture (`add_eager`), so the handoff is replayed
+with the graph. The tap set reaches the worker in
+`vllm_config.additional_config["nnsight_taps"]`; an edit at a tap is copied back
+into the recording's tensor, since the callable's return is discarded.
 
 ### `mode="sync"` vs `mode="async"`
 
@@ -120,6 +126,12 @@ vLLM concatenates all in-flight tokens into one `[total_tokens, hidden]` slab.
 recomputed every step:
 
 - `add(new_requests, persistent_objects)` deserializes new mediators from `extra_args`.
+  A request vLLM preempted and resumed comes back through the same call and is
+  skipped: its workers continue, because the engine replays the tokens they already
+  saw inside one recompute step, and a fresh block would be short by exactly those
+  steps. `scope` notes the interleaver's occurrence counts when a worker's request
+  leaves the batch (`Requests.out`) and moves the worker's `base` past the visits it
+  sat out when it returns, so its next `tracer.iter` step is the recompute step.
 - `scope(model)` sets each scheduled worker's `batch_group = [start,
   tokens]`, `mediator.start(interleaver)` on first schedule, and keeps finished
   workers scheduled only if they still hold caches or an exception. It orders by
@@ -185,17 +197,20 @@ worker and returns
 `pickle.dumps({engine_id: {"saves", "registered", "error", "sequences"}})`.
 `sequences` is keyed by sampled-sequence index: `n > 1` fans a request into a child
 per sequence (`"{index}_{parent}"`, vLLM's `ParentRequest`), each of which runs its
-own copy of the block, so each is owed values of its own. `Requests.engine_key`
-resolves a worker id to `(engine_id, index)` — taking the child reading only when
-the parent it names is one the engine asked about, so an id that merely starts with
-digits and an underscore is not mistaken for somebody's second sequence. `saves` /
+own copy of the block, so each is owed values of its own. A `Request` parses its
+vLLM id once, on arrival, and `Request.key` resolves it to `(engine_id, index)` —
+taking the child reading only when the parent it names is one the engine asked
+about, so an id that merely starts with digits and an underscore is not mistaken
+for somebody's second sequence. `saves` /
 `registered` stay the primary sequence's, so nothing changes for a caller that never
 sets `n`; `attach` puts each sequence's on `output.outputs[i].saves` and the trace's
 own on `output.nnsight_sequences`, which is what `VLLM._collect` pushes back as a
 list.
 It harvests what finished, takes the registered values, serves `tracer.result`,
 throws `finish_dangling` into whatever is still parked, collects the saves, and
-pops finished mediators.
+pops finished requests — one `Request` record per in-flight request holds its
+traced worker, its registered copies, what those copies left behind, and any
+deserialization error, so there is one loop and one place to look.
 
 **Every rank winds up its own workers; only one reports.** Each rank ran the block,
 so each holds a worker, a greenlet, and whatever that greenlet captured — all of it
@@ -395,8 +410,10 @@ test guarding it):
 
 Single-GPU tests always run; TP/Ray/async-Ray tests skip below 2 GPUs but should be
 verified on a multi-GPU box before shipping runner/batcher changes. The suite sets
-`VLLM_ALLOW_INSECURE_SERIALIZATION=1` (needed for the `collective_rpc` request-state
-tests, and for the mediator payload to ride Ray's transport). See
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1` only for the request-state tests, which ship a
+*function* to the workers through `collective_rpc`. Tracing needs no such flag: the
+mediator payload is `bytes` in `SamplingParams.extra_args`, and the collect RPC
+pickles the `RequestOutput`s it sends, so both ride the msgpack transport natively. See
 [testing.md](./testing.md) for the run commands.
 
 ## Key files

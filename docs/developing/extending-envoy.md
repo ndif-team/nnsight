@@ -87,7 +87,7 @@ def output(self, value: Any) -> Object:
     return value
 ```
 
-Its location is `"{self.path}.output"`. The produce side is the forward hook
+Its location is `"{self.path}.output"`. The produce side is the controller
 installed by `Interleaver.instrument` (`interleaver.py:521`), which calls
 `handle(f"{path}.output", output)` after the module runs. `.input`, `.inputs`, and
 `.skip` follow the identical pattern one location over. `SourceEnvoy`'s op-level

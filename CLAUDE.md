@@ -109,7 +109,7 @@ Read at least the first two if the user is asking "why is my code blocking / out
 
 - [docs/concepts/deferred-execution.md](docs/concepts/deferred-execution.md) — the block is captured, compiled, and run interleaved with the model; `.output` blocks until the model fires
 - [docs/concepts/threading-and-mediators.md](docs/concepts/threading-and-mediators.md) — each invoke is a `Mediator` running in a **greenlet** (not a thread); event protocol VALUE/SWAP/SKIP/BARRIER
-- [docs/concepts/interleaver-and-hooks.md](docs/concepts/interleaver-and-hooks.md) — one shared `Interleaver` installs pass-through forward hooks on every module
+- [docs/concepts/interleaver-and-hooks.md](docs/concepts/interleaver-and-hooks.md) — one shared `Interleaver` installs a pass-through controller forward on every module, no hooks
 - [docs/concepts/envoy.md](docs/concepts/envoy.md) — `Envoy` wraps a module; `.input`/`.output` are eproperties, `.source` returns a `Source`
 - [docs/concepts/batching-and-invokers.md](docs/concepts/batching-and-invokers.md) — invokes, empty invokes, batch groups, when you need a barrier
 - [docs/concepts/source-tracing.md](docs/concepts/source-tracing.md) — how `.source` rewrites a module's forward AST

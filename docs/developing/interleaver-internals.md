@@ -167,7 +167,7 @@ defer_exceptions # vLLM: record a worker's error instead of raising out of the h
 `Interleaver.instrument(envoy)` (`:521`) is called from `Envoy.__init__` (and again
 from `Envoy._update` when weights are swapped in). It:
 
-1. Calls `install_skip(envoy)` (`source.py:437`) to register the source/skip
+1. Calls `install_controller(envoy)` (`source.py:437`) to register the source/skip
    controller on the module and record this interleaver on it.
 2. Removes any existing hooks for the module's path (`remove`, `:663`).
 3. Registers a `forward_pre_hook` and a `forward_hook` (both `with_kwargs=True`):

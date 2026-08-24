@@ -89,8 +89,8 @@ def output(self, value):                 # identity view of the module's output
   `Mediator.swap(location, value)` — the worker parks, and the model side
   substitutes the value in.
 - **In-place edits** (`model.layer.output[:] = 0`) work because the identity
-  preprocess returns the live tensor and the forward hook returns whatever the
-  worker left it as.
+  preprocess returns the live tensor and the module's controller returns whatever
+  the worker left it as.
 
 `.input` / `.inputs` share the key `"input"` (both address `"{path}.input"`):
 `.inputs` returns the whole `(args, kwargs)`; `.input` extracts the first argument
@@ -176,6 +176,16 @@ location — `Envoy.interleave` serves it with `handle("result", result)` after 
 forward. A `description` is what surfaces an eproperty in the Envoy repr tree as
 `(logits): pre-sampling logits for this step`; `.input`/`.output` carry none, so they
 stay hidden.
+
+## Shared modules
+
+A module the tree reaches by two paths — a layer a wrapper keeps a second
+reference to (vLLM's MLA attention holds `q_proj`/`kv_b_proj`/`o_proj` under
+`self_attn` and again under `self_attn.mla_attn`), or tied weights — gets **one**
+envoy, at the first path, and the later name is bound as an alias to it, the way
+`torch.nn.Module.named_modules()` lists a shared module once. So the module has
+one location (`model...self_attn.q_proj.output`), every spelling reaches the same
+envoy, and `_aliases` on the aliasing parent records where it points.
 
 ## Module renaming (aliases)
 
