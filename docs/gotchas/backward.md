@@ -14,6 +14,7 @@ sources: [src/nnsight/intervention/backward.py, src/nnsight/intervention/interle
 - `.grad` is on **tensors, not modules**. There is no `module.grad`; capture the tensor, then read its `.grad`.
 - Gradient access order is the **reverse** of forward access order (gradients flow backward). Requesting an earlier-forward tensor's gradient before a later one raises `OutOfOrderError`.
 - `retain_graph=True` on the first backward if you call `.backward()` more than once on overlapping graphs.
+- All invokes in a trace share **one** autograd graph, so one `.backward()` *per invoke* still counts as more than once — every invoke but the last needs `retain_graph=True`.
 - A standalone `with loss.backward():` works outside a forward trace if you `.save()` the forward tensors first.
 
 ---
@@ -111,6 +112,58 @@ with model.trace("Hello world"):
     with (logits.sum() * 2).backward():
         g2 = hs.grad.clone().save()
 ```
+
+---
+
+## One `.backward()` per invoke still counts as more than once
+
+### Symptom
+Each invoke calls `.backward()` exactly once, so nothing looks repeated — but the second invoke raises:
+
+```
+RuntimeError: The autograd graph for this trace has already been freed.
+
+Every invoke in a trace contributes to a single batched forward pass, so all
+invokes share one autograd graph. An earlier `.backward()` in the same trace
+freed the graph that this one needs.
+```
+
+### Cause
+Invokes are not separate runs. Every invoke's input is combined into **one** batch and the model is called **once**, so the whole trace has a single autograd graph. The first `.backward()` frees it and every later invoke walks a graph that no longer exists.
+
+### Wrong code
+```python
+with model.trace() as tracer:
+    with tracer.invoke(prompt_a):
+        a1 = model.transformer.h[5].output
+        with model.output.logits.sum().backward():          # frees the graph
+            grad_a = a1.grad.save()
+
+    with tracer.invoke(prompt_b):
+        a1 = model.transformer.h[5].output
+        with model.output.logits.sum().backward():          # RuntimeError
+            grad_b = a1.grad.save()
+```
+
+### Right code
+```python
+with model.trace() as tracer:
+    with tracer.invoke(prompt_a):
+        a1 = model.transformer.h[5].output
+        with model.output.logits.sum().backward(retain_graph=True):
+            grad_a = a1.grad.save()
+
+    with tracer.invoke(prompt_b):
+        a1 = model.transformer.h[5].output
+        with model.output.logits.sum().backward():          # last one: let it free
+            grad_b = a1.grad.save()
+```
+
+Each invoke still gets its own gradient — the loss inside an invoke is built from that invoke's rows, so backward only reaches those rows.
+
+### Mitigation / how to spot it early
+- Count `.backward()` calls per **trace**, not per invoke. All but the last need `retain_graph=True`.
+- If you don't need the gradients together, give each backward pass its own `model.trace()`. That frees the graph between passes and costs less memory than retaining it.
 
 ---
 

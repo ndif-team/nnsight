@@ -32,6 +32,86 @@ from ..tracing.tracer import Tracer, WithBlockNotFoundError, push_result
 from .interleaver import Interleaver, Mediator
 
 
+# Autograd raises a bare ``RuntimeError`` when a freed graph is walked again;
+# there is no dedicated exception type or error code to match on.
+_GRAPH_FREED_MARKER = "backward through the graph a second time"
+
+_RETAIN_GRAPH_EXAMPLE = """    with model.trace() as tracer:
+        with tracer.invoke(prompt_a):
+            a1   = model.transformer.h[5].output
+            loss = model.output.logits.sum()
+            with loss.backward(retain_graph=True):
+                grad_a = a1.grad.save()
+        with tracer.invoke(prompt_b):
+            a1   = model.transformer.h[5].output
+            loss = model.output.logits.sum()
+            with loss.backward():
+                grad_b = a1.grad.save()"""
+
+
+def _retain_graph_requested(args: tuple, kwargs: dict) -> bool:
+    """Whether this ``.backward()`` call asked for the graph to be retained.
+
+    Mirrors ``Tensor.backward(gradient=None, retain_graph=None, ...)``, so
+    ``retain_graph`` is the second positional parameter.
+    """
+    if "retain_graph" in kwargs:
+        return bool(kwargs["retain_graph"])
+    return len(args) > 1 and bool(args[1])
+
+
+def _explain_freed_graph(
+    error: RuntimeError, args: tuple, kwargs: dict
+) -> RuntimeError | None:
+    """Re-frame autograd's "graph freed" error in terms of invokes.
+
+    Every invoke in a trace contributes to *one* batched forward pass, so they
+    also share one autograd graph. That makes a per-invoke ``.backward()`` look
+    independent when it is not: the first frees the graph and the next invoke
+    fails inside ``torch.autograd``, with a message about backwarding "a second
+    time" that never mentions invokes -- so it reads as describing someone
+    else's code when each invoke calls ``.backward()`` exactly once.
+
+    Returns ``None`` for any other ``RuntimeError``, which the caller re-raises
+    untouched.
+    """
+    if _GRAPH_FREED_MARKER not in str(error):
+        return None
+
+    if _retain_graph_requested(args, kwargs):
+        cause = (
+            "This `.backward()` passed `retain_graph=True`, so an earlier "
+            "`.backward()` in the same trace did not."
+        )
+    else:
+        cause = (
+            "An earlier `.backward()` in the same trace freed the graph that "
+            "this one needs."
+        )
+
+    return RuntimeError(
+        "\n".join(
+            [
+                "The autograd graph for this trace has already been freed.",
+                "",
+                "Every invoke in a trace contributes to a single batched forward "
+                "pass, so all invokes share one autograd graph. " + cause,
+                "",
+                "Pass `retain_graph=True` to every `.backward()` except the last "
+                "one:",
+                "",
+                _RETAIN_GRAPH_EXAMPLE,
+                "",
+                "The same applies to two `.backward()` calls inside one invoke. "
+                "If you do not need the gradients together, run each backward "
+                "pass in its own trace instead.",
+                "",
+                f"Original error from torch.autograd: {error}",
+            ]
+        )
+    )
+
+
 def _grad_property(
     interleaver: Interleaver, seen: set[int], hooks: list
 ) -> property:
@@ -205,8 +285,14 @@ class BackwardTracer(Tracer):
             # but the interventions run in a thread-bound greenlet — a hook firing
             # off-thread can't switch back into it. Force single-threaded backward
             # so every hook fires on this thread.
-            with interleaver, torch.autograd.set_multithreading_enabled(False):
-                self.fn(self.tensor, *self.args, **self.kwargs)
+            try:
+                with interleaver, torch.autograd.set_multithreading_enabled(False):
+                    self.fn(self.tensor, *self.args, **self.kwargs)
+            except RuntimeError as error:
+                explained = _explain_freed_graph(error, self.args, self.kwargs)
+                if explained is None:
+                    raise
+                raise explained from error
             interleaver.check_dangling_mediators()
             push_result(frame, mediator.lcls)
         finally:
