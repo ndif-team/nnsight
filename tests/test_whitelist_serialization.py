@@ -17,12 +17,86 @@ import torch
 sys.path.insert(0, "tests")
 
 from nnsight import LanguageModel
-from nnsight.intervention.serialization import (
-    SERVER_MODULES_WHITELIST,
-    _is_whitelisted_module,
-    dumps,
-    loads,
-)
+from nnsight.intervention import serialization
+from nnsight.intervention.serialization import dumps, loads
+
+
+def _whitelist_api():
+    """The module whitelist, or skip if it is no longer part of the API.
+
+    ``SERVER_MODULES_WHITELIST`` / ``_is_whitelisted_module`` were dropped from
+    ``serialization.py``. Importing them at module scope made all 12 tests in
+    this file an ImportError at collection -- including the nine that test
+    source serialization, which still works. Resolve them per-test instead, so
+    the rest of the file runs and these three come back automatically if the
+    API returns.
+    """
+
+    whitelist = getattr(serialization, "SERVER_MODULES_WHITELIST", None)
+    predicate = getattr(serialization, "_is_whitelisted_module", None)
+
+    if whitelist is None or predicate is None:
+        pytest.skip(
+            "serialization.SERVER_MODULES_WHITELIST / _is_whitelisted_module "
+            "are no longer part of the API"
+        )
+
+    return whitelist, predicate
+
+
+@pytest.fixture
+def registered_mymethods():
+    """Register ``mymethods`` by value for the duration of one test.
+
+    Serializing by source is opt-in: ``dumps`` emits a by-reference GLOBAL
+    (47 bytes, no source) until the owning module is registered, and the full
+    definition (887 bytes) once it is. The remote backend registers local
+    modules for you via ``get_local_env()`` before it calls ``dumps``, so the
+    registered state is what a remote trace actually serializes under.
+
+    ``register`` mutates a process-global set in cloudpickle, so without this
+    fixture the tests below only passed when an earlier test in the same
+    session happened to have registered the module first -- each of them
+    failed when run alone. Registration is undone on teardown so neither
+    ordering nor leakage can decide the result.
+    """
+
+    import mymethods.stateful
+    from cloudpickle.cloudpickle import unregister_pickle_by_value
+
+    from nnsight.ndif import register
+
+    register(mymethods.stateful)
+    try:
+        yield mymethods.stateful
+    finally:
+        unregister_pickle_by_value(mymethods.stateful)
+
+
+@pytest.fixture
+def unregistered_mymethods():
+    """Guarantee ``mymethods`` is *not* registered for the duration of one test.
+
+    Any trace in this session calls ``get_local_env()``, which registers local
+    modules process-wide, so by the time a later test runs the module is
+    already registered. Lift those entries out of cloudpickle's global set and
+    put them back on teardown, so the by-reference case can be asserted no
+    matter where in the file it runs.
+    """
+
+    import mymethods.stateful  # noqa: F401  (ensure the module is importable)
+    from cloudpickle.cloudpickle import _PICKLE_BY_VALUE_MODULES
+
+    removed = {
+        name
+        for name in _PICKLE_BY_VALUE_MODULES
+        if name == "mymethods" or name.startswith("mymethods.")
+    }
+    _PICKLE_BY_VALUE_MODULES.difference_update(removed)
+    try:
+        yield
+    finally:
+        _PICKLE_BY_VALUE_MODULES.update(removed)
 
 
 # =============================================================================
@@ -32,6 +106,8 @@ from nnsight.intervention.serialization import (
 
 def test_whitelisted_modules():
     """Test that core modules are in the whitelist."""
+    _, _is_whitelisted_module = _whitelist_api()
+
     assert _is_whitelisted_module("torch")
     assert _is_whitelisted_module("torch.nn")
     assert _is_whitelisted_module("torch.nn.functional")
@@ -42,6 +118,8 @@ def test_whitelisted_modules():
 
 def test_non_whitelisted_modules():
     """Test that user modules are NOT in the whitelist."""
+    _, _is_whitelisted_module = _whitelist_api()
+
     assert not _is_whitelisted_module("mymethods")
     assert not _is_whitelisted_module("mymethods.stateful")
     assert not _is_whitelisted_module("myproject")
@@ -50,6 +128,8 @@ def test_non_whitelisted_modules():
 
 def test_whitelist_includes_submodules():
     """Test that submodules of whitelisted packages are also whitelisted."""
+    _, _is_whitelisted_module = _whitelist_api()
+
     # torch submodules
     assert _is_whitelisted_module("torch.cuda")
     assert _is_whitelisted_module("torch.distributed")
@@ -65,7 +145,7 @@ def test_whitelist_includes_submodules():
 # =============================================================================
 
 
-def test_non_whitelisted_function_serialized_by_source():
+def test_non_whitelisted_function_serialized_by_source(registered_mymethods):
     """Test that functions from non-whitelisted modules are serialized by source."""
     from mymethods.stateful import normalize
 
@@ -86,7 +166,7 @@ def test_non_whitelisted_function_serialized_by_source():
     assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
 
 
-def test_non_whitelisted_class_serialized_by_source():
+def test_non_whitelisted_class_serialized_by_source(registered_mymethods):
     """Test that classes from non-whitelisted modules can be serialized.
 
     Cloudpickle serializes classes using _make_skeleton_class with method
@@ -112,7 +192,7 @@ def test_non_whitelisted_class_serialized_by_source():
     assert stats.count == 2
 
 
-def test_non_whitelisted_instance_serialized_by_source():
+def test_non_whitelisted_instance_serialized_by_source(registered_mymethods):
     """Test that instances from non-whitelisted modules can be serialized.
 
     We verify that:
@@ -230,7 +310,7 @@ def test_module_state_isolation(tiny_model):
 
 
 @torch.no_grad()
-def test_serialization_includes_module_functions(tiny_model):
+def test_serialization_includes_module_functions(tiny_model, registered_mymethods):
     """Test that module-level functions are included in serialization."""
     from mymethods.stateful import normalize, get_call_count
 
@@ -247,27 +327,42 @@ def test_serialization_includes_module_functions(tiny_model):
     # This is a key difference from whole-module serialization
 
 
-def test_no_register_needed():
-    """Test that register() is no longer needed for user modules.
+def test_unregistered_module_is_serialized_by_reference(unregistered_mymethods):
+    """An unregistered local module pickles as a GLOBAL, with no source.
 
-    Previously, users had to call register(mymodule) before using functions
-    from that module in remote execution. With whitelist-based serialization,
-    this is no longer necessary.
+    This is the other half of the contract, and the reason the tests above
+    need an explicit fixture. It is asserted here on purpose rather than left
+    to whichever test happens to run first.
     """
-    # Import without calling register()
+    import mymethods.stateful
+
+    data = dumps(mymethods.stateful.normalize)
+
+    assert b"def normalize" not in data
+    # A by-reference pickle names the module and attribute and nothing else.
+    assert b"mymethods.stateful" in data
+    assert b"normalize" in data
+
+
+def test_register_switches_to_serialization_by_value(registered_mymethods):
+    """`register()` is what makes a local module's source travel with the job.
+
+    Named for what it checks: the previous version of this test asserted that
+    `register()` was unnecessary, which was true only under the whitelist
+    design that has since been removed. Without registration `dumps` emits a
+    GLOBAL the server cannot import.
+    """
     from mymethods.stateful import normalize
 
-    # Serialize - should work without register()
     data = dumps(normalize)
 
-    # Should contain source code
     assert b"def normalize" in data
 
-    # Deserialize should work
     restored = loads(data)
     x = torch.randn(3, 4)
     result = restored(x)
     assert result.shape == x.shape
+    assert torch.allclose(result.norm(dim=-1), torch.ones(3), atol=1e-5)
 
 
 # =============================================================================

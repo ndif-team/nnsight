@@ -823,11 +823,18 @@ class CustomCloudPickler(cloudpickle.Pickler):
             if k in func_globals:
                 base_globals[k] = func_globals[k]
 
-        # SECURITY CHECK: Check function globals for prohibited modules/functions.
-        # This catches dangerous patterns like `import os; os.getcwd()` or
-        # `from subprocess import run; run(...)` where the prohibited object
-        # is captured in the function's globals.
-        captured_globals = slotstate.get("__globals__", {})
+        # NOTE: there is no prohibited-module check here. A lint-time blacklist
+        # (`PROHIBITED_MODULES` / `PROHIBITED_BUILTINS`, raising
+        # `PicklingProhibitedError`) used to run at this point and reject
+        # functions whose globals captured `os`, `subprocess`, `eval` and
+        # similar before they were serialized for NDIF. It is gone, along with
+        # the comment that used to describe it and a `captured_globals` local
+        # that nothing read -- which together left this reading as though the
+        # check were still here. Real sandboxing is server-side; if the
+        # client-side lint is wanted back it belongs on `slotstate["__globals__"]`
+        # right here, and the tests for it are already written (the
+        # `test_prohibited_*` cases in tests/test_serialization_edge_cases.py,
+        # currently skipped).
 
         # CLOSURE: Extract closure values and names.
         # For recursive/mutually recursive local functions, the closure may contain
