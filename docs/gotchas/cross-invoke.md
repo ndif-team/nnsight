@@ -14,6 +14,7 @@ sources: [src/nnsight/intervention/tracing/tracer.py:551, src/nnsight/interventi
 - `CONFIG.APP.CROSS_INVOKER` (default `True`) is what makes the cross-invoke variable flow happen at all. Setting it to `False` isolates each invoke (sometimes useful for debugging).
 - Empty `tracer.invoke()` (no positional args) operates on the entire batch from earlier invokes. It works on bare `NNsight` models because it does not call `_batch()`.
 - Decision rule: same module accessed in both invokes? → barrier. Different modules? → no barrier needed.
+- Invokes also share one **autograd graph**, so a `.backward()` in more than one invoke needs `retain_graph=True` on all but the last. See [backward.md](backward.md#one-backward-per-invoke-still-needs-retain_graphtrue).
 
 ---
 

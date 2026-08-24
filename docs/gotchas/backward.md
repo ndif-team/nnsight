@@ -3,7 +3,7 @@ title: Backward (Gradient) Pitfalls
 one_liner: Gradient tracing is a separate session — get .output values FIRST, .grad lives on tensors not modules, gradients flow in reverse.
 tags: [gotcha, backward, grad]
 related: [docs/usage/save.md, docs/concepts/threading-and-mediators.md]
-sources: [src/nnsight/intervention/tracing/backwards.py:69, src/nnsight/intervention/tracing/backwards.py:81, src/nnsight/__init__.py:154]
+sources: [src/nnsight/intervention/tracing/backwards.py:69, src/nnsight/intervention/tracing/backwards.py:81, src/nnsight/intervention/tracing/backwards.py:_explain_freed_graph, src/nnsight/intervention/batching.py, src/nnsight/__init__.py:154]
 ---
 
 # Backward (Gradient) Pitfalls
@@ -13,6 +13,7 @@ sources: [src/nnsight/intervention/tracing/backwards.py:69, src/nnsight/interven
 - `.grad` is on tensors, not modules. There's no `module.grad` — request gradients on the tensor you saved during the forward pass.
 - Gradient access order is the *reverse* of forward access order. If you accessed `h[5].output` then `h[10].output` on forward, request `.grad` for `h[10]`'s tensor before `h[5]`'s.
 - `retain_graph=True` is required if you call `.backward()` more than once on overlapping graphs.
+- All invokes in one trace share a single autograd graph, so one `.backward()` *per invoke* still counts as "more than once" — every invoke but the last needs `retain_graph=True`.
 - Standalone `with loss.backward():` outside any `model.trace()` works for simple cases — useful when you save the forward outputs first and want to inspect gradients afterward.
 
 ---
@@ -180,6 +181,60 @@ with model.trace("Hello"):
 
 ### Mitigation / how to spot it early
 - If you'll backward twice, the first call needs `retain_graph=True`. The last call doesn't (and skipping it frees memory).
+
+---
+
+## One `.backward()` per invoke still needs `retain_graph=True`
+
+### Symptom
+Each invoke calls `.backward()` exactly once, so nothing looks repeated — but the second invoke raises:
+
+```
+RuntimeError: The autograd graph for this trace has already been freed.
+
+Every invoke in a trace contributes to a single batched forward pass, so all
+invokes share one autograd graph. An earlier `.backward()` in the same trace
+freed the graph that this one needs.
+```
+
+### Cause
+Invokes are not separate runs. Every invoke's input is combined into **one** batch and the model is called **once** (`src/nnsight/intervention/batching.py`), so there is only one autograd graph for the whole trace. The first `.backward()` frees it and every later invoke is walking a graph that no longer exists.
+
+Before nnsight recognized this case you got autograd's raw message instead, which talks about backwarding "a second time" and never mentions invokes — so the obvious reading ("but I only called backward once here") sent people looking in the wrong place.
+
+### Wrong code
+```python
+with model.trace() as tracer:
+    with tracer.invoke(prompt_a):
+        x = model.transformer.h[5].output[0]
+        with model.lm_head.output.sum().backward():        # frees the graph
+            grad_a = x.grad.save()
+
+    with tracer.invoke(prompt_b):
+        y = model.transformer.h[5].output[0]
+        with model.lm_head.output.sum().backward():        # RuntimeError
+            grad_b = y.grad.save()
+```
+
+### Right code
+```python
+with model.trace() as tracer:
+    with tracer.invoke(prompt_a):
+        x = model.transformer.h[5].output[0]
+        with model.lm_head.output.sum().backward(retain_graph=True):
+            grad_a = x.grad.save()
+
+    with tracer.invoke(prompt_b):
+        y = model.transformer.h[5].output[0]
+        with model.lm_head.output.sum().backward():        # last one: let it free
+            grad_b = y.grad.save()
+```
+
+Each invoke still gets its own gradient — the loss inside an invoke is built from that invoke's slice of the batch, so backward only reaches its own rows.
+
+### Mitigation / how to spot it early
+- Count `.backward()` calls per **trace**, not per invoke. If the trace has more than one, all but the last need `retain_graph=True`.
+- If you don't need the gradients together, give each backward pass its own `model.trace()`. That frees the graph between passes and costs less memory than retaining it.
 
 ---
 
