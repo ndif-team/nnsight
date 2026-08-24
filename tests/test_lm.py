@@ -24,6 +24,25 @@ def _test_serialize(tracer):
     pass
 
 
+def _grad_rel_err(got: torch.Tensor, expected: torch.Tensor) -> float:
+    """Relative error between two gradients, as a single scale-free number.
+
+    Gradient magnitudes here run to ~4e4, where one float32 ULP is already
+    ~4e-3, so an absolute tolerance says nothing useful. A normalised norm
+    ratio is comparable across tensors and is insensitive to individual
+    near-zero entries, where catastrophic cancellation makes the *elementwise*
+    relative error large even when the tensor as a whole is correct.
+
+    Batching left-pads a shorter prompt, so the batched gradient carries extra
+    leading positions; the real tokens are right-aligned.
+    """
+
+    length = min(got.shape[1], expected.shape[1])
+    got, expected = got[:, -length:], expected[:, -length:]
+
+    return ((got - expected).norm() / expected.norm()).item()
+
+
 # =============================================================================
 # Basic Generation and Tracing
 # =============================================================================
@@ -277,35 +296,77 @@ class TestGradients:
 
         assert not torch.all(hidden_states_grad1.eq(hidden_states_grad2))
 
-    def test_backward_with_multiple_invokers(self, gpt2: nnsight.LanguageModel):
+    # Distinct prompts, so a gradient taken from the wrong batch row is
+    # detectable. (With the same prompt in every invoke, returning another
+    # invoke's slice -- or the whole batch -- looks identical to success.)
+    GRAD_PROMPTS = (
+        "The quick brown fox jumps",
+        "Madison Square Garden is located in",
+        "A completely different sentence appears",
+    )
+
+    def _single_invoke_grad(self, gpt2: nnsight.LanguageModel, prompt: str):
+        """d(sum lm_head.output)/d(h[5].attn.c_proj.output) with no batching."""
+        with gpt2.trace() as tracer:
+            with tracer.invoke(prompt):
+                x = gpt2.transformer.h[5].attn.c_proj.output
+                with gpt2.lm_head.output.sum().backward():
+                    grad = x.grad.save()
+        return grad
+
+    @pytest.mark.parametrize(
+        "n_invokes, target",
+        [
+            (2, 1),  # last invoke
+            (2, 0),  # first invoke -- the batch slice does not start at 0 for
+            (3, 0),  # the others, so each position exercises a different offset
+            (3, 1),
+            (3, 2),
+        ],
+    )
+    def test_backward_with_multiple_invokers(
+        self, gpt2: nnsight.LanguageModel, n_invokes: int, target: int
+    ):
         """Regression for #664: a gradient requested inside a batched invoke.
 
         With two or more invokes sharing an input, each invoke's module output
-        is a storage-sharing view of the full batch; a backward hook on that view
-        never fires, raising MissedProviderError. The grad must (a) be provided
-        and (b) match the gradient computed for the same input in a single invoke.
+        is a storage-sharing view of the full batch; a backward hook on that
+        view never fires, raising MissedProviderError. The grad must (a) be
+        provided and (b) be *this* invoke's gradient rather than another row's.
+
+        Correctness is asserted as a relative-norm error rather than
+        ``allclose(..., atol=1e-5)``. These gradients reach ~4e4 in float32,
+        where a single ULP is ~4e-3, and the batched backward accumulates its
+        reductions in a different order than the unbatched one. Reproducing the
+        batch shape in plain HuggingFace gives the same discrepancy, and in
+        float64 the two agree to 5e-11 -- so the spread is float32 reduction
+        order, not a slicing bug. It is measured here at ~1e-5 relative, five
+        orders of magnitude below the ~1.2 relative error of picking the wrong
+        row, which is what this test needs to distinguish.
         """
-        prompt = "The quick brown fox jumps"
+        prompts = list(self.GRAD_PROMPTS[:n_invokes])
 
-        # Reference: single invoke, no batching.
-        with gpt2.trace() as tracer:
-            with tracer.invoke(prompt):
-                ref_x = gpt2.transformer.h[5].attn.c_proj.output
-                with gpt2.lm_head.output.sum().backward():
-                    ref_grad = ref_x.grad.save()
+        references = [self._single_invoke_grad(gpt2, prompt) for prompt in prompts]
 
-        # Two invokes share the input -> batching views in invoke 2.
         with gpt2.trace() as tracer:
-            with tracer.invoke(prompt):
-                gpt2.lm_head.output.save()
-            with tracer.invoke(prompt):
-                batched_x = gpt2.transformer.h[5].attn.c_proj.output
-                with gpt2.lm_head.output.sum().backward():
-                    batched_grad = batched_x.grad.save()
+            for index, prompt in enumerate(prompts):
+                with tracer.invoke(prompt):
+                    if index == target:
+                        x = gpt2.transformer.h[5].attn.c_proj.output
+                        with gpt2.lm_head.output.sum().backward():
+                            batched_grad = x.grad.save()
+                    else:
+                        gpt2.lm_head.output.save()
             _test_serialize(tracer)
 
         assert batched_grad is not None
-        assert torch.allclose(ref_grad, batched_grad, atol=1e-5)
+
+        assert _grad_rel_err(batched_grad, references[target]) < 1e-4
+
+        # Negative control: it must not be any other invoke's gradient.
+        for index, reference in enumerate(references):
+            if index != target:
+                assert _grad_rel_err(batched_grad, reference) > 1e-2
 
     def test_grad_edit_with_multiple_invokers(self, gpt2: nnsight.LanguageModel):
         """Editing a gradient inside a batched invoke must be applied (#664)."""
