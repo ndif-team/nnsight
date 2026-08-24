@@ -54,8 +54,7 @@ reads/writes.
 `Batcher.batching` (`batching.py:183`) is `True` only once **two or more** non-empty
 invokes have been added (`len(self.invokes) > 1`). With a single invoke, `narrow`
 and `widen` are no-ops — a lone invoke *is* the whole batch, so it sees every row
-untouched. (This is the analogue of the OLD `needs_batching`; there is no separate
-vLLM force flag in this class — vLLM subclasses the batcher.)
+untouched. (vLLM subclasses the batcher rather than forcing batching on through a flag.)
 
 ### narrow — scoping a read to a block's rows
 

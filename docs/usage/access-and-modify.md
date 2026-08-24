@@ -140,7 +140,7 @@ If a module's class has a submodule named `input`, `output`, `inputs`, etc. (e.g
 
 ## Gotchas
 
-- Within an invoke, access modules in forward-pass order or hit `OutOfOrderError`. See `docs/gotchas/out-of-order.md`.
+- Within an invoke, access modules in forward-pass order or hit `OutOfOrderError`. See `docs/errors/out-of-order-error.md`.
 - For tuple-returning modules, `module.output[0] = x` is a `__setitem__` on a tuple and fails. Use `module.output[0][:] = x` (in-place on the first element) or rebuild the tuple and assign to `module.output`.
 - Reading `.output` returns the real runtime tensor — `print`, `.shape`, `.mean()` all work; there is no proxy to unwrap.
 - Outside interleaving, `.output` raises `ValueError: Cannot access ... outside of interleaving`. Use `model.scan(...)` for shapes without execution.

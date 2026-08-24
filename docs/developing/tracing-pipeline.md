@@ -85,19 +85,15 @@ block caches `(None, None)`, so the negative verdict isn't re-derived every call
 is evicted or re-validated against on-disk changes — a file edited mid-run is
 traced as it was first seen. Both are process-wide.
 
-There is no per-tracer-type code cache: the same site under two tracer types
-would collide on the key, but in practice a given `with` line is only ever entered
-under one tracer type, and a compiled *body* is tracer-type-independent (the
-subclass differences are all in `execute`, not in the compiled code). Compare this
-to the OLD design, which keyed a second code cache by `(cache_key, tracer_type)`;
-that layer is gone.
+There is no per-tracer-type code cache: a given `with` line is only ever entered
+under one tracer type, and a compiled *body* is tracer-type-independent — the
+subclass differences are all in `execute`, not in the compiled code.
 
 ### Finding the caller's frame
 
 `capture()` looks two frames up: `sys._getframe(2)` (`tracer.py:287`), i.e. past
-`__enter__` to the user's frame. This replaces the OLD `get_entered_frame` /
-`get_non_nnsight_frame` stack-walking heuristics. Subclasses that enter at a
-different depth compensate directly: `EditingTracer.__enter__` (`editing.py:88`)
+`__enter__` to the user's frame — a fixed depth, not a stack walk. Subclasses that
+enter at a different depth compensate directly: `EditingTracer.__enter__` (`editing.py:88`)
 mirrors `Tracer.__enter__` inline rather than calling `super().__enter__()` so
 capture sees the user's frame at the same depth.
 

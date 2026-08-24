@@ -59,8 +59,7 @@ location the request targets. Without `tracer.iter`, it is always `.i0`; in a
 generation loop it counts `.i0`, `.i1`, `.i2`, … per step.
 
 > This is the same class raised by the "model finished, a worker is still waiting"
-> case in [value-was-not-provided.md](value-was-not-provided.md). There is no
-> separate `MissedProviderError` in this rewrite.
+> case in [value-was-not-provided.md](value-was-not-provided.md).
 
 ## Common triggers
 
@@ -102,18 +101,18 @@ with model.trace() as tracer:
 - For backward passes, mirror forward order in reverse inside `with tensor.backward():`.
 - Split interleaving access patterns across multiple invokes.
 
-## Another cause: something removed nnsight's hooks
+## Another cause: something replaced the module's forward
 
 `OutOfOrderError` also fires when the location was never served at all, because
-nnsight's forward hooks are gone from the module tree. nnsight installs a
-pass-through pre-hook and hook on every module and expects them to stay; another
-library that calls `remove()` broadly — some intervention frameworks clear
-*every* hook on teardown, not just their own — silently strips them, and the next
+nnsight's controller is no longer the module's `forward`. nnsight installs the
+controller as an instance attribute (`module.__dict__["forward"]`) on every module
+and expects it to stay; another library that reassigns `module.forward`, or wraps
+the module in a way that bypasses its `forward`, silently removes it, and the next
 trace reports a location the model "already ran past".
 
-The tell is that `.input` breaks while other things still work, and that it
-started after running code from another hooking library in the same process.
-Re-instrument by walking the tree:
+The tell is that `.input`/`.output` of some modules break while others still work,
+and that it started after running code from another instrumentation library in the
+same process. Re-instrument by walking the tree:
 
 ```python
 for envoy in [model, *model.modules()]:

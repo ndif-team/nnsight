@@ -2,13 +2,12 @@
 title: Source Tracing
 one_liner: .source rewrites a module's forward AST so every call site becomes a location bracketed through Interleaver.handle (input / skip / output) — the same primitive modules use, one level finer. Source is the forward view; SourceEnvoy is one operation.
 tags: [concept, mental-model, source-tracing]
-related: [docs/concepts/envoy.md, docs/concepts/interleaver-and-hooks.md]
+related: [docs/concepts/envoy.md, docs/concepts/interleaver-and-controller.md]
 sources: [src/nnsight/intervention/source.py:132, src/nnsight/intervention/source.py:271, src/nnsight/intervention/source.py:362, src/nnsight/intervention/source.py:414, src/nnsight/intervention/source.py:447, src/nnsight/intervention/source.py:664]
 ---
 
 # Source Tracing
 
-> Naming changed from the old docs: the module-forward view is now **`Source`** (was `SourceEnvoy`); a single operation is now **`SourceEnvoy`** (was `OperationEnvoy`). The per-module `SourceAccessor`/`OperationAccessor` split is gone — there is one per-module `_State` and one `handle`-based primitive.
 
 ## What this is for
 
@@ -101,7 +100,7 @@ When an instrumented op fires inside a trace, `_run_op` (`source.py:271`) bracke
 4. `value = fn(*args, **kwargs)` — run the call.
 5. `handle("{base}.output", value)` — report/replace the return value.
 
-Steps 1/2/5 are the exact three handles a module hook emits — the interleaver treats an op location no differently from a module location. Occurrence tagging (`.i{n}`) applies the same way (see [Interleaver and Hooks](interleaver-and-hooks.md)).
+Steps 1/2/5 are the exact three handles a module hook emits — the interleaver treats an op location no differently from a module location. Occurrence tagging (`.i{n}`) applies the same way (see [Interleaver and Controller](interleaver-and-controller.md)).
 
 ## SourceEnvoy: one operation
 
@@ -156,5 +155,5 @@ The instrumented forward is never written onto the module's class — it lives a
 ## Related
 
 - [Envoy](envoy.md) — `SourceEnvoy` mirrors an `Envoy`'s `.input`/`.output`/`.skip`.
-- [Interleaver and Hooks](interleaver-and-hooks.md) — the `handle` primitive ops share with modules, and occurrence tagging.
+- [Interleaver and Controller](interleaver-and-controller.md) — the `handle` primitive ops share with modules, and occurrence tagging.
 - Source: `src/nnsight/intervention/source.py` (`Source`, `SourceEnvoy`, `_State`, `_Instrument`, `_run_op`, `install_source`, `install_controller`).

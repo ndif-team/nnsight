@@ -8,7 +8,6 @@ sources: [src/nnsight/modeling/diffusion.py:38, src/nnsight/modeling/huggingface
 
 # DiffusionModel
 
-> Renamed from `DiffusionModel` in old nnsight. The class is now `nnsight.DiffusionModel`.
 
 ## What this is for
 

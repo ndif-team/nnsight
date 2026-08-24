@@ -120,25 +120,10 @@ Everything downstream follows from a few commitments:
 
 ### What changed in 0.8
 
-0.8 is a ground-up rewrite around a compile-and-interleave pipeline. If you're
-coming from an earlier nnsight, the load-bearing changes:
-
-- **Greenlets, not threads.** Each intervention block runs as a *greenlet* (a
-  cooperative coroutine), not an OS thread. The event protocol is
-  `VALUE` / `SWAP` / `SKIP` / `BARRIER`. See [Interleaving](#4-interleaving).
-- **`TransformersModel` is the primary HuggingFace class.** `LanguageModel` /
-  `VisionLanguageModel` still work but are deprecated aliases that warn.
-- **`generate` returns token ids; `pipe` returns the pipeline's records.** The old
-  `generate`-returns-decoded-text behavior is now `pipe`.
-- **Hookable values are `eproperty` descriptors** (`.input`/`.output`/`tracer.result`
-  and your own), and per-module custom envoy classes come back via `envoys=`.
-- **Remote gains an async backend** (`await` / `async for` a job); the old hybrid
-  `tracer.local()` streaming is gone.
-- **`save()` raises outside a trace** (it used to be a silent no-op), and the idiom
-  for collecting values is to **save the container**, not each element.
-
-The full old→new delta is in
-[docs/reference/version-history.md](docs/reference/version-history.md).
+0.8 is a ground-up rewrite around a compile-and-interleave pipeline. The
+old→new delta, for readers of an earlier nnsight, is
+[docs/reference/version-history.md](docs/reference/version-history.md); the rest of
+this document describes 0.8 as it is.
 
 ---
 
@@ -374,7 +359,7 @@ exactly one of {the model, one worker} is running, and a worker only ever runs
 between the two model events it cares about. Everything in this section lives in
 `src/nnsight/intervention/interleaver.py` (plus `batching.py` and `barrier.py`); the
 concept pages are
-[docs/concepts/interleaver-and-hooks.md](docs/concepts/interleaver-and-hooks.md) and
+[docs/concepts/interleaver-and-controller.md](docs/concepts/interleaver-and-controller.md) and
 [docs/concepts/threading-and-mediators.md](docs/concepts/threading-and-mediators.md).
 
 ### 4.1 The Interleaver
@@ -398,25 +383,23 @@ running. Under transformers tensor parallelism the controller runs inside the
 model's own collective hooks, so it sees a partial sum or a shard there, which
 `TPFragments` makes whole only when a worker is waiting for it.
 
-The single most important property of these hooks is that they **pass through when
-idle**. The first line of each is `if not self.interleaving: return None`, and
-`interleaving` is a flag flipped on only between the interleaver's `__enter__` and
-`__exit__`. Outside a trace the hooks return `None` — PyTorch's signal for "no
-change" — and the module runs exactly as if they weren't there. So an instrumented
-model runs at normal speed whenever you aren't tracing; the cost when idle is one
-short-circuiting `if` per hook, nothing more. There is no lazy install, no sentinel,
-no removing and re-adding hooks around each run: the hooks are permanent and gated on
-a flag.
+The single most important property of the controller is that it **passes through
+when idle**. Its first line asks the module's `_State` which interleaver is running
+(`interleaving` is `True` between `__enter__` and `__exit__`) *and* has workers
+(`busy`); with neither it runs the body and returns. So an instrumented model runs
+at normal speed whenever you aren't tracing; the cost when idle is one frame and one
+check per module call, nothing more. The controller is permanent: nothing is
+installed or removed around a run.
 
 `instrument` also installs the per-module **source/skip controller** (see
 [Source tracing](#54-source-tracing) and
-[docs/developing/hook-system.md](docs/developing/hook-system.md)), which replaces the
+[docs/developing/controller.md](docs/developing/controller.md)), which replaces the
 module's `forward` to add the `.skip` gate and, on demand, operation-level access.
 The controller is registered up front so it's in place before `nn.Module.__call__`
 binds `forward` — necessary because a skip's replacement can be read from the
 module's own input first. `instrument` runs again on dispatch (`Envoy._update`, when
-meta weights are swapped for real ones): it drops the old module's hooks and
-re-installs on the new one.
+meta weights are swapped for real ones): the new module gets its own controller;
+the meta module's doesn't carry over.
 
 **`handle`: one call, every worker.** Everything the model side does routes through
 `Interleaver.handle(provider, value)`. It offers `value` at that location to every
@@ -426,10 +409,10 @@ edits it, or ignores it, and the possibly-edited value threads through to the ne
 Afterward, the post-intervention value is offered to any active
 [`tracer.cache()`](#6-features) observers, narrowed to each cache's own batch rows,
 so a cache records exactly what interventions produced. The edited value returns to
-the hook, which substitutes it back into the forward.
+the controller, which substitutes it back into the forward.
 
 That one primitive — a location string plus `handle` — carries *everything*, not
-just module boundaries. The model's return value isn't produced by any module hook,
+just module boundaries. The model's return value isn't produced by any module,
 so `Envoy.interleave` calls `handle("result", result)` after the forward to serve
 anything parked on [`tracer.result`](#6-features). The `.skip` gate is
 `handle("{path}.skip", ...)`. Source operations inside a forward are
@@ -442,7 +425,7 @@ separate event type for any of these — they're all the one primitive, which is
 One interleaver persists across many runs. `__enter__` flips `interleaving` on and
 starts every not-yet-started worker; `__exit__` flips it back off (swallowing an
 intentional `EarlyStopException` from `tracer.stop()`); `cancel` then clears the
-workers and the batcher so the next run starts clean. The hooks themselves are never
+workers and the batcher so the next run starts clean. The controllers themselves are never
 touched — a server reuses the same interleaver, request after request.
 
 ### 4.2 The Mediator
@@ -824,7 +807,7 @@ use separate invokes. Full detail in
 
 ### 5.4 Source tracing
 
-Module `.input`/`.output` are the only two locations the forward *hooks* surface.
+Module `.input`/`.output` are the only two locations the controller surfaces.
 The individual operations *inside* a `forward` — an activation function, a
 `torch.matmul`, an attention call — are invisible to hooks, because an operation
 isn't a submodule. `.source` makes them observable, editable, and skippable.
@@ -977,7 +960,7 @@ the first real (non-scan) interleave, or callable directly to load eagerly — l
 the weights via the wrapper's `_load` and hands the new module to `_update`, which
 **re-points the existing envoy tree** at it in place. `_update` walks the tree by
 name, swapping each envoy's `._module` for the real one and re-instrumenting it (the
-new module gets its own controller and hooks; the meta module's don't carry over).
+new module gets its own controller; the meta module's doesn't carry over).
 Passing a ready `nn.Module`, or `dispatch=True`, skips the meta phase and loads
 eagerly.
 
@@ -985,7 +968,7 @@ Because `_update` re-points the *same* envoy objects rather than rebuilding the
 tree, everything that referenced them stays valid: **aliases survive dispatch** (they
 point at the same child objects `_update` re-points), and standalone children added
 to the tree that aren't part of the loaded module — `TransformersModel`'s
-`generator`, for instance — are left in place, keeping their own module and hooks.
+`generator`, for instance — are left in place, keeping their own module and controller.
 This is why `rename=` and `envoys=` are threaded to the envoy but kept out of the
 replayed load arguments: the tree carries them across the swap for free. See
 `src/nnsight/modeling/mixins/meta.py`.
@@ -1006,7 +989,7 @@ with model.trace("The Eiffel Tower is in the city of"):
 
 By default, while interleaving, `envoy(...)` calls `module.forward(...)` **directly**,
 skipping PyTorch's hook dispatch. That is deliberate: it keeps the ad-hoc call from
-re-firing the interleaver's own hooks (which would try to switch into the very worker
+re-entering the controller's handoff (which would try to switch into the very worker
 making the call) and leaves the module's real place in the forward pass untouched.
 Outside a trace it's just an ordinary module call.
 
@@ -1470,7 +1453,7 @@ Intervention code is deferred and interleaved: nnsight captures the body of your
 that trades control back and forth with the model's forward pass (see
 [Interleaving](#4-interleaving)). That indirection is what makes debugging feel
 different from ordinary Python — the line that raises did not run where you wrote
-it, and by the time an exception surfaces it has passed through nnsight's hooks
+it, and by the time an exception surfaces it has passed through nnsight's controller
 and the model's own frames. The three subsections below cover how nnsight keeps
 that machinery out of your way when something goes wrong: tracebacks that point
 at your code, a single switch that puts the plumbing back when you need to see
@@ -1503,7 +1486,7 @@ wrote.
 
 nnsight also works to point at the *right* line. When a worker raises, the
 mediator stashes an intervention-only traceback on the exception (as
-`__intervention_tb__`) before the model and hook frames pile on during
+`__intervention_tb__`) before the model and controller frames pile on during
 unwinding, so the surfaced trace can name the exact intervention line rather than
 the deepest model frame. This matters most for the deferred-worker path (remote
 and vLLM), where the error is reduced to a wire-safe dict in one process and
@@ -1945,7 +1928,7 @@ class MyModel(NNsight):
 ```
 
 Calling a child envoy directly (`self[1](hidden)`) runs that module's forward
-out of execution order without re-firing the interleaver's hooks — the logit-lens
+out of execution order without re-entering the controller's handoff — the logit-lens
 idiom, and the reason `Envoy.__call__` exists. Because a class-level attribute on
 an `Envoy`/`NNsight` subclass is shared across every instance, keep mutable
 per-model config (a head count, a device map) in `__init__`, not at class scope.
@@ -1957,7 +1940,7 @@ mixins over `Envoy`, and you inherit exactly as many as you need
 (`src/nnsight/modeling/mixins/`, and see [The mixin architecture](#71-the-mixin-architecture)):
 
 ```
-Envoy               the tree; hooks; trace / interleave / __call__
+Envoy               the tree; controllers; trace / interleave / __call__
  └─ Loadable        _load(...): construct the module from a spec, not a passed one
      └─ Meta        meta-device build up front; dispatch() swaps in real weights; scan()
          └─ Remotable   remote model key + per-request env; remote & local backends
@@ -2020,7 +2003,7 @@ through it in your `trace`/`generate` override with `self.generator(output, hook
 which fires its hooks so `model.generator.output` receives the value (and can
 edit it). Second, standalone children survive a model-environment rebind — lazy
 dispatch swapping in real weights, or a PEFT adapter rebind — because they keep
-their own module and hooks rather than being rebuilt from the wrapped tree.
+their own module and controller rather than being rebuilt from the wrapped tree.
 
 ### 10.2 Custom hookable values (eproperty)
 

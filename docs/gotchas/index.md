@@ -13,7 +13,7 @@ This folder is the failure-mode reference. Each doc covers one cluster of relate
 ## Buckets
 
 ### [save.md](save.md)
-- **`save()` now RAISES outside a trace** (old nnsight made it a silent no-op) — move every save inside the `with` block.
+- **`save()` raises outside a trace** — move every save inside the `with` block.
 - Forget `.save()` and the value doesn't cross the trace boundary (`UnboundLocalError` inside a function).
 - `.save()` returns the value unchanged; save the value you bind. Nested traces don't need `.save()` between them (only the outermost boundary filters).
 - Remote `.save()` is the only transmission channel; collect via a saved container, not an external list.
@@ -45,7 +45,7 @@ This folder is the failure-mode reference. Each doc covers one cluster of relate
 
 ### [types-and-values.md](types-and-values.md)
 - Values inside a trace are **real** tensors, not proxies.
-- `model.scan(...)` gives `FakeTensor`s (shapes/dtypes). **Branching on their content raises** (`GuardOnDataDependentSymNode`) — the old always-`True` `__bool__` patch is gone. Branch only on shapes in scan.
+- `model.scan(...)` gives `FakeTensor`s (shapes/dtypes). **Branching on their content raises** (`GuardOnDataDependentSymNode`). Branch only on shapes in scan.
 - Tensors you create inside a trace must be moved onto the model's device.
 
 ### [remote.md](remote.md)

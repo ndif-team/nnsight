@@ -12,7 +12,7 @@ sources: [src/nnsight/modeling/transformers.py]
 
 `model.pipe(input, ...)` runs the model's whole `transformers.pipeline` end to end and returns what the pipeline **postprocesses to** — decoded-text records for text-generation, labels for a classifier, and so on. It is traced like `trace`/`generate`: the block sees every forward the pipeline makes.
 
-This is what old nnsight's `generate` returned. Now the two are split:
+The two are split:
 
 - `model.generate(...)` runs the model and returns **token ids** (`tracer.result`). See `docs/usage/generate.md`.
 - `model.pipe(...)` runs the pipeline and returns its **records**.

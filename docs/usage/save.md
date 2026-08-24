@@ -17,7 +17,7 @@ Inside a tracing context (`model.trace`, `model.generate`, `model.pipe`, `model.
 - Use for **every** value you want to read after a `with model.trace(...):` block exits.
 - Required inside `model.scan(...)` too — it is a tracing context like the others.
 - Not needed for values you only read inside the body.
-- **Calling `save` outside a trace raises `ValueError`** (see below) — it is no longer a silent no-op.
+- **Calling `save` outside a trace raises `ValueError`** (see below).
 
 ## Canonical pattern
 

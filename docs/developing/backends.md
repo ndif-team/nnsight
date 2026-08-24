@@ -136,11 +136,6 @@ blocking `recv` runs through `asyncio.to_thread` (`receive`, `remote.py:437`) to
 the event loop free. The caller's frame is gone by the time the result lands, so
 saves come out of the await / the iterator's final item, not a frame push.
 
-> The OLD `RemoteBackend` submodes (`blocking_request`/`non_blocking_request`/
-> `async_request` methods, a Socket.IO transport, a `LocalTracer`/`STREAM`
-> hybrid-streaming path, `tracer.local()`) are **not** in this codebase. Remote is
-> one websocket; async is a separate subclass; there is no server→client streamed
-> execution.
 
 ### LocalSimulationBackend — a serverless dry run
 

@@ -2,7 +2,7 @@
 title: Architecture Overview
 one_liner: Top-down map of how user code flows through Tracer, Backend, Interleaver, Mediator (greenlet), and PyTorch hooks.
 tags: [internals, dev]
-related: [docs/developing/tracing-pipeline.md, docs/developing/interleaver-internals.md, docs/developing/hook-system.md, docs/developing/backends.md]
+related: [docs/developing/tracing-pipeline.md, docs/developing/interleaver-internals.md, docs/developing/controller.md, docs/developing/backends.md]
 sources: [src/nnsight/tracing/tracer.py, src/nnsight/tracing/backend.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/batching.py]
 ---
 
@@ -228,7 +228,7 @@ under a `BackwardsTracer` that routes `.grad` reads/writes through it
 
 - `docs/developing/tracing-pipeline.md` — capture, parse, build, compile, execute.
 - `docs/developing/interleaver-internals.md` — the greenlet park/switch event loop.
-- `docs/developing/hook-system.md` — the per-module controller, and when hooks are used instead.
+- `docs/developing/controller.md` — the per-module controller (handoff, skip gate, source bodyad.
 - `docs/developing/backends.md` — the backend classes.
 - `docs/concepts/deferred-execution.md`, `docs/concepts/threading-and-mediators.md`
   — the mental-model versions.

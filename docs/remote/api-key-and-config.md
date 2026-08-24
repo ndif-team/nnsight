@@ -141,13 +141,13 @@ APP:
   REMOTE_LOGGING: true
 ```
 
-The shipped defaults live at `<nnsight-package-dir>/config.yaml` and are merged under your user file, so upgrading nnsight no longer clobbers your saved key — it's in `~/.config`, separate from the package.
+The shipped defaults live at `<nnsight-package-dir>/config.yaml` and are merged under your user file, so upgrading nnsight leaves your saved key alone — it's in `~/.config`, separate from the package.
 
 ## Gotchas
 
 - `NDIF_HOST` and `NDIF_API_KEY` env vars override the on-disk values, so a stale env var can mask the key you just saved.
 - `CONFIG.APP.DEBUG = True` prints payload/result sizes and a per-status timeline every run. Turn it off for clean output.
-- The legacy `CROSS_INVOKER`, `CACHE_DIR`, and `TRACE_CACHING` config fields are gone. `nnsight.ndif_status()` still exists but is deprecated in favor of `nnsight.status()`.
+- `nnsight.ndif_status()` is deprecated in favor of `nnsight.status()`.
 
 ## Related
 

@@ -1,12 +1,12 @@
 ---
-title: Interleaver and Hooks
+title: Interleaver and Controller
 one_liner: One shared Interleaver installs a controller forward on every wrapped module; it passes through when idle and hands input/output to Interleaver.handle when interleaving, counting each visit once on the interleaver.
-tags: [concept, mental-model, hooks]
+tags: [concept, mental-model, controller]
 related: [docs/concepts/threading-and-mediators.md, docs/concepts/envoy.md, docs/concepts/source-tracing.md]
 sources: [src/nnsight/intervention/interleaver.py:430, src/nnsight/intervention/interleaver.py:521, src/nnsight/intervention/interleaver.py:566, src/nnsight/intervention/interleaver.py:375, src/nnsight/intervention/interleaver.py:605]
 ---
 
-# Interleaver and Hooks
+# Interleaver and Controller
 
 ## What this is for
 
@@ -20,7 +20,7 @@ How a module reaches it:
 - **No hooks under tensor parallelism either.** transformers TP all-reduces and all-gathers in *its* forward hooks, which run after the controller — so the controller sees a row-parallel output as this rank's partial sum and a gathered head as a shard. `TPFragments` records which, and makes the value whole (all-reduce or all-gather) only when a worker is actually waiting there.
 - **One occurrence counter per location**, on the interleaver, bumped once per visit; each worker holds the counts it started at, so its own occurrence of a location is a subtraction, not a per-worker increment at every handoff.
 
-This is simpler than the older lazy one-shot hook design: there is **one** primitive — a location string plus `Interleaver.handle` — and modules, source operations, `.skip`, and `result` all ride on it.
+There is **one** primitive — a location string plus `Interleaver.handle` — and modules, source operations, `.skip`, and `result` all ride on it.
 
 ## When to use / when not to use
 
@@ -56,9 +56,9 @@ def controller(*args, **kwargs):                      # the module's forward, pe
 1. Offer `value` to every mediator in turn via `Mediator.handle` (`interleaver.py:375`). A read is served the value; a swap replaces it. The value threads through all workers, so each sees the previous one's edits.
 2. If batching, reassemble a batched `.skip` from its per-invoke parts (`Batcher.assemble_skip`).
 3. Offer the now post-intervention value to any active caches (`tracer.cache()`), narrowed to each cache's own batch rows.
-4. Return the possibly-edited value back to the hook, which substitutes it into the forward.
+4. Return the possibly-edited value back to the controller, which substitutes it into the forward.
 
-Values that don't come from a module hook use the same call: `Envoy.interleave` does `handle("result", result)`; source operations do `handle("{op}.input"/".output"/".skip", ...)`.
+Values that don't come from a module use the same call: `Envoy.interleave` does `handle("result", result)`; source operations do `handle("{op}.input"/".output"/".skip", ...)`.
 
 ## Occurrence tagging (iteration)
 
@@ -81,13 +81,13 @@ After the model returns, `check_dangling_mediators` (`interleaver.py:605`) inspe
 
 `tracer.cache()` needs no per-module hooks. It registers a `Cache` on the calling mediator; `Interleaver.handle` feeds every location to every active cache *after* interventions have run, so a cache records exactly the values interventions produced, narrowed to that worker's rows. See `intervention/cache.py`.
 
-## Skip is a gate, not a hook
+## Skip is a gate
 
 `.skip(value)` parks on `Event.SKIP` at `"{path}.skip"`. The module's **controller** forward (installed by `install_controller`) queries that gate *before* running the body: if a replacement is pending, the body is skipped and the replacement returned. This is why a skip can even read the module's own `.input` first — the controller is bound before `nn.Module.__call__` runs its pre-hooks. See [Source Tracing](source-tracing.md) for the controller.
 
 ## Gotchas
 
-- **The controller is always installed, not lazy.** Overhead when idle is one frame and one `interleaving`/`busy` check per module call, on PyTorch's hook-free fast path. Don't replace a module's `forward` by hand — reassign the module through the envoy so `instrument` re-runs.
+- **The controller is installed at wrap time and stays.** Overhead when idle is one frame and one `interleaving`/`busy` check per module call, on PyTorch's hook-free fast path. Don't replace a module's `forward` by hand — reassign the module through the envoy so `instrument` re-runs.
 - **The input handoff sees `(args, kwargs)`** and can rewrite either; `.inputs` exposes the full pair, `.input` the first positional-or-keyword argument.
 - **One interleaver per tree, reused across runs.** `cancel()` clears mediators and the batcher after each run; the controllers stay installed. A server keeps the same interleaver across requests.
 - **Occurrence tags are strings.** A request pinned to a later step simply doesn't string-match earlier visits and waits — there is no numeric comparison in the hot path.
@@ -95,6 +95,6 @@ After the model returns, `check_dangling_mediators` (`interleaver.py:605`) inspe
 ## Related
 
 - [Threading and Mediators](threading-and-mediators.md) — the worker side that parks and is served here.
-- [Envoy](envoy.md) — the properties that call `Mediator.value`/`swap`, which the hooks fulfil.
+- [Envoy](envoy.md) — the properties that call `Mediator.value`/`swap`, which the controller's handoffs fulfil.
 - [Source Tracing](source-tracing.md) — the same `handle` primitive applied to intra-forward operations, and the skip controller.
 - Source: `src/nnsight/intervention/interleaver.py` (`Interleaver.instrument`, `Interleaver.handle`, `check_dangling_mediators`), `src/nnsight/intervention/cache.py` (`Cache`).

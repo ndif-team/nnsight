@@ -2,13 +2,13 @@
 title: Envoy
 one_liner: Envoy wraps a torch.nn.Module and mirrors its submodule tree, exposing .input / .inputs / .output as eproperty descriptors over Mediator.value / Mediator.swap, plus .skip (method) and .source (property).
 tags: [concept, mental-model, envoy]
-related: [docs/concepts/interleaver-and-hooks.md, docs/concepts/source-tracing.md, docs/concepts/threading-and-mediators.md]
+related: [docs/concepts/interleaver-and-controller.md, docs/concepts/source-tracing.md, docs/concepts/threading-and-mediators.md]
 sources: [src/nnsight/intervention/envoy.py:105, src/nnsight/intervention/envoy.py:417, src/nnsight/intervention/envoy.py:494, src/nnsight/intervention/envoy.py:612, src/nnsight/intervention/envoy.py:726, src/nnsight/modeling/base.py:6]
 ---
 
 # Envoy
 
-> Renamed from `envoy-and-eproperty.md`. `Envoy`'s hookable values (`.input`, `.inputs`, `.output`) are `eproperty` descriptors — a small `property` subclass (`intervention/eproperty.py`) that reads/writes an interleaver location; `.skip` is a method and `.source` a plain property.
+`Envoy`'s hookable values (`.input`, `.inputs`, `.output`) are `eproperty` descriptors — a small `property` subclass (`intervention/eproperty.py`) that reads/writes an interleaver location; `.skip` is a method and `.source` a plain property.
 
 ## What this is for
 
@@ -205,7 +205,7 @@ If a submodule's name shadows an `Envoy` attribute (e.g. BERT's `output`), the s
 
 ## Related
 
-- [Interleaver and Hooks](interleaver-and-hooks.md) — what `Mediator.value`/`swap` are fulfilled by.
+- [Interleaver and Controller](interleaver-and-controller.md) — what `Mediator.value`/`swap` are fulfilled by.
 - [Source Tracing](source-tracing.md) — `.source` and the per-operation `SourceEnvoy`.
 - [Threading and Mediators](threading-and-mediators.md) — what parks on a property access and what resumes it.
 - Source: `src/nnsight/intervention/envoy.py` (`Envoy`), `src/nnsight/modeling/base.py` (`NNsight`), `src/nnsight/intervention/eproperty.py` (the descriptor), `src/nnsight/modeling/vllm/vllm.py` (custom-eproperty example).

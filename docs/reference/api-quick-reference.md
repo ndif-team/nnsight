@@ -61,7 +61,6 @@ Notes:
 | `tracer.barrier` | `tracer.barrier(n: int) -> Barrier` | A meeting point for `n` of this trace's blocks; the last to call it releases them all. |
 | `tracer.stop` | `tracer.stop()` | Halt the model's forward pass early (raises `EarlyStopException`). |
 
-The `tracer.next()` method from old nnsight is **gone** — advance across occurrences with `tracer.iter` / `tracer.all()` instead.
 
 ## Envoy properties
 

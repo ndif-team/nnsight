@@ -135,9 +135,9 @@ There is **no** `tokenizer`, **no** `generator`, **no** `processor`, **no** `con
 ## Gotchas
 
 - **Pre-loaded module required.** `NNsight("repo/id")` does not work — pass a `torch.nn.Module`. Use `TransformersModel("repo/id")` for HF repos.
-- **Re-wrapping the same module is safe.** Wrapping a module twice re-applies hooks rather than stacking them (`tests/test_modeling.py` `TestUpdate` / `test_multiple_wrappers.py`).
+- **Re-wrapping the same module is safe.** Wrapping a module twice re-installs its controller rather than stacking (`tests/test_modeling.py` `TestUpdate` / `test_multiple_wrappers.py`).
 - **Module access order matters.** Inside a single invoke, accessing `.output` of a later layer before an earlier one can deadlock — see [docs/gotchas/](../gotchas/).
-- **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` errors when there is no active trace (it was a silent no-op in old nnsight).
+- **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` errors when there is no active trace.
 
 ## Related
 

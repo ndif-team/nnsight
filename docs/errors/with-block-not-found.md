@@ -14,7 +14,7 @@ sources: [src/nnsight/tracing/tracer.py:51, src/nnsight/tracing/tracer.py:270, s
 nnsight.tracing.tracer.WithBlockNotFoundError
 ```
 
-The exception carries **no message** in this rewrite — the class docstring is the
+The exception carries **no message** — the class docstring is the
 explanation: "The tracer call isn't used as a `with` block, so there's nothing to
 trace."
 

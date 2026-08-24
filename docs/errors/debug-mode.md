@@ -1,6 +1,6 @@
 ---
 title: Debug Mode and Tracebacks
-one_liner: "What CONFIG.APP.DEBUG does in this rewrite (remote verbose logging), and how trace tracebacks are cleaned so they point at your code."
+one_liner: "What CONFIG.APP.DEBUG does (remote verbose logging), and how trace tracebacks are cleaned so they point at your code."
 tags: [error, debug, traceback]
 related: [docs/errors/index.md, docs/concepts/threading-and-mediators.md, docs/remote/index.md]
 sources: [src/nnsight/schema/config.py:19, src/nnsight/schema/config.py:100, src/nnsight/intervention/backends/remote.py:83, src/nnsight/tracing/util.py:139, src/nnsight/tracing/tracer.py:465]
@@ -8,12 +8,8 @@ sources: [src/nnsight/schema/config.py:19, src/nnsight/schema/config.py:100, src
 
 # Debug Mode and Tracebacks
 
-> This page was heavily rewritten. The old `ExceptionWrapper` / dynamic
-> `NNsightException` / `sys.excepthook` / IPython `set_custom_exc` machinery **does
-> not exist in this rewrite.** Exceptions from a trace body are the real exception
-> objects; their tracebacks are cleaned by default and shown in full under `DEBUG`.
 
-## What `CONFIG.APP.DEBUG` does now
+## What `CONFIG.APP.DEBUG` does
 
 `CONFIG.APP.DEBUG` has two effects:
 

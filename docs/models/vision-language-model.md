@@ -30,7 +30,7 @@ model = TransformersModel("llava-hf/llava-1.5-7b-hf", task="image-text-to-text",
 
 ## The one behavioral difference: `generate`
 
-The deprecated alias keeps its old `generate` shape — it runs the **processor** itself over the prompt and images, then generates through the model, returning **token ids** (`vlm.py:52`). Images and text go by keyword (`text=`, `images=`), as older nnsight took them:
+The deprecated alias's `generate` runs the **processor** itself over the prompt and images, then generates through the model, returning **token ids** (`vlm.py:52`). Images and text go by keyword (`text=`, `images=`), as older nnsight took them:
 
 ```python
 from nnsight import VisionLanguageModel

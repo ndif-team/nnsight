@@ -2,7 +2,7 @@
 title: Errors Index
 one_liner: Map of the exceptions nnsight raises to their cause-and-fix docs.
 tags: [error, index]
-related: [docs/concepts/threading-and-mediators.md, docs/concepts/interleaver-and-hooks.md, docs/usage/trace.md]
+related: [docs/concepts/threading-and-mediators.md, docs/concepts/interleaver-and-controller.md, docs/usage/trace.md]
 sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/envoy.py, src/nnsight/tracing/util.py]
 ---
 
@@ -15,7 +15,7 @@ When code inside a `with model.trace(...):` block raises, nnsight cleans the
 traceback (`clean_traceback`, `src/nnsight/tracing/util.py:139`) so the top frames
 point at your own source rather than nnsight's plumbing. The exception type is
 preserved — `except ValueError:` / `except IndexError:` still work. See
-[debug-mode.md](debug-mode.md) for what `CONFIG.APP.DEBUG` does (and no longer does).
+[debug-mode.md](debug-mode.md) for what `CONFIG.APP.DEBUG` does.
 
 ## Execution-order errors
 
@@ -29,9 +29,6 @@ the wrong order. There is one class for both: `OutOfOrderError`
 | `OutOfOrderError` (dangling worker) | ``'<location>.i0' was requested but the model already ran past it`` — raised at the end of the run for a worker still waiting on a location that never fired | [value-was-not-provided.md](value-was-not-provided.md) |
 | `UserWarning` (not an exception) | ``'<location>' was never reached: the model ran fewer iterations than the loop requested. Values from reached iterations are kept.`` — an `iter` loop that outran the model | [value-was-not-provided.md](value-was-not-provided.md) |
 
-> `MissedProviderError` (and its old `OutOfOrderError` subclass split) no longer
-> exists. Both the eager "asked out of order" case and the late "model finished, a
-> worker is still waiting" case now raise the single `OutOfOrderError`.
 
 ## Setup / context errors
 

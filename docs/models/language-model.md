@@ -60,7 +60,7 @@ with model.trace(PROMPT):
     hidden = model.transformer.h[-1].output.save()
 ```
 
-- `generate` returns **token ids** (old nnsight's `generate` returned decoded records — that is now `model.pipe(...)`).
+- `generate` returns **token ids** (decoded records come from `model.pipe(...)`).
 - `model.generator.output` and `model.generator.streamer.output` behave as on `TransformersModel`.
 - Batching, iteration (`tracer.iter`), gradients, caching, sessions, and renaming all inherit unchanged.
 

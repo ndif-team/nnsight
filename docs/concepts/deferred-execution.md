@@ -2,7 +2,7 @@
 title: Deferred Execution
 one_liner: A trace block is captured by source, compiled into a standalone function, and run interleaved with the model — parking in a greenlet on each Envoy property access until the model produces the value via a PyTorch hook.
 tags: [concept, mental-model, tracing]
-related: [docs/concepts/threading-and-mediators.md, docs/concepts/interleaver-and-hooks.md, docs/concepts/envoy.md]
+related: [docs/concepts/threading-and-mediators.md, docs/concepts/interleaver-and-controller.md, docs/concepts/envoy.md]
 sources: [src/nnsight/tracing/tracer.py:214, src/nnsight/tracing/tracer.py:270, src/nnsight/tracing/tracer.py:343, src/nnsight/intervention/tracer.py:223, src/nnsight/intervention/envoy.py:612]
 ---
 
@@ -121,5 +121,5 @@ with model.trace() as tracer:
 ## Related
 
 - [Threading and Mediators](threading-and-mediators.md) — what the greenlet worker does after capture, and the event protocol.
-- [Interleaver and Hooks](interleaver-and-hooks.md) — the PyTorch-side machinery that delivers values.
+- [Interleaver and Controller](interleaver-and-controller.md) — the PyTorch-side machinery that delivers values.
 - Source: `src/nnsight/tracing/tracer.py` (`Tracer`, `save`, `Scope` handling), `src/nnsight/intervention/tracer.py` (`InterleavingTracer`, `ScanningTracer`, `Invoker`), `src/nnsight/intervention/envoy.py` (`Envoy.interleave`).

@@ -14,8 +14,6 @@ class as [out-of-order-error.md](out-of-order-error.md), different code path —
 `Interleaver.check_dangling_mediators` (`src/nnsight/intervention/interleaver.py:605`)
 surfaces it after the forward pass finishes.
 
-> The old `MissedProviderError` and its "Execution complete but `<x>` was not
-> provided" message are gone. This case now raises `OutOfOrderError`.
 
 ## Symptom
 

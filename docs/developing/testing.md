@@ -38,8 +38,8 @@ That collects ~650 tests. Config is minimal — `pyproject.toml` has only:
 testpaths = ["tests"]
 ```
 
-There are **no custom pytest CLI flags** (the old `--device`, `--tp`, `--test-flux`
-options are gone) and no registered markers beyond stock `parametrize`/`skipif`.
+There are no custom pytest CLI flags and no registered markers beyond stock
+`parametrize`/`skipif`.
 Select tests the usual ways:
 
 ```bash

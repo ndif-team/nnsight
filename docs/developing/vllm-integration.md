@@ -18,16 +18,6 @@ serialized into its request's `SamplingParams.extra_args` and rides vLLM's own
 request pipeline into the worker, where the nnsight model runner deserializes it,
 runs it against the real module, and ships saved values back.
 
-> **Deltas from the old integration.** There is no `sampling.py` /
-> `NNsightSamplingParams` — interventions ride the **stock** `vllm.SamplingParams`
-> `extra_args` dict under the key `"nnsight_mediator"`. There is no
-> `executors/ray_workaround.py` (Ray works through vLLM's stock
-> `distributed_executor_backend="ray"`), no local `DummyModelLoader` (nnsight
-> monkeypatches vLLM's own), and the `README/DISCUSSION/IDEAS` files are gone.
-> `async_tracer.py` is now `tracer.py` (`VLLMTracer`). `logits`/`samples` are
-> `eproperty` descriptors served with `.provide` (the old separate
-> `NNsightSamplingParams.provide` hook is gone). A new `serve/` package adds an HTTP
-> `nnsight-serve` path.
 
 ## Two-process layout
 
@@ -167,13 +157,12 @@ them; the `Interleaver` brackets the gather (see
   because a request's tokens sit alongside others in the slab, so even a lone
   invoke must be narrowed to its own span.
 
-This used to live in `VLLMBatcher` with two extra pairs of forward hooks per
-parallel layer, installed either side of building the tree so they bracketed the
-interleaver's. It needed them because `Batcher.narrow` runs once per *parked
-worker*, so the gather had to be memoized and explicitly released — several
-workers reading one value would otherwise have run several collectives and
-deadlocked the ranks. On the interleaver the bracket is already once-per-visit,
-so none of that is needed. See [batching-internals.md](./batching-internals.md).
+The gather lives on the interleaver, not the batcher, because `Batcher.narrow` runs
+once per *parked worker*: a gather there would run one collective per reader, and
+since which workers read a value is a property of the block rather than of the
+model, the ranks would run different numbers of collectives and deadlock.
+`Interleaver.handle` sees each visit exactly once, so one visit is one collective,
+however many workers read it. See [batching-internals.md](./batching-internals.md).
 
 ## Sync result collection
 
@@ -215,12 +204,10 @@ deserialization error, so there is one loop and one place to look.
 **Every rank winds up its own workers; only one reports.** Each rank ran the block,
 so each holds a worker, a greenlet, and whatever that greenlet captured — all of it
 has to be released. Only rank 0's values are reported, since the reads are gathered
-and every rank holds the same ones. This used to be an early `return` for
-`get_pp_group().rank != 0`, which leaked every other rank's workers for the life of
-the engine: with no pipeline, that rank is the *global* rank, so under plain tensor
-parallelism every rank but 0 skipped its own cleanup. `nnsight_request_count()` is
-the leak gauge — it should return to 0 **on every rank**, which is what
-`tests/vllm/test_tensor_parallel.py::TestEveryRankWindsUp` pins.
+and every rank holds the same ones. Only the *reporting* is gated on rank; an early
+return on the other ranks would leave their workers in place for the life of the
+engine. `nnsight_request_count()` is the leak gauge — it returns to 0 **on every
+rank**, which is what `tests/vllm/test_tensor_parallel.py::TestEveryRankWindsUp` pins.
 
 ## Async streaming
 
@@ -434,7 +421,6 @@ pickles the `RequestOutput`s it sends, so both ride the msgpack transport native
 
 - [serialization.md](./serialization.md) — how mediators survive process boundaries
 - [batching-internals.md](./batching-internals.md) — the `Batcher`/`VLLMBatcher` contract
-- [fragments-proposal.md](./fragments-proposal.md) — the seam both distributed runtimes share
 - [extending-envoy.md](./extending-envoy.md) — how `logits`/`samples` are exposed
 - [adding-a-new-runtime.md](./adding-a-new-runtime.md) — vLLM as the reference runtime
 - `tests/vllm/` — the reference test suite (needs GPU + `vllm`)

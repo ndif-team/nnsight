@@ -109,7 +109,7 @@ Read at least the first two if the user is asking "why is my code blocking / out
 
 - [docs/concepts/deferred-execution.md](docs/concepts/deferred-execution.md) — the block is captured, compiled, and run interleaved with the model; `.output` blocks until the model fires
 - [docs/concepts/threading-and-mediators.md](docs/concepts/threading-and-mediators.md) — each invoke is a `Mediator` running in a **greenlet** (not a thread); event protocol VALUE/SWAP/SKIP/BARRIER
-- [docs/concepts/interleaver-and-hooks.md](docs/concepts/interleaver-and-hooks.md) — one shared `Interleaver` installs a pass-through controller forward on every module, no hooks
+- [docs/concepts/interleaver-and-controller.md](docs/concepts/interleaver-and-controller.md) — one shared `Interleaver` installs a pass-through controller forward on every module, no hooks
 - [docs/concepts/envoy.md](docs/concepts/envoy.md) — `Envoy` wraps a module; `.input`/`.output` are eproperties, `.source` returns a `Source`
 - [docs/concepts/batching-and-invokers.md](docs/concepts/batching-and-invokers.md) — invokes, empty invokes, batch groups, when you need a barrier
 - [docs/concepts/source-tracing.md](docs/concepts/source-tracing.md) — how `.source` rewrites a module's forward AST
@@ -133,7 +133,7 @@ Read at least the first two if the user is asking "why is my code blocking / out
 - [docs/developing/architecture-overview.md](docs/developing/architecture-overview.md) — how everything fits (Tracer → Backend → Interleaver → Mediator → hooks → Envoy)
 - [docs/developing/tracing-pipeline.md](docs/developing/tracing-pipeline.md) — capture → parse → build → compile → execute
 - [docs/developing/interleaver-internals.md](docs/developing/interleaver-internals.md) — greenlets, mediators, the event protocol
-- [docs/developing/hook-system.md](docs/developing/hook-system.md) — the per-module forward-hook design
+- [docs/developing/controller.md](docs/developing/controller.md) — the per-module controller: handoff, skip gate, source body
 - [docs/developing/serialization.md](docs/developing/serialization.md) — source-based block reduction for remote
 - [docs/developing/source-internals.md](docs/developing/source-internals.md) — `.source` AST instrumentation
 - [docs/developing/vllm-integration.md](docs/developing/vllm-integration.md) — the vLLM runtime
@@ -150,7 +150,7 @@ Read at least the first two if the user is asking "why is my code blocking / out
 - **A module's `.output` is the real object it returns.** For a GPT-2 *block* that's a plain `Tensor (batch, seq, hidden)` — read/write the whole tensor, no `[0]`. An *attention* submodule returns a tuple; check `print(module.source)` or the shape rather than assuming.
 - **A tuple `.output` can't have its elements reassigned, but the tensors inside it can be edited in place.** `attn.output[0] = x` fails (tuples are immutable); `attn.output[0][:, -1] = x` works, because `.output` hands back the live tensor. To swap the element itself, rebuild the tuple: `attn.output = (new,) + tuple(out[1:])`.
 - **Execution is deferred and interleaved (greenlets).** Reading a location the model already ran past raises `OutOfOrderError`; reading `.output`/`.input` *outside* a trace raises "Cannot access `...` outside of interleaving". Capture forward tensors before a `backward()` block.
-- **Unbounded `iter[:]` / `all()` drop everything after the loop.** To keep per-step values *and* a final result, use a bounded `iter[:N]`. `tracer.next()` no longer exists.
+- **Unbounded `iter[:]` / `all()` drop everything after the loop.** To keep per-step values *and* a final result, use a bounded `iter[:N]`.
 - **A value produced inside one `invoke` is not visible in another** without `tracer.barrier(n)`.
 - **`generate` returns token ids** (`tracer.result`), greedy by default; use **`pipe`** for the pipeline's decoded records.
 - **Prefer `TransformersModel` / `NNsight`.** `LanguageModel` / `VisionLanguageModel` are deprecated aliases that warn.

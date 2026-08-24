@@ -11,7 +11,7 @@ sources: [src/nnsight/intervention/interleaver.py:270, src/nnsight/intervention/
 ## TL;DR
 - Inside a `trace`, `.output`/`.input` deliver **real** tensors. `print`, `.shape`, `.mean()`, arithmetic all work directly. There are no proxies to "resolve".
 - `model.scan(input)` runs the forward under `FakeTensorMode` — values come back as **`FakeTensor`s** carrying shape/dtype only. Read `.shape`/`.dtype`; a fake tensor is invalid once the scan exits.
-- **Branching on fake-tensor *content* under scan raises** (`GuardOnDataDependentSymNode`), it does not silently return `True`. The old "`FakeTensor.__bool__` always True" behavior is gone. For content-dependent branching use `trace`, not `scan`.
+- **Branching on fake-tensor *content* under scan raises** (`GuardOnDataDependentSymNode`). For content-dependent branching use `trace`, not `scan`.
 - Branching on **shapes/ints** (`torch.Size`, `int`) works normally in scan — those aren't fake tensors.
 - Tensors you create inside a trace must be on the model's device. Inputs *you pass to `trace`* are moved for you; tensors you build in the block are not.
 

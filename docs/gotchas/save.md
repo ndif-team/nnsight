@@ -9,7 +9,7 @@ sources: [src/nnsight/tracing/tracer.py:161, src/nnsight/tracing/tracer.py:201, 
 # Save Pitfalls
 
 ## TL;DR
-- **`save()` now RAISES outside a trace.** `nnsight.save(x)` / `x.save()` marks a value to return from the enclosing `with model.trace(...):` block, so calling it with no trace running is a `ValueError` — not the silent no-op old nnsight allowed. Move the save inside the block.
+- **`save()` raises outside a trace.** `nnsight.save(x)` / `x.save()` marks a value to return from the enclosing `with model.trace(...):` block, so calling it with no trace running is a `ValueError` — not the silent no-op old nnsight allowed. Move the save inside the block.
 - Forget `.save()` and the variable does not cross back out of the trace. Inside a function you get `UnboundLocalError` when you read it afterward.
 - `.save()` / `nnsight.save(x)` return `x` **unchanged** — save the value you bind: `h = module.output.save()`. A value built from a saved one is not itself saved: `(x.save() * 2)` returns `x`, write `(x * 2).save()`.
 - **Nested traces don't need `.save()` between them.** Only the *outermost* trace boundary filters to saved values; inner traces (inside a `model.session()`) push everything up.

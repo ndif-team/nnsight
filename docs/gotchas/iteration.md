@@ -9,7 +9,7 @@ sources: [src/nnsight/intervention/iterator.py, src/nnsight/intervention/interle
 # Iteration Pitfalls
 
 ## TL;DR
-- The loop form is `for step in tracer.iter[...]:` (or `for step in tracer.all():`). The old `with tracer.iter[...]:` block still works but is **deprecated** and warns.
+- The loop form is `for step in tracer.iter[...]:` (or `for step in tracer.all():`). A `with tracer.iter[...]:` block is **deprecated** and warns.
 - **`tracer.next()` / `module.next()` do not exist.** Use `tracer.iter[i]` / `tracer.iter[[i, j]]` to target specific steps.
 - Unbounded `tracer.iter[:]` (and `tracer.all()`, which *is* `iter[:]`) runs until the model stops producing steps. The final loop iteration asks for a step the model never runs, so the worker is **unwound there** — **any code after the loop in the same block does NOT run** (a warning is emitted, not an error). This is true even inside `generate(...)`; there is no `default_all` bound.
 - To run code after the loop, move the trailing code into a **separate empty `tracer.invoke()`**. **Bounding the loop (`tracer.iter[:N]`) is not a reliable fix**: if the model stops early — EOS, a stop string, any generation shorter than `N` — the bounded loop parks on a step that never runs and drops the trailing code exactly as the unbounded form does (it warns: `'model.output.iN' was never reached`). Since `max_new_tokens` is only ever an *upper* bound, a bound cannot guarantee the loop completes. The empty-invoke form always works.

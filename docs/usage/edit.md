@@ -17,7 +17,7 @@ Two flavors:
 - `model.edit()` (default, `inplace=False`) — stores the edit on a **shallow copy** of the envoy; the original is left clean. Entering the block binds `(tracer, edited)`.
 - `model.edit(inplace=True)` — stores the edit on the envoy itself. Entering the block binds only `tracer`.
 
-> **`__enter__` return changed.** Non-inplace now yields a `(tracer, edited)` tuple (old nnsight yielded just the edited model). The `tracer` carries the `iter` API for per-occurrence edits.
+Non-inplace `edit()` yields a `(tracer, edited)` tuple; the `tracer` carries the `iter` API for per-occurrence edits.
 
 ## When to use / when not to use
 
@@ -119,7 +119,6 @@ with edited.trace("The Eiffel Tower is in", remote="local"):
 - Stored edits run **first** on every later trace, before user invokes — their effects are visible to your code.
 - Non-inplace `edit()` binds `(tracer, edited)` — bind both and write against `edited`. `inplace=True` binds only `tracer`.
 - A plain edit applies at the *first* occurrence of a location; use the tracer's `iter` to apply at every occurrence.
-- Serializing edits to disk (`export_edits`/`import_edits`) from old nnsight is **not** available in this rewrite.
 
 ## Related
 

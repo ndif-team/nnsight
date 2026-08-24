@@ -80,7 +80,6 @@ Any of them may be `None`. `model.pipeline` is always the underlying `transforme
 | `model.pipe(...)` | the **whole task pipeline** | the pipeline's postprocessed **records** (decoded text, labels, ...) |
 | `model.scan(...)` | one forward under **fake tensors** | shapes only, no weights loaded |
 
-> Note the OLD→NEW change: old nnsight's `generate` returned the pipeline's decoded records. That is now `pipe`. `generate` returns raw token ids.
 
 ### trace — one forward
 
@@ -266,8 +265,8 @@ Aliases are honored in `tracer.cache()` keys too (`tests/test_language.py:487`).
 
 ## Gotchas
 
-- **`generate` vs `pipe`.** `generate` returns token ids and is greedy by default; `pipe` returns decoded records and folds in the checkpoint's sampling `task_specific_params`. If old code relied on `generate` returning text, switch it to `pipe`.
-- **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` now raises if there's no active trace (it was a silent no-op in old nnsight).
+- **`generate` vs `pipe`.** `generate` returns token ids and is greedy by default; `pipe` returns decoded records and folds in the checkpoint's sampling `task_specific_params`.
+- **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` raises if there's no active trace.
 - **`scan` needs `dispatch=False` to be cheap** but works either way; it never loads weights.
 - **Opaque inputs can't be batched.** A multimodal encoding (with `pixel_values`) or a raw float tensor must be a lone invoke — batching several raises `NotImplementedError`.
 - **`tracer.result` is preferred over `model.generator.output`** for finished ids; the latter is deprecated.

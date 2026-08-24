@@ -160,7 +160,7 @@ stopping criteria pass through the same way.
 
 ## Gotchas
 
-- **Unbounded iter eats trailing code**: `for step in tracer.iter[:]: ...` runs until the model stops; code after the loop in the same invoke may not run as expected. Use a bounded slice or a separate invoke. See `docs/gotchas/unbounded-iter.md`.
+- **Unbounded iter eats trailing code**: `for step in tracer.iter[:]: ...` runs until the model stops; code after the loop in the same invoke may not run as expected. Use a bounded slice or a separate invoke. See `docs/gotchas/iteration.md`.
 - Always pass a stop bound (`max_new_tokens=` or a `generation_config`).
 - Within a step, modules must still be accessed in forward-pass order.
 - Reading `model.generator.output` for the finished ids is deprecated — use `tracer.result`.

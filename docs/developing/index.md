@@ -58,8 +58,8 @@ as an edit).
 
 - `docs/developing/interleaver-internals.md` — `Interleaver`, `Mediator`, the
   greenlet park/switch dance, `Event`, `handle()` fan-out, iteration tagging.
-- `docs/developing/hook-system.md` — the per-module controller installed at
-  instrument time: the handoff, the skip gate, and when hooks are used instead.
+- `docs/developing/controller.md` — the per-module controller installed at
+  instrument time: the handoff, the skip gate, and the source-instrumented body.
 - `docs/developing/source-internals.md` — `.source` operation-level
   access via AST-instrumented forwards.
 
@@ -70,10 +70,10 @@ as an edit).
 
 ### Distributed values
 
-- `docs/developing/fragments-proposal.md` — `Fragments`, the one seam both vLLM
-  and transformers tensor parallelism use to make a sharded value whole at a
-  location. Why it hangs off the interleaver rather than the batcher, and what
-  the port cost.
+- `src/nnsight/intervention/fragments.py` (module docstring) — `Fragments`, the one
+  seam vLLM and tensor parallelism share for making a sharded value whole before a
+  worker sees it; the runtimes' rules live in `modeling/tp/fragments.py` and
+  `modeling/vllm/fragments.py`.
 
 ### Backends
 
@@ -101,7 +101,7 @@ as an edit).
 
 The `docs/concepts/` folder holds the shorter, mental-model versions of several of
 these topics — `deferred-execution.md`, `threading-and-mediators.md`,
-`interleaver-and-hooks.md`, `batching-and-invokers.md`, `source-tracing.md`,
+`interleaver-and-controller.md`, `batching-and-invokers.md`, `source-tracing.md`,
 `envoy.md`. Read those first if you want the "why" before the "how".
 
 ## Related

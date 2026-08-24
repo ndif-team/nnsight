@@ -2,13 +2,12 @@
 title: Threading and Mediators
 one_liner: Each block is one Mediator running in a greenlet (not a thread) that parks on a location and switches back to the model side, exchanging typed events (VALUE, SWAP, SKIP, BARRIER) one at a time.
 tags: [concept, mental-model, greenlets]
-related: [docs/concepts/deferred-execution.md, docs/concepts/interleaver-and-hooks.md, docs/concepts/batching-and-invokers.md]
+related: [docs/concepts/deferred-execution.md, docs/concepts/interleaver-and-controller.md, docs/concepts/batching-and-invokers.md]
 sources: [src/nnsight/intervention/interleaver.py:56, src/nnsight/intervention/interleaver.py:93, src/nnsight/intervention/interleaver.py:245, src/nnsight/intervention/interleaver.py:345, src/nnsight/intervention/interleaver.py:375]
 ---
 
 # Threading and Mediators
 
-> This page used to describe worker *threads*. This rewrite uses **greenlets** — cooperative, single-threaded coroutines — with no locks and no queues. The filename is kept; the mechanism below is the current one.
 
 ## What this is for
 
@@ -54,7 +53,7 @@ A worker parks by switching a tuple `(Event, location, ...)` to its parent. `Eve
 
 There are no `END` or `EXCEPTION` events. A worker finishing is just its greenlet running to completion (falsy afterwards; see `alive`, `interleaver.py:313`). An exception simply propagates out of the `switch` — with a clean intervention-only traceback stashed on it as `__intervention_tb__` before the model/hook frames pile on (`interleaver.py:345`).
 
-The location a worker parks on is tagged with the occurrence it wants: `"{location}.i{n}"` (`Mediator.event`, `interleaver.py:245`). With no `tracer.iter`, `n` is always `0`, so every request binds to the first visit — see [occurrence tagging](interleaver-and-hooks.md).
+The location a worker parks on is tagged with the occurrence it wants: `"{location}.i{n}"` (`Mediator.event`, `interleaver.py:245`). With no `tracer.iter`, `n` is always `0`, so every request binds to the first visit — see [occurrence tagging](interleaver-and-controller.md).
 
 ## Lifecycle
 
@@ -103,6 +102,6 @@ Read a module's `.input` **before** its `.output`. To access modules in a differ
 ## Related
 
 - [Deferred Execution](deferred-execution.md) — how the worker's block is captured and compiled before it runs.
-- [Interleaver and Hooks](interleaver-and-hooks.md) — the model side: hooks, `Interleaver.handle`, occurrence tagging.
+- [Interleaver and Controller](interleaver-and-controller.md) — the model side: hooks, `Interleaver.handle`, occurrence tagging.
 - [Batching and Invokers](batching-and-invokers.md) — multiple workers on one batched forward.
 - Source: `src/nnsight/intervention/interleaver.py` (`Event`, `Mediator`, `Interleaver`), `src/nnsight/intervention/barrier.py` (`Barrier`).

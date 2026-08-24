@@ -22,8 +22,6 @@ chosen range of those steps:**
 For a single forward (`model.trace(x)`) there is only step 0, so you don't need
 these.
 
-> Note: the old `tracer.next()` / `module.next()` manual-stepping API is **gone**
-> in this rewrite. Step targeting is done with the loop forms below.
 
 ## Canonical pattern
 
@@ -121,8 +119,7 @@ with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
   after it**. So `tracer.result.save()` placed *after* an open-ended loop never
   runs. To capture per-step values *and* the final result, use a **bounded**
   `iter[:N]` matching `max_new_tokens` — then trailing code runs (see the canonical
-  pattern above). This differs from old nnsight, which special-cased this via a
-  `default_all` bound.
+  pattern above).
 - **`max_new_tokens` is a cap, not a guarantee.** If the model stops early (EOS /
   stop string), steps that didn't happen warn `'...' was never reached: the model
   ran fewer iterations than the loop requested. Values from reached iterations are

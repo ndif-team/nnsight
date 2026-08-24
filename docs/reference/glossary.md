@@ -37,7 +37,6 @@ The `Event` enum (`src/nnsight/intervention/interleaver.py`) — what a parked w
 - `SKIP` — bypass a gated computation, using a replacement: `(SKIP, location, value)`.
 - `BARRIER` — wait on the other blocks, not on the model: `(BARRIER, None)`.
 
-(The old `END` / `EXCEPTION` events are gone — a worker finishing or raising is handled by the greenlet switch itself.)
 
 ## greenlet
 

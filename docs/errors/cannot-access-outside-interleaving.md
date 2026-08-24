@@ -31,8 +31,6 @@ no `tracer.invoke(...)` block, so the model has nothing to run on:
 ValueError: trace() needs an input, or at least one `with tracer.invoke(...)` block
 ```
 
-> Older docs referenced `ValueError: The model did not execute`. That string does
-> **not** exist in this rewrite. The two messages above are what you actually see.
 
 ## Cause
 

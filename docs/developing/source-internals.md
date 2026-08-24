@@ -18,11 +18,8 @@ covers the AST instrumentation (`_Instrument`), the per-module controller and
 `__nnsight_op__`, the `_State` object keyed on interleavers, the `Source` /
 `SourceEnvoy` user views, and recursive `.source`.
 
-> **Renames from the old codebase.** The whole-forward view is now `Source` (was
-> `SourceEnvoy`); the single-operation view is now `SourceEnvoy` (was
-> `OperationEnvoy`). The old `SourceAccessor`/`OperationAccessor` split is **gone** —
-> there is no accessor layer. A `SourceEnvoy`'s `.output`/`.input`/`.inputs` are
-> `eproperty` descriptors (the same descriptor `Envoy` uses), one level finer.
+The whole-forward view is `Source`; the single-operation view is `SourceEnvoy`, whose
+`.output`/`.input`/`.inputs` are the same `eproperty` descriptors `Envoy` uses, one level finer.
 
 ## Quick check (verified)
 
@@ -94,8 +91,8 @@ forwards it can't safely instrument, raising `SourceNotAvailable` (`:67`) for:
 - a closure (`co_freevars` present),
 - unrecoverable source (`inspect.getsourcelines` fails),
 - a **decorated** definition — `SourceNotAvailable("decorated callable is not
-  supported")`. Unlike the old code, it does not strip decorators and proceed; a
-  decorator is load-bearing and dropping it would change behavior.
+  supported")`. A decorator is load-bearing and dropping it would change behavior, so
+  the forward is refused rather than instrumented without it.
 
 Each rewritten call copies the original call's source location onto its wrapper node
 (`ast.copy_location`), so `ast.increment_lineno` then shifts everything to file
@@ -203,16 +200,15 @@ just installs the controller (no source needed to skip a whole module).
 
 ## Wiring from the interleaver — `instrument`
 
-`Interleaver.instrument(envoy)` (`interleaver.py:521`) is called from
-`Envoy.__init__` and again from `Envoy._update` (on dispatch). It:
-
-1. calls `install_controller(envoy)` **first**, so the module's `forward` is the
-   controller before `nn.Module.__call__` binds it — required so a skip whose
-   replacement is read from the module's own input works;
-2. registers a forward-pre-hook serving `{path}.input` and a forward-hook serving
-   `{path}.output`, both `with_kwargs=True`, both returning the handled value so
-   interventions can edit input/output; both pass through (`return None`) when not
-   interleaving.
+`Interleaver.instrument(envoy)` is called from `Envoy.__init__` and again from
+`Envoy._update` (on dispatch). It lets the runtime's `Fragments` record what the
+module's values are at the handoff, then calls `install_controller(envoy)`, which
+makes the module's `forward` the controller: the `{path}.input` handoff, the
+`{path}.skip` gate, the body, the `{path}.output` handoff. Each handoff returns
+the handled value, so interventions can edit input or output; with no trace
+running the controller calls the body straight through. The controller is in
+place before `nn.Module.__call__` binds `forward`, which is what lets a skip read
+the module's own input first.
 
 On dispatch, `_update` re-runs `instrument` against the newly loaded module, so the
 real module gets its own controller and `_State` — the meta module's don't carry over.
