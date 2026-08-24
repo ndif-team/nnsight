@@ -210,12 +210,20 @@ def _function_referenced_names(source: str) -> set[str]:
         return names
 
     top = symtable.symtable(source, "<sourced>", "exec")
-    # The source is one `def` (or `lambda`) at module level; its own table is the
-    # single child. Anything else, fall back to the block rule rather than guess.
-    children = top.get_children()
-    if len(children) != 1:
+    # The source is one `def` (or `lambda`) at module level, so exactly one child
+    # table is a function. Select it by type rather than by counting children:
+    # under PEP 649 (3.14+) every `def` also gets an `__annotate__` table of type
+    # "annotation", and PEP 695 generics add a "type_parameters" table, so a
+    # single `def` yields two or more children. Counting them sent every `def` to
+    # the block rule instead -- silently reinstating the capture this function
+    # exists to prevent. Anything other than exactly one function table, fall
+    # back rather than guess.
+    functions = [
+        child for child in top.get_children() if child.get_type() == "function"
+    ]
+    if len(functions) != 1:
         return _referenced_names(source)
-    return globals_of(children[0])
+    return globals_of(functions[0])
 
 
 def code_reduce(source: str, globals: dict, locals: dict, function: bool = False) -> tuple:

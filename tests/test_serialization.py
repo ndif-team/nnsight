@@ -135,6 +135,56 @@ class TestScopeFiltering:
         _, used_globals, _ = code_reduce(source, {"counter": 0}, {}, function=True)
         assert used_globals == {"counter": 0}
 
+    @pytest.mark.parametrize(
+        "source",
+        [
+            pytest.param("def f(x):\n    return g(x)\n", id="plain"),
+            pytest.param("def f(x: int) -> int:\n    return g(x)\n", id="annotated"),
+            pytest.param("def f(x=1):\n    return g(x)\n", id="default"),
+            pytest.param("f = lambda x: g(x)\n", id="lambda"),
+        ],
+    )
+    def test_scope_filter_survives_extra_symtable_children(self, source):
+        """The function's own symtable child must be found by type, not by count.
+
+        A single ``def`` does not yield a single child table on every Python.
+        Under PEP 649 (3.14+) it also gets an ``__annotate__`` table -- with or
+        without annotations present -- and PEP 695 generics add a
+        ``type_parameters`` table. Selecting the child by counting meant every
+        ``def`` fell through to the block rule on 3.14, so the whole filter was
+        silently inert there while the 3.12 CI runner stayed green.
+
+        ``x`` is the parameter, so it is local no matter what: if it ships, the
+        filter was bypassed.
+        """
+        _, used_globals, _ = code_reduce(
+            source, {"g": "g-mod", "x": "stale"}, {}, function=True
+        )
+
+        assert used_globals == {"g": "g-mod"}
+
+    def test_function_local_shadowing_an_unpicklable_global(self, tmp_path):
+        """End-to-end: the payload must not capture an unpicklable shadowed name.
+
+        This is the failure the filter was written for. A closed file cannot be
+        pickled at all, so capturing the enclosing scope's ``f`` does not merely
+        bloat the payload -- serializing it raises.
+        """
+        handle = open(tmp_path / "left-over.txt", "w")
+        handle.close()
+
+        source = (
+            "def load(path):\n"
+            "    with open(path) as f:\n"
+            "        return f.read()\n"
+        )
+
+        _, used_globals, _ = code_reduce(source, {"f": handle}, {}, function=True)
+
+        assert "f" not in used_globals
+        # Nothing left that pickle would choke on.
+        dumps(used_globals)
+
 
 class TestLambda:
     def test_simple_lambda(self):
