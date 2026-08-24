@@ -158,4 +158,3 @@ Read at least the first two if the user is asking "why is my code blocking / out
 
 ---
 
-*See `questions.md` at the repo root for open documentation questions and the decisions taken while porting these docs.*
