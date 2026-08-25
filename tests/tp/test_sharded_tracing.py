@@ -126,7 +126,7 @@ def runs(tmp_path_factory) -> tuple[dict, list[dict]]:
 
 
 # Every value the worker records: a sharded read, a boundary-straddling edit, a
-# cached read, and a generation.
+# cached read, a generation, and a parameter read.
 VALUES = [
     "gate_proj_out",
     "down_proj_in",
@@ -141,6 +141,10 @@ VALUES = [
     "adhoc_colwise",
     "adhoc_rowwise",
     "adhoc_lens",
+    "gate_proj_weight",
+    "down_proj_weight",
+    "lm_head_weight",
+    "weight_lens",
 ]
 
 

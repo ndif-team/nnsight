@@ -262,3 +262,64 @@ class TestEveryRankWindsUp:
             assert counts == [0] * len(counts), f"workers left behind: {counts}"
         finally:
             edit.clear()
+
+
+class TestShardedParameters:
+    """A parameter read inside a trace is the full tensor, not this rank's shard."""
+
+    @pytest.mark.parametrize("path", ROW_PARALLEL)
+    @torch.no_grad()
+    def test_row_weight_matches_reference(
+        self, vllm_qwen_ref, vllm_qwen_tp, path, ET_prompt
+    ):
+        with vllm_qwen_ref.trace(ET_prompt, temperature=0.0, top_p=1):
+            ref = _submodule(vllm_qwen_ref, path).weight.data.save()
+        with vllm_qwen_tp.trace(ET_prompt, temperature=0.0, top_p=1):
+            tp = _submodule(vllm_qwen_tp, path).weight.data.save()
+
+        # A row-parallel weight splits the input dim; gathered in rank order it
+        # is laid out exactly as the single-rank weight.
+        assert tp.shape == ref.shape
+        assert torch.equal(tp.cpu(), ref.cpu())
+
+    @pytest.mark.parametrize("path", COLUMN_PARALLEL)
+    @torch.no_grad()
+    def test_column_weight_gathers_every_row(
+        self, vllm_qwen_ref, vllm_qwen_tp, path, ET_prompt
+    ):
+        with vllm_qwen_ref.trace(ET_prompt, temperature=0.0, top_p=1):
+            ref = _submodule(vllm_qwen_ref, path).weight.data.save()
+        with vllm_qwen_tp.trace(ET_prompt, temperature=0.0, top_p=1):
+            tp = _submodule(vllm_qwen_tp, path).weight.data.save()
+
+        # Fused column-parallel weights come back with rows grouped by rank, the
+        # layout the gathered output has, so compare as a multiset of rows.
+        assert tp.shape == ref.shape
+        ref_rows = ref.float().cpu().sum(dim=-1).sort().values
+        tp_rows = tp.float().cpu().sum(dim=-1).sort().values
+        assert torch.allclose(tp_rows, ref_rows)
+
+    @torch.no_grad()
+    def test_lm_head_weight_full_vocab(self, vllm_qwen_ref, vllm_qwen_tp, ET_prompt):
+        with vllm_qwen_ref.trace(ET_prompt, temperature=0.0, top_p=1):
+            ref = vllm_qwen_ref.lm_head.weight.data.save()
+        vocab = ref.shape[0]
+        tid = vocab - 5  # a row the last rank owns
+
+        with vllm_qwen_tp.trace(ET_prompt, temperature=0.0, top_p=1):
+            tp = vllm_qwen_tp.lm_head.weight.data.save()
+            tp_row = vllm_qwen_tp.lm_head.weight[tid].save()
+
+        # Full vocab with vLLM's TP padding rows dropped, and the upper-shard
+        # row is the real token's row, not an index into this rank's slice.
+        assert tp.shape == ref.shape
+        assert torch.equal(tp_row.cpu(), ref[tid].cpu())
+
+    @torch.no_grad()
+    def test_weight_outside_trace_is_slice(self, vllm_qwen_ref, vllm_qwen_tp):
+        # The gather is a trace-time correction; outside one the module holds
+        # this rank's slice, as anywhere else in vLLM.
+        tp = vllm_qwen_tp.model.layers[LAYER].mlp.down_proj.weight
+        ref = vllm_qwen_ref.model.layers[LAYER].mlp.down_proj.weight
+        ranks = vllm_qwen_tp.model.layers[LAYER].mlp.down_proj._module.tp_size
+        assert tp.shape[1] * ranks == ref.shape[1]

@@ -27,8 +27,11 @@ It does mean the style's *pre*-hook fires too, which is why re-splitting the
 input is conditional: see
 [`SPLITS_ITS_OWN_INPUT`][nnsight.modeling.tp.envoys.SPLITS_ITS_OWN_INPUT].
 
-Parameters are left alone. ``layer.weight`` is this rank's real slice, as it is
-anywhere else under transformers tensor parallelism.
+A **parameter read** is the other thing outside the bracket. ``layer.weight``
+is this rank's slice, so ``lm_head.weight[token_id]`` on the wrong rank indexes
+a different token's row. Read inside a trace it is all-gathered to its full
+shape (`TPEnvoy.__getattr__`), off transformers' own style-to-dim table;
+outside a trace it is still the slice.
 """
 
 from __future__ import annotations
@@ -100,6 +103,52 @@ class TPEnvoy(Envoy):
         if style in SHARDED_AFTER_CALL:
             result = _gather(result, module._hf_device_mesh)
         return result
+
+    def __getattr__(self, name: str) -> Any:
+        """A tensor attribute read inside a trace, gathered to its full shape.
+
+        Which dim a style splits, for a weight and for a bias, is transformers'
+        own table (``ALL_PARALLEL_STYLES.plan_to_weight_dim`` /
+        ``plan_to_bias_dim``, the one its checkpoint saver uses); a style that
+        replicates the parameter maps to ``None`` and passes through.
+
+        One all-gather per read, on every rank: a read under rank-dependent
+        control flow deadlocks, the same condition every collective here
+        carries. A ``packed_colwise`` weight comes back with its rows grouped
+        by rank, the same layout its gathered ``.output`` has. The result is a
+        copy: ``layer.weight[i] = v`` does not reach the model.
+        """
+        value = super().__getattr__(name)
+        fragments = self.interleaver.fragments
+        if (
+            not isinstance(value, torch.Tensor)
+            or not self.interleaver.interleaving
+            or fragments is None
+            or not fragments.enabled
+        ):
+            return value
+
+        module = self._module
+        # Stamped by transformers only on a module it sharded.
+        style = getattr(module, "_hf_tp_plan", None)
+        if style is None or module._hf_device_mesh.size() < 2:
+            return value
+        mesh = module._hf_device_mesh
+
+        from transformers.integrations.tensor_parallel import (
+            ALL_PARALLEL_STYLES,
+            gather_full_tensor,
+        )
+
+        dims = (
+            ALL_PARALLEL_STYLES.plan_to_bias_dim
+            if name == "bias"
+            else ALL_PARALLEL_STYLES.plan_to_weight_dim
+        )
+        dim = dims.get(style)
+        if dim is None or value.dim() == 0:
+            return value
+        return gather_full_tensor(value.data, dim, mesh)
 
 
 def tp_envoys() -> dict:

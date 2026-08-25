@@ -80,18 +80,31 @@ final norm all arrive complete. Only two kinds of value are really a slice:
 | Whole modules | no | `model.layers[i].output`, `mlp.output`, `norm.output` |
 | The LM head | no — gathered by transformers | `lm_head.output` |
 | Embeddings | no — all-reduced | `embed_tokens.output` |
-| **Parameters** | **yes — not gathered** | `q_proj.weight`, `down_proj.weight` |
+| **Parameters** | yes, gathered for you | `q_proj.weight`, `down_proj.weight`, `lm_head.weight` |
 
 Calling a sharded module **ad hoc** — the logit lens, `model.lm_head(hidden)` —
 is corrected the same way its activations are, so it returns the full-width
 result it would on one GPU.
 
-Parameters are the exception, and the one place a trace does not read as it would
-on one GPU: `layer.weight` is this rank's slice, at `1/tp_size` of the real
-width. Weights are what tensor parallelism exists to split, so nnsight does not
-quietly reassemble one — that would allocate the whole tensor on every rank, in
-the situation where memory was tight enough to reach for TP. Gather it yourself
-if you need it whole, and remember every rank must do so.
+A **parameter** read inside a trace is gathered too: `lm_head.weight[token_id]`
+is the real row on every rank, and `layer.weight.shape` is the full shape. Four
+things to know about it:
+
+- It costs one all-gather per read and allocates the whole tensor on every rank,
+  in the situation where memory was tight enough to reach for TP. Read it once
+  and reuse the result rather than indexing `layer.weight` in a loop.
+- Every rank must perform the read. A read under rank-dependent control flow
+  deadlocks, as any collective in a block would.
+- The gathered tensor is a copy. `layer.weight[i] = v` edits the copy and never
+  reaches the model; edit activations through `.output` instead. Assigning
+  `layer.weight = t` sets an attribute on the envoy and shadows the module's
+  parameter from then on.
+- A fused weight (`qkv_proj`, `gate_up_proj`) comes back with its rows grouped
+  by rank, the same layout its gathered `.output` has, so `x @ weight.T` and
+  `.output` agree.
+
+Outside a trace `layer.weight` is still this rank's slice, at `1/tp_size` of
+the real width.
 
 The gather only fires when an intervention is actually parked on that location,
 so reading a handful of locations does not pay for the hundreds you ignored. A
