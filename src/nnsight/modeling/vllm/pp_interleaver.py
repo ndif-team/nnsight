@@ -55,6 +55,14 @@ from .lazy_remote_tensor import (
 from .pp import PPModuleMap, resolve_meta
 
 
+def _occurrence(provider: str) -> Optional[int]:
+    """The ``.i{n}`` occurrence a tagged provider names, or ``None``."""
+    _, _, tag = provider.rpartition(".")
+    if tag.startswith("i") and tag[1:].isdigit():
+        return int(tag[1:])
+    return None
+
+
 def _strip_park_tag(location: str) -> str:
     """Drop the ``.i{n}`` tag :meth:`Mediator.event` appended to a park."""
     head, _, tail = location.rpartition(".")
@@ -114,20 +122,32 @@ class PPInterleaver(Interleaver):
         # A forced lazy parking for its value.
         if location.startswith(PULL_LOCATION_PREFIX):
             source_rank, req_id, provider = decode_pull_location(location)
-            # An upstream-owned value already exists by the time this stage's
-            # forward runs (pipeline order: the earlier stage finished this
-            # step before ours started), so the wait is transfer only. Serve
-            # it in place — blocking the worker right here, inside whatever
-            # switched it in — instead of parking. Parking would surrender
-            # the swap window: the worker could only resume at a serve point
-            # outside the forward, after the model ran past every location
-            # the rest of the block might write (a write to the very module
-            # whose hook is live underneath this force raises OutOfOrderError
-            # once resumed late). An error or timeout raises here, on the
-            # worker, at the line that forced the value.
+            # An upstream-owned value from a round this rank has opened
+            # already exists (pipeline order: the earlier stage finishes a
+            # round before ours starts it), so the wait is transfer only.
+            # Serve it in place — blocking the worker right here, inside
+            # whatever switched it in — instead of parking. Parking would
+            # surrender the swap window: the worker could only resume at a
+            # serve point outside the forward, after the model ran past every
+            # location the rest of the block might write (a write to the very
+            # module whose hook is live underneath this force raises
+            # OutOfOrderError once resumed late). An error or timeout raises
+            # here, on the worker, at the line that forced the value.
+            # A pull for a round this rank has NOT opened (a loop body running
+            # ahead of the model) parks like a downstream pull below and is
+            # resumed by the serve point once that round has run.
             if source_rank < self.local_rank:
-                pull = self.listener.begin_pull(source_rank, provider, req_id)
-                return (pull.complete(),)
+                occurrence = _occurrence(provider)
+                rounds = (
+                    self.rounds.get(req_id) if req_id is not None else None
+                )
+                if (
+                    rounds is None
+                    or occurrence is None
+                    or occurrence <= rounds
+                ):
+                    pull = self.listener.begin_pull(source_rank, provider, req_id)
+                    return (pull.complete(),)
             # Downstream-owned: the value is produced only after this rank's
             # forward returns, so blocking here would deadlock the pipeline.
             # Issue the pull NOW, on this worker's way into the park, so the
@@ -149,15 +169,20 @@ class PPInterleaver(Interleaver):
         owner = self.module_map.get_owning_rank(location)
         if event is Event.VALUE:
             # Tag the read with the occurrence the owning rank will publish
-            # under: the pinned step inside ``tracer.iter``, else this rank's
-            # forward count. Mirror handle()'s pin relaxation so the rest of a
-            # pinned step's requests follow sequentially.
+            # under: the pinned step inside ``tracer.iter`` (kept for every
+            # read of the step's body, so they all name the same round), else
+            # the request's completed-round count. The owning rank's visit
+            # counter for a once-per-step module advances one visit per round
+            # of the request, so the two clocks agree. A run outside the
+            # engine (no request id) counts its own forwards instead.
             if mediator.iteration is not None:
                 occurrence = mediator.iteration
-                if mediator.iteration:
-                    mediator.iteration = None
             else:
-                occurrence = self.step
+                req_id = self._req_id(mediator)
+                rounds = (
+                    self.rounds.get(req_id) if req_id is not None else None
+                )
+                occurrence = rounds if rounds is not None else self.step
             provider = f"{location}.i{occurrence}"
             lazy = LazyRemoteTensor(
                 owner,
@@ -300,12 +325,7 @@ class PPInterleaver(Interleaver):
                     _, req_id, provider = decode_pull_location(untagged)
                     rounds = self.rounds.get(req_id)
                     if rounds is not None:
-                        _, _, tag = provider.rpartition(".")
-                        occurrence = (
-                            int(tag[1:])
-                            if tag.startswith("i") and tag[1:].isdigit()
-                            else None
-                        )
+                        occurrence = _occurrence(provider)
                         # An unparseable occurrence is treated as current-round
                         # (left parked): its transfer is in flight and the next
                         # boundary completes it, which is always safe.
