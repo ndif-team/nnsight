@@ -1,7 +1,7 @@
 """Fragments (within-stage TP gather) riding the PP interleaver.
 
 Rank 0 owns ``model.h.0``, whose output is marked fragmented by a fake
-Fragments (whole = piece * 2, fragment = whole / 2 — the arithmetic of an
+Fragments (whole = piece * 2, fragment = whole / 2: the arithmetic of an
 all-reduce over two identical partials, with no real collective). Rank 1 owns
 ``model.h.1``, unfragmented. Both ranks run the same block reading both
 outputs.

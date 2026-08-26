@@ -824,7 +824,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         # Who ships the payload: under PP every stage's TP-rank-0 (each holds
         # its own stage's slots; the engine merges); otherwise the single PP
-        # rank. Every rank runs the wind-up and forgets its finished workers.
+        # rank. Every rank releases its finished workers.
         if self.nnsight_pp:
             ship = get_tp_group().rank_in_group == 0
         else:

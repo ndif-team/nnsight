@@ -67,8 +67,8 @@ class NNsightGPUWorker(Worker):
 
         # The engine's own config, narrowed to one rank and the meta device:
         # every loading option the user gave (trust_remote_code, revision,
-        # hf_overrides, quantization, ...) shapes the meta build exactly as it
-        # shaped the real one.
+        # hf_overrides, quantization, ...) applies to the meta build exactly
+        # as it applied to the real one.
         vllm_config = copy.deepcopy(self.vllm_config)
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.pipeline_parallel_size = 1

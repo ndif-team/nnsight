@@ -41,8 +41,8 @@ for s in STEPS:
         for _ in range(3):
             interleaver.handle(STEP_GATE, None)
     # Generation over with the worker parked on the gate: the dangling check
-    # (which drivers run after the model finishes) unwinds the loop quietly —
-    # the loop simply ended with the run.
+    # (which drivers run after the model finishes) unwinds the loop without a
+    # warning: the loop ended with the run.
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         interleaver.check_dangling_mediators()
@@ -101,10 +101,10 @@ for s in STEPS:
     assert not mediator.alive
 
 
-def test_pre_loop_park_then_open_loop_rides_later_serves():
+def test_pre_loop_park_then_open_loop_takes_later_serves():
     # A park before the loop (a save of a value served after the forward)
     # lets gate serves pass while the worker waits elsewhere. Each gate park
-    # pins to the serves already seen, so the loop rides the remaining
+    # pins to the serves already seen, so the loop takes the remaining
     # steps' serves.
     interleaver = Interleaver()
     mediator = make_mediator(

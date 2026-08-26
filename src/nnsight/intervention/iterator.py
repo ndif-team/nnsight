@@ -145,8 +145,8 @@ class Iterations(Tracer):
                     # Each park waits for the NEXT gate serve: it pins to the
                     # count of serves the worker has already seen, and at
                     # least one past the previous gate park, so consecutive
-                    # park-free bodies ride consecutive serves and one serve
-                    # releases exactly one step.
+                    # park-free bodies wait on consecutive serves and one
+                    # serve releases exactly one step.
                     tag = mediator.iterations[STEP_GATE]
                     if gate is not None and tag <= gate:
                         tag = gate + 1

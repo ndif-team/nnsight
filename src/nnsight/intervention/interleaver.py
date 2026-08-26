@@ -763,11 +763,11 @@ class Interleaver:
         """Offer ``value`` to every mediator, then to any active caches; return
         what the workers left.
 
-        Runs inside `handle`'s gather bracket, so on a sharded model what it
-        serves — and what it returns — is the assembled whole; the re-split for
-        the model happens afterwards, in `handle`. That is the seam a
-        distributed interleaver needs: overriding this (rather than `handle`)
-        lets it record the post-intervention value exactly as workers saw it.
+        Runs inside `handle`'s gather bracket, so on a sharded model both the
+        served value and the returned value are the assembled whole; the
+        re-split for the model happens afterwards, in `handle`. A distributed
+        interleaver overrides this to record the post-intervention value
+        exactly as workers saw it.
         """
         for mediator in self.mediators:
             try:

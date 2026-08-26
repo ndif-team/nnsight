@@ -97,7 +97,7 @@ def stub_rank_gated_modules(local: nn.Module, meta: nn.Module) -> list[str]:
     so every module the meta tree has and ``local`` does not gets a
     ``PPMissingLayer`` in its place: the path resolves at request
     deserialization, and the forward never calls it on this rank. Modules
-    under a stage's ``PPMissingLayer`` are left alone; the meta-envoy graft
+    under a stage's ``PPMissingLayer`` are not stubbed; the meta-envoy graft
     provides those. Returns the stubbed names.
     """
     from vllm.model_executor.models.utils import PPMissingLayer

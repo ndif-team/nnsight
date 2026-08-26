@@ -93,8 +93,8 @@ class PPInterleaver(Interleaver):
         module_meta: Optional[dict] = None,
         fragments: Optional[Any] = None,
     ) -> None:
-        # Fragments (the within-stage TP gather) ride the base bracket
-        # unchanged: `handle` assembles the whole before `serve` runs, so both
+        # Fragments (the within-stage TP gather) run in the base bracket:
+        # `handle` assembles the whole before `serve` runs, so both
         # the local workers and the publish below see the real tensor. The
         # vLLM runner serves the step gate at its own boundary, once per
         # engine step.
@@ -241,10 +241,9 @@ class PPInterleaver(Interleaver):
             else []
         )
         value = super().serve(provider, value)
-        # Publishing from serve — inside handle's gather bracket — is what puts
-        # the post-intervention value into the pull buffer as the workers saw
-        # it: under TP-within-a-stage that is the assembled whole, where
-        # handle's return value is already re-split for the model.
+        # Publishing from serve, inside handle's gather bracket, puts the
+        # post-intervention value into the pull buffer as the workers saw it:
+        # under TP within a stage, the assembled whole.
         if wanted:
             self._publish(provider, value, wanted)
         return value
