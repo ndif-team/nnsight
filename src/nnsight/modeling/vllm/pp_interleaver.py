@@ -95,8 +95,10 @@ class PPInterleaver(Interleaver):
     ) -> None:
         # Fragments (the within-stage TP gather) ride the base bracket
         # unchanged: `handle` assembles the whole before `serve` runs, so both
-        # the local workers and the publish below see the real tensor.
-        super().__init__(fragments=fragments)
+        # the local workers and the publish below see the real tensor. The
+        # vLLM runner serves the step gate at its own boundary, once per
+        # engine step.
+        super().__init__(fragments=fragments, step_gate_at_root=False)
         self.module_map = module_map
         self.module_meta = module_meta if module_meta is not None else {}
         self.listener = listener

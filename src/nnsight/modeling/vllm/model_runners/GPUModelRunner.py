@@ -281,12 +281,18 @@ class Requests:
             over_iterated = False
         elif requester.startswith(STEP_GATE):
             # An open-ended tracer.iter loop parked between steps and the
-            # generation ended: the loop's designed exit, phrased for the user
-            # rather than by the gate's internal location.
+            # generation ended: the loop's exit. Unwind without a warning;
+            # reached steps kept their values.
             error = OutOfOrderError(
                 "generation ended before the loop's next step"
             )
-            over_iterated = True
+            try:
+                mediator.worker.throw(error)
+            except greenlet_error:
+                pass
+            except BaseException:
+                pass
+            return
         else:
             error = OutOfOrderError(
                 f"'{requester}' was requested but the model already ran past it"
@@ -371,7 +377,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
             interleaver=(
                 interleaver
                 if interleaver is not None
-                else Interleaver(fragments=VLLMFragments())
+                # The runner serves the step gate at its own boundary, once
+                # per engine step (see execute_model).
+                else Interleaver(
+                    fragments=VLLMFragments(), step_gate_at_root=False
+                )
             ),
         )
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)

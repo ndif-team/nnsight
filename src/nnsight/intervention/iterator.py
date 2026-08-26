@@ -123,6 +123,8 @@ class Iterations(Tracer):
         mediator: Mediator = getcurrent().mediator()
         open_ended = self.steps is None and self.stop is None
         previous = mediator.iteration
+        # The occurrence the loop's previous gate park was pinned to, if any.
+        gate = None
         try:
             for step in self._indices():
                 if step < 0:
@@ -140,14 +142,16 @@ class Iterations(Tracer):
                     # dangling-worker unwind ends the loop — the same exit a
                     # parking body has always had.
                     #
-                    # Re-pin first: a body that created a lazy relaxed the pin
-                    # without parking, and a relaxed gate park is tagged from
-                    # a count the driver's serve loop has not advanced yet, so
-                    # it lands on the SAME location and the serve loop
-                    # re-serves it forever. Pinned to the step, each gate park
-                    # is a new location and one serve releases exactly one
-                    # step.
-                    mediator.iteration = step
+                    # Each park waits for the NEXT gate serve: it pins to the
+                    # count of serves the worker has already seen, and at
+                    # least one past the previous gate park, so consecutive
+                    # park-free bodies ride consecutive serves and one serve
+                    # releases exactly one step.
+                    tag = mediator.iterations[STEP_GATE]
+                    if gate is not None and tag <= gate:
+                        tag = gate + 1
+                    gate = tag
+                    mediator.iteration = tag
                     Mediator.event(Event.VALUE, STEP_GATE)
                 step += 1
         finally:

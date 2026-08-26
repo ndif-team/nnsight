@@ -538,9 +538,21 @@ class Interleaver:
             afterwards.
     """
 
-    def __init__(self, fragments: Optional["Fragments"] = None) -> None:
+    def __init__(
+        self,
+        fragments: Optional["Fragments"] = None,
+        step_gate_at_root: bool = True,
+    ) -> None:
         self.handles: dict[str, list[torch.utils.hooks.RemovableHandle]] = {}
         self.mediators: list[Mediator] = []
+        # The first instrumented envoy's path: one completed forward of that
+        # module is one generation step, so its forward hook serves the step
+        # gate (see STEP_GATE). A driver that owns the step boundary itself
+        # (the vLLM runner, whose forward may replay as a captured graph with
+        # no hooks) passes ``step_gate_at_root=False`` and serves the gate at
+        # its own boundary instead.
+        self.root: Optional[str] = None
+        self.step_gate_at_root = step_gate_at_root
         # What, if anything, makes a value at a location whole before workers see
         # it — see intervention/fragments.py. None on an ordinary model, and on a
         # distributed one it is the runtime's own object. Kept as a collaborator
@@ -683,6 +695,9 @@ class Interleaver:
             self.fragments.instrument(envoy)
 
         path = envoy.path
+        # The tree instruments top-down, so the first path seen is the root's.
+        if self.root is None:
+            self.root = path
 
         # Drop any existing hooks for this path before re-adding.
         self.remove(path)
@@ -697,7 +712,12 @@ class Interleaver:
             if not self.interleaving:
                 return None
             # Returning a value lets an intervention edit the module output.
-            return self.handle(f"{path}.output", output)
+            output = self.handle(f"{path}.output", output)
+            # The root module completing is the step boundary: release any
+            # open-ended tracer.iter park waiting on the gate.
+            if self.step_gate_at_root and path == self.root:
+                self.handle(STEP_GATE, None)
+            return output
 
         self.handles[path] = [
             envoy._module.register_forward_pre_hook(pre_forward, with_kwargs=True),
@@ -811,6 +831,19 @@ class Interleaver:
                         "check the count it was created with"
                     )
                 )
+                continue
+            if requester.startswith(STEP_GATE):
+                # An open-ended loop parked for a step the run never made: the
+                # loop's exit. Unwind the worker; reached steps kept their
+                # values.
+                try:
+                    mediator.worker.throw(
+                        OutOfOrderError(
+                            "generation ended before the loop's next step"
+                        )
+                    )
+                except OutOfOrderError:
+                    pass
                 continue
             error = OutOfOrderError(
                 f"'{requester}' was requested but the model already ran past it"

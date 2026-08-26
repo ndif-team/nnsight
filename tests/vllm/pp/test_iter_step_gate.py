@@ -9,6 +9,8 @@ which the driver serves once per generation step, restoring the designed
 exit.
 """
 
+import warnings
+
 import pytest
 
 from nnsight.intervention.interleaver import STEP_GATE, Interleaver, Mediator
@@ -39,9 +41,10 @@ for s in STEPS:
         for _ in range(3):
             interleaver.handle(STEP_GATE, None)
     # Generation over with the worker parked on the gate: the dangling check
-    # (which drivers run after the model finishes) unwinds the loop with the
-    # expected past-the-end warning and the block completes.
-    with pytest.warns(UserWarning):
+    # (which drivers run after the model finishes) unwinds the loop quietly —
+    # the loop simply ended with the run.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         interleaver.check_dangling_mediators()
     assert mediator.lcls["out"] == [0, 1, 2, 3]
     assert not mediator.alive
@@ -65,12 +68,11 @@ for s in STEPS:
 
 
 def test_pin_relaxing_body_still_advances_one_step_per_serve():
-    # A remote read under PP is served in place by the intercept, which
-    # relaxes the iteration pin without parking. The gate park must re-pin to
-    # its step: a relaxed gate park is tagged from a count the driver's serve
-    # loop has not advanced yet, lands on the same location, and the serve
-    # loop re-serves the worker forever (the second generation-patching
-    # wedge).
+    # A remote read under PP is served in place by the intercept, which may
+    # relax the iteration pin without parking. The gate park pins its own
+    # tag (the serves already seen, at least one past the previous gate
+    # park), so each serve releases exactly one step regardless of what the
+    # body did to the pin.
     class Intercepting(Interleaver):
         def intercept(self, mediator, event, location, rest):
             if location == "model.remote.output":
@@ -92,9 +94,39 @@ for s in STEPS:
     with interleaver:
         for _ in range(3):
             interleaver.handle(STEP_GATE, None)
-    with pytest.warns(UserWarning):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         interleaver.check_dangling_mediators()
     assert mediator.lcls["seen"] == ["remote-value"] * 4
+    assert not mediator.alive
+
+
+def test_pre_loop_park_then_open_loop_rides_later_serves():
+    # A park before the loop (a save of a value served after the forward)
+    # lets gate serves pass while the worker waits elsewhere. Each gate park
+    # pins to the serves already seen, so the loop rides the remaining
+    # steps' serves.
+    interleaver = Interleaver()
+    mediator = make_mediator(
+        interleaver,
+        """
+first = Mediator.value("logits")
+out = []
+for s in STEPS:
+    out.append(s)
+""",
+        {"STEPS": Iterations(0, None)},
+    )
+    with interleaver:
+        interleaver.handle(STEP_GATE, None)  # step 0 boundary; parked on logits
+        interleaver.handle("logits", "L0")
+        interleaver.handle(STEP_GATE, None)  # step 1 boundary
+        interleaver.handle(STEP_GATE, None)  # step 2 boundary
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        interleaver.check_dangling_mediators()
+    assert mediator.lcls["first"] == "L0"
+    assert mediator.lcls["out"] == [0, 1, 2]
     assert not mediator.alive
 
 
