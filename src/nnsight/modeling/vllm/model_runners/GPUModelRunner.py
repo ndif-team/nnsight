@@ -434,22 +434,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
         pp_group = get_pp_group()
         pp_world_size = pp_group.world_size
 
-        # vLLM's LlamaForCausalLM gates ``logits_processor`` inside
-        # ``if get_pp_group().is_last_rank:`` with no else-branch stub — unlike
-        # Qwen2/GPT2/OPT/Bloom/Gemma2, which construct it unconditionally. On a
-        # non-last rank the attribute is then absent, so a request serialized
-        # against the client's full meta tree ships a
-        # ``Module:model.logits_processor`` persistent id this rank cannot
-        # resolve. Insert the stub (before the envoy walk) so the id resolves;
-        # the forward returns early on non-last ranks before its call site, so
-        # it is functionally inert.
-        from vllm.model_executor.models.llama import LlamaForCausalLM
-        from vllm.model_executor.models.utils import PPMissingLayer
+        # Any module the architecture builds only on some ranks (vLLM gates
+        # e.g. ``logits_processor`` behind ``is_last_rank``) gets a stub here,
+        # before the envoy walk, so the paths a request serialized against the
+        # client's full meta tree names all resolve on this rank.
+        from ..pp import stub_rank_gated_modules
 
-        if isinstance(self.model, LlamaForCausalLM) and not hasattr(
-            self.model, "logits_processor"
-        ):
-            self.model.logits_processor = PPMissingLayer()
+        meta_model = self.__dict__.get("_pp_meta_model")
+        if meta_model is not None:
+            stub_rank_gated_modules(self.model, meta_model)
 
         # Architecture-agnostic ownership: a module's owning stage is wherever
         # it is REAL, per the load-time exchange. The only non-derivable cases

@@ -88,6 +88,36 @@ def derive_owners(per_rank_meta: list) -> dict:
     return owners
 
 
+def stub_rank_gated_modules(local: nn.Module, meta: nn.Module) -> list[str]:
+    """Stub modules the architecture builds only on some ranks.
+
+    An architecture may construct a module on one rank only (vLLM gates e.g.
+    ``logits_processor`` behind ``is_last_rank``). The client's meta tree has
+    every module, and a request serialized against it names each one by path,
+    so every module the meta tree has and ``local`` does not gets a
+    ``PPMissingLayer`` in its place: the path resolves at request
+    deserialization, and the forward never calls it on this rank. Modules
+    under a stage's ``PPMissingLayer`` are left alone; the meta-envoy graft
+    provides those. Returns the stubbed names.
+    """
+    from vllm.model_executor.models.utils import PPMissingLayer
+
+    modules = dict(local.named_modules())
+    stubbed = []
+    for name, _ in meta.named_modules():
+        if not name or name in modules:
+            continue
+        parent_name, _, attr = name.rpartition(".")
+        parent = modules.get(parent_name)
+        if parent is None or is_pp_missing(parent):
+            continue
+        stub = PPMissingLayer()
+        setattr(parent, attr, stub)
+        modules[name] = stub
+        stubbed.append(name)
+    return stubbed
+
+
 def is_pp_missing(module: nn.Module) -> bool:
     """Check whether *module* is a vLLM ``PPMissingLayer`` stub.
 

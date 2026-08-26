@@ -44,6 +44,7 @@ class NNsightGPUWorker(Worker):
         exist yet), constructs the model without weights, then tears the env
         down so ``init_device`` can set up the real groups.
         """
+        import copy
         import socket
 
         from vllm.distributed import (
@@ -52,7 +53,6 @@ class NNsightGPUWorker(Worker):
             init_distributed_environment,
             initialize_model_parallel,
         )
-        from vllm.engine.arg_utils import EngineArgs
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
         from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 
@@ -65,12 +65,14 @@ class NNsightGPUWorker(Worker):
             tensor_model_parallel_size=1, pipeline_model_parallel_size=1
         )
 
-        engine_args = EngineArgs(
-            model=self.model_config.model,
-            tensor_parallel_size=1,
-            pipeline_parallel_size=1,
-        )
-        vllm_config = engine_args.create_engine_config()
+        # The engine's own config, narrowed to one rank and the meta device:
+        # every loading option the user gave (trust_remote_code, revision,
+        # hf_overrides, quantization, ...) shapes the meta build exactly as it
+        # shaped the real one.
+        vllm_config = copy.deepcopy(self.vllm_config)
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.parallel_config.world_size = 1
         vllm_config.load_config.device = "meta"
 
         loader = DummyModelLoader(vllm_config.load_config)
