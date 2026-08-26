@@ -294,6 +294,15 @@ class Requests:
                 pass
             return
         else:
+            # A park on a cross-stage pull names the pulled value, phrased by
+            # its provider rather than the wire encoding.
+            from ..lazy_remote_tensor import (
+                PULL_LOCATION_PREFIX,
+                decode_pull_location,
+            )
+
+            if requester.startswith(PULL_LOCATION_PREFIX):
+                requester = decode_pull_location(requester)[2]
             error = OutOfOrderError(
                 f"'{requester}' was requested but the model already ran past it"
             )
@@ -789,18 +798,28 @@ class NNsightGPUModelRunner(GPUModelRunner):
         }
 
         # PP finalize, on EVERY rank (collect_nnsight arrives via
-        # collective_rpc): resume the finished requests' workers still parked
-        # on a pull; blocking is safe for them, their generation is over and
-        # every producible round has been published. Serving is scoped to the
-        # finished requests: a concurrent request's workers stay parked and are
-        # resumed by its own step serves. Then hold the drain barrier so no
-        # rank clears its published buffer while a peer's pull is still in
-        # flight, and clear only the finished requests' entries; still-parked
-        # pulls for the cleared ids get error replies instead of hanging their
-        # consumers.
+        # collective_rpc): complete the finished requests' workers' remaining
+        # producible pulls. The workers are named explicitly, since a later
+        # step's scheduling drops them from the interleaver's per-step list,
+        # and the serve keeps the produced-round gate (``drain=False``): a
+        # pull for a produced round waits on its transfer only, while a pull
+        # past generation end stays parked and is unwound by finish_dangling
+        # below as the loop's exit. A concurrent request's workers are
+        # untouched and are resumed by its own step serves. Then hold the
+        # drain barrier so no rank clears its published buffer while a peer's
+        # pull is still in flight, and clear only the finished requests'
+        # entries; still-parked wire requests for the cleared ids get error
+        # replies instead of hanging their consumers.
         if self.nnsight_pp:
             interleaver = self.nnsight_model.interleaver
-            interleaver.serve_pulls(block=True, only=finished_worker_ids)
+            finalizing = [
+                requests.mediators[worker_id]
+                for worker_id in finished_worker_ids
+                if worker_id in requests.mediators
+            ]
+            interleaver.serve_pulls(
+                block=True, drain=False, mediators=finalizing
+            )
             self.pp_listener.drain_barrier()
             if finished_worker_ids:
                 self.pp_listener.clear_buffer(req_ids=list(finished_worker_ids))
@@ -866,6 +885,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 if collected is not None:
                     for value in collected[engine_id]["saves"].values():
                         saved.discard(id(value))
+                if self.nnsight_pp:
+                    mediator = requests.mediators.get(worker_id)
+                    if mediator is not None:
+                        self.nnsight_model.interleaver.discard_pulls(mediator)
                 requests.mediators.pop(worker_id, None)
 
         if collected is None:

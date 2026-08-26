@@ -287,6 +287,7 @@ class PPInterleaver(Interleaver):
         block: bool = True,
         drain: bool = True,
         only: Optional[set] = None,
+        mediators: Optional[list] = None,
     ) -> None:
         """Resume workers parked on pulls.
 
@@ -295,9 +296,11 @@ class PPInterleaver(Interleaver):
         ``block=False`` (the end of a step, while the pipeline is still moving)
         serves only pulls whose value has already arrived.
 
-        ``only`` scopes the serve to the workers riding the named requests
-        (collect passes the finished request ids); every other worker keeps its
-        park and is resumed by its own request's step serves.
+        ``only`` scopes the serve to the workers riding the named requests;
+        every other worker keeps its park and is resumed by its own request's
+        step serves. ``mediators`` names the workers to serve explicitly:
+        collect passes the finished requests' workers, which a later step's
+        scheduling has dropped from :attr:`mediators`.
 
         ``drain=False`` (the start of a step) blocks only on pulls whose
         target the pipeline has already produced: a pull's occurrence tag and
@@ -318,7 +321,9 @@ class PPInterleaver(Interleaver):
         progressed = True
         while progressed:
             progressed = False
-            for mediator in list(self.mediators):
+            for mediator in (
+                list(self.mediators) if mediators is None else mediators
+            ):
                 if only is not None and self._req_id(mediator) not in only:
                     continue
                 if not mediator.alive or mediator.pending is None:
@@ -370,6 +375,18 @@ class PPInterleaver(Interleaver):
                     if not self.defer_exceptions:
                         raise
                 progressed = True
+
+    def discard_pulls(self, mediator: Mediator) -> None:
+        """Drop a released worker's in-flight pull records.
+
+        A pull left parked past a worker's end (a loop body that pulled one
+        step past generation) keeps a record keyed by the mediator's id; the
+        owner's ``clear_buffer`` error-replies its wire request, and this
+        removes the local record with the worker.
+        """
+        marker = id(mediator)
+        for key in [k for k in self._pulls if k[0] == marker]:
+            del self._pulls[key]
 
     def has_pending_pulls(self) -> bool:
         """Whether any worker is currently parked on a pull location."""
