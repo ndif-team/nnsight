@@ -780,48 +780,64 @@ class NNsightGPUModelRunner(GPUModelRunner):
         """
         requests = self.nnsight_requests
         finished = set(finished_request_ids or [])
+        matched = requests.match(set(request_ids) | finished)
+        finished_worker_ids = {
+            worker_id for engine_id, worker_id in matched if engine_id in finished
+        }
 
         # PP finalize, on EVERY rank (collect_nnsight arrives via
-        # collective_rpc): resume workers still parked on a pull — blocking is
-        # safe, the requests being collected have finished generating — then
-        # hold the drain barrier so no rank clears its published buffer while
-        # a peer's pull is still in flight, then clear only the finished
-        # requests' entries (a blanket clear would strand concurrent
-        # requests' pulls; still-parked pulls for the cleared ids get error
-        # replies instead of hanging their consumers).
+        # collective_rpc): resume the finished requests' workers still parked
+        # on a pull; blocking is safe for them, their generation is over and
+        # every producible round has been published. Serving is scoped to the
+        # finished requests: a concurrent request's workers stay parked and are
+        # resumed by its own step serves. Then hold the drain barrier so no
+        # rank clears its published buffer while a peer's pull is still in
+        # flight, and clear only the finished requests' entries; still-parked
+        # pulls for the cleared ids get error replies instead of hanging their
+        # consumers.
         if self.nnsight_pp:
             interleaver = self.nnsight_model.interleaver
-            interleaver.serve_pulls(block=True)
+            interleaver.serve_pulls(block=True, only=finished_worker_ids)
             self.pp_listener.drain_barrier()
-            finished_worker_ids = [
-                worker_id for _, worker_id in requests.match(finished)
-            ]
             if finished_worker_ids:
-                self.pp_listener.clear_buffer(req_ids=finished_worker_ids)
-
-        # Who ships: under PP every stage's TP-rank-0 (each holds its own
-        # stage's slots; the engine merges); otherwise the single PP rank.
-        if self.nnsight_pp:
-            if get_tp_group().rank_in_group != 0:
-                return None
-        elif get_pp_group().rank != 0:
-            return None
-
-        matched = requests.match(set(request_ids) | finished)
+                self.pp_listener.clear_buffer(req_ids=list(finished_worker_ids))
 
         # A worker still parked when its request finishes was waiting on a location the
         # model never reached; surface that as its deferred error before it is read.
+        # An exception raised while a pull serve above resumed the worker landed on
+        # ``mediator.exception``; capture it here so it ships as the request's error.
+        from ....intervention.errors import capture_exception
+
         for engine_id, worker_id in matched:
             if engine_id in finished:
                 requests.finish_dangling(worker_id)
+                mediator = requests.mediators.get(worker_id)
+                if (
+                    mediator is not None
+                    and mediator.exception is not None
+                    and getattr(mediator, "nnsight_error", None) is None
+                ):
+                    mediator.nnsight_error = capture_exception(mediator.exception)
 
-        collected = {
-            engine_id: {
-                "saves": requests.saves(worker_id, pp=self.nnsight_pp),
-                "error": requests.error(worker_id),
+        # Who ships the payload: under PP every stage's TP-rank-0 (each holds
+        # its own stage's slots; the engine merges); otherwise the single PP
+        # rank. Every rank runs the wind-up and forgets its finished workers.
+        if self.nnsight_pp:
+            ship = get_tp_group().rank_in_group == 0
+        else:
+            ship = get_pp_group().rank == 0
+
+        collected = (
+            {
+                engine_id: {
+                    "saves": requests.saves(worker_id, pp=self.nnsight_pp),
+                    "error": requests.error(worker_id),
+                }
+                for engine_id, worker_id in matched
             }
-            for engine_id, worker_id in matched
-        }
+            if ship
+            else None
+        )
 
         # Requests whose payload failed to deserialize (see Requests.add) carry no
         # worker; surface their captured error here, keyed like the collected saves.
@@ -831,7 +847,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
             key = engine_id if engine_id in wanted else req_id if req_id in wanted else None
             if key is None:
                 continue
-            collected[key] = {"saves": {}, "error": error}
+            if collected is not None:
+                collected[key] = {"saves": {}, "error": error}
             if engine_id in finished or req_id in finished:
                 requests.errored.pop(req_id, None)
 
@@ -843,9 +860,13 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 # behind could be reused by a later request's values and mistaken for
                 # saved. (No-op on a collect thread other than the workers' own, e.g.
                 # Ray, where that set is empty — but harmless.)
-                for value in collected[engine_id]["saves"].values():
-                    saved.discard(id(value))
+                if collected is not None:
+                    for value in collected[engine_id]["saves"].values():
+                        saved.discard(id(value))
                 requests.mediators.pop(worker_id, None)
+
+        if collected is None:
+            return None
 
         # Saves may still be device work in flight; they are about to be pickled.
         if torch.cuda.is_available():

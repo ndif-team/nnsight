@@ -244,13 +244,22 @@ class PPInterleaver(Interleaver):
     # Driver side: the serve point
     # ------------------------------------------------------------------
 
-    def serve_pulls(self, block: bool = True, drain: bool = True) -> None:
+    def serve_pulls(
+        self,
+        block: bool = True,
+        drain: bool = True,
+        only: Optional[set] = None,
+    ) -> None:
         """Resume workers parked on pulls.
 
         Called at serve points. ``block=True`` (collect/finalize, sampling)
         completes every parked worker's pull, waiting for in-flight transfers.
         ``block=False`` (the end of a step, while the pipeline is still moving)
         serves only pulls whose value has already arrived.
+
+        ``only`` scopes the serve to the workers riding the named requests
+        (collect passes the finished request ids); every other worker keeps its
+        park and is resumed by its own request's step serves.
 
         ``drain=False`` (the start of a step) blocks only on pulls whose
         target the pipeline has already produced: a pull's occurrence tag and
@@ -272,6 +281,8 @@ class PPInterleaver(Interleaver):
         while progressed:
             progressed = False
             for mediator in list(self.mediators):
+                if only is not None and self._req_id(mediator) not in only:
+                    continue
                 if not mediator.alive or mediator.pending is None:
                     continue
                 if mediator.pending[0] is not Event.VALUE:
