@@ -213,26 +213,37 @@ class PPInterleaver(Interleaver):
     # ------------------------------------------------------------------
 
     def serve(self, provider: str, value: Any) -> Any:
-        # Snapshot each worker's visit count BEFORE the mediators run: their
-        # handle() advances it, and the published key must carry the visit the
-        # peers' reads were tagged with.
-        visits = [
-            (mediator, mediator.iterations[provider])
-            for mediator in self.mediators
-        ]
+        # Publish exactly what some worker is waiting on. Every rank runs the
+        # same block, so a location a peer pulls is one this rank's copy of
+        # the worker parks on locally; a worker's park already carries the
+        # occurrence tag of the visit it wants, so this is the same string
+        # match handle() serves by, taken BEFORE the mediators run (their
+        # handle() advances the visit count). The step gate carries no data
+        # and locations nothing reads are never buffered.
+        wanted = (
+            [
+                (mediator, visit)
+                for mediator, visit in (
+                    (mediator, mediator.iterations[provider])
+                    for mediator in self.mediators
+                )
+                if mediator.pending is not None
+                and mediator.pending[1] == f"{provider}.i{visit}"
+            ]
+            if (
+                provider != STEP_GATE
+                and self.listener is not None
+                and self.module_map.is_local(provider, self.local_rank)
+            )
+            else []
+        )
         value = super().serve(provider, value)
         # Publishing from serve — inside handle's gather bracket — is what puts
         # the post-intervention value into the pull buffer as the workers saw
         # it: under TP-within-a-stage that is the assembled whole, where
         # handle's return value is already re-split for the model.
-        # The step gate is served on every rank each step; it carries no data
-        # and must not enter the pull buffer.
-        if (
-            provider != STEP_GATE
-            and self.listener is not None
-            and self.module_map.is_local(provider, self.local_rank)
-        ):
-            self._publish(provider, value, visits)
+        if wanted:
+            self._publish(provider, value, wanted)
         return value
 
     def _publish(self, provider: str, value: Any, visits: list) -> None:
