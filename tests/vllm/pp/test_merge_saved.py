@@ -264,3 +264,45 @@ class TestMergeCollected:
         stage2 = pickle.dumps({"req": {"saves": {}, "error": "later detail"}})
         merged = merge_collected([stage0, stage1, stage2])
         assert merged["req"]["error"] == "worker raised"
+
+
+def _cache_view(entries):
+    from nnsight.intervention.cache import Cache, CacheView
+
+    cache = Cache.__new__(Cache)
+    cache.model = None
+    cache.targets = None
+    cache.entries = entries
+    return CacheView(cache, None)
+
+
+def test_cache_views_union_per_stage_entries():
+    from nnsight.intervention.cache import Entry
+
+    stage0 = _cache_view(
+        {"model.layers.2": [Entry(output=torch.ones(3))]}
+    )
+    stage1 = _cache_view(
+        {"model.layers.20": [Entry(output=torch.zeros(3))]}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        merged = merge_saved(stage0, stage1, "cache")
+    entries = merged._cache.entries
+    assert set(entries) == {"model.layers.2", "model.layers.20"}
+    assert torch.equal(entries["model.layers.2"][0].output, torch.ones(3))
+    assert torch.equal(entries["model.layers.20"][0].output, torch.zeros(3))
+
+
+def test_cache_views_merge_shared_paths_entry_wise():
+    from nnsight.intervention.cache import Entry
+
+    value = torch.arange(3.0)
+    stage0 = _cache_view({"model.rotary": [Entry(output=value)]})
+    stage1 = _cache_view({"model.rotary": [Entry(output=value.clone())]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        merged = merge_saved(stage0, stage1, "cache")
+    assert torch.equal(
+        merged._cache.entries["model.rotary"][0].output, value
+    )

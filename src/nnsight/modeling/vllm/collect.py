@@ -27,6 +27,7 @@ from typing import Optional
 
 import torch
 
+from ...intervention.cache import Cache, CacheView, Entry
 from .lazy_remote_tensor import NOT_ON_THIS_RANK, LazyRemoteTensor
 
 
@@ -248,6 +249,22 @@ def merge_saved(a, b, label: Optional[str] = None):
                 merge_saved(x, y, _extend(label, f"[{i}]"))
                 for i, (x, y) in enumerate(zip(a, b))
             ],
+        )
+    if isinstance(a, CacheView) and isinstance(b, CacheView):
+        # Each stage's cache observed its own modules; the union carries every
+        # stage's recordings under one view. A path both stages recorded (a
+        # module real on every rank) merges entry-wise below.
+        a._cache.entries = merge_saved(
+            a._cache.entries, b._cache.entries, _extend(label, ".entries")
+        )
+        return a
+    if isinstance(a, Cache) and isinstance(b, Cache):
+        a.entries = merge_saved(a.entries, b.entries, _extend(label, ".entries"))
+        return a
+    if isinstance(a, Entry) and isinstance(b, Entry):
+        return Entry(
+            output=merge_saved(a.output, b.output, _extend(label, ".output")),
+            inputs=merge_saved(a.inputs, b.inputs, _extend(label, ".inputs")),
         )
     if isinstance(a, dict) and isinstance(b, dict):
         # Union the key sets. A normal dict save carries identical keys on
