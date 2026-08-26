@@ -91,6 +91,22 @@ def test_upstream_pull_of_a_future_round_parks():
     assert (id(mediator), location) in interleaver._pulls
 
 
+def test_upstream_pull_during_the_first_round_serves_in_place():
+    interleaver, mediator, listener = build(local_rank=1)
+    mediator.pp_req_id = "req"
+    location = encode_pull_location(0, "req", "model.h.0.output.i0")
+    result = interleaver.intercept(mediator, Event.VALUE, location, ())
+    assert result == (SERVED,)
+
+
+def test_upstream_pull_ahead_of_the_first_round_parks():
+    interleaver, mediator, listener = build(local_rank=1)
+    mediator.pp_req_id = "req"
+    location = encode_pull_location(0, "req", "model.h.0.output.i1")
+    result = interleaver.intercept(mediator, Event.VALUE, location, ())
+    assert result is None
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

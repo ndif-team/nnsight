@@ -141,7 +141,7 @@ class PPInterleaver(Interleaver):
             if source_rank < self.local_rank:
                 occurrence = _occurrence(provider)
                 rounds = (
-                    self.rounds.get(req_id) if req_id is not None else None
+                    self.rounds.get(req_id, 0) if req_id is not None else None
                 )
                 if (
                     rounds is None
@@ -181,10 +181,11 @@ class PPInterleaver(Interleaver):
                 occurrence = mediator.iteration
             else:
                 req_id = self._req_id(mediator)
-                rounds = (
-                    self.rounds.get(req_id) if req_id is not None else None
+                occurrence = (
+                    self.rounds.get(req_id, 0)
+                    if req_id is not None
+                    else self.step
                 )
-                occurrence = rounds if rounds is not None else self.step
             provider = f"{location}.i{occurrence}"
             lazy = LazyRemoteTensor(
                 owner,
