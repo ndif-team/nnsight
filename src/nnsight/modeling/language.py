@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-
+import json
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -543,7 +543,32 @@ class LanguageModel(TransformersModel):
         return tuple(), kwargs
 
     def _remoteable_model_key(self) -> str:
-        return super()._remoteable_model_key()
+        """Include ``automodel`` so non-causal heads survive remote execution.
+
+        The base implementation serializes only ``repo_id`` and ``revision``, so
+        the server reconstructs every model through the ``LanguageModel``
+        default of ``AutoModelForCausalLM``. Any encoder or masked-LM checkpoint
+        then fails to provision:
+
+            Failed to provision model: Unrecognized configuration class
+            EsmConfig for this kind of AutoModel: AutoModelForCausalLM
+
+        which covers every protein and RNA language model, along with BERT-style
+        encoders generally. ``_remoteable_from_model_key`` already merges the key
+        JSON into the constructor kwargs, and ``TransformersMixin`` accepts a
+        string ``automodel`` and resolves it via ``getattr(modeling_auto, ...)``,
+        so carrying the class name is enough.
+
+        Omitted when it is the default, to keep keys for existing causal-LM
+        deployments byte-identical.
+        """
+
+        key = json.loads(super()._remoteable_model_key())
+
+        if self.automodel is not AutoModelForCausalLM:
+            key["automodel"] = self.automodel.__name__
+
+        return json.dumps(key)
 
     def _remoteable_persistent_objects(self) -> dict:
         persistent_objects = super()._remoteable_persistent_objects()

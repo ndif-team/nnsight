@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import inspect
 import os
 import warnings
@@ -74,6 +75,11 @@ class Envoy(Batchable):
         _children (List[Envoy]): List of child Envoys
         _alias (Aliaser): Aliaser object for managing aliases
     """
+
+    #: Subclasses synthesized by :meth:`_preserved_subclass`, keyed on
+    #: ``(base class, mount point)``. Shared across Envoy instances so the
+    #: classes stay resolvable by qualified name and therefore picklable.
+    _PRESERVED_CLASSES: Dict[Tuple[Type["Envoy"], str], Type["Envoy"]] = {}
 
     def __init__(
         self,
@@ -752,6 +758,54 @@ class Envoy(Batchable):
 
         return envoy
 
+    @staticmethod
+    def _preserved_subclass(base: Type["Envoy"], mount_point: str) -> Tuple[Type["Envoy"], bool]:
+        """Return a subclass of ``base`` whose ``mount_point`` is shadowed.
+
+        The class is memoized on ``(base, mount_point)`` and bound into the
+        module that defines ``base``, so that ``pickle`` and ``importlib`` can
+        resolve it by qualified name.
+
+        Previously one anonymous class was synthesized per Envoy instance, named
+        ``f"{base.__name__}.Preserved"``. That name contains a dot and was never
+        bound in any module, so the class could not be serialized:
+
+            PicklingError: Can't pickle <class 'nnsight.intervention.envoy.Envoy.Preserved'>:
+            attribute lookup Envoy.Preserved on nnsight.intervention.envoy failed
+
+        Remote execution therefore failed for every model with a submodule named
+        ``input`` or ``output`` -- which is every BERT- and ESM-family model,
+        since ``BertLayer.output`` is a ``BertOutput`` submodule -- while
+        decoder-only models, which never take this path, worked.
+
+        Since the attributes installed on the class are fully determined by
+        ``(base, mount_point)``, one shared class per pair is equivalent to one
+        per instance. Per-instance state stays in ``self.__dict__``.
+
+        Returns:
+            (cls, created): ``created`` is False when the class came from cache
+            and its attributes are already installed.
+        """
+
+        key = (base, mount_point)
+
+        cached = Envoy._PRESERVED_CLASSES.get(key)
+        if cached is not None:
+            return cached, False
+
+        name = f"{base.__name__}__nns_{mount_point}"
+
+        cls = type(
+            name,
+            (base,),
+            {"__module__": base.__module__, "__qualname__": name},
+        )
+
+        Envoy._PRESERVED_CLASSES[key] = cls
+        setattr(importlib.import_module(base.__module__), name, cls)
+
+        return cls, True
+
     def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str) -> None:
         """If a given module already has an attribute of the same name as something nnsight wants to add, we need to rename it.
 
@@ -766,20 +820,15 @@ class Envoy(Batchable):
             f"Module `{self.path}` of type `{type(self._module)}` has pre-defined a `{mount_point}` attribute. nnsight access for `{mount_point}` will be mounted at `.nns_{mount_point}` instead of `.{mount_point}` for this module only."
         )
 
-        # If we already shifted a mount point dont create another new class.
-        if "Preserved" in self.__class__.__name__:
+        new_cls, created = Envoy._preserved_subclass(self.__class__, mount_point)
 
-            new_cls = self.__class__
+        object.__setattr__(self, "__class__", new_cls)
 
-        else:
-
-            new_cls = type(
-                f"{self.__class__.__name__}.Preserved",
-                (self.__class__,),
-                {},
-            )
-
-            object.__setattr__(self, "__class__", new_cls)
+        if not created:
+            # The shared class already carries the shadowing attributes; only
+            # the per-instance child envoy below still has to be installed.
+            self.__dict__[mount_point] = envoy
+            return
 
         # Get the normal proxy mount point
         mount = getattr(Envoy, mount_point)
