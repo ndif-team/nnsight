@@ -23,7 +23,11 @@ clean answer, that activation was sufficient to flip the model.
 
 In nnsight you do this with two `tracer.invoke(...)` calls in one `trace()`. Because
 both invokes touch the same module on the same forward, use a `tracer.barrier(n)` to
-synchronize the value hand-off — see `docs/usage/barrier.md`.
+synchronize the value hand-off — see `docs/usage/barrier.md`. On `VLLM` there is
+no barrier and no cross-invoke hand-off: save the clean activations in one trace and
+patch them in the next, index rows as `hs[POS]` (no batch axis), and write both
+elements of the layer's `(hidden, residual)` output — see
+[Passing values between invokes](../models/vllm.md#passing-values-between-invokes).
 
 Tutorial mirror: https://nnsight.net/notebooks/tutorials/activation_patching/
 

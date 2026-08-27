@@ -14,6 +14,7 @@ sources: [src/nnsight/intervention/barrier.py, src/nnsight/tracing/util.py:32, s
 - This applies whether the invokes touch the **same** module or **different** modules.
 - **Use a name that doesn't already exist outside the invokes.** Each block starts with a copy of the surrounding scope, and that copy is checked first — so if `donor` already exists out there, the consumer reads the *old* value instead of the one the producer just bound. Nothing errors.
 - Sharing is via the blocks' shared frame locals (`Scope.shared`), sequenced by barriers.
+- **None of this applies on `VLLM`**: invokes are separate requests with separate scopes, `barrier` raises, and the `NameError` there means "use two traces" — see [Passing values between invokes](../models/vllm.md#passing-values-between-invokes).
 - Empty `tracer.invoke()` (no input) works on bare `NNsight` — it contributes no rows and skips `_batch()`, so it never raises `NotImplementedError`.
 
 ---

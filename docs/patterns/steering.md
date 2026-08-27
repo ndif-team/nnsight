@@ -163,6 +163,14 @@ Note that the prefill-only run *does* differ from the baseline — the prompt wa
 encoded differently — which is why a missing per-step application reads as "the
 steering is working, the effect is just modest" rather than as a bug.
 
+#### On `VLLM`
+
+Activations have no batch axis and a decoder layer returns `(hidden, residual)`:
+`model.model.layers[L].output[0][-1] += direction * coef`, with `direction` moved onto the
+served tensor's device inside the block. Scale against the *median* per-token residual norm — the
+first position is often an attention sink with a norm 100× the rest, and on 8B-class models ~1×
+that median already saturates. See [What your block sees on vLLM](../models/vllm.md#what-your-block-sees-on-vllm).
+
 #### `[:, -1, :]` means something different after the prefill
 
 With `use_cache=True` (the default), the prefill's activation covers the whole

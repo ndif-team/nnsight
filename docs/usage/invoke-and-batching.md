@@ -109,7 +109,9 @@ model): `tracer.invoke("word " * 50, truncation=True, max_length=4)`.
 ## Cross-invoke value sharing
 
 Invokes of one trace share the scope they were written in, so a name one invoke
-binds is readable by a later invoke — no config flag required:
+binds is readable by a later invoke — no config flag required (on the local
+runtimes; on `VLLM` each invoke is its own request and its own scope, see
+[Passing values between invokes](../models/vllm.md#passing-values-between-invokes)):
 
 ```python
 with model.trace() as tracer:

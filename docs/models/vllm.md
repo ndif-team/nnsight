@@ -82,6 +82,36 @@ with model.trace("The Eiffel Tower is located in the city of", temperature=0.0, 
 print(model.tokenizer.decode(logits.argmax(dim=-1)))
 ```
 
+### What your block sees on vLLM
+
+Four things differ from the HuggingFace path, and every one of them changes what an index means:
+
+- **No batch axis.** A served value is `[tokens, hidden]` for *your* request's rows: the prefill step
+  serves every prompt token, each later decode step serves one row. The last position is `[-1]`,
+  never `[:, -1, :]`.
+- **A decoder layer's `.output` is a pair `(hidden, residual)`** on Llama/Qwen/Mistral-style models,
+  because vLLM fuses the residual add into the next layer's norm. `output[0]` is this layer's
+  sub-block output (norm ~30 on Qwen3-8B), `output[1]` the residual stream entering it (norm ~1000);
+  the residual stream *after* the layer is their sum. Patching `output[0]` alone changes little;
+  writing either element steers, since the next norm adds them.
+
+  ```python
+  out = model.model.layers[20].output
+  resid = (out[0] + out[1]).clone()        # residual stream after layer 20, [tokens, hidden]
+  out[0][-1] += v                          # additive steering at the last position
+  ```
+
+- **Clone what you keep.** A served value is the model's live buffer, and the next layer's fused
+  add+norm rewrites it in place — `layers[8].output[0].save()` comes back holding a later layer's
+  data. Reduce or `.clone()` before you save (`(out[0] + out[1]).mean(0).cpu().save()`).
+- **Where tensors live.** A tensor your block references from outside (a steering vector) is
+  serialized with the block and arrives in the worker as it was; move it onto the served value
+  (`v.to(h.device, h.dtype)`). Saved tensors come back on the worker's device (`cuda:0`) unless
+  you `.cpu()` them in the block. `model.device` on an undispatched client is `meta`.
+
+`model.logits` is `[1, vocab]` for the step and `model.samples` is `[1, 1]` (`.item()` for one
+sequence). Greedy decoding is `temperature=0.0`; vLLM's default is `1.0`.
+
 ### `logits` and `samples`
 
 These are vLLM-specific hookable values on the model — `eproperty` descriptors (the same mechanism behind a module's `.output`/`.input`, `vllm.py:144`), not on a vanilla `vllm.LLM`, and only meaningful inside a trace. Read them for the logits and sampled ids of each step; for the finished request as a whole, read `tracer.result`.
@@ -105,6 +135,11 @@ with model.trace("Madison Square Garden is located in the city of",
 print(model.tokenizer.batch_decode([l.argmax(dim=-1) for l in logits]))
 # [' New', ' York', ' City']
 ```
+
+Step 0 is the prefill; `model.samples` on step *k* is the *k*-th generated token
+(`result.outputs[0].token_ids[k]`). Plain Python locals persist across steps, so a block can keep
+state — a flag flipped by a probe at one step steers every later one. A write to a layer *below*
+a read lands on the next step, not the current one.
 
 `tracer.all()` iterates every generated step:
 
@@ -135,13 +170,16 @@ On `mode="async"` the same call returns an awaitable: `outputs = await model.gen
 
 ```python
 with model.trace("The Eiffel Tower is in", temperature=0.0, max_tokens=3) as tracer:
-    hidden = model.model.layers[8].output[0].save()
-    result = tracer.result.save()
+    out = model.model.layers[8].output
+    hidden = (out[0] + out[1]).clone().save()
+    result = tracer.result.save()          # last: nothing can be read after it
 
 result.outputs[0].text        # ' Paris, France'
 ```
 
-It is served at collect time, which is the first moment both halves exist — the block runs in the engine's worker, the output is assembled by the engine. Two consequences: it carries the generation but **not** `.saves` (those are attached to the engine's own copy afterwards), and per-step values still come from `model.logits` / `model.samples` under `tracer.iter`, since `result` is the request's end state.
+It is served at collect time — after every module, `logits` and `samples` visit of the request —
+so it must be the **last** read in the block; a read after it raises `OutOfOrderError` naming
+that later value. It is served at collect time, which is the first moment both halves exist — the block runs in the engine's worker, the output is assembled by the engine. Two consequences: it carries the generation but **not** `.saves` (those are attached to the engine's own copy afterwards), and per-step values still come from `model.logits` / `model.samples` under `tracer.iter`, since `result` is the request's end state.
 
 ### Sampling parameters
 
@@ -162,7 +200,8 @@ with model.trace(max_tokens=3) as tracer:
         ...
 ```
 
-Common kwargs: `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `stop`, `stop_token_ids`, `seed`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs`, `lora_request` — anything `vllm.SamplingParams` takes.
+Common kwargs: `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `stop`, `stop_token_ids`, `seed`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs`, `lora_request` — anything `vllm.SamplingParams` takes. `ignore_eos=True` makes a
+bounded `tracer.iter[:N]` see all `N` steps when the model would stop early.
 
 ### Input forms per invoke
 
@@ -206,9 +245,11 @@ list — that is what the loop above does. Firing each prompt as its own async t
 concurrently (`asyncio.gather`) also works, and each one's saves then arrive on its
 own finished `output`.
 
-A container bound *and saved* **above** the invokes is one object locally, so it
-stays one object here: its per-request copies are merged back element-wise, which
-is what makes the pre-sized-slot idiom work.
+A container bound *and saved* **above** the invokes is one object locally, and
+each request gets its own copy. Assigning into pre-sized slots merges back;
+`append` does not — a list appended in every invoke comes back with one element.
+For a dynamic number of prompts, save the same name in every invoke and read the
+list.
 
 ```python
 with model.trace(temperature=0.0, max_tokens=1) as tracer:
@@ -218,6 +259,27 @@ with model.trace(temperature=0.0, max_tokens=1) as tracer:
     with tracer.invoke(prompt_b):
         rows[1] = model.transformer.h[5].output
 ```
+
+### Passing values between invokes
+
+Each invoke's block runs on its own request, in its own scope: a value one invoke
+reads is **not** visible to a sibling (`NameError`), `tracer.barrier` is
+unavailable, and a `session()` does not bridge traces either. Hand values across
+with two traces — a saved value from the first ships with the block of the second:
+
+```python
+with model.trace(clean, temperature=0.0, max_tokens=1):
+    donor = nnsight.save(tuple(o.clone() for o in model.model.layers[L].output))
+
+with model.trace(temperature=0.0, max_tokens=1) as tracer:
+    with tracer.invoke(corrupt):
+        for served, saved in zip(model.model.layers[L].output, donor):
+            served[POS] = saved[POS].to(served.device)
+        logits = model.logits.save()
+```
+
+Many invokes in one trace still batch: a layer sweep is one trace with one
+patched invoke per layer.
 
 ### Several sampled sequences (`n > 1`)
 
@@ -235,7 +297,9 @@ result.outputs[1].text           # what sequence 1 sampled
 ```
 
 `tracer.result` is **not** a list: a request has one `RequestOutput`, and the
-sequences are its `outputs[i]`.
+sequences are its `outputs[i]`. A saved container (`caps = nnsight.save([])`
+appended under `tracer.iter`) comes back as a list of `n` containers, `caps[i]`
+matching `result.outputs[i]`.
 
 Where you hold outputs rather than variables — async, `serve=`, plain `generate`
 with an edit installed — the values ride the completion they belong to:
@@ -260,10 +324,22 @@ trace's own saves per sequence, in order.
 model = VLLM("meta-llama/Llama-3.1-8B", tensor_parallel_size=4, dispatch=True)
 
 with model.trace("Hello", temperature=0.0):
-    hidden = model.model.layers[16].output.save()   # full unsharded tensor
+    out = model.model.layers[16].output             # (hidden, residual), both full width
+    hidden = (out[0] + out[1]).clone().save()
 ```
 
-`VLLMFragments` (`fragments.py`) gathers a `ColumnParallelLinear`/`RowParallelLinear` shard into the full tensor before your intervention reads it and re-splits on write, so every rank runs the same code on the same complete tensor. Calling one of those layers ad hoc (a logit lens) is corrected the same way. Parameters are not: `layer.weight` is this rank's slice. Verified in `tests/vllm/test_tensor_parallel.py`.
+`VLLMFragments` (`fragments.py`) gathers a `ColumnParallelLinear`/`RowParallelLinear` shard into the full tensor before your intervention reads it and re-splits on write, so every rank runs the same code on the same complete tensor: `qkv_proj.output`, `gate_up_proj.output`, `o_proj.input` and `down_proj.input` read at their full width; layer outputs and `norm.output` are whole on every rank already. Parameters are not: `layer.weight` is this rank's slice. Verified in `tests/vllm/test_tensor_parallel.py`.
+
+Rules for block code under TP: every rank runs the block, so keep control flow rank-independent; a tensor referenced from outside travels with the block to every rank; an in-block `torch.randn` agrees across ranks (vLLM seeds every worker alike). The client-side `print(model)` shows `tp_size=1` whatever you asked for — check `layer._module.weight.shape` inside the block for the real slice.
+
+A logit lens goes through the model's own logits path, which gathers the vocab shards; calling `model.lm_head(h)` directly raises `LMHead's weights should be used in the sampler`:
+
+```python
+out = model.model.layers[20].output
+h = (out[0] + out[1])[-1:]
+logits = model.logits_processor(model.lm_head, model.model.norm(h))   # [1, vocab]
+top1 = logits.argmax(-1).item()
+```
 
 ### Mixture-of-experts models and expert parallelism
 
@@ -274,7 +350,19 @@ MoE models (Qwen-MoE, DeepSeek, Mixtral, ...) work with the same transparency, i
 
 The router (`mlp.gate`, a `ReplicatedLinear`) is full and identical on every rank, so reading router logits or swapping them (expert steering / expert-masking ablation) needs no gathering at all. The fused-experts module (`mlp.experts`, a `FusedMoE`) is the one MoE-specific case the batcher handles: models that build it with `reduce_results=False` (the Qwen-MoE/DeepSeek pattern) make it return **per-rank partial sums** that the outer block all-reduces afterwards, so on access the batcher all-reduces the partials into the true value and on write-back divides by the group size so the block's own all-reduce reconstructs a swapped value exactly once. Verified in `tests/vllm/test_moe_batching.py` against an HF reference.
 
-Individual experts are **not** addressable as submodules: vLLM stacks all local experts into fused weight tensors consumed by one grouped kernel, so there is no `experts[3]` to hook at any parallelism level. To ablate an expert, mask its router logit to `-inf` in `mlp.gate.output` instead.
+Individual experts are **not** addressable as submodules: vLLM stacks all local experts into fused weight tensors consumed by one grouped kernel, so there is no `experts[3]` to hook at any parallelism level. The top-k selection and routing weights are computed inside that kernel too — recompute them from the logits. `mlp.gate.output` is `(logits, bias)`, `[tokens, num_experts]`; to ablate an expert, mask its router logit: `mlp.gate.output[0][:, e] = -inf`.
+
+```python
+with model.trace(prompt, temperature=0.0, max_tokens=6) as tracer:
+    tops = list().save()
+    for _ in tracer.iter[:6]:
+        logits, _bias = model.model.layers[5].mlp.gate.output
+        tops.append(logits[-1].topk(2).indices.clone())
+```
+
+### Hybrid (linear-attention) trunks
+
+Qwen3-Next / Qwen3.5-style models interleave gated-delta-net layers with full-attention layers. Both are ordinary decoder-layer envoys; tell them apart by the child they carry, `layers[i].linear_attn` or `layers[i].self_attn`. The recurrent state lives in vLLM's state cache, not in any module output. `taps=` works on these models: a tapped engine pins `cudagraph_mode="FULL_DECODE_ONLY"` on any model vLLM reports as hybrid or attention-free (a full graph captured over a recurrent layer silently miscomputes the other batch composition), and tapped generation matches eager exactly. Checkpoints with a vision tower (`Qwen3_5ForConditionalGeneration`) load and trace on text; their decoder layers are at `model.language_model.model.layers`.
 
 !!! warning "This recipe is vLLM-specific"
     On **`TransformersModel`** it is a silent no-op. A transformers MoE block calls its
@@ -337,15 +425,16 @@ per prompt, and it can only touch requests that *are* nnsight traces.
 
 `model.edit()` sends the block over once and leaves it there. Every request
 the engine runs afterwards gets its own copy — including requests submitted by
-something that never heard of nnsight, e.g. an OpenAI-API client on the same
-server. Each copy has its own scope, so what it saves is that request's, and it
+something that never heard of nnsight, e.g. another client of the same
+`nnsight-serve` engine. Each copy has its own scope, so what it saves is that request's, and it
 comes back on that request's output — the same place a trace's values arrive.
 
 ```python
 model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True, enable_prefix_caching=False)
 
 with model.edit() as (tracer, edit):
-    hidden = model.model.layers[16].output[0].save()
+    out = model.model.layers[16].output
+    hidden = (out[0] + out[1]).clone().save()
 
 # Not traces — plain vLLM requests. The block still runs for them.
 outputs = model.generate(["The Eiffel Tower is in", "The capital of Japan is"],
@@ -368,8 +457,11 @@ request across its generated tokens rather than seeing only the prefill:
 with model.edit() as (tracer, edit):
     readout = nnsight.save([])
     for step in tracer.all():
-        readout.append(model.model.layers[16].output[0][-1])
+        readout.append(model.model.layers[16].output[0][-1].clone())
 ```
+
+After `edit.clear()` a request's output has no `.saves` attribute at all — read it
+with `getattr(output, "saves", {})` if the edit may be gone.
 
 | Member | Description |
 |---|---|
@@ -416,8 +508,13 @@ sync-looking call would leave every edit in place and say nothing.
 ### When to edit instead of trace
 
 - Sweeping many prompts — an edit pays the serialization once instead of per
-  request. Capturing one layer over 1024 prompts on Llama-3.1-8B: **2.04 s
-  traced, 1.43 s edited** (bare vLLM 0.87 s).
+  request. Capturing one layer over 500 prompts on Qwen3-8B: **0.5 s edited**
+  (bare vLLM 0.45 s) against 0.8 s traced when the block reads only a layer
+  envoy bound outside the trace — and **5.2 s traced** the moment the block also
+  reads `model.logits`, `model.samples` or `tracer.result`, because a reference
+  to the model inside the block ships the model with every invoke (~9 ms each),
+  and those properties cannot be bound outside a trace. In a sweep, take the
+  text from the edit's outputs.
 - Instrumenting traffic you don't control (a served endpoint, another client).
 - Keep tracing for one-off experiments, and whenever you want the values pushed
   back into your own variables.
@@ -436,8 +533,19 @@ sync-looking call would leave every edit in place and say nothing.
 Start a server (holds one dispatched async engine):
 
 ```bash
-nnsight-serve gpt2 --port 8000 [--api-key SECRET] [--gpu-memory-utilization 0.1]
+nnsight-serve gpt2 --port 8000 --enable-prefix-caching False [--api-key SECRET] [--gpu-memory-utilization 0.1]
 ```
+
+`--help` lists only the server's own options; every other `--flag value` is forwarded to vLLM's
+`EngineArgs` as `flag=value` (`--max-model-len 4096`, `--tensor-parallel-size 2`). Booleans take a
+literal — `--enable-prefix-caching False`, not vLLM's `--no-enable-prefix-caching` — and prefix
+caching must be off if you will `edit(serve=...)` (below). Poll `GET /health` for `{"status": "ok"}`
+before sending traces; the engine takes a minute or two to build. The server exposes only the
+nnsight routes (`/health`, `/v1/nnsight/generate`, `/v1/nnsight/register/{id}`, `.../clear`) —
+it is **not** an OpenAI-compatible server, and a "plain" request is a trace whose body saves only
+`tracer.result`. `serve=` is accepted by `trace` and `edit`; a with-less `model.generate(serve=...)`
+is not routed and would dispatch a local engine. The engine core is a child process: if the server
+is killed rather than interrupted, kill the `EngineCore` pid from its log too.
 
 Then a client with **no GPU** submits traces to it:
 
@@ -486,7 +594,10 @@ model.model.layers[i].mlp.down_proj.output
 model.model.norm.output
 ```
 
-For GPT-2-style models: `model.transformer.h[i].attn.output`, `model.transformer.h[i].mlp.output`. Print `model` to see the actual tree.
+`model.model.layers[i].output` is the `(hidden, residual)` pair described under
+[What your block sees](#what-your-block-sees-on-vllm). For GPT-2-style models: `model.transformer.h[i].attn.output`, `model.transformer.h[i].mlp.output`. MoE blocks carry `mlp.gate`, `mlp.experts` (and on Qwen-MoE `mlp.shared_expert`); hybrid trunks carry `linear_attn` or `self_attn` per layer; vision-language checkpoints keep the decoder at `model.language_model.model.layers`. Print `model` (or one layer, `model.model.layers[0]`, on a large checkpoint) to see the actual tree.
+
+Paths from `model.named_modules()` carry the root's name (`model.model.layers.0`); `model.get(...)` and `taps=` take the path without it (`model.layers.0`), and `model.taps` reports the prefixed form.
 
 ## vLLM versions
 
@@ -532,17 +643,21 @@ model = VLLM(
 )
 
 with model.trace(prompt, max_tokens=20, temperature=0.0) as tracer:
-    model.model.layers[10].output[0][:] += 4 * steering_vector   # in place
     hiddens = list().save()
-    for _ in tracer.iter[:20]:
-        hiddens.append(model.model.layers[16].output[0].clone())  # clone: see below
+    for _ in tracer.iter[:20]:                                     # every step, prefill included
+        model.model.layers[10].output[0][:] += 4 * steering_vector   # in place
+        hiddens.append(model.model.layers[16].output[0].clone())     # clone: see below
 ```
+
+Outside the loop the edit would fire on the prefill only. Measured on Qwen3-8B, one request, 32
+greedy tokens with a per-step steering edit at one tap and a per-step capture at another: eager 60
+tok/s, graphs 86 tok/s; the same graph engine with no trace 89 tok/s.
 
 What changes under graphs, and why:
 
 - **Only taps are reachable.** A location you didn't declare is never visited by a replayed step, so a block that reads one parks until the request ends and the request's error says `'...' is not a tap on this engine`. Declare it, or drop `taps` for the eager engine. `model.taps` lists the resolved set after dispatch. Keep the set small: each tap splits the graph, and a break at every module would cost what replay bought.
 - **Edits land in place.** The next kernel reads the tap's tensor from a fixed address, so an in-place edit (`output[0][:] += v`, `output[0][:, i] = 0`) is exactly right and a replacement (`output = t`) is copied back into that memory — it has to have the same shape, else the request errors.
-- **Clone what you keep.** The value served at a tap *is* the graph's memory, rewritten next step. A tensor you `.save()` or append under `tracer.iter` aliases it; call `.clone()` if you read it after the step. The eager engine has a milder version of the same rule: a value served is the model's live tensor, and some of vLLM's layers keep writing into it after the module returns (DeepSeek's MLA attention rotates the `q_proj` output in place), so a saved alias can differ from what the module handed back — `.clone()` makes a read a read.
+- **Clone what you keep.** The value served at a tap *is* the graph's memory, rewritten next step. A tensor you `.save()` or append under `tracer.iter` aliases it; call `.clone()` if you read it after the step. The un-cloned list still comes back as N separate tensors — each is copied at collect time — all holding the last step's values, and nothing warns. The eager engine has the same rule: a served value is the model's live buffer, and the next layer's fused add+norm (or DeepSeek's MLA attention, which rotates the `q_proj` output in place) rewrites it after the module returns — `.clone()` makes a read a read.
 - **`torch.compile` is off.** Breakable graphs keep replay and drop the compiled path; that is most of the throughput, not all of it. The flag is process-wide, so one process holds either graph engines or compiled ones.
 
 ## Limitations
@@ -551,7 +666,7 @@ What changes under graphs, and why:
 - **One prompt per invoke** — no `tracer.invoke(["a", "b"])`.
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
 - **No backward / gradients, no `.scan()`, no source tracing on fused CUDA kernels.**
-- **Text-only** — multimodal vLLM is not exposed.
+- **Text prompts only** — image/video inputs are not accepted; vision-language checkpoints load and their language trunk traces normally.
 - **Version sensitivity** — targets vLLM's v1 architecture (`AsyncLLM` at `vllm.v1.engine.async_llm`).
 
 ## Gotchas

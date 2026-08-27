@@ -83,7 +83,7 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `envoy(...)` | `envoy(*args, hook=False, **kwargs)` | Ad-hoc apply the module to a value (e.g. logit lens); the trace is stood down for the call, so it spends no occurrences. `hook=True` lets the trace watch it — for adapters/SAEs/LoRA attached to the tree. |
 | `envoy.get` | `envoy.get("transformer.h.0.mlp")` | Fetch a descendant envoy by dotted path. |
 | `envoy.modules` | `envoy.modules(include_fn=None, names=False)` | List all descendant envoys (optionally filtered / with paths). |
-| `envoy.named_modules` | `envoy.named_modules(include_fn=None)` | `modules(names=True)` — `(path, envoy)` pairs. |
+| `envoy.named_modules` | `envoy.named_modules(include_fn=None)` | `modules(names=True)` — `(path, envoy)` pairs. Paths carry the root's name (`model.transformer.h.0`); `get()` and `VLLM(taps=...)` take them without it. |
 | `envoy.to` / `.cpu` / `.cuda` | `envoy.to(device)` | Move the underlying module; returns the envoy. |
 | `envoy.clear_edits` | `envoy.clear_edits()` | Drop all edits accumulated by `edit(inplace=True)`. |
 | `envoy[i]` / `for c in envoy` / `len(envoy)` | — | Index / iterate direct children (e.g. a `ModuleList`'s blocks). |
@@ -100,7 +100,8 @@ Deprecated aliases (warn; use the `tracer.*` forms): `model.iter`, `model.all()`
 | `model.generator.output` | `TransformersModel` | Generated ids passthrough — **deprecated**; use `tracer.result`. |
 | `model.generator.streamer.output` | `TransformersModel` | Per-step generated tokens during decoding. |
 | `model.logits` | `VLLM` | This request's pre-sampling logits for the step. |
-| `model.samples` | `VLLM` | The token ids the sampler drew for the step. |
+| `model.samples` | `VLLM` | The token ids the sampler drew for the step, `[1, 1]` for one sequence. |
+| `model.logits_processor(model.lm_head, h)` | `VLLM` | The unembed on vLLM (a logit lens); `model.lm_head(h)` raises. |
 | `model.edit` | `VLLM` | `with model.edit() as (tracer, edit):` — install a block on the engine, run for *every* request it handles; values arrive on `output.saves`. `edit.clear()` / `model.clear_edits()` stop it. Needs `enable_prefix_caching=False`. |
 
 ## Top-level functions

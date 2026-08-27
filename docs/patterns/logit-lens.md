@@ -20,6 +20,10 @@ The residual stream at layer L is `h_L`. The model's final prediction is
 `lm_head(ln_f(h_L))` for L = 0, 1, 2, ... This often shows a smooth refinement:
 early layers predict generic frequent tokens, late layers converge on the answer.
 
+On `VLLM`, `model.lm_head(h)` raises (`LMHead's weights should be used in the sampler`); the
+lens is `model.logits_processor(model.lm_head, model.model.norm(h))` on `h = (out[0] + out[1])[-1:]`
+— see [Tensor parallelism](../models/vllm.md#tensor-parallelism-is-transparent).
+
 Calling `model.lm_head(...)` inside a trace runs the module with the trace
 **stood down** — it is just the linear math you want, applied out of order
 without re-triggering the model. See `docs/usage/access-and-modify.md`

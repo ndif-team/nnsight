@@ -136,7 +136,7 @@ print(len(hiddens))            # 0 on remote
 Inside a `model.session()` you want a value produced in one inner `model.trace()` used by another. Unsure whether to `.save()` it.
 
 ### Cause
-The save filter runs **only when the outermost tracing context exits** (`push_result` checks the trace depth is 1). Inner traces push *all* their locals up to the enclosing block, so variables flow freely between sibling traces in a session; only values crossing the outermost boundary back to plain Python are filtered.
+The save filter runs **only when the outermost tracing context exits** (`push_result` checks the trace depth is 1). Inner traces push *all* their locals up to the enclosing block, so variables flow freely between sibling traces in a session (not on `VLLM`, where each trace is its own request); only values crossing the outermost boundary back to plain Python are filtered.
 
 ### Right code
 ```python

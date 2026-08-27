@@ -175,7 +175,9 @@ still at site *i*.
   every participant must reach it.
 - **Not available on vLLM.** Each invoke there is a separate engine request,
   scheduled independently, so the blocks never run against one forward — a barrier
-  could not release. `tracer.barrier(n)` raises `NotImplementedError` rather than
+  could not release. Hand values across with two traces instead (a saved value
+ships with the next block — [Passing values between invokes](../models/vllm.md#passing-values-between-invokes)).
+`tracer.barrier(n)` raises `NotImplementedError` rather than
   hanging.
 - **Reading a later site too early breaks an earlier one.** With several sites,
   put each source's read *after* the rounds for every site before it; requesting
