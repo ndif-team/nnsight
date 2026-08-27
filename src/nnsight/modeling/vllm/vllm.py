@@ -253,6 +253,15 @@ class VLLM(Remotable):
         # would be handed to the real engine on dispatch.
         _ROPE_DICT.clear()
 
+        # Whether any layer is recurrent rather than attention (a hybrid
+        # gated-delta / Mamba trunk, or an attention-free model). Recorded here —
+        # vLLM's model config is the authority — because a tapped engine must
+        # not replay a full graph over such a model's prefill (see `_load`).
+        mc = vllm_config.model_config
+        self._graph_unsafe_prefill = bool(
+            getattr(mc, "is_hybrid", False) or getattr(mc, "is_attention_free", False)
+        )
+
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -306,6 +315,19 @@ class VLLM(Remotable):
             self.taps = self._resolve_taps(meta_model)
             # The flag is read by the worker processes, which inherit the environment.
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            if getattr(self, "_graph_unsafe_prefill", False):
+                # A recurrent layer runs a different computation for a prefill
+                # than for a decode step, chosen per batch — a full graph
+                # captured for one composition replays the wrong one for the
+                # other, and the forward is silently wrong (a hybrid trunk's
+                # greedy generation diverges from eager). The compiled engine
+                # avoids this by splitting its graphs around the recurrent op;
+                # breakable graphs run without the compiler, so pin graphs to
+                # pure-decode steps and run prefill eagerly instead. Decode is
+                # where replay pays anyway. A caller's own setting wins.
+                compilation = kwargs.setdefault("compilation_config", {})
+                if isinstance(compilation, dict):
+                    compilation.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
             kwargs["additional_config"] = {
                 **(kwargs.get("additional_config") or {}),
                 "nnsight_taps": list(self.taps),
