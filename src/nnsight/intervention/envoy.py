@@ -231,6 +231,47 @@ class Envoy:
         # nothing more to override.
         self.__dict__[name] = envoy
 
+    def _alias_conflict(self, alias: str, path: str, target: Envoy) -> str | None:
+        """What ``alias`` would displace on this envoy, or ``None`` if nothing.
+
+        Aliases are bound with `object.__setattr__`, which overwrites whatever
+        name is already there without a word. Three things can be underneath:
+
+        * **Another alias** from an earlier ``rename`` entry whose key also
+          resolved here. The dict is self-contradictory -- one path silently wins
+          by insertion order.
+        * **A child envoy.** The child stays in the tree, but its own name now
+          reads as the aliased module, so an intervention written against it
+          lands somewhere else and nothing says so.
+        * **An `Envoy` attribute** (``output``, ``trace``, ``source``, ...).
+          Shadowing ``trace`` breaks ``model.trace(...)`` itself, surfacing much
+          later as a ``TypeError`` about context managers.
+
+        Returns a description of the conflict for the caller to raise with.
+        """
+
+        # Already pointing at this very envoy: nothing is displaced. Covers a
+        # key aliased to its own name (``{"attn": "attn"}``, which a cross-
+        # architecture dict pairs with ``{"self_attn": "attn"}``), two keys that
+        # reach one module (tied weights), and the binding being re-applied.
+        if self.__dict__.get(alias) is target:
+            return None
+
+        existing_path = self._aliases.get(alias)
+        if existing_path is not None:
+            return f"the alias already bound here from {existing_path!r}"
+
+        if isinstance(self.__dict__.get(alias), Envoy):
+            return "a child module of that name"
+
+        # Walk the MRO's own namespaces rather than `hasattr`, so an eproperty
+        # is found without its `__get__` running (reading `.output` outside
+        # interleaving raises).
+        if any(alias in vars(klass) for klass in type(self).__mro__):
+            return f"the `{type(self).__name__}.{alias}` attribute"
+
+        return None
+
     def _bind_aliases(self) -> None:
         """Bind each ``rename`` alias as an attribute pointing at the same Envoy.
 
@@ -242,6 +283,14 @@ class Envoy:
         ``"transformer.h.3.mlp"`` binds only on the envoy it resolves from. A
         leading dot is a no-op — path components are matched by name (an empty
         first component is skipped, mirroring `nnsight.util.fetch_attr`).
+
+        A key that does not resolve here is skipped, not an error: one ``rename``
+        is meant to be reusable across architectures that spell the same module
+        differently (``{"attn": "att", "self_attn": "att"}``), and on any given
+        envoy only one of those spellings exists.
+
+        An alias that would *displace* something is an error, because there is no
+        spelling of it that works — see `_alias_conflict`.
 
         Aliases are ordinary attributes referencing the *same* child object (not
         copies, and not added to `_children`), so ``__getattr__`` needs no
@@ -259,6 +308,15 @@ class Envoy:
             if not isinstance(target, Envoy):
                 continue
             for alias in [aliases] if isinstance(aliases, str) else aliases:
+                conflict = self._alias_conflict(alias, path, target)
+                if conflict is not None:
+                    raise ValueError(
+                        f"`rename` alias {alias!r} for {path!r} would shadow "
+                        f"{conflict} on `{self.path}`. Aliases are bound as plain "
+                        f"attributes, so this would make the original unreachable "
+                        f"by name while leaving it in the tree. Pick a different "
+                        f"alias."
+                    )
                 object.__setattr__(self, alias, target)
                 self._aliases[alias] = path
 

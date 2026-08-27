@@ -330,6 +330,77 @@ class TestRename:
         envoy = Envoy(module, rename={"layers": "blocks"})
         assert envoy.get("blocks.0.mlp") is envoy.layers[0].mlp
 
+    # -- collisions ------------------------------------------------------
+    #
+    # Aliases bind with `object.__setattr__`, so before these checks anything
+    # already under the name was overwritten in silence.
+
+    def test_alias_shadowing_a_sibling_child_raises(self, module):
+        # `head` and `embed` both exist; aliasing one to the other's name would
+        # leave the original in the tree but unreachable by name, so an
+        # intervention written against it would land on the wrong module.
+        with pytest.raises(ValueError) as info:
+            Envoy(module, rename={"head": "embed"})
+
+        message = str(info.value)
+        assert "rename" in message
+        assert "'embed'" in message
+        assert "child module" in message
+
+    def test_alias_shadowing_an_envoy_attribute_raises(self, module):
+        # Shadowing `trace` used to break `model.trace(...)` itself, surfacing
+        # much later as a TypeError about the context manager protocol.
+        with pytest.raises(ValueError) as info:
+            Envoy(module, rename={"head": "trace"})
+
+        assert "Envoy.trace" in str(info.value)
+
+    @pytest.mark.parametrize("alias", ["output", "input", "inputs", "source"])
+    def test_alias_shadowing_an_eproperty_raises(self, module, alias):
+        # These are data descriptors whose __get__ raises outside interleaving,
+        # so the conflict has to be found without reading them. Previously
+        # `output` failed with "Cannot access `model.output` outside of
+        # interleaving", which never mentions `rename`.
+        with pytest.raises(ValueError) as info:
+            Envoy(module, rename={"head": alias})
+
+        assert "rename" in str(info.value)
+
+    def test_two_paths_claiming_one_alias_raises(self, module):
+        # Self-contradictory: one silently won by dict insertion order.
+        with pytest.raises(ValueError) as info:
+            Envoy(module, rename={"embed": "dup", "head": "dup"})
+
+        assert "already bound" in str(info.value)
+
+    # -- collisions that are not collisions ------------------------------
+
+    def test_alias_equal_to_its_own_name_is_a_noop(self, module):
+        # One `rename` is meant to be reusable across architectures that spell
+        # the same module differently. Pairing `{"attn": "attn"}` with an alias
+        # for the other spelling is the normal way to write that, so a key
+        # aliased to its own name must stay harmless.
+        envoy = Envoy(module, rename={"attn": "attn", "self_attn": "attn"})
+
+        assert envoy.layers[0].attn is envoy.layers[0]._module.attn or isinstance(
+            envoy.layers[0].attn, Envoy
+        )
+
+    def test_unresolvable_key_is_still_skipped(self, module):
+        # The cross-architecture case: a key that names nothing here is skipped,
+        # not an error.
+        envoy = Envoy(module, rename={"layers": "blocks", "decoder.layers": "blocks"})
+
+        assert envoy.blocks[0] is envoy.layers[0]
+
+    def test_two_paths_to_the_same_module_share_an_alias(self, module):
+        # Tied weights: two keys reaching one module bind the same object, so
+        # the second is a no-op rather than a conflict.
+        module.tied = module.head
+        envoy = Envoy(module, rename={"head": "out", "tied": "out"})
+
+        assert envoy.out is envoy.head
+
 
 class TestDevice:
     def test_device_of_parameters(self, envoy):
