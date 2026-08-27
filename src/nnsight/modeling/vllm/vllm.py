@@ -474,12 +474,16 @@ class VLLM(Remotable):
             kwargs = dict(kwargs)
             lora_requests.append(kwargs.pop("lora_request", None))
             prompts.append(self._prompt(*inputs))
+            # Which installed edits this request runs — nnsight's, not a sampling
+            # setting; it rides `extra_args` (see `_attach_mediators`).
+            edits = kwargs.pop("edits", None)
             param = SamplingParams(**kwargs)
             # Which settings this invoke named, for `_attach_mediators` to leave
             # alone. Recorded rather than inferred: the value a caller passed
             # cannot be told from the one it would have had by default, and half
             # of vLLM's defaults are the obvious thing to type.
-            param.nnsight_named = frozenset(kwargs)
+            param.nnsight_named = frozenset(kwargs) | ({"edits"} if edits is not None else set())
+            param.nnsight_edits = self._edit_names(edits)
             params.append(param)
 
         return (prompts, params, lora_requests), {}
@@ -608,6 +612,7 @@ class VLLM(Remotable):
     def edit(
         self,
         *,
+        name: str | None = None,
         inplace: bool = True,
         serve: str | None = None,
         api_key: str | None = None,
@@ -631,6 +636,13 @@ class VLLM(Remotable):
         ``tracer.invoke(...)``.
 
         Args:
+            name: What requests may address this edit by. A request that passes
+                ``edits=[...]`` (to ``trace``, ``invoke`` or a plain ``generate``)
+                runs the named edits it lists **and every edit installed without
+                a name**; a request that passes nothing runs every edit. A name
+                is a tag rather than a key — two edits may share one, and both
+                run when it is asked for. A request naming an edit nothing is
+                installed under fails rather than quietly running nothing.
             inplace: Only ``True``. An edit here lives on the engine every caller
                 shares, so unlike the local form there is no copy to edit
                 instead.
@@ -661,6 +673,15 @@ class VLLM(Remotable):
 
                 >>> with model.edit(serve="http://host:8000") as (tracer, edit):
                 ...     model.model.layers[16].output[0][:] = 0  # doctest: +SKIP
+
+            Named, so a request can choose::
+
+                >>> with model.edit(name="probe") as (tracer, edit):  # doctest: +SKIP
+                ...     score = model.model.layers[16].output[0][-1].norm().save()
+                >>> with model.edit(name="steer") as (tracer, edit2):  # doctest: +SKIP
+                ...     model.model.layers[8].output[0][:] += v
+                >>> outputs = model.generate(prompts, max_tokens=5, edits=["probe"])  # doctest: +SKIP
+                >>> outputs[0].saves["score"]     # the probe ran; the steer did not
         """
         from .registration import RegisteringTracer
 
@@ -670,7 +691,45 @@ class VLLM(Remotable):
                 "caller shares — there is no copy to edit instead. Drop "
                 "inplace=False, or trace the requests you want to change."
             )
-        return RegisteringTracer(self, backend=backend, serve=serve, api_key=api_key)
+        if name is not None and not isinstance(name, str):
+            raise TypeError(f"edit name must be a string, got {type(name).__name__}")
+        return RegisteringTracer(
+            self, backend=backend, serve=serve, api_key=api_key, name=name
+        )
+
+    @staticmethod
+    def _edit_names(edits: Any) -> list[str] | None:
+        """Normalize an ``edits=`` argument: ``None`` means every edit; else a list of names."""
+        if edits is None:
+            return None
+        if isinstance(edits, str):
+            raise TypeError(
+                f"edits= takes a list of edit names, not a string; write edits=[{edits!r}]"
+            )
+        names = list(edits)
+        for name in names:
+            if not isinstance(name, str):
+                raise TypeError(f"edit names are strings, got {type(name).__name__}: {name!r}")
+        return names
+
+    def _check_edit_names(self, edits: list[str] | None) -> None:
+        """Refuse a name nothing is installed under, when this process holds the engine.
+
+        The worker makes the same check for every request (a served engine's
+        edits are installed over HTTP, which this process cannot see), but here
+        the mistake can be reported at the call rather than as the request's
+        deferred error.
+        """
+        if edits is None or getattr(self, "_serving", False):
+            return
+        installed = {edit.name for edit in self._installed_edits if edit.name is not None}
+        unknown = [name for name in edits if name not in installed]
+        if unknown:
+            raise ValueError(
+                f"edits={edits!r} names {unknown!r}, but no edit is installed under "
+                f"that name (installed: {sorted(installed)!r}). Install it with "
+                "model.edit(name=...), or drop it from the list."
+            )
 
     def clear_edits(self) -> None:
         """Clear every edit still installed on the engine.
@@ -749,7 +808,13 @@ class VLLM(Remotable):
 
         kwargs = self._sampling_kwargs(kwargs)
         lora_request = kwargs.pop("lora_request", None)
+        # Which installed edits these requests run; see `edit`. Rides the same
+        # field a trace's block does, so the worker reads it the same way.
+        edits = self._edit_names(kwargs.pop("edits", None))
+        self._check_edit_names(edits)
         params = SamplingParams(**kwargs)
+        if edits is not None:
+            params.extra_args = {**(params.extra_args or {}), "nnsight_edits": edits}
 
         prompts = inputs[0] if len(inputs) == 1 else list(inputs)
         if self._async_engine:
@@ -909,6 +974,18 @@ class VLLM(Remotable):
                     "one request — give every invoke a prompt, or remove the empty invoke."
                 )
 
+        # `edits=` on the trace: the installed edits every invoke runs unless it
+        # named its own. Not a SamplingParams field, so it is taken out before
+        # the check below and rides `extra_args` beside the block.
+        kwargs = dict(kwargs)
+        trace_edits = self._edit_names(kwargs.pop("edits", None))
+        # Not on an nnsight-serve server: its edits arrive over HTTP, unseen by
+        # this list, and the worker checks every request anyway.
+        if not getattr(self, "_serving", False):
+            self._check_edit_names(trace_edits)
+            for param in params:
+                self._check_edit_names(getattr(param, "nnsight_edits", None))
+
         default = SamplingParams()
         for attr in kwargs:
             if not hasattr(default, attr):
@@ -920,6 +997,10 @@ class VLLM(Remotable):
 
         for mediator, param in zip(attached, params):
             param.extra_args = {"nnsight_mediator": dumps(mediator)}
+            named = getattr(param, "nnsight_named", frozenset())
+            edits = getattr(param, "nnsight_edits", None) if "edits" in named else trace_edits
+            if edits is not None:
+                param.extra_args["nnsight_edits"] = edits
             # A prefix-cached token is served from the KV cache without a forward
             # pass, so no hook fires for it and the intervention silently sees a
             # short activation — the trace reads only the tokens that were
@@ -931,7 +1012,6 @@ class VLLM(Remotable):
             # consulted this way and the read is whole anyway.
             if hasattr(param, "skip_reading_prefix_cache"):
                 param.skip_reading_prefix_cache = True
-            named = getattr(param, "nnsight_named", frozenset())
             for attr, value in kwargs.items():
                 if attr not in named:
                     setattr(param, attr, value)

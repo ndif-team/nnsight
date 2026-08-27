@@ -466,7 +466,41 @@ with `getattr(output, "saves", {})` if the edit may be gone.
 | Member | Description |
 |---|---|
 | `edit.clear()` | Stop running the block. `await edit.aclear()` on an async engine. |
+| `edit.name` | The name it was installed under, or `None`. |
 | `model.clear_edits()` | Clear every edit still installed. `await model.aclear_edits()` on an async engine. |
+
+### Named edits, and choosing them per request
+
+`model.edit(name="probe")` tags the block. A request then picks which installed
+edits run with `edits=[...]` — on `trace(...)`, on an `invoke(...)` (which wins
+over the trace's), on a with-less `generate(...)`, on an async engine and on a
+served one alike; it rides the request beside the block:
+
+```python
+with model.edit(name="probe") as (tracer, probe):
+    score = model.model.layers[16].output[1][-1].norm().save()
+with model.edit(name="steer") as (tracer, steer):
+    model.model.layers[8].output[0][:] += v
+with model.edit() as (tracer, always):                      # unnamed
+    stamp = nnsight.save(True)
+
+model.generate(prompts, max_tokens=5)                       # all three run
+model.generate(prompts, max_tokens=5, edits=["probe"])      # probe + always; no steer
+model.generate(prompts, max_tokens=5, edits=[])             # always only
+
+with model.trace(max_tokens=5, edits=["steer"]) as tracer:
+    with tracer.invoke(prompt_a):                           # steer + always
+        ...
+    with tracer.invoke(prompt_b, edits=[]):                 # always only
+        ...
+```
+
+The rule: no `edits=` runs every edit; `edits=[...]` runs the named ones it lists
+**plus every unnamed edit**. A name is a tag, not a key — two edits installed
+under one name both run when it is asked for. Naming an edit nothing is
+installed under raises (`ValueError`) at the call on a local engine, and comes
+back as the request's error from a served one. `edits="probe"` (a string) is
+refused; write the list.
 
 That is the whole handle — the values are not read through it. They are taken as
 they are collected, so nothing accumulates on the worker for as long as somebody

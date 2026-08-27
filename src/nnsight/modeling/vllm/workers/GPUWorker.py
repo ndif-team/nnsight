@@ -55,9 +55,14 @@ class NNsightGPUWorker(Worker):
         """How many requests this worker's runner still tracks, via ``collective_rpc``."""
         return self.model_runner.nnsight_request_count()
 
-    def nnsight_register(self, registration_id: str, payload: bytes) -> None:
-        """Install a block this worker runs for every request (``collective_rpc``)."""
-        return self.model_runner.nnsight_register(registration_id, payload)
+    def nnsight_register(
+        self, registration_id: str, payload: bytes, name: str | None = None
+    ) -> None:
+        """Install a block this worker runs for every request (``collective_rpc``).
+
+        ``name`` is what requests may address it by (``edits=[...]``).
+        """
+        return self.model_runner.nnsight_register(registration_id, payload, name=name)
 
     def nnsight_clear_registered(self, registration_id: str) -> None:
         """Remove a registration from this worker (``collective_rpc``)."""

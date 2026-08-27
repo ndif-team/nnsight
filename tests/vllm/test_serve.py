@@ -231,3 +231,25 @@ class TestServeEdit:
             assert not serve_client.dispatched
         finally:
             edit.clear()
+
+
+class TestNamedEditsOverServe:
+    def test_named_edit_selected_by_a_served_trace(self, serve_client, serve_url, ET_prompt):
+        model = serve_client
+        with model.edit(serve=serve_url, name="a") as (tracer, a):
+            value_a = model.transformer.h[3].output[-1].norm().save()
+        with model.edit(serve=serve_url, name="b") as (tracer, b):
+            value_b = model.transformer.h[4].output[-1].norm().save()
+        try:
+            with model.trace(ET_prompt, serve=serve_url, max_tokens=1, edits=["a"]) as tracer:
+                result = tracer.result.save()
+            assert "value_a" in result.saves and "value_b" not in result.saves
+
+            # The worker's check: it comes back as the request's deferred error,
+            # re-raised here as a RuntimeError carrying the original type.
+            with pytest.raises(RuntimeError, match="ValueError: edits=.*no edit is installed under that name"):
+                with model.trace(ET_prompt, serve=serve_url, max_tokens=1, edits=["nope"]) as tracer:
+                    result = tracer.result.save()
+        finally:
+            a.clear()
+            b.clear()

@@ -107,13 +107,17 @@ class Registration:
 
     Attributes:
         model: The engine this is registered on.
-        id: The engine-wide name for this registration, used to address it in the
+        id: The engine-wide id for this registration, used to address it in the
             worker.
+        name: The name it was installed under, or ``None``. A request that asks
+            for particular edits (``edits=[...]``) runs the named ones it lists
+            and every unnamed one; a request that asks for none runs them all.
     """
 
-    def __init__(self, model: "VLLM", id: str) -> None:
+    def __init__(self, model: "VLLM", id: str, name: str | None = None) -> None:
         self.model = model
         self.id = id
+        self.name = name
         self.cleared = False
 
     def _collective(self, method: str, args: tuple) -> Any:
@@ -161,11 +165,11 @@ class Registration:
 
     def install(self, payload: bytes) -> None:
         """Put the block on the engine. The seam a serve client replaces."""
-        self._rpc("nnsight_register", self.id, payload)
+        self._rpc("nnsight_register", self.id, payload, self.name)
 
     async def ainstall(self, payload: bytes) -> None:
         """`install`, awaited."""
-        await self._arpc("nnsight_register", self.id, payload)
+        await self._arpc("nnsight_register", self.id, payload, self.name)
 
     def uninstall(self) -> None:
         """Take the block off the engine. The other half of the seam."""
@@ -201,7 +205,8 @@ class Registration:
 
     def __repr__(self) -> str:
         state = "cleared" if self.cleared else "active"
-        return f"<Registration {self.id} ({state})>"
+        name = f" {self.name!r}" if self.name is not None else ""
+        return f"<Registration{name} {self.id} ({state})>"
 
 
 class ServeRegistration(Registration):
@@ -215,11 +220,25 @@ class ServeRegistration(Registration):
     """
 
     def __init__(
-        self, model: "VLLM", id: str, host: str, api_key: str | None = None
+        self,
+        model: "VLLM",
+        id: str,
+        host: str,
+        api_key: str | None = None,
+        name: str | None = None,
     ) -> None:
-        super().__init__(model, id)
+        super().__init__(model, id, name=name)
         self.host = host.rstrip("/")
         self.api_key = api_key
+
+    def _register_path(self) -> str:
+        """The install route, carrying the name as a query parameter when there is one."""
+        from urllib.parse import quote
+
+        path = f"/v1/nnsight/register/{self.id}"
+        if self.name is not None:
+            path += f"?name={quote(self.name, safe='')}"
+        return path
 
     def _post(self, path: str, content: bytes = b"") -> None:
         import httpx
@@ -250,10 +269,10 @@ class ServeRegistration(Registration):
             )
 
     def install(self, payload: bytes) -> None:
-        self._post(f"/v1/nnsight/register/{self.id}", payload)
+        self._post(self._register_path(), payload)
 
     async def ainstall(self, payload: bytes) -> None:
-        await self._apost(f"/v1/nnsight/register/{self.id}", payload)
+        await self._apost(self._register_path(), payload)
 
     def uninstall(self) -> None:
         self._post(f"/v1/nnsight/register/{self.id}/clear")
@@ -263,7 +282,8 @@ class ServeRegistration(Registration):
 
     def __repr__(self) -> str:
         state = "cleared" if self.cleared else "active"
-        return f"<Registration {self.id} on {self.host} ({state})>"
+        name = f" {self.name!r}" if self.name is not None else ""
+        return f"<Registration{name} {self.id} on {self.host} ({state})>"
 
 
 class RegisteringTracer(VLLMTracer):
@@ -284,12 +304,15 @@ class RegisteringTracer(VLLMTracer):
         backend: Backend | None = None,
         serve: str | None = None,
         api_key: str | None = None,
+        name: str | None = None,
     ) -> None:
         super().__init__(model, "__call__", backend=backend)
         self._model = model
         # Where the block goes: this process's engine, or an nnsight-serve one.
         self._serve = serve
         self._api_key = api_key
+        # What requests address it by, if anything. See `VLLM.edit`.
+        self._name = name
         self.registration: Registration | None = None
         # Set by `execute`, sent by whichever exit ran.
         self._payload: bytes | None = None
@@ -303,9 +326,9 @@ class RegisteringTracer(VLLMTracer):
         id = f"registration-{uuid.uuid4().hex}"
         if self._serve is not None:
             return ServeRegistration(
-                self._model, id, self._serve, api_key=self._api_key
+                self._model, id, self._serve, api_key=self._api_key, name=self._name
             )
-        return Registration(self._model, id)
+        return Registration(self._model, id, name=self._name)
 
     def __enter__(self) -> tuple["RegisteringTracer", Registration]:
         """Enter the block, binding the tracer and the handle that ends it.

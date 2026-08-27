@@ -109,8 +109,14 @@ class Request:
         return {name: mediator.lcls[name] for name in saved if name in mediator.lcls}
 
     def deferred(self) -> Optional[dict]:
-        """The trace's deferred error, captured for the client, or None."""
-        return self.error if self.mediator is None else getattr(self.mediator, "nnsight_error", None)
+        """The request's deferred error, captured for the client, or None.
+
+        The request's own error first — a block that failed to deserialize, or an
+        ``edits=`` name nothing is installed under — then the traced block's.
+        """
+        if self.error is not None:
+            return self.error
+        return None if self.mediator is None else getattr(self.mediator, "nnsight_error", None)
 
 
 class Requests:
@@ -129,11 +135,16 @@ class Requests:
             still wanted.
         templates: Registration id -> the deserialized block each request's copy
             is built from, so the source is compiled once rather than per request.
+        names: Registration id -> the name it was installed under, or ``None``.
+            A request that names the edits it wants (``extra_args["nnsight_edits"]``)
+            gets copies of those and of every unnamed one; a request that names
+            none gets copies of them all.
     """
 
     def __init__(self) -> None:
         self.requests: dict[str, Request] = {}
         self.templates: dict[str, Any] = {}
+        self.names: dict[str, str | None] = {}
         # Workers whose request is out of the batch (preempted), and the
         # interleaver's counts when that was last noted, so the visits they sit
         # out are subtracted from their own count (see `scope`).
@@ -142,13 +153,21 @@ class Requests:
         # Rows in this step's batch, for `unflatten`.
         self.nrows = 0
 
-    def register(self, registration_id: str, payload: bytes, persistent_objects: dict) -> None:
+    def register(
+        self,
+        registration_id: str,
+        payload: bytes,
+        persistent_objects: dict,
+        name: str | None = None,
+    ) -> None:
         """Take a block the engine should run for every request from now on."""
         self.templates[registration_id] = loads(payload, persistent_objects=persistent_objects)
+        self.names[registration_id] = name
 
     def unregister(self, registration_id: str) -> None:
         """Stop running a block and forget anything it has not handed back."""
         self.templates.pop(registration_id, None)
+        self.names.pop(registration_id, None)
         for request in self.requests.values():
             request.copies.pop(registration_id, None)
             request.harvested.pop(registration_id, None)
@@ -174,11 +193,31 @@ class Requests:
             if data.req_id in self.requests:
                 continue
             request = self.requests[data.req_id] = Request(data.req_id)
+            extra_args = getattr(data.sampling_params, "extra_args", None) or {}
+            # Which installed blocks this request runs: all of them, unless it
+            # named the ones it wants — then those, plus every block installed
+            # without a name. A name nothing is installed under is the request's
+            # error rather than a silent no-op, surfaced at collect like any other.
+            wanted = extra_args.get("nnsight_edits")
+            if wanted is not None:
+                installed = {name for name in self.names.values() if name is not None}
+                unknown = [name for name in wanted if name not in installed]
+                if unknown:
+                    request.error = capture_exception(
+                        ValueError(
+                            f"edits={list(wanted)!r} names {unknown!r}, but no edit "
+                            f"is installed under that name (installed: "
+                            f"{sorted(installed)!r}). Install it with "
+                            "model.edit(name=...), or drop it from the list."
+                        )
+                    )
             for registration_id, template in self.templates.items():
+                name = self.names.get(registration_id)
+                if wanted is not None and name is not None and name not in wanted:
+                    continue
                 copy = Mediator(template.code, template.glbls, dict(template.lcls))
                 copy.presaved = set(template.presaved)
                 request.copies[registration_id] = copy
-            extra_args = getattr(data.sampling_params, "extra_args", None) or {}
             if "nnsight_mediator" not in extra_args:
                 continue
             try:
@@ -816,16 +855,18 @@ class NNsightGPUModelRunner(GPUModelRunner):
     # Worker-side RPC entry points (called by name via collective_rpc)
     # ------------------------------------------------------------------
 
-    def nnsight_register(self, registration_id: str, payload: bytes) -> None:
+    def nnsight_register(
+        self, registration_id: str, payload: bytes, name: str | None = None
+    ) -> None:
         """Keep a block and run it for every request from now on.
 
         See [`nnsight.modeling.vllm.registration`][nnsight.modeling.vllm.registration].
         Runs on all ranks, so every rank builds the same per-request copies and
         their reads stay in lockstep — which is what a sharded model's gathers
-        need.
+        need. ``name`` is what requests may address it by (``edits=[...]``).
         """
         self.nnsight_requests.register(
-            registration_id, payload, self.nnsight_persistent_objects
+            registration_id, payload, self.nnsight_persistent_objects, name=name
         )
 
     def nnsight_clear_registered(self, registration_id: str) -> None:

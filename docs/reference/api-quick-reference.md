@@ -102,7 +102,8 @@ Deprecated aliases (warn; use the `tracer.*` forms): `model.iter`, `model.all()`
 | `model.logits` | `VLLM` | This request's pre-sampling logits for the step. |
 | `model.samples` | `VLLM` | The token ids the sampler drew for the step, `[1, 1]` for one sequence. |
 | `model.logits_processor(model.lm_head, h)` | `VLLM` | The unembed on vLLM (a logit lens); `model.lm_head(h)` raises. |
-| `model.edit` | `VLLM` | `with model.edit() as (tracer, edit):` — install a block on the engine, run for *every* request it handles; values arrive on `output.saves`. `edit.clear()` / `model.clear_edits()` stop it. Needs `enable_prefix_caching=False`. |
+| `model.edit` | `VLLM` | `with model.edit(name=None) as (tracer, edit):` — install a block on the engine, run for *every* request it handles; values arrive on `output.saves`. `edit.clear()` / `model.clear_edits()` stop it. Needs `enable_prefix_caching=False`. |
+| `edits=[...]` | `VLLM` | On `trace`/`invoke`/plain `generate`: run only the edits installed under these names, plus every unnamed edit. Omitted = all. |
 
 ## Top-level functions
 

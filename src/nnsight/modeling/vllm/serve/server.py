@@ -54,6 +54,9 @@ def set_model(model: "VLLM") -> None:
     """Register the dispatched engine the server runs traces on."""
     global _model, _persistent_objects
     _model = model
+    # Edits reach this engine over HTTP, not through model.edit(), so the
+    # client-side edit-name check has nothing to consult here; the worker checks.
+    model._serving = True
     _persistent_objects = model._remoteable_persistent_objects()
 
 
@@ -102,14 +105,18 @@ async def health() -> dict:
 
 
 @app.post("/v1/nnsight/register/{registration_id}")
-async def register(registration_id: str, request: Request) -> dict:
+async def register(
+    registration_id: str, request: Request, name: Optional[str] = None
+) -> dict:
     """Install a block on this server's engine, to run for every request it handles.
 
     Body: the serialized block ``model.edit(serve=url)`` prepared on the client.
     The client has no engine to ``collective_rpc`` into, so the install comes
     over HTTP and this hands it to every rank — the same call the in-process form
     makes. What the block saves rides the output of the request it ran on, so a
-    serve client reads it through ``tracer.result``.
+    serve client reads it through ``tracer.result``. ``?name=`` is the name
+    requests may address the edit by (``trace(..., edits=[name])``); without it
+    the edit runs for every request.
     """
     model = _ready()
 
@@ -125,12 +132,12 @@ async def register(registration_id: str, request: Request) -> dict:
     payload = await request.body()
     try:
         await model.vllm_entrypoint.collective_rpc(
-            "nnsight_register", args=(registration_id, payload)
+            "nnsight_register", args=(registration_id, payload, name)
         )
     except Exception as exception:
         logger.exception("Failed to install edit %s", registration_id)
         raise HTTPException(status_code=400, detail=str(exception))
-    return {"status": "ok", "id": registration_id}
+    return {"status": "ok", "id": registration_id, "name": name}
 
 
 @app.post("/v1/nnsight/register/{registration_id}/clear")
