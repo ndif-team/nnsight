@@ -136,3 +136,75 @@ def test_enforce_eager_contradicting_taps_is_refused():
         VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True, taps=["transformer.h.*.output"], enforce_eager=True)
     with pytest.raises(ValueError, match="enforce_eager=False contradicts taps"):
         VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True, enforce_eager=False)
+
+
+# --- taps on operations inside a forward (`.source`) ---------------------------
+
+
+@pytest.fixture(scope="module")
+def vllm_gpt2_source_taps():
+    from nnsight.modeling.vllm import VLLM
+
+    if GPU_COUNT < 1:
+        pytest.skip("vLLM tests need a GPU")
+    return VLLM(
+        "gpt2",
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.1,
+        dispatch=True,
+        taps=["transformer.h.3.attn.source.qkv_chunk_0.output", "transformer.h.*.output"],
+    )
+
+
+def test_source_tap_resolves(vllm_gpt2_source_taps):
+    assert "model.transformer.h.3.attn.source.qkv_chunk_0.output" in vllm_gpt2_source_taps.taps
+    assert "model.transformer.h.3.output" in vllm_gpt2_source_taps.taps
+
+
+@torch.no_grad()
+def test_source_tap_read_matches_eager(vllm_gpt2_source_taps, vllm_gpt2, ET_prompt):
+    """The op's value on replay is the eager engine's value."""
+    with vllm_gpt2_source_taps.trace(ET_prompt, temperature=0.0, top_p=1):
+        tapped = vllm_gpt2_source_taps.transformer.h[3].attn.source.qkv_chunk_0.output[0].clone().save()
+    with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+        eager = vllm_gpt2.transformer.h[3].attn.source.qkv_chunk_0.output[0].clone().save()
+
+    assert tapped.shape == eager.shape and tapped.shape[-1] == 768
+    assert torch.allclose(tapped.float(), eager.float(), atol=1e-2, rtol=1e-2)
+
+
+@torch.no_grad()
+def test_source_tap_per_step_under_iter(vllm_gpt2_source_taps, MSG_prompt):
+    with vllm_gpt2_source_taps.trace(MSG_prompt, temperature=0.0, max_tokens=4, ignore_eos=True) as tracer:
+        qs = list().save()
+        for _ in tracer.iter[:4]:
+            qs.append(vllm_gpt2_source_taps.transformer.h[3].attn.source.qkv_chunk_0.output[0][-1].clone())
+        result = tracer.result.save()
+
+    assert len(qs) == 4 and all(q.shape == (768,) for q in qs)
+    assert not torch.equal(qs[1], qs[2])
+    assert len(result.outputs[0].token_ids) == 4
+
+
+@torch.no_grad()
+def test_source_tap_in_place_edit_lands(vllm_gpt2_source_taps, ET_prompt):
+    """Zeroing q at the op changes what the engine predicts."""
+    model = vllm_gpt2_source_taps
+    with model.trace(ET_prompt, temperature=0.0, top_p=1):
+        plain = model.logits.clone().save()
+    with model.trace(ET_prompt, temperature=0.0, top_p=1):
+        model.transformer.h[3].attn.source.qkv_chunk_0.output[0][:] = 0
+        edited = model.logits.clone().save()
+
+    assert not torch.allclose(plain.float(), edited.float())
+
+
+def test_source_tap_on_a_missing_op_is_refused():
+    """The op is checked when the worker loads, so a typo is a load error, not a parked request."""
+    from nnsight.modeling.vllm import VLLM
+
+    if GPU_COUNT < 1:
+        pytest.skip("vLLM tests need a GPU")
+    with pytest.raises(Exception):
+        VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True,
+             taps=["transformer.h.3.attn.source.nope_0.output"])
