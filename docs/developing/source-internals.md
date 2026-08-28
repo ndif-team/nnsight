@@ -14,8 +14,8 @@ Module `input`/`output` are the only two locations the forward *hooks* surface.
 Everything in between — the individual operations a `forward` performs — is
 invisible to them, because an operation isn't a submodule with its own hook.
 `.source` makes those intermediates observable, editable, and skippable. This doc
-covers the AST instrumentation (`_Instrument`), the per-module controller and
-`__nnsight_op__`, the `_State` object keyed on interleavers, the `Source` /
+covers the AST instrumentation (`Instrument`), the per-module controller and
+`__nnsight_op__`, the `State` object keyed on interleavers, the `Source` /
 `SourceEnvoy` user views, and recursive `.source`.
 
 The whole-forward view is `Source`; the single-operation view is `SourceEnvoy`, whose
@@ -66,33 +66,60 @@ It does this in two steps:
 2. At run time `__nnsight_op__` brackets the call with `handle` on its `.input`
    (before) and `.output` (after) — both readable/replaceable — plus a `.skip` gate
    that can bypass the call.
+3. Rewrite every assignment `x = value` into
+   `x = __nnsight_op__("source.x_{n}", __nnsight_bind__, value)` — the same
+   bracket around an identity (`bind`), so a value that is not a call's return (a
+   product, a loop's running state) is addressable by the name the forward gives
+   it. Tuple-literal unpacking gets one op per name; chained and augmented
+   assignments are left alone.
 
 Op naming: `name` is the called function's dotted path joined with `_`
 (`self.act(...)` → `self_act`, `torch.relu(...)` → `torch_relu`, `dropout(...)` →
 `dropout`); `n` is a per-name counter in **execution order** — nested calls run
 inner-first, so the inner call is `_0`, matching the order the interleaver serves
-values.
+values. Assignments are `{target}_{n}` on the same counter (`out[:, i] = v` →
+`out_n`, `self.buf = v` → `self_buf_n`), so a name bound and then called is
+`_0` at the binding and `_1` at the call (`attention_interface_1` is GPT-2's
+attention call).
 
 ## Instrumentation (compile time)
 
-`_Instrument(ast.NodeTransformer)` (`source.py:132`) is the AST rewriter.
+`Instrument(ast.NodeTransformer)` (`source.py:132`) is the AST rewriter.
 
-- `_op_name(call)` (`:147`) builds the op name from the whole dotted attribute
-  chain joined with `_`.
+- `dotted(expr)` walks an attribute chain (skipping subscripts) to build both call
+  names and assignment-target names, joined with `_`; `wrap` numbers and emits the op.
 - `visit_Call(node)` (`:170`) calls `generic_visit` **first** (so inner calls are
   numbered before outer ones), then rewrites the node to
   `__nnsight_op__("source.<label>", node.func, *node.args, **node.keywords)`.
   The inserted `__nnsight_op__` call isn't re-visited, so it's never counted as an op.
 
-`_compile_instrumented(func)` (`source.py:191`) drives compilation and **refuses**
-forwards it can't safely instrument, raising `SourceNotAvailable` (`:67`) for:
+`compile_source(func)` drives compilation and raises `SourceNotAvailable`
+only when there is nothing to parse: a builtin/C function (no `__code__`) or
+unrecoverable source (`inspect.getsourcelines` fails). Source is read from the
+**code object**, not the function — given a `functools.wraps` wrapper, `inspect`
+follows `__wrapped__` and hands back the decorated function's source instead.
 
-- a builtin/C function (no `__code__`),
-- a closure (`co_freevars` present),
-- unrecoverable source (`inspect.getsourcelines` fails),
-- a **decorated** definition — `SourceNotAvailable("decorated callable is not
-  supported")`. A decorator is load-bearing and dropping it would change behavior, so
-  the forward is refused rather than instrumented without it.
+A function with free variables — a decorator's wrapper, a `forward` that calls
+`super()` — is compiled inside a shell function whose parameters are the free
+names, so they compile as free variables again rather than as globals, and
+`instrument` attaches the original closure cells to the new function (matched
+by name; the shell can order them differently). Every function goes through the
+shell — with no free variables it simply has no parameters.
+
+Decorators are handled by `instrument`, the one entry point `install_source` and
+recursive `.source` share. `decorator_chain` peels wrappers with `peel_index`,
+which parses the wrapper's own source for the free names it *calls directly* and
+peels through the one cell holding a Python function. A wrapper that doesn't
+call what it closes over is not peeled: transformers' `use_experts_implementation`
+wrapper hands `original_forward` to a lookup and calls the result, and peeling it
+would instrument an eager loop that never runs (the ops would sit dead and every
+request would be "out of order"). Instrumented as it is, its ops are the dispatch,
+and drilling into the dispatch op reaches whichever implementation ran. Two
+called functions are ambiguous and get the same treatment. `rewrap` rebuilds
+peeled wrappers around the instrumented function with fresh closures — the
+wrapper is the class's attribute, shared by every instance in the process. A
+bare `super()` is never wrapped as an op: it reads `__class__` off the calling
+frame, which inside `__nnsight_op__` is the wrong one.
 
 Each rewritten call copies the original call's source location onto its wrapper node
 (`ast.copy_location`), so `ast.increment_lineno` then shifts everything to file
@@ -102,17 +129,17 @@ compiles the module and lifts the child code object whose `co_name == func.__nam
 result is a `Compiled` NamedTuple (`:71`): `code`, `names` (op labels in execution
 order), `lines` (label → 1-based line, for the repr), and `source`.
 
-`_compiled(func)` (`source.py:241`) memoizes this keyed on `func.__code__` in
-`_FORWARD_CACHE`, caching failures too, so compiling the instrumented forward is a
+`compiled(func)` (`source.py:241`) memoizes this keyed on `func.__code__` in
+`FORWARD_CACHE`, caching failures too, so compiling the instrumented forward is a
 one-time cost per forward per process.
 
-## `_State` — keyed on interleavers, not one envoy
+## `State` — keyed on interleavers, not one envoy
 
 Per-module source/skip state lives at `module.__dict__["__nnsight__"]` (the
-`_STATE` key) as a `_State` (`source.py:80`):
+`STATE` key) as a `State` (`source.py:80`):
 
 ```python
-class _State:
+class State:
     __slots__ = ("interleavers", "body", "sourced")
     def __init__(self, body):
         self.interleavers = weakref.WeakKeyDictionary()  # interleaver -> path string
@@ -136,45 +163,45 @@ here — it's queried live through the interleaver's `.skip` gate.
 The first time a module is sourced or skipped, its `forward` is replaced —
 permanently and inertly — by a controller closure.
 
-`_make_controller(module)` (`source.py:362`):
+`make_controller(module)` (`source.py:362`):
 
 ```python
 @functools.wraps(original)   # keeps the signature; generate() introspects it
 def controller(*args, **kwargs):
-    state = module_ref().__dict__[_STATE]
+    state = module_ref().__dict__[STATE]
     interleaver, path = state.active()
     if interleaver is None:                       # outside a trace: pass through
         return state.body(module, *args, **kwargs)
-    skipped = _skipped(interleaver, path)         # module-level .skip gate
-    if skipped is not _NO_SKIP:
+    skipped = skipped(interleaver, path)         # module-level .skip gate
+    if skipped is not NO_SKIP:
         return skipped
     return state.body(module, *args, **kwargs)
 ```
 
 `state.body` is the **unbound** forward (original or instrumented), so the
-controller passes `module` explicitly. It reads live `_State` every call, so
+controller passes `module` explicitly. It reads live `State` every call, so
 re-wrapping and multiple wrappers just work. It's installed via `install_controller`
 (`source.py:392`), which stores the controller under `module.__dict__["forward"]`
 (shadowing the class method for `nn.Module.__call__`) and, on every access,
 `state.register(envoy.interleaver, envoy.path)`.
 
 `__nnsight_op__` is the name bound into each instrumented forward's globals. It's
-built per module by `_make_op` (`source.py:302`):
+built per module by `make_op` (`source.py:302`):
 
 ```python
 def op(location, fn, *args, **kwargs):
-    interleaver, path = module_ref().__dict__[_STATE].active()
+    interleaver, path = module_ref().__dict__[STATE].active()
     if interleaver is None:
         return fn(*args, **kwargs)               # fast path: not interleaving
-    return _run_op(interleaver, f"{path}.{location}", fn, args, kwargs)
+    return run_op(interleaver, f"{path}.{location}", fn, args, kwargs)
 ```
 
-`_run_op` (`source.py:271`) is the bracket:
+`run_op` (`source.py:271`) is the bracket:
 
 ```python
 args, kwargs = interleaver.handle(f"{base}.input", (args, kwargs))
-skipped = _skipped(interleaver, base)
-if skipped is not _NO_SKIP:
+skipped = skipped(interleaver, base)
+if skipped is not NO_SKIP:
     return interleaver.handle(f"{base}.output", skipped)   # skipped: don't call fn
 if base in interleaver.sourced:                            # recursive .source drill-in
     interleaver.handle(f"{base}.fn", fn)
@@ -194,7 +221,7 @@ the controller and `op` call straight through — one weakref deref, one dict re
 nothing.
 
 `install_source(envoy)` (`source.py:414`) builds the instrumented forward once
-(`FunctionType(compiled.code, {**globals, OP: _make_op(module)}, ...)`), sets it as
+(`FunctionType(compiled.code, {**globals, OP: make_op(module)}, ...)`), sets it as
 `state.body`, and flips `state.sourced = True`. `install_controller(envoy)` (`source.py:437`)
 just installs the controller (no source needed to skip a whole module).
 
@@ -211,7 +238,7 @@ place before `nn.Module.__call__` binds `forward`, which is what lets a skip rea
 the module's own input first.
 
 On dispatch, `_update` re-runs `instrument` against the newly loaded module, so the
-real module gets its own controller and `_State` — the meta module's don't carry over.
+real module gets its own controller and `State` — the meta module's don't carry over.
 
 ## The user views
 
@@ -256,9 +283,9 @@ with model.trace("hi"):
 Mechanics: it marks the op requested (`interleaver.sourced[self.path] = None`), parks
 via `Mediator.value(f"{self.path}.fn")` to receive the live callable from the model
 side, rejects submodules (`SourceNotAvailable` — call `.source` on the submodule
-directly instead), then compiles + builds an instrumented copy bound to a nested op
-(`_make_nested_op`, `source.py:323`) and caches `(instrumented, compiled)`. On the
-model side, `_run_op`'s `interleaver.sourced` branch swaps that instrumented copy in
+directly instead), then builds an instrumented copy via `instrument` with an op located at the
+drilled path (`make_op`) and caches `(instrumented, compiled)`. On the
+model side, `run_op`'s `interleaver.sourced` branch swaps that instrumented copy in
 so subsequent calls run the drilled-in version.
 
 ## Gotchas
@@ -269,14 +296,16 @@ so subsequent calls run the drilled-in version.
 - **Prefer whole-value assignment over an in-place slice into a tuple element.**
   Set `module.output = x` (or an op's `.output`) rather than mutating a narrowed
   view across a barrier.
-- **Decorated / builtin / closure forwards can't be sourced** — you'll get
-  `SourceNotAvailable`. Access `.output`/`.input` on the module (or on a real
-  submodule) instead.
+- **Builtin / C forwards can't be sourced** — you'll get `SourceNotAvailable`.
+  Access `.output`/`.input` on the module (or on a real submodule) instead.
+- **A dispatching wrapper shows its dispatch, not the body it wraps.** Drill into
+  the dispatch op (`experts_forward_1.source`) for the implementation that ran.
+- **Assignment ops have no callee.** `x_0.source` raises `SourceNotAvailable`.
 
 ## Key files
 
-- `src/nnsight/intervention/source.py` — `_Instrument` (`:132`), `Compiled` (`:71`),
-  `_State` (`:80`), `_make_controller` (`:362`), `_make_op` (`:302`), `_run_op`
+- `src/nnsight/intervention/source.py` — `Instrument` (`:132`), `Compiled` (`:71`),
+  `State` (`:80`), `make_controller` (`:362`), `make_op` (`:302`), `run_op`
   (`:271`), `install_source` (`:414`), `Source` (`:659`), `SourceEnvoy` (`:448`,
   with its `.output`/`.input`/`.inputs` eproperties at `:550`/`:565`/`:581`)
 - `src/nnsight/intervention/interleaver.py` — `Event` (`:56`), `Mediator` (`:93`),

@@ -568,7 +568,7 @@ class Envoy:
             >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
             >>> print(model.transformer.h[0].attn.source)   # list the operations
             >>> with model.trace("Hello World"):
-            ...     attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
+            ...     attn = model.transformer.h[0].attn.source.attention_interface_1.output.save()
 
         Returns:
             A [`Source`][nnsight.intervention.source.Source] exposing operation-level access.

@@ -221,7 +221,7 @@ Only `torch.nn.Module` components are wrapped as envoys — the **scheduler is n
 - **`.trace()` defaults to `num_inference_steps=1`; `.generate()` uses the pipeline's default** (which may be large). Pass `num_inference_steps=N` to either to override.
 - **Per-invoke pipeline result objects aren't supported in a batched trace.** Read component tensors (e.g. `sd.unet.output[0]`) inside `tracer.invoke(...)` blocks, not `sd.output`.
 - **Scheduler / non-module components are not Envoy-wrapped.** Do scheduler swaps on `model.pipeline` pre-trace.
-- **Op-level `.source` may be unavailable** on a UNet whose forward closes over free variables (`SourceNotAvailable`) — see `tests/test_diffusion.py:95`.
+- **Op-level `.source` raises `SourceNotAvailable`** only when a forward has no Python source to instrument (a builtin or C function); decorated and closure forwards are instrumented — see [source.md](../usage/source.md).
 - **UNet output shape varies.** With `return_dict=False` it's a tuple; use `sd.unet.output[0]`.
 - **Remote:** diffusion models are not deployed on NDIF as of this writing.
 

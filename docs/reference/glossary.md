@@ -84,7 +84,7 @@ Bypass a module's (or operation's) forward, using a replacement as its output �
 
 ## source (source tracing)
 
-Operation-level access inside a module's forward. `envoy.source` returns a `Source` (`src/nnsight/intervention/source.py`) that decomposes the forward into named operations `{callable}_{occurrence}` (`fc1_0`, `relu_0`, `relu_1`, ...). Indexing one (`envoy.source.relu_0`) gives a `SourceEnvoy` with the same `.input` / `.inputs` / `.output` / `.skip` / `.source` interface as an `Envoy` — one level finer. `print(envoy.source)` renders the forward with each op labelled; `.source` on a `SourceEnvoy` drills recursively into a called function. Requesting an op on an unrecoverable forward raises `SourceNotAvailable`.
+Operation-level access inside a module's forward. `envoy.source` returns a `Source` (`src/nnsight/intervention/source.py`) that decomposes the forward into named operations `{callable}_{occurrence}` (`fc1_0`, `relu_0`, `relu_1`, ...) and `{target}_{occurrence}` for each assignment (`h_0`). Indexing one (`envoy.source.relu_0`) gives a `SourceEnvoy` with the same `.input` / `.inputs` / `.output` / `.skip` / `.source` interface as an `Envoy` — one level finer. `print(envoy.source)` renders the forward with each op labelled; `.source` on a `SourceEnvoy` drills recursively into a called function. Requesting an op on a forward with no Python source (a builtin) raises `SourceNotAvailable`; decorated forwards are peeled or instrumented as they are.
 
 ## Tracer
 

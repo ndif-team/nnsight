@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from nnsight.intervention.envoy import Envoy
 from nnsight.intervention.interleaver import OutOfOrderError
-from nnsight.intervention.source import _STATE, SourceNotAvailable
+from nnsight.intervention.source import STATE, SourceNotAvailable
 
 
 class MLP(nn.Module):
@@ -44,7 +44,8 @@ class Decorated(nn.Module):
 
 
 def _opaque(func):
-    """A decorator that doesn't use functools.wraps, so it can't be peeled."""
+    """A decorator without functools.wraps: no __wrapped__, but the wrapper calls
+    the function it closes over, which is what identifies it."""
 
     def wrapper(*args, **kwargs):
         return func(*args, **kwargs)
@@ -58,6 +59,144 @@ class OpaquelyDecorated(nn.Module):
         return torch.relu(x) + 1
 
 
+def _fused(self, x):
+    return torch.neg(x)
+
+
+IMPLEMENTATIONS = {"fused": _fused}
+
+
+def _dispatching(func):
+    """A wrapper that hands the function it closes over to a lookup and calls the
+    result (the shape of transformers' experts wrapper): it never calls `func`
+    itself, so peeling it would instrument code that may not run."""
+
+    def forward(self, *args, **kwargs):
+        implementation = IMPLEMENTATIONS.get(self.implementation) or func
+        return implementation(self, *args, **kwargs)
+
+    return forward
+
+
+class Dispatched(nn.Module):
+    implementation = "fused"
+
+    @_dispatching
+    def forward(self, x):
+        return torch.relu(x)
+
+
+def _negate(x):
+    return torch.neg(x)
+
+
+def _around(func, before=_negate):
+    """Two closed-over Python functions are both called: which one is the
+    decorated function is ambiguous, so the wrapper is instrumented as it is."""
+
+    def wrapper(self, x):
+        return func(self, before(x))
+
+    return wrapper
+
+
+class Ambiguous(nn.Module):
+    @_around
+    def forward(self, x):
+        return torch.relu(x)
+
+
+class Base(nn.Module):
+    def forward(self, x):
+        return torch.relu(x)
+
+
+class Sub(Base):
+    """super() makes forward a closure over __class__."""
+
+    def forward(self, x):
+        return torch.neg(super().forward(x))
+
+
+def _wraps(func):
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+@_wraps
+def relu_wrapped(x):
+    return torch.relu(x)
+
+
+class CallsWrapped(nn.Module):
+    """forward calls a decorated module-level helper."""
+
+    def forward(self, x):
+        return relu_wrapped(x)
+
+
+class Products(nn.Module):
+    """Values that are never a call's return: products, sums, slices, a loop state."""
+
+    def forward(self, x):
+        s = x * 2
+        s = s + 1
+        a, b = s * 2, s * 3
+        out = torch.zeros_like(x)
+        out[:, 0] = a[:, 0] + b[:, 0]
+        self.last = out
+        return out
+
+
+class Running(nn.Module):
+    """A state carried through a Python loop, as in a recurrent kernel."""
+
+    def forward(self, x):
+        s = torch.zeros_like(x)
+        for _ in range(3):
+            s = s * 0.5 + x
+        return s
+
+
+class Chained(nn.Module):
+    def forward(self, x):
+        a = b = torch.relu(x)
+        return a + b
+
+
+def _apply(func, *args):
+    return func(*args)
+
+
+def _indirect(func):
+    """functools.wraps, but the function runs through a helper rather than by
+    name, so nothing in the wrapper's source says which closed-over function is
+    the decorated one."""
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(self, x):
+        return _apply(func, self, x)
+
+    return wrapper
+
+
+class Indirect(nn.Module):
+    @_indirect
+    def forward(self, x):
+        return torch.relu(x)
+
+
+class Rooted(nn.Module):
+    def forward(self, x):
+        return x[0].exp() + (x * 2).sum()
+
+
 @pytest.fixture
 def x():
     return torch.randn(2, 8)
@@ -66,8 +205,8 @@ def x():
 class TestListing:
     def test_lists_operations_in_execution_order(self):
         envoy = Envoy(MLP())
-        # fc1 runs, then relu wrapping it, then fc2.
-        assert list(envoy.source._names) == ["self_fc1_0", "torch_relu_0", "self_fc2_0"]
+        # fc1 runs, then relu wrapping it, then h is bound, then fc2.
+        assert list(envoy.source.names) == ["self_fc1_0", "torch_relu_0", "h_0", "self_fc2_0"]
 
     def test_repr_lists_operations(self):
         envoy = Envoy(MLP())
@@ -96,8 +235,8 @@ class TestListing:
 
     def test_repeated_op_gets_distinct_occurrences(self):
         envoy = Envoy(Repeated())
-        assert "torch_relu_0" in envoy.source._names
-        assert "torch_relu_1" in envoy.source._names
+        assert "torch_relu_0" in envoy.source.names
+        assert "torch_relu_1" in envoy.source.names
 
     def test_unknown_operation_raises_with_available(self):
         envoy = Envoy(MLP())
@@ -109,7 +248,7 @@ class TestListing:
         # transformers wraps nearly every forward, so rejecting decorated ones
         # left .source unusable on real models. They are peeled and rebuilt now.
         envoy = Envoy(Decorated())
-        assert "torch_relu_0" in envoy.source._names
+        assert "torch_relu_0" in envoy.source.names
 
     def test_rebuilt_decorator_still_applies(self, x):
         # The decorator is load-bearing (@torch.no_grad); peeling without
@@ -124,12 +263,69 @@ class TestListing:
         assert not captured.requires_grad
         assert torch.allclose(out, model(x))
 
-    def test_unpeelable_decorated_forward_rejected(self):
-        # No functools.wraps means no __wrapped__ to follow, so the decorator
-        # can't be rebuilt and dropping it would change behaviour silently.
-        envoy = Envoy(OpaquelyDecorated())
-        with pytest.raises(SourceNotAvailable):
-            envoy.source
+    def test_opaque_decorator_peeled_through_its_call(self, x):
+        # No functools.wraps, so no __wrapped__ to follow; the wrapper's own source
+        # shows it calls the function it closes over, which is what gets peeled.
+        model = OpaquelyDecorated()
+        envoy = Envoy(model)
+        assert "torch_relu_0" in envoy.source.names
+        with envoy.trace(x):
+            captured = nnsight.save(envoy.source.torch_relu_0.output)
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(captured, torch.relu(x))
+        assert torch.allclose(out, model(x))
+
+    def test_dispatching_wrapper_is_not_peeled(self, x):
+        # The wrapper hands `func` to a lookup and calls the result, so the eager
+        # body it closes over may never run. Instrumenting the wrapper itself keeps
+        # its closure and exposes the call that does run — drill into that.
+        model = Dispatched()
+        envoy = Envoy(model)
+        names = envoy.source.names
+        assert "implementation_1" in names and "torch_relu_0" not in names
+        with envoy.trace(x):
+            fused = nnsight.save(envoy.source.implementation_1.source.torch_neg_0.output)
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(fused, torch.neg(x)) and torch.allclose(out, torch.neg(x))
+
+        model.implementation = "eager"  # falls back to the decorated forward
+        with envoy.trace(x):
+            eager = nnsight.save(envoy.source.implementation_1.source.torch_relu_0.output)
+        assert torch.allclose(eager, torch.relu(x))
+
+    def test_ambiguous_wrapper_instrumented_with_closure(self, x):
+        model = Ambiguous()
+        envoy = Envoy(model)
+        assert list(envoy.source.names) == ["before_0", "func_0"]
+        with envoy.trace(x):
+            inner = nnsight.save(envoy.source.func_0.source.torch_relu_0.output)
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(inner, torch.relu(torch.neg(x)))
+        assert torch.allclose(out, model(x))
+
+    def test_indirect_wrapper_is_not_peeled(self, x):
+        # __wrapped__ alone doesn't identify the decorated function; the wrapper
+        # is instrumented with its closure and the helper call is the op to drill.
+        model = Indirect()
+        envoy = Envoy(model)
+        assert list(envoy.source.names) == ["_apply_0"]
+        with envoy.trace(x):
+            inner = nnsight.save(envoy.source._apply_0.source.func_0.source.torch_relu_0.output)
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(inner, torch.relu(x)) and torch.allclose(out, model(x))
+
+    def test_call_on_subscript_keeps_its_root(self):
+        # `x[0].exp()` is named from x; `(x * 2).sum()` has no name to root in.
+        assert list(Envoy(Rooted()).source.names) == ["x_exp_0", "sum_0"]
+
+    def test_super_forward_is_instrumented(self, x):
+        # super() makes forward close over __class__; the cell is carried across.
+        envoy = Envoy(Sub())
+        with envoy.trace(x):
+            base = nnsight.save(envoy.source.forward_0.output)
+            out = nnsight.save(envoy.source.torch_neg_0.output)
+        assert torch.allclose(base, torch.relu(x))
+        assert torch.allclose(out, torch.neg(torch.relu(x)))
 
 
 class TestCapture:
@@ -258,6 +454,70 @@ class TestEditing:
         assert torch.allclose(captured["out"], model.fc2(zeros))
 
 
+class TestAssignments:
+    """Every `name = value` is an operation `name_n`, so values that are not a
+    call's return — products, slices, a loop's running state — are addressable."""
+
+    def test_listed_alongside_calls(self):
+        names = list(Envoy(Products()).source.names)
+        assert names == [
+            "s_0",             # s = x * 2
+            "s_1",             # s = s + 1
+            "a_0", "b_0", # a, b = s * 2, s * 3 — one op per name
+            "torch_zeros_like_0", "out_0",
+            "out_1",           # out[:, 0] = ... — the value stored, under the target's name
+            "self_last_0",     # self.last = out
+        ]
+        text = repr(Envoy(Products()).source)
+        assert "s_1" in text and "self_last_0" in text
+
+    def test_capture(self, x):
+        envoy = Envoy(Products())
+        with envoy.trace(x):
+            s0 = nnsight.save(envoy.source.s_0.output)
+            s1 = nnsight.save(envoy.source.s_1.output)
+            b = nnsight.save(envoy.source.b_0.output)
+            row = nnsight.save(envoy.source.out_1.output)
+        assert torch.allclose(s0, x * 2)
+        assert torch.allclose(s1, x * 2 + 1)
+        assert torch.allclose(b, (x * 2 + 1) * 3)
+        assert torch.allclose(row, (x * 2 + 1)[:, 0] * 5)
+
+    def test_edit_propagates(self, x):
+        model = MLP()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            envoy.source.h_0.output = torch.zeros(2, 8)
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(out, model.fc2(torch.zeros(2, 8)))
+
+    def test_loop_state_per_iteration(self, x):
+        # One assignment inside the loop is one location fired per iteration;
+        # tracer.iter selects the fire, so every intermediate state is reachable.
+        envoy = Envoy(Running())
+        states = []
+        with envoy.trace(x) as tracer:
+            for _ in tracer.iter[:3]:
+                states.append(nnsight.save(envoy.source.s_1.output))
+        s = torch.zeros_like(x)
+        for expected in states:
+            s = s * 0.5 + x
+            assert torch.allclose(expected, s)
+
+    def test_loop_state_edit(self, x):
+        envoy = Envoy(Running())
+        with envoy.trace(x) as tracer:
+            for _ in tracer.iter[1]:
+                envoy.source.s_1.output = torch.zeros_like(x)
+            out = nnsight.save(envoy.output)
+        # state zeroed after the second iteration, then one more step
+        assert torch.allclose(out, x)
+
+    def test_chained_assignment_left_alone(self):
+        names = list(Envoy(Chained()).source.names)
+        assert names == ["torch_relu_0"]
+
+
 class NestedMLP(nn.Module):
     def __init__(self):
         super().__init__()
@@ -349,7 +609,7 @@ class TestInstall:
             envoy.source.torch_relu_0.output
         # The instrumented forward stays installed (permanent, module-cached).
         assert "forward" in model.__dict__
-        assert model.__dict__[_STATE].sourced is True
+        assert model.__dict__[STATE].sourced is True
 
     def test_untraced_inference_matches_reference(self, x):
         model = MLP()
@@ -513,15 +773,29 @@ class TestRecursive:
             nested = envoy.source.relu_double_0.source
             captured["names"] = [op.name for op in nested]
             captured["repr"] = repr(nested)
-        assert captured["names"] == ["torch_relu_0", "torch_add_0"]
+        assert captured["names"] == ["torch_relu_0", "a_0", "torch_add_0", "b_0"]
         assert "torch_relu_0" in captured["repr"] and "torch_add_0" in captured["repr"]
 
     def test_unknown_nested_op_raises(self, x):
         model = Calls()
         envoy = Envoy(model)
-        with pytest.raises(AttributeError, match="available: torch_relu_0, torch_add_0"):
+        with pytest.raises(AttributeError, match="available: torch_relu_0, a_0, torch_add_0, b_0"):
             with envoy.trace(x):
                 envoy.source.relu_double_0.source.nope_0.output
+
+    def test_nested_through_wrapped_helper(self, x):
+        # The helper is a functools.wraps wrapper around the real function; the
+        # drill peels it the same way a module's decorated forward is.
+        envoy = Envoy(CallsWrapped())
+        with envoy.trace(x):
+            inner = nnsight.save(envoy.source.relu_wrapped_0.source.torch_relu_0.output)
+        assert torch.allclose(inner, torch.relu(x))
+
+    def test_assignment_op_cannot_be_drilled(self, x):
+        envoy = Envoy(Calls())
+        with pytest.raises(SourceNotAvailable, match="assignment"):
+            with envoy.trace(x):
+                envoy.source.h_0.source
 
     def test_builtin_target_raises(self, x):
         # torch_relu_0 inside relu_double calls the builtin torch.relu — no source.
@@ -558,9 +832,9 @@ class TestRecursiveIntegration:
         attn = gpt2.transformer.h[0].attn
         captured = {}
         with gpt2.trace("The Eiffel Tower is in"):
-            captured["names"] = attn.source.attention_interface_0.source._compiled.names
+            captured["names"] = attn.source.attention_interface_1.source.compiled.names
             out = nnsight.save(
-                attn.source.attention_interface_0.source.attn_output_transpose_0.output
+                attn.source.attention_interface_1.source.attn_output_transpose_0.output
             )
         assert "attn_output_transpose_0" in captured["names"]
         assert out.shape[0] == 1  # batch
@@ -572,7 +846,7 @@ class TestRecursiveIntegration:
             for _ in tracer.iter[:3]:
                 saved.append(
                     nnsight.save(
-                        attn.source.attention_interface_0.source.attn_output_transpose_0.output
+                        attn.source.attention_interface_1.source.attn_output_transpose_0.output
                     )
                 )
         assert len(saved) == 3

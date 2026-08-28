@@ -58,6 +58,24 @@ Target occurrences across a repeated run with `tracer.iter[...]` (loop form: `fo
 
 `nnsight.apply()`, `nnsight.log()`, `nnsight.local()`, `nnsight.cond()`, `nnsight.iter()`, `nnsight.session()`, and the `nnsight.list/dict/int/...` type wrappers are removed — use plain Python and `model.session()`.
 
+### `.source`: assignments are operations; decorated forwards are instrumented
+
+Every assignment in an instrumented forward is an operation, `{target}_{n}`, on
+the same per-name counter as calls; its `.output` is the assigned value. Values
+that are not a call's return — a product, a loop's running state — are reachable
+by name, one fire per loop iteration. **Labels shift where a forward binds a name
+and then calls it**: GPT-2's attention call is now `attention_interface_1`
+(`attention_interface_0` is the line that chooses the implementation). Requesting
+the old label raises nothing — it returns the assigned value instead — so update
+any code that used it.
+
+Decorated forwards no longer raise `SourceNotAvailable`: a wrapper that calls the
+function it closes over is peeled and rebuilt around the instrumented function; a
+dispatching wrapper (transformers' `experts_implementation`) is instrumented as it
+is and shows the dispatch, so `experts.source.experts_forward_1.source` reaches the
+implementation that ran. Closures and `super()` forwards are instrumented too.
+`SourceNotAvailable` now means only "no Python source" (a builtin or C function).
+
 ## Where to read more
 
 - README: [`../../README.md`](../../README.md)

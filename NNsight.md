@@ -865,7 +865,7 @@ value flowing through the call:
 ```python
 with model.trace("Hello world"):
     attn  = model.transformer.h[0].attn.source
-    inner = attn.attention_interface_0.source            # drill into the call
+    inner = attn.attention_interface_1.source            # drill into the call (_0 is the assignment choosing it)
     scores = inner.attn_output_transpose_0.output.save() # an op inside it
 ```
 

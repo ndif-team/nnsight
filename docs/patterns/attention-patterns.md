@@ -20,8 +20,9 @@ the value-weighted result. To get the probabilities you reach into the attention
 computation with `.source`, which hooks intermediate operations inside the module's
 forward (see `docs/usage/source.md`).
 
-For GPT-2, the relevant operation is `attention_interface_0` — the function call
-that returns `(attn_output, attn_weights)`. Discover it with `print(...source)`.
+For GPT-2, the relevant operation is `attention_interface_1` — the function call
+that returns `(attn_output, attn_weights)` (`attention_interface_0` is the
+assignment that picks the implementation). Discover it with `print(...source)`.
 
 ## When to use
 
@@ -48,9 +49,9 @@ model = TransformersModel(
 prompt = "The cat sat on the"
 
 with model.trace(prompt):
-    # attention_interface_0 returns (attn_output, attn_weights).
+    # attention_interface_1 returns (attn_output, attn_weights).
     attn_out, attn_weights = (
-        model.transformer.h[0].attn.source.attention_interface_0.output.save()
+        model.transformer.h[0].attn.source.attention_interface_1.output.save()
     )
 
 print(attn_weights.shape)                 # [batch, n_heads, q_seq, k_seq]
@@ -67,7 +68,7 @@ Discover the operation name by printing `.source` (works outside a trace):
 ```python
 print(model.transformer.h[0].attn.source)
 # ...
-#  attention_interface_0  -> 71     attn_output, attn_weights = attention_interface(
+#  attention_interface_1  -> 71     attn_output, attn_weights = attention_interface(
 # ...
 ```
 
@@ -83,7 +84,7 @@ import nnsight
 with model.trace(prompt):
     patterns = nnsight.save([])
     for block in model.transformer.h:
-        _, weights = block.attn.source.attention_interface_0.output
+        _, weights = block.attn.source.attention_interface_1.output
         patterns.append(weights)
 
 # len(patterns) == 12; patterns[L].shape == [1, 12, 5, 5]
@@ -91,7 +92,7 @@ with model.trace(prompt):
 
 ### Raw softmax weights (recursive source)
 
-`attention_interface_0` resolves at run time to a plain Python function
+`attention_interface_1` resolves at run time to a plain Python function
 (`eager_attention_forward`), so you can chain `.source` again to reach the raw
 softmax — before the dtype cast and dropout:
 
@@ -99,7 +100,7 @@ softmax — before the dtype cast and dropout:
 with model.trace(prompt):
     softmax_w = (
         model.transformer.h[0].attn.source
-        .attention_interface_0
+        .attention_interface_1
         .source.nn_functional_softmax_0
         .output.save()
     )
@@ -108,7 +109,7 @@ with model.trace(prompt):
 
 Recursive `.source` only works **inside a trace** (the called function is resolved
 from the live value). Print the inner ops with
-`print(model.transformer.h[0].attn.source.attention_interface_0.source)` inside a
+`print(model.transformer.h[0].attn.source.attention_interface_1.source)` inside a
 trace. See `docs/usage/source.md`.
 
 ### Average attention across a batch
@@ -122,7 +123,7 @@ with model.trace() as tracer:
     pieces = nnsight.save([])
     for p in prompts:
         with tracer.invoke(p):
-            _, w = model.transformer.h[5].attn.source.attention_interface_0.output
+            _, w = model.transformer.h[5].attn.source.attention_interface_1.output
             pieces.append(w)
 
 # each pieces[i] is [1, 12, seq, seq]; pad/clip if seq lengths differ.
@@ -137,9 +138,9 @@ tuple `(attn_output, attn_weights)`; rebuild it and assign the whole tuple:
 import torch
 
 with model.trace(prompt):
-    out = model.transformer.h[0].attn.source.attention_interface_0.output
+    out = model.transformer.h[0].attn.source.attention_interface_1.output
     new = (torch.zeros_like(out[0]),) + tuple(out[1:])   # zero the attn output
-    model.transformer.h[0].attn.source.attention_interface_0.output = new
+    model.transformer.h[0].attn.source.attention_interface_1.output = new
     logits = model.lm_head.output.save()
 ```
 
@@ -163,7 +164,7 @@ See `tests/test_source.py` for tested source-patching examples.
 
 - The operation name can vary between transformer versions. `print(...attn.source)`
   first to confirm what's available.
-- Request `attention_interface_0` **before** `attn.output` in the same forward —
+- Request `attention_interface_1` **before** `attn.output` in the same forward —
   the source op runs first, so reading `attn.output` and then the source op is out
   of order (`OutOfOrderError`).
 - For Llama / Mistral / Qwen the path is typically
