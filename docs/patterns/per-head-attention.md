@@ -19,7 +19,7 @@ Three ways:
 
 1. **Inline reshape** of `attn.output[0]` inside a trace. Works on the
    post-projection output.
-2. **Read `.source.attention_interface_0.output[0]`**, which is *already* shaped
+2. **Read `.source.attention_interface_1.output[0]`**, which is *already* shaped
    `[batch, seq, n_heads, head_dim]` (before the reshape + `c_proj`). No manual
    reshape needed.
 3. **Expose a first-class `.heads` accessor** with a custom `eproperty` on an
@@ -105,7 +105,7 @@ flattened and projected. Read it directly from the source op — no reshape:
 with model.trace(prompt):
     ph = (
         model.transformer.h[LAYER].attn
-        .source.attention_interface_0.output[0]     # already [B, S, n_heads, head_dim]
+        .source.attention_interface_1.output[0]     # already [B, S, n_heads, head_dim]
         .save()
     )
 print(ph.shape)   # torch.Size([1, 5, 12, 64])
@@ -115,14 +115,15 @@ Ablate a head at this stage (before `c_proj`) by rebuilding the op's output tupl
 
 ```python
 with model.trace(prompt):
-    out = model.transformer.h[LAYER].attn.source.attention_interface_0.output
+    out = model.transformer.h[LAYER].attn.source.attention_interface_1.output
     per = out[0].clone()                # [B, S, n_heads, head_dim]
     per[:, :, HEAD, :] = 0
-    model.transformer.h[LAYER].attn.source.attention_interface_0.output = (per,) + tuple(out[1:])
+    model.transformer.h[LAYER].attn.source.attention_interface_1.output = (per,) + tuple(out[1:])
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
-The op name (`attention_interface_0`) is GPT-2-specific — discover yours with
+The op name (`attention_interface_1`; `_0` is the assignment choosing the
+implementation) is GPT-2-specific — discover yours with
 `print(model.transformer.h[0].attn.source)`. See `docs/usage/source.md` and
 `docs/patterns/attention-patterns.md`.
 
@@ -249,7 +250,7 @@ gradient and sum over `head_dim` for a `[layer, head]` map. See
 
 - **`n_heads` and `head_dim` are model-specific.** Read from `model.config`
   (`n_head` / `n_embd` for GPT-2; `num_attention_heads` for Llama-family).
-- **`attn.output[0]` is post-projection**; `.source.attention_interface_0.output[0]`
+- **`attn.output[0]` is post-projection**; `.source.attention_interface_1.output[0]`
   is pre-projection and already per-head.
 - **Aliasing matters.** `.view()` shares storage; `.reshape()` / `.contiguous()` may
   copy. If edits don't show up downstream, you mutated a copy — rebuild and assign.

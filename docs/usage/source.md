@@ -42,15 +42,21 @@ print(model.transformer.h[0].mlp.source)
 ```
 
 ```
-                    * def forward(self, hidden_states: ...) -> torch.FloatTensor:
- self_c_fc_0    ->  0     hidden_states = self.c_fc(hidden_states)
- self_act_0     ->  1     hidden_states = self.act(hidden_states)
- self_c_proj_0  ->  2     hidden_states = self.c_proj(hidden_states)
- self_dropout_0 ->  3     hidden_states = self.dropout(hidden_states)
-                    4     return hidden_states
+                     * def forward(self, hidden_states: ...) -> torch.FloatTensor:
+ self_c_fc_0     ->  0     hidden_states = self.c_fc(hidden_states)
+ hidden_states_0 ->  +     ...
+ self_act_0      ->  1     hidden_states = self.act(hidden_states)
+ hidden_states_1 ->  +     ...
+ self_c_proj_0   ->  2     hidden_states = self.c_proj(hidden_states)
+ hidden_states_2 ->  +     ...
+ self_dropout_0  ->  3     hidden_states = self.dropout(hidden_states)
+ hidden_states_3 ->  +     ...
+                     4     return hidden_states
 ```
 
-`print(module.source.self_act_0)` zooms in on one call site:
+Each line carries two operations: the call, and the assignment that binds its
+result (`hidden_states_n`). `print(module.source.self_act_0)` zooms in on
+one call site:
 
 ```
 model.transformer.h.0.mlp.source.self_act_0:
@@ -75,6 +81,27 @@ joined with `_`:
 The occurrence counter is per callable and runs in **execution order** — nested
 calls run inner-first, so `f(f(x))` gives the inner call `f_0` and the outer `f_1`.
 A second `relu(...)` on another line is `torch_relu_1`.
+
+Every assignment is an operation too, named `<target>_<occurrence>` — the
+n-th binding of that name in the forward:
+
+- `scores = q @ k.transpose(-1, -2)` → `scores_0` (the product; the call is
+  `k_transpose_0`)
+- `state = state * decay + update` inside a loop → `state_1` (`_0` is the
+  initialisation before the loop), fired once per iteration
+- `a, b = x * 2, x * 3` → `a_0`, `b_0`
+- `out[:, i] = v` → `out_n`, whose `.output` is `v` (the value stored, not
+  the whole tensor); `self.buf = v` → `self_buf_n`
+
+An assignment's `.output` is the assigned value; assigning to it rebinds the name
+for the rest of the forward. `.input` is the same value, `.skip(v)` binds `v`
+instead, and `.source` raises — there is no callee to drill into. Calls and
+assignments share one counter per name, so where a forward binds a name and then
+calls it, the binding comes first: in GPT-2's attention,
+`attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(...)` is
+`attention_interface_0` and the call `attention_interface(...)` is
+`attention_interface_1`. Chained (`a = b = v`) and augmented (`x += v`)
+assignments are not operations.
 
 ## Canonical pattern
 
@@ -103,7 +130,7 @@ An operation whose target is a plain Python function can be re-traced. Chain
 with model.trace("The Eiffel Tower is in"):
     attn = model.transformer.h[0].attn
     scores = (
-        attn.source.attention_interface_0
+        attn.source.attention_interface_1
             .source.attn_output_transpose_0
             .output.save()
     )
@@ -125,7 +152,7 @@ with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
     for _ in tracer.iter[:3]:
         saved.append(
             model.transformer.h[0].attn
-                 .source.attention_interface_0
+                 .source.attention_interface_1
                  .source.attn_output_transpose_0.output
         )
 # len(saved) == 3; step 0 sees the full prompt, later (KV-cached) steps one token.
@@ -133,6 +160,48 @@ with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
 
 An op that fires once per forward is indexed per generation step; an op that loops
 within one forward (e.g. an MoE expert loop) is indexed per fire.
+
+## Values that aren't calls: a loop's running state
+
+A recurrent kernel carries its state through a Python loop as a product, never as
+a call's return value, so only its assignment names it. The assignment is one
+location fired per iteration; `tracer.iter` selects the fire:
+
+```python
+# Qwen3.5-MoE linear attention: torch_chunk_gated_delta_rule advances the
+# recurrent state once per 64-token chunk, `last_recurrent_state = (...)`.
+with model.trace(prompt) as tracer:
+    kernel = model.model.layers[0].linear_attn.source.torch_chunk_gated_delta_rule_0.source
+    states = nnsight.save([])
+    for _ in tracer.iter[:3]:                                   # chunks 0, 1, 2
+        states.append(kernel.last_recurrent_state_1.output)  # _0 is the init
+    for _ in tracer.iter[1]:
+        kernel.last_recurrent_state_1.output[:] = 0        # patch after chunk 1
+```
+
+## Decorated forwards and dispatchers
+
+A decorated `forward` is instrumented through its decorators. A wrapper that
+calls the function it closes over — `functools.wraps` or not — is peeled, the
+function is instrumented, and the wrapper is rebuilt around it so its behaviour
+still runs (`@torch.no_grad()` still disables grad). A wrapper that *doesn't* call
+it — a dispatcher that hands the function to a lookup and calls the result — is
+instrumented as it is, closure intact, so `print(module.source)` shows the
+dispatch and the call that actually runs is what you drill into:
+
+```python
+# transformers' experts run a fused kernel by default; the eager loop the class
+# defines never executes. experts.source shows the dispatch, not the loop:
+print(model.model.layers[0].mlp.experts.source)
+#  experts_interface_get_interface_0 -> 1  experts_forward = experts_interface.get_interface(...)
+#  experts_forward_0            -> +  ...
+#  experts_forward_1                 -> 2  return experts_forward(self, *args, **kwargs)
+
+with model.trace(prompt):
+    impl = model.model.layers[0].mlp.experts.source.experts_forward_1.source
+    # grouped_mm_experts_forward's ops under the default implementation, the
+    # eager loop's under experts_implementation="eager"
+```
 
 ## Gotchas
 
@@ -144,13 +213,11 @@ within one forward (e.g. an MoE expert loop) is indexed per fire.
   `.source` instead.
 - **Builtins / C functions have no recoverable source** — drilling into e.g.
   `torch.relu` raises `SourceNotAvailable`.
-- **Decorated forwards are rejected**, and the message usually names the
-  decorator's *closure* rather than the decorator: a wrapped `forward` raises
-  `SourceNotAvailable("callable closes over free variables")`, because the
-  wrapper's free variables are checked before the source is parsed. An
-  undecorated-but-closing function raises the same thing. See
-  [below](#when-source-isnt-available) for which HuggingFace modules this hits,
-  and on which versions.
+- **A dispatching wrapper's ops are the dispatch, not the body.** When a
+  decorator chooses an implementation at run time (transformers'
+  `experts_implementation`), the class's own `forward` may never run; its calls
+  are reached through the dispatch op's `.source` (see
+  [above](#decorated-forwards-and-dispatchers)).
 - **Requesting an operation out of execution order deadlocks → `OutOfOrderError`.**
   Reading `self_fc2_0.output` then `self_fc1_0.output` (fc1 runs first) is late.
 - **The *first* `.source` access on a module also raises `OutOfOrderError`, and it
@@ -164,11 +231,11 @@ within one forward (e.g. an MoE expert loop) is indexed per fire.
 
     ```python
     with model.trace(prompt):                        # warm-up: nothing else read
-        _ = model.transformer.h[5].attn.source.attention_interface_0.output[1].save()
+        _ = model.transformer.h[5].attn.source.attention_interface_1.output[1].save()
 
     with model.trace(prompt):                        # now the real trace works
         qkv     = model.transformer.h[5].attn.c_attn.output.save()
-        pattern = model.transformer.h[5].attn.source.attention_interface_0.output[1].save()
+        pattern = model.transformer.h[5].attn.source.attention_interface_1.output[1].save()
     ```
 
     Accessing the source *first* in the block works too, but only when nothing you
@@ -181,25 +248,19 @@ within one forward (e.g. an MoE expert loop) is indexed per fire.
 
 ## When `.source` isn't available
 
-A `forward` that is decorated can't be source-instrumented, and on
-**transformers 4.x** several of the ones people most want are:
+`SourceNotAvailable` means there is no Python source to instrument: a builtin or
+C function (`torch.relu`), a function compiled from a string, or a call into a
+`torch.nn.Module` (use that submodule's own `.source`). Decorators and closures
+are not a reason — a wrapped `forward` is peeled or instrumented as it is, and a
+`forward` using `super()` keeps its `__class__` cell.
 
-| Module | transformers 4.57 | transformers 5 |
-|---|---|---|
-| `LlamaAttention` | unavailable | **available** |
-| `LlamaDecoderLayer` | unavailable | **available** |
-| `GPT2Attention` | unavailable | **available** |
-| `LlamaMLP`, `GPT2MLP` | available | available |
+A value can also be out of reach because it is never computed in Python: with a
+fused attention kernel (`attn_implementation="sdpa"`, flash) there is no
+attention pattern to hook, and a Triton linear-attention kernel (`fla`) has no
+per-step state. Choose the eager implementation when you need those.
 
-On 4.x these carry `@deprecate_kwarg`, and the failure surfaces as
-`SourceNotAvailable("callable closes over free variables")` — the decorator's
-closure, not anything in the forward. **Transformers 5 dropped those decorators**,
-so `.source` on attention and decoder layers works there with no change on
-nnsight's side. If you are on 4.x and want attention internals, upgrading
-transformers is the fix.
-
-Where `.source` is unavailable, target a real submodule instead, which is often
-the value you wanted anyway and works on every version:
+Where an operation is unavailable, target a real submodule instead, which is
+often the value you wanted anyway:
 
 ```python
 attn = model.model.layers[0].self_attn
@@ -210,8 +271,8 @@ attn.o_proj.input         # the per-head attention output, pre-projection
 model.model.layers[0].mlp.act_fn.output   # the MLP's activation
 ```
 
-`print(module.source)` lists the op names when it works, and raises when it
-doesn't — the quickest way to check on your installed version.
+`print(module.source)` lists the op names — the quickest way to see what a
+version of a model exposes, and whether a wrapper dispatches elsewhere.
 
 ## Related
 

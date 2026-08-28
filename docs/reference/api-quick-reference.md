@@ -88,6 +88,7 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `envoy.clear_edits` | `envoy.clear_edits()` | Drop all edits accumulated by `edit(inplace=True)`. |
 | `envoy[i]` / `for c in envoy` / `len(envoy)` | — | Index / iterate direct children (e.g. a `ModuleList`'s blocks). |
 | `envoy.source.<op>_<n>` | e.g. `.source.relu_0` | A `SourceEnvoy` for the n-th call of `<op>` in the forward; same `.input`/`.output`/`.skip`/`.source` interface. `print(envoy.source)` lists them. |
+| `envoy.source.<name>_<n>` | e.g. `.source.h_0` | A `SourceEnvoy` for the n-th assignment to `<name>` in the forward; `.output` is the assigned value (read or replace it). One counter per name, shared with calls: `f = pick(); f(x)` is `f_0` then `f_1`. Fires once per loop iteration for an assignment inside a loop. |
 
 Deprecated aliases (warn; use the `tracer.*` forms): `model.iter`, `model.all()`.
 

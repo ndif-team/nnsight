@@ -88,7 +88,7 @@ difference. Do not cite these figures as authoritative — regenerate them.
 - **Per intervention.** Each `.output`/`.save()` parks a worker and serves it one
   value through `handle` — the slope of `intervention_scaling` (tens of µs each).
 - **`.source`.** First access compiles the instrumented forward (`source_first_access`,
-  a one-time cost cached in `_FORWARD_CACHE`, `source.py`); steady-state reads add a
+  a one-time cost cached in `FORWARD_CACHE`, `source.py`); steady-state reads add a
   small constant over reading the module's output.
 
 ## The biggest win: consolidate traces
@@ -129,7 +129,7 @@ with model.trace(prompt):
 - `tests/performance/compare.py` — side-by-side ratio of two runs
 - `tests/performance/README.md` — harness documentation
 - `src/nnsight/tracing/globals.py` — `BLOCKS`, the block capture cache
-- `src/nnsight/intervention/source.py` — `_FORWARD_CACHE`, the instrumented-forward cache
+- `src/nnsight/intervention/source.py` — `FORWARD_CACHE`, the instrumented-forward cache
 
 ## Related
 

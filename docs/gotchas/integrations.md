@@ -58,6 +58,7 @@ SourceNotAvailable: 'self_c_proj_0' calls a submodule; call `.source` on that su
 with model.trace("Hello world"):
     ...
 # print(model.transformer.h[0].mlp.source)   ->  self_c_fc_0, self_act_0, self_c_proj_0, self_dropout_0
+#                                              and the assignments hidden_states_0 .. _3
 
 # wrong — c_proj is a submodule
 with model.trace("Hello world"):

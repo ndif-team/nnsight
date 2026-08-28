@@ -75,14 +75,14 @@ class TestUpdate:
         assert getattr(envoy.layers, "0").mlp._module is not old.layers[0].mlp
 
     def test_no_double_instrument(self):
-        from nnsight.intervention.source import _STATE
+        from nnsight.intervention.source import STATE
 
         envoy = Envoy(Model(n_layers=1))
         envoy._update(Model(n_layers=1))
         # Each module routes to this interleaver exactly once, however many times
         # it was instrumented.
         for _, child in envoy.named_modules():
-            routes = child._module.__dict__[_STATE].routes
+            routes = child._module.__dict__[STATE].routes
             assert [r[0]() for r in routes] == [envoy.interleaver]
 
     def test_a_module_reachable_by_two_paths_has_one_envoy(self):
