@@ -1,6 +1,7 @@
 """Correctness tests for the public-API AtP* research pattern."""
 
 from collections import OrderedDict
+
 import torch
 import pytest
 from transformers import (
@@ -9,7 +10,23 @@ from transformers import (
     GPTNeoXConfig,
     GPTNeoXForCausalLM,
 )
+
 from nnsight import NNsight
+
+
+class _CancellationModel(torch.nn.Module):
+    """A direct path and an equal, opposite indirect path."""
+
+    def __init__(self):
+        super().__init__()
+        self.component = torch.nn.Identity()
+        self.indirect = torch.nn.Linear(1, 1, bias=False)
+        with torch.no_grad():
+            self.indirect.weight.fill_(-1.0)
+
+    def forward(self, inputs):
+        component = self.component(inputs)
+        return component + self.indirect(component)
 
 
 def _attention_probabilities(query, key, mask=None, scale=None):
@@ -102,6 +119,30 @@ def _unpack_attention_call(call):
     else:
         raise ValueError("Unsupported per-head attention output layout")
     return query, key, value, normalized_output, probabilities
+
+
+def _aggregate_graddrop(drop_estimates):
+    """Equation 11: sum absolute layer-drop estimates and divide by L - 1."""
+    layers = drop_estimates.shape[0]
+    if layers < 2:
+        raise ValueError("GradDrop requires at least two residual layers")
+    return drop_estimates.abs().sum(dim=0) / (layers - 1)
+
+
+def _subset_statistics(masks, effects):
+    """Algorithm 1 statistics for included and excluded node subsets."""
+    if masks.ndim != 2 or effects.shape != masks.shape[:1]:
+        raise ValueError("Expected masks [sample, node] and effects [sample]")
+    membership = torch.stack((masks, ~masks))
+    counts = membership.sum(dim=1)
+    if torch.any(counts < 2):
+        raise ValueError("Each node needs two included and two excluded samples")
+
+    expanded_effects = effects[None, :, None]
+    means = (expanded_effects * membership).sum(dim=1) / counts
+    centered = expanded_effects - means[:, None, :]
+    variances = (centered.square() * membership).sum(dim=1) / (counts - 1)
+    return counts, means, variances
 
 
 def _linear_model() -> NNsight:
@@ -307,6 +348,29 @@ def test_key_correction_preserves_sub_epsilon_probabilities():
     torch.testing.assert_close(key_delta[..., 1, :], patched_output - noise_output)
 
 
+def test_graddrop_exposes_a_cancellation_hidden_component():
+    """Dropping an indirect residual gradient reveals the direct path."""
+    model = NNsight(_CancellationModel())
+    inputs = torch.tensor([[3.0]])
+
+    with model.trace(inputs):
+        component = model.component.output
+        component.requires_grad_(True)
+        indirect = model.indirect.output
+        indirect.requires_grad_(True)
+        metric = model.output.sum()
+
+        with metric.backward(retain_graph=True):
+            standard_gradient = component.grad.clone().save()
+
+        with metric.backward():
+            indirect.grad = torch.zeros_like(indirect.grad)
+            dropped_gradient = component.grad.clone().save()
+
+    torch.testing.assert_close(standard_gradient, torch.zeros_like(standard_gradient))
+    torch.testing.assert_close(dropped_gradient, torch.ones_like(dropped_gradient))
+
+
 @pytest.mark.parametrize("family", ("gpt2", "pythia"))
 def test_attention_source_adapter_matches_model_attention(family):
     """Each MVP adapter reproduces the model's eager attention result."""
@@ -343,3 +407,49 @@ def test_attention_source_adapter_matches_model_attention(family):
     torch.testing.assert_close(saved_output, recomputed_output)
     assert torch.isfinite(query_gradient).all()
     assert torch.count_nonzero(query_gradient)
+
+
+def test_graddrop_aggregation_matches_equation_11():
+    drop_estimates = torch.tensor(
+        [
+            [1.0, -2.0, 0.0],
+            [-3.0, 4.0, 2.0],
+            [2.0, -1.0, -4.0],
+        ]
+    )
+    expected = torch.tensor([3.0, 3.5, 3.0])
+    torch.testing.assert_close(_aggregate_graddrop(drop_estimates), expected)
+
+
+def test_subset_statistics_recover_additive_node_effects():
+    """Algorithm 1 is exact on a balanced, additive subset experiment."""
+    nodes = 4
+    integers = torch.arange(2**nodes)
+    bit_positions = torch.arange(nodes)
+    masks = integers[:, None].bitwise_and(1 << bit_positions).bool()
+    contributions = torch.tensor([3.0, -2.0, 0.5, 4.0])
+    effects = masks.float() @ contributions
+
+    counts, means, variances = _subset_statistics(masks, effects)
+    estimates = means[0] - means[1]
+
+    assert torch.equal(counts, torch.full_like(counts, 2 ** (nodes - 1)))
+    torch.testing.assert_close(estimates, contributions)
+    assert torch.isfinite(variances).all()
+    assert torch.all(variances >= 0)
+
+
+def test_atp_star_helpers_reject_invalid_inputs():
+    with pytest.raises(ValueError, match="at least two residual layers"):
+        _aggregate_graddrop(torch.ones((1, 3)))
+
+    with pytest.raises(ValueError, match="Expected masks"):
+        _subset_statistics(torch.ones((2, 2), dtype=torch.bool), torch.ones((2, 1)))
+
+    masks = torch.tensor([[True, False], [True, False]])
+    with pytest.raises(ValueError, match="two included and two excluded"):
+        _subset_statistics(masks, torch.ones(2))
+
+    unsupported_attention = type("UnsupportedAttention", (), {"source": object()})()
+    with pytest.raises(ValueError, match="Unsupported pythia attention source layout"):
+        _attention_source_call(unsupported_attention, "pythia")
