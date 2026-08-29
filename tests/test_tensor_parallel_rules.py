@@ -33,6 +33,38 @@ def _upstream_styles() -> set:
     return set(ALL_PARALLEL_STYLES._global_mapping)
 
 
+def _drives_this_transformers() -> bool:
+    """Whether the installed transformers is the one these rules describe.
+
+    The tables say which side of a handoff carries a shard, and the reshard
+    guard patches the helper that moves one. Both are written against the
+    ``all_gather``/``split`` implementation nnsight drives; 5.16 rebuilt tensor
+    parallelism on DTensor and removed those, so asserting either against it
+    says nothing about whether nnsight is right. Refusing to run there is not
+    the same as refusing to notice: a transformers that still has the helpers
+    and adds a style fails these as loudly as before.
+    """
+    try:
+        from transformers.integrations.tensor_parallel import (  # noqa: F401
+            all_gather,
+            split,
+        )
+    except ImportError:
+        return False
+
+    return True
+
+
+drives_this_transformers = pytest.mark.skipif(
+    not _drives_this_transformers(),
+    reason=(
+        "transformers no longer provides the all_gather/split tensor-parallel "
+        "helpers these rules are written against (5.16 moved to DTensor); "
+        "nnsight refuses to shard there - see fragments._collectives"
+    ),
+)
+
+
 class _FakeMesh:
     def __init__(self, size: int = 2) -> None:
         self._size = size
@@ -62,6 +94,7 @@ def _module(style: str | None, **attrs) -> torch.nn.Module:
 class TestStyleCoverage:
     """Every style transformers knows about has a rule here, and vice versa."""
 
+    @drives_this_transformers
     def test_no_upstream_style_is_unaccounted_for(self):
         # The one that matters: a new style upstream with no rule here is a model
         # nnsight will refuse at deploy time. Better to find out at test time.
@@ -72,6 +105,7 @@ class TestStyleCoverage:
             f"carry a shard) or to UNSUPPORTED."
         )
 
+    @drives_this_transformers
     def test_no_rule_names_a_style_that_no_longer_exists(self):
         stale = (set(SIDES) | set(UNSUPPORTED)) - _upstream_styles()
         assert not stale, (
@@ -268,6 +302,22 @@ class TestTransformersVersionFloor:
         # checkout reports 5.15.0.dev0, which a plain >= would reject.
         self._check(monkeypatch, version)
 
+    def test_a_transformers_without_the_collectives_is_refused(self, monkeypatch):
+        # 5.16 rebuilt tensor parallelism on DTensor and dropped `all_gather` /
+        # `split`. Without a guard the failure is an ImportError from inside a
+        # hook on the first sharded module, naming a module that does still
+        # import -- on a path that only runs on multiple GPUs.
+        import transformers.integrations.tensor_parallel as tp
+
+        from nnsight.modeling.tp import UnsupportedTransformersVersion
+        from nnsight.modeling.tp import fragments as tp_fragments
+
+        monkeypatch.delattr(tp, "all_gather", raising=False)
+        monkeypatch.delattr(tp, "split", raising=False)
+
+        with pytest.raises(UnsupportedTransformersVersion, match="all_gather"):
+            tp_fragments._collectives()
+
     def test_it_only_runs_once(self, monkeypatch):
         # instrument() calls this per sharded module -- hundreds on a real model
         # -- so the import and version parse have to happen once, not per call.
@@ -397,6 +447,7 @@ class FakeMesh:
         return self._size
 
 
+@drives_this_transformers
 class TestReshardGuard:
     """What goes back to the model must be guarded like what came out of it.
 

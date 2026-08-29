@@ -170,9 +170,40 @@ def _shardable(tensor: torch.Tensor, world_size: int) -> bool:
     return tensor.is_floating_point() and tensor.dim() >= 1 and tensor.shape[-1] % world_size == 0
 
 
+def _collectives():
+    """transformers' ``(all_gather, split)``, the pair fragments are moved with.
+
+    Imported through here rather than at each call site so a transformers that
+    does not have them is one error, raised where it can be explained.
+
+    5.16.0 rebuilt tensor parallelism on DTensor: the implementation moved to
+    ``transformers.distributed.tensor_parallel``, and these two module-level
+    helpers are not part of what the old path re-exports -- they are gone, with
+    no drop-in replacement (a DTensor is made whole through
+    ``redistribute``/``full_tensor``). Left alone, the failure is an ImportError
+    from inside a hook on the first sharded module, naming a module that does
+    still import, on a code path that only runs on multiple GPUs.
+    """
+    try:
+        from transformers.integrations.tensor_parallel import all_gather, split
+    except ImportError as error:
+        import transformers
+
+        raise UnsupportedTransformersVersion(
+            f"transformers {transformers.__version__} does not provide the "
+            "`all_gather` / `split` helpers that nnsight reassembles sharded "
+            "activations with, so a fragment cannot be made whole for an "
+            "intervention to see. 5.16.0 rebuilt tensor parallelism on DTensor "
+            "and removed them. Pin `transformers<5.16`, or load this model on "
+            "one GPU."
+        ) from error
+
+    return all_gather, split
+
+
 def _gather(value: Any, mesh: Any) -> Any:
     """Every rank's slice of ``value``, concatenated back into the whole tensor."""
-    from transformers.integrations.tensor_parallel import all_gather
+    all_gather, _ = _collectives()
 
     return apply(
         value,
@@ -204,7 +235,7 @@ def _reshard(value: Any, mesh: Any) -> Any:
     are autograd functions. Guarded by the same predicate as the gather: a tensor
     that was never a fragment must not be cut down here.
     """
-    from transformers.integrations.tensor_parallel import split
+    _, split = _collectives()
 
     world_size = mesh.size()
     return apply(
