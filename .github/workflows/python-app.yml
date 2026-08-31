@@ -5,7 +5,10 @@ name: Tests
 
 on:
   push:
-    branches: ["main"]
+    # Development happens on the release branch, so it has to be listed here or
+    # nothing tests it: a `pull_request` run only ever tests the PR head, never
+    # the merge that lands it, and never a commit pushed straight to the branch.
+    branches: ["main", "0.8"]
   pull_request:
 
 permissions:
