@@ -107,6 +107,22 @@ def main() -> None:
         record("adhoc_rowwise", layer.mlp.down_proj(down_in).save())
         record("adhoc_lens", model.lm_head(model.model.norm(hidden)).save())
 
+    # A parameter read inside a trace is the full weight: a column-parallel one
+    # split on its output dim, a row-parallel one on its input dim, and the
+    # gathered head. Reading it in place of the head's forward reproduces the
+    # lens, so the layout is the single-GPU one and not merely the right shape.
+    with model.trace(PROMPT):
+        record("gate_proj_weight", layer.mlp.gate_proj.weight.save())
+        record("down_proj_weight", layer.mlp.down_proj.weight.save())
+        record("lm_head_weight", model.lm_head.weight.save())
+        hidden = model.model.norm(layer.output[0])
+        record("weight_lens", (hidden @ model.lm_head.weight.T).save())
+    if args.tp > 1:
+        local_rows = layer.mlp.gate_proj._module.weight.shape[0]
+        assert results["gate_proj_weight"].shape[0] == local_rows * args.tp, (
+            "gate_proj.weight read in a trace is still this rank's slice"
+        )
+
     # A cache must record whole tensors too, and only for what it selects.
     with model.trace(PROMPT) as tracer:
         cache = tracer.cache(modules=[layer.mlp.gate_proj], include_inputs=True).save()

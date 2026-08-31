@@ -15,8 +15,10 @@ cut down on the way in and the output reassembled on the way out, off the rules
 [`VLLMFragments`][nnsight.modeling.vllm.fragments.VLLMFragments] already recorded
 for exactly this envoy's two locations.
 
-Parameters are left alone. ``layer.weight`` is this rank's real slice here, as it
-is anywhere else in vLLM, and gathering one is the caller's business.
+A **parameter read** is the other thing outside the bracket. ``layer.weight``
+is this rank's slice, so ``lm_head.weight[token_id]`` on the wrong rank indexes
+a different token's row. Read inside a trace it is all-gathered to its full
+shape (`ParallelEnvoy.__getattr__`); outside a trace it is still the slice.
 """
 
 from __future__ import annotations
@@ -92,3 +94,51 @@ class ParallelEnvoy(Envoy):
             result = fragments.whole(outof, result)
 
         return result
+
+    def __getattr__(self, name: str) -> Any:
+        """A tensor attribute read inside a trace, gathered to its full shape.
+
+        vLLM stamps every parameter it shards with the dim it split
+        (``output_dim`` / ``input_dim``); a tensor without that stamp (a
+        row-parallel bias, a scale) is replicated and passes through. A
+        row-parallel layer splits its input dim, every other parallel layer its
+        output dim. The vocab-parallel head is padded to a TP-divisible size, so
+        the padding rows are dropped to give the true ``[vocab, hidden]``.
+
+        One all-gather per read, on every rank: a read under rank-dependent
+        control flow deadlocks, the same condition every collective here
+        carries. A fused layer (``qkv_proj``, ``gate_up_proj``) comes back with
+        its rows grouped by rank, the same layout its gathered ``.output`` has.
+        The result is a copy: ``layer.weight[i] = v`` does not reach the model.
+        """
+        value = super().__getattr__(name)
+        fragments = self.interleaver.fragments
+        if (
+            not isinstance(value, torch.Tensor)
+            or not self.interleaver.interleaving
+            or fragments is None
+            or not fragments.enabled
+        ):
+            return value
+
+        module = self._module
+        if module.tp_size < 2:
+            # Built with `disable_tp=True`: replicated on every rank.
+            return value
+
+        from vllm.distributed.communication_op import tensor_model_parallel_all_gather
+        from vllm.model_executor.layers.linear import RowParallelLinear
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            VocabParallelEmbedding,
+        )
+
+        axis = "input_dim" if isinstance(module, RowParallelLinear) else "output_dim"
+        # Genuinely optional: vLLM sets it only on the parameters it sharded.
+        dim = getattr(value, axis, None)
+        if dim is None or value.dim() <= dim:
+            return value
+
+        whole = tensor_model_parallel_all_gather(value.data, dim=dim)
+        if isinstance(module, VocabParallelEmbedding) and dim == 0:
+            whole = whole[: module.org_vocab_size]
+        return whole
