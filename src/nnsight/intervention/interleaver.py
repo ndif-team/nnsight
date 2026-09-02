@@ -727,10 +727,9 @@ class Interleaver:
         # worker will be served on *this* occurrence or a selected cache records
         # it. Every rank derives this from the same provider routes, keeping their
         # collectives matched.
-        gathering = False
+        undo = None
         if self.fragments is not None and self.fragments.enabled and self.fragments.fragmented(provider) and (observers or self._ready(provider)):
-            gathering = True
-            value = self.fragments.whole(provider, value)
+            value, undo = self.fragments.whole(provider, value)
 
         # Serving one worker can release another into parking here (a barrier),
         # so keep serving until nobody is parked on this visit.
@@ -767,8 +766,8 @@ class Interleaver:
         # Back to the piece the model's own forward expects, carrying whatever the
         # workers left behind — so an edit to the assembled tensor reaches the
         # model rather than being dropped with the gather.
-        if gathering:
-            value = self.fragments.fragment(provider, value)
+        if undo is not None:
+            value = undo(value)
         return value
 
     def check_dangling_mediators(self) -> None:

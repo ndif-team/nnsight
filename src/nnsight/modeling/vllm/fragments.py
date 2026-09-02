@@ -31,6 +31,7 @@ needed: no memo, no ``watch``/``release``, no extra hooks.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, Dict, Tuple
 
 import torch
@@ -94,8 +95,12 @@ class VLLMFragments(Fragments):
     def fragmented(self, location: str) -> bool:
         return location in self.rules
 
-    def whole(self, location: str, value: Any) -> Any:
-        """The real tensor behind ``value``, assembled from every rank's piece."""
+    def whole(self, location: str, value: Any) -> "tuple[Any, Any]":
+        """The real tensor behind ``value``, and how to cut it back down.
+
+        vLLM's rules describe a location and nothing else — no value here carries
+        its own layout — so the way back is `split` with this location bound to it.
+        """
         from vllm.distributed.communication_op import (
             tensor_model_parallel_all_gather,
             tensor_model_parallel_all_reduce,
@@ -124,13 +129,15 @@ class VLLMFragments(Fragments):
             # MoE it is the same collective the outer block runs right afterwards.
             collective = tensor_model_parallel_all_reduce
 
-        return apply(value, collective, torch.Tensor)
+        return apply(value, collective, torch.Tensor), partial(self.split, location)
 
-    def fragment(self, location: str, whole: Any) -> Any:
+    def split(self, location: str, whole: Any) -> Any:
         """This rank's piece of ``whole``, as vLLM's own forward expects it.
 
         Applied to whatever intervention code left behind, so an edit made to the
-        assembled tensor is carried back into the model rather than dropped.
+        assembled tensor is carried back into the model rather than dropped — and
+        to a value that was never gathered at all (a `.skip` replacement, or the
+        argument of an ad-hoc call), which is already the real tensor.
         """
         from vllm.model_executor.layers.linear import (
             ColumnParallelLinear,

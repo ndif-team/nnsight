@@ -30,9 +30,13 @@ it, with no memoization to keep in step.
 * **Never branch on rank.** Every rank runs the same intervention block and must
   reach the same collectives in the same order. `fragmented` in particular is
   asked on every rank and must answer identically on all of them.
-* **`fragment` must undo `whole`.** What comes back goes into the model's own
-  forward. A value `whole` passed through untouched must come back untouched — a
+* **`whole`'s ``undo`` must reverse it.** What comes back goes into the model's
+  own forward. A value passed through untouched must come back untouched — a
   tensor that was never a fragment must not be split.
+* **`split` is not that operation.** It cuts down a value that was never
+  gathered, so the location's rule is all it has to work from. Serving both from
+  one method let the assembling path and the ad-hoc path be mistaken for each
+  other, and a nested ad-hoc call consumed the record its caller was still using.
 """
 
 from __future__ import annotations
@@ -76,19 +80,31 @@ class Fragments:
         """
         return False
 
-    def whole(self, location: str, value: Any) -> Any:
-        """The real value at ``location``, assembled from every device's piece.
+    def whole(self, location: str, value: Any) -> "tuple[Any, Any]":
+        """The real value at ``location``, and how to put back what that took.
+
+        Returns ``(whole, undo)``. ``undo`` is called with whatever intervention
+        code left behind — so an edit to the assembled tensor is carried back into
+        the model rather than discarded — or is ``None`` when there was nothing to
+        assemble.
+
+        Handed back rather than looked up again later because only this call knows
+        what it did: where a value can describe its own layout, the way back
+        depends on the value that arrived and not on the location alone. Holding
+        that on the caller's stack is also what keeps a nested handoff — an ad-hoc
+        call made while this visit is still open — from consuming it.
 
         Only called when `fragmented` said so *and* something is actually waiting
         to read it. Default: unreachable, since nothing is ever fragmented.
         """
-        return value
+        return value, None
 
-    def fragment(self, location: str, whole: Any) -> Any:
-        """This device's piece of ``whole``, as the model's own forward expects.
+    def split(self, location: str, whole: Any) -> Any:
+        """This device's piece of an already-whole value, from the rule alone.
 
-        The inverse of `whole`, called with whatever intervention code left
-        behind — so an edit made to the assembled tensor is carried back into the
-        model rather than discarded.
+        For values that never came out of the model and so were never assembled: a
+        `.skip` replacement, and the argument of an ad-hoc call on a sharded
+        module. Both are the real tensor already, and both have to be cut down
+        before the model's own forward sees them.
         """
         return whole

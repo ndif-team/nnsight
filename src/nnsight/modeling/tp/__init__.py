@@ -11,6 +11,9 @@ they are reassembled, and
 
 from .fragments import (
     MINIMUM_TRANSFORMERS,
+    device_mesh,
+    gather,
+    shard,
     SIDES,
     UNSUPPORTED,
     TPFragments,
@@ -21,11 +24,15 @@ from .plan import (
     UnshardableCheckpoint,
     check_tp_request,
     max_tp_size,
+    requested_expert_parallel,
     requested_tp_size,
 )
 
 __all__ = [
     "MINIMUM_TRANSFORMERS",
+    "device_mesh",
+    "gather",
+    "shard",
     "SIDES",
     "UNSUPPORTED",
     "TPFragments",
@@ -34,5 +41,6 @@ __all__ = [
     "UnshardableCheckpoint",
     "check_tp_request",
     "max_tp_size",
+    "requested_expert_parallel",
     "requested_tp_size",
 ]

@@ -18,6 +18,14 @@ from typing import Any, Optional
 
 from .fragments import SIDES
 
+#: What an *expert*-parallel degree has to divide instead. Expert parallelism
+#: distributes whole experts rather than slicing a tensor axis, so the head
+#: counts and the intermediate size are irrelevant to it and the expert count is
+#: the only constraint. transformers raises on an uneven split itself
+#: (``EpRouterParallel`` checks ``num_experts % ep_size``), but by then the
+#: weights are already being read.
+_EXPERT_DIVIDES: tuple[str, ...] = ("num_local_experts", "num_experts")
+
 #: Config fields a tensor-parallel degree has to divide. Attention is split by
 #: head, so both head counts must divide; the MLP is split along its intermediate
 #: dimension. A field a config doesn't have is not a constraint — a model with no
@@ -40,7 +48,7 @@ def _text_config(config: Any) -> Any:
     return getattr(config, "text_config", None) or config
 
 
-def max_tp_size(config: Any) -> Optional[int]:
+def max_tp_size(config: Any, expert_parallel: bool = False) -> Optional[int]:
     """The largest tensor-parallel degree ``config``'s model supports.
 
     ``None`` when it cannot be split at all: no plan to shard by, or a plan
@@ -57,7 +65,14 @@ def max_tp_size(config: Any) -> Optional[int]:
     out. ``Llama4Config`` does exactly this: its plan is ``colwise_rep``, which
     is in no list and no registry.
     """
-    plan = getattr(config, "base_model_tp_plan", None)
+    # Expert parallelism is answered from the model's *expert* plan, which is what
+    # transformers applies for it; a checkpoint can publish one and no
+    # tensor-parallel plan at all (gpt-oss does), and reading the wrong field
+    # would call it unshardable.
+    fields = _EXPERT_DIVIDES if expert_parallel else _DIVIDES
+    plan = getattr(
+        config, "base_model_ep_plan" if expert_parallel else "base_model_tp_plan", None
+    )
     if not plan:
         return None
 
@@ -66,7 +81,7 @@ def max_tp_size(config: Any) -> Optional[int]:
 
     dimensions = [
         value
-        for name in _DIVIDES
+        for name in fields
         if isinstance(value := getattr(_text_config(config), name, None), int) and value
     ]
     if not dimensions:
@@ -98,7 +113,21 @@ def requested_tp_size(distributed_config: Any) -> Optional[int]:
     return size if isinstance(size, int) and size > 1 else None
 
 
-def check_tp_request(config: Any, tp_size: Optional[int]) -> None:
+def requested_expert_parallel(distributed_config: Any) -> bool:
+    """Whether this ``distributed_config`` asks for expert parallelism.
+
+    Accepts the dataclass or a plain dict, because transformers does.
+    """
+    if distributed_config is None:
+        return False
+    if isinstance(distributed_config, dict):
+        return bool(distributed_config.get("enable_expert_parallel"))
+    return bool(getattr(distributed_config, "enable_expert_parallel", False))
+
+
+def check_tp_request(
+    config: Any, tp_size: Optional[int], expert_parallel: bool = False
+) -> None:
     """Raise unless ``tp_size`` is a degree ``config``'s model can really be split into.
 
     transformers does not check this. Asked to shard a checkpoint with no plan it
@@ -120,13 +149,16 @@ def check_tp_request(config: Any, tp_size: Optional[int]) -> None:
     if tp_size is None:
         return
 
-    limit = max_tp_size(config)
+    limit = max_tp_size(config, expert_parallel)
     if limit is None:
+        axis = "expert-parallel" if expert_parallel else "tensor-parallel"
+        field = "base_model_ep_plan" if expert_parallel else "base_model_tp_plan"
+        divides = "its expert count divides" if expert_parallel else "its dimensions divide"
         raise UnshardableCheckpoint(
-            f"this checkpoint cannot be split tensor-parallel, so tp_size={tp_size} "
+            f"this checkpoint cannot be split {axis}, so tp_size={tp_size} "
             "would load a whole copy of it onto every rank rather than a shard. "
-            "Either it publishes no `base_model_tp_plan`, its plan uses a style "
-            "nnsight cannot gather, or its dimensions divide no degree above 1. "
+            f"Either it publishes no `{field}`, its plan uses a style "
+            f"nnsight cannot gather, or {divides} no degree above 1. "
             "Load it without `distributed_config` — on one GPU, or spread over "
             "several with `device_map`."
         )

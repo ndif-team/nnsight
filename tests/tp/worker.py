@@ -78,6 +78,8 @@ def main() -> None:
     rank = int(os.environ.get("RANK", 0))
     model = build(args.repo, args.tp, getattr(torch, args.dtype), args.device)
 
+    from nnsight.modeling.tp import gather, shard
+
     layer = model.model.layers[LAYER]
     results: dict[str, torch.Tensor] = {}
 
@@ -95,8 +97,13 @@ def main() -> None:
     # An edit straddling rank boundaries: only correct if the gather assembled in
     # true rank order and the re-split put the edit back where it came from.
     width = results["gate_proj_out"].shape[-1]
+    # Cloned first, then assigned back: a gathered value is the output of an
+    # autograd Function, which torch will not have written into in place. See
+    # "Editing a gathered value" in docs/models/tensor-parallel.md.
     with model.trace(PROMPT):
-        layer.mlp.gate_proj.output[..., : width // 2 + 1] = 0
+        edited = layer.mlp.gate_proj.output.clone()
+        edited[..., : width // 2 + 1] = 0
+        layer.mlp.gate_proj.output = edited
         record("partial_edit_logits", model.lm_head.output.save())
 
     # Ad-hoc calls run a sharded module on whole tensors, through its own
@@ -110,6 +117,50 @@ def main() -> None:
         record("adhoc_rowwise", layer.mlp.down_proj(down_in).save())
         record("adhoc_lens", model.lm_head(model.model.norm(hidden)).save())
 
+    # An operation *inside* a module's forward is handed over as this rank's
+    # piece — no rule describes one, and the axis it is split on is not knowable
+    # from the value. The trace names the axis and reassembles it itself. Here
+    # the column-parallel matmul is a last-dim shard of the whole.
+    colwise_op = next(iter(layer.mlp.gate_proj.source.names))
+    with model.trace(PROMPT):
+        raw = getattr(layer.mlp.gate_proj.source, colwise_op).output
+        record("source_colwise_gathered", gather(model, raw, dim=-1).save())
+
+    # `.skip()` on a sharded module. The replacement is the caller's whole tensor
+    # and never passed through the module, so there is nothing to assemble — it
+    # only has to be cut back down. A row-parallel skip used to be all-reduced on
+    # the way out instead: every rank read back `tp_size` times what it wrote and
+    # the model carried that forward, with no error anywhere.
+    with model.trace(PROMPT):
+        hidden = layer.input
+        layer.mlp.down_proj.skip(torch.ones_like(hidden))
+        record("skip_read_back", layer.mlp.down_proj.output.save())
+        record("skip_logits", model.lm_head.output.save())
+
+    # An ad-hoc call on the *same* module whose handoff is still open. Reading
+    # `down_proj.input` opens that location's visit; calling `down_proj` from
+    # inside the block then asks the same location to be cut down again. The two
+    # used to share one record keyed by location, so the nested call consumed the
+    # open visit's and the module ran its sharded weights against a whole tensor.
+    with model.trace(PROMPT):
+        down_in = layer.mlp.down_proj.input
+        record("adhoc_nested", layer.mlp.down_proj(down_in).save())
+
+    # A value *between* two sharded modules is handed over as this rank's piece:
+    # nothing records which axis holds the shard once it has left the module that
+    # made it, and here `view`/`transpose` have moved it onto the head axis. So
+    # the trace says which axis, and gathers it itself. This is the per-head
+    # attention read, which is only reachable that way.
+    with model.trace(PROMPT):
+        heads = gather(model, layer.self_attn.source.query_states_0.output, dim=1)
+        record("manual_gathered_heads", heads.save())
+
+    with model.trace(PROMPT):
+        whole = gather(model, layer.self_attn.source.query_states_0.output, dim=1).clone()
+        whole[:, 1] = 0
+        layer.self_attn.source.query_states_0.output = shard(model, whole, dim=1)
+        record("manual_ablated_logits", model.lm_head.output.save())
+
     # A cache must record whole tensors too, and only for what it selects.
     with model.trace(PROMPT) as tracer:
         cache = tracer.cache(modules=[layer.mlp.gate_proj], include_inputs=True).save()
@@ -121,7 +172,7 @@ def main() -> None:
         with tracer.invoke(PROMPT):
             record("batched_first", layer.mlp.gate_proj.output.save())
         with tracer.invoke(SECOND_PROMPT):
-            layer.mlp.gate_proj.output[:] = 0
+            layer.mlp.gate_proj.output = torch.zeros_like(layer.mlp.gate_proj.output)
             record("batched_edited_logits", model.lm_head.output.save())
 
     # The same sharded location revisited on every step: the occurrence tagging
@@ -131,6 +182,17 @@ def main() -> None:
         for _ in tracer.iter[:3]:
             steps.append(layer.mlp.gate_proj.output[:, -1].mean())
     record("generated_steps", torch.stack([s.reshape(()) for s in steps]))
+
+    # `backward()` through a gathered *partial* side. The re-fragment contributes
+    # the whole on rank 0 and zeros elsewhere; done with a bare `zeros_like` that
+    # severed the graph on every rank but 0, so the ranks stopped reaching the
+    # same collectives and the backward hung — a deadlock rather than a wrong
+    # number, and reached without any branch in this block.
+    with model.trace(PROMPT):
+        layer.mlp.down_proj.output          # forces the gather and the re-fragment
+        loss = model.lm_head.output.sum()
+        with loss.backward():
+            record("partial_backward_grad", model.model.embed_tokens.weight.grad.save())
 
     # Greedy so the ranks cannot diverge on sampling; see the module docstring of
     # nnsight/modeling/tp/fragments.py for why that would be a correctness bug.

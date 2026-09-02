@@ -134,12 +134,19 @@ VALUES = [
     "baseline_logits",
     "partial_edit_logits",
     "cached_gate_out",
+    "partial_backward_grad",   # backward through a row-parallel output
+    "source_colwise_gathered",   # tp.gather on an op inside a sharded module
+    "manual_gathered_heads",   # tp.gather on a value between two shards
+    "manual_ablated_logits",   # ... edited and tp.shard-ed back
     "generated",
     "batched_first",
     "batched_edited_logits",
     "generated_steps",
     "adhoc_colwise",
     "adhoc_rowwise",
+    "adhoc_nested",   # an ad-hoc call inside its own open handoff
+    "skip_read_back",   # a .skip replacement is not gathered
+    "skip_logits",
     "adhoc_lens",
 ]
 

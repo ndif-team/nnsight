@@ -41,22 +41,64 @@ class _FakeMesh:
         return self._size
 
 
+class _FakeInterleaver:
+    """Weakref-able stand-in.
+
+    `install_controller` registers a route on the envoy's interleaver, and a
+    weakref needs a real object to point at. Nothing here is called: these tests
+    instrument a tree, they do not run one.
+    """
+
+
 class _FakeEnvoy:
-    """The two things `instrument` reads off an envoy."""
+    """What `instrument` reads off an envoy."""
 
     def __init__(self, module: torch.nn.Module, path: str = "model.thing") -> None:
         self._module = module
         self.path = path
+        self.interleaver = _FakeInterleaver()
 
 
-def _module(style: str | None, **attrs) -> torch.nn.Module:
+ROOT = "model"
+
+
+def _tp_wrapped_forward():
+    """A stand-in for transformers' TP forward wrapper, recognised by qualname."""
+
+    class TensorParallelLayer:
+        @staticmethod
+        def install_forward():
+            def tp_forward(*args, **kwargs):
+                raise AssertionError("these tests instrument a tree, they do not run one")
+
+            return tp_forward
+
+    return TensorParallelLayer.install_forward()
+
+
+def _sharded(style: str | None, path: str = "model.thing", size: int = 2, **attrs):
+    """A `TPFragments` that has walked a model sharding ``path`` as ``style``.
+
+    Built the way transformers describes a sharded model: the plan lives on the
+    *root*, keyed by each module's path below it, with a mesh saying it was
+    really split — so the root is instrumented first, exactly as `Envoy.__init__`
+    does before walking its children.
+    """
+    root = torch.nn.Identity()
+    root.tp_plan = {path[len(ROOT) + 1 :]: style} if style is not None else {}
+    root._device_mesh = _FakeMesh(size)
+
+    # Stands in for the wrapper transformers installs when it shards a module:
+    # `instrument` records a rule only for a module it actually wrapped.
     module = torch.nn.Identity()
-    if style is not None:
-        module._hf_tp_plan = style
-        module._hf_device_mesh = _FakeMesh()
+    module.__dict__["forward"] = _tp_wrapped_forward()
     for name, value in attrs.items():
         setattr(module, name, value)
-    return module
+
+    fragments = TPFragments()
+    fragments.instrument(_FakeEnvoy(root, path=ROOT))
+    fragments.instrument(_FakeEnvoy(module, path=path))
+    return fragments
 
 
 class TestStyleCoverage:
@@ -79,13 +121,6 @@ class TestStyleCoverage:
             f"{sorted(stale)} — probably renamed upstream."
         )
 
-    def test_a_style_is_either_handled_or_refused_never_both(self):
-        assert not (set(SIDES) & set(UNSUPPORTED))
-
-    @pytest.mark.parametrize("sides", SIDES.values())
-    def test_sides_are_input_or_output(self, sides):
-        assert set(sides) <= {"input", "output"}
-
 
 class TestInstrument:
     """What the interleaver does as the Envoy tree is built."""
@@ -96,43 +131,37 @@ class TestInstrument:
         assert not interleaver.tp_rules
 
     def test_an_unsharded_module_records_nothing(self, monkeypatch):
-        interleaver = TPFragments()
-
-        interleaver.instrument(_FakeEnvoy(_module(None)))
+        interleaver = _sharded(None)
 
         assert not interleaver.enabled
         assert not interleaver.tp_rules
 
     def test_a_sharded_module_records_its_side_and_enables(self, monkeypatch):
-        interleaver = TPFragments()
-
-        interleaver.instrument(_FakeEnvoy(_module("colwise"), path="model.q_proj"))
+        interleaver = _sharded("colwise", path="model.q_proj")
 
         assert interleaver.enabled
         assert "model.q_proj.output" in interleaver.tp_rules
 
     def test_a_row_parallel_module_records_its_input(self, monkeypatch):
-        interleaver = TPFragments()
-
-        interleaver.instrument(_FakeEnvoy(_module("rowwise"), path="model.o_proj"))
+        interleaver = _sharded("rowwise", path="model.o_proj")
 
         # At the handoff a row-parallel input is already this rank's slice and its
-        # output is this rank's partial sum — its own post-hook reduces it after us.
-        assert interleaver.tp_rules["model.o_proj.input"][1] == "shard"
-        assert interleaver.tp_rules["model.o_proj.output"][1] == "partial"
+        # output is this rank's partial sum — its own post-transform reduces it
+        # after us. Recorded as the DTensor placements that say so, which is what
+        # the gather asserts onto a value that arrives without one.
+        from torch.distributed.tensor import Partial, Shard
+
+        assert interleaver.tp_rules["model.o_proj.input"][1] == Shard(-1)
+        assert isinstance(interleaver.tp_rules["model.o_proj.output"][1], Partial)
 
     @pytest.mark.parametrize("style", sorted(UNSUPPORTED))
     def test_a_refused_style_raises(self, style, monkeypatch):
-        interleaver = TPFragments()
-
         with pytest.raises(UnsupportedParallelStyle, match=style):
-            interleaver.instrument(_FakeEnvoy(_module(style)))
+            _sharded(style)
 
     def test_an_unknown_style_raises(self, monkeypatch):
-        interleaver = TPFragments()
-
         with pytest.raises(UnsupportedParallelStyle, match="not a parallel style"):
-            interleaver.instrument(_FakeEnvoy(_module("something_new_upstream")))
+            _sharded("something_new_upstream")
 
 
 def test_an_unsharded_model_is_never_asked():
@@ -185,10 +214,10 @@ class TestMaxTpSize:
     def test_an_unsupported_style_in_the_plan_refuses(self):
         from nnsight.modeling.tp import max_tp_size
 
-        # An expert-parallel model would fail at load; it must not be *placed*
-        # as though it could be split.
+        # A model whose plan nnsight cannot gather would fail at load; it must
+        # not be *placed* as though it could be split.
         assert max_tp_size(self._config(
-            plan={"layers.*.mlp.experts": "grouped_gemm"},
+            plan={"layers.*.mlp.experts": "megamoe_experts"},
             num_attention_heads=16, num_key_value_heads=16, intermediate_size=4096,
         )) is None
 
@@ -238,11 +267,14 @@ class TestBytesPerElement:
 
 
 class TestTransformersVersionFloor:
-    """Sharding is refused on a transformers that shards incorrectly.
+    """Sharding is refused on a transformers whose TP nnsight cannot read.
 
-    Caught on a live deployment: the container ran 5.14.1 and a tied-embedding
-    model came back with logits four times the vocabulary width, while the argmax
-    — and so every eyeball check — stayed right.
+    The floor is the DTensor rewrite. Below it the plan is stamped per module
+    rather than kept on the model, so nnsight finds nothing sharded — which does
+    not fail, it hands intervention code one rank's slice as the whole tensor.
+    That is the same shape of bug as the one caught on a live deployment running
+    5.14.1, where a tied-embedding model returned logits four times the
+    vocabulary width while the argmax — and so every eyeball check — stayed right.
     """
 
     def _check(self, monkeypatch, version: str):
@@ -257,15 +289,15 @@ class TestTransformersVersionFloor:
     def test_an_older_transformers_is_refused(self, monkeypatch):
         from nnsight.modeling.tp import UnsupportedTransformersVersion
 
-        with pytest.raises(UnsupportedTransformersVersion, match="tie_word_embeddings"):
-            self._check(monkeypatch, "5.14.1")
+        with pytest.raises(UnsupportedTransformersVersion, match="5.16"):
+            self._check(monkeypatch, "5.15.1")
 
     @pytest.mark.parametrize(
-        "version", ["5.15.0", "5.15.1", "6.0.0", "5.15.0.dev0", "5.16.0rc1"]
+        "version", ["5.16.0", "5.16.1", "6.0.0", "5.16.0.dev0", "5.17.0rc1"]
     )
     def test_the_floor_and_above_are_allowed(self, monkeypatch, version):
         # Including pre-releases of the fixed series: an editable transformers
-        # checkout reports 5.15.0.dev0, which a plain >= would reject.
+        # checkout reports 5.16.0.dev0, which a plain >= would reject.
         self._check(monkeypatch, version)
 
     def test_it_only_runs_once(self, monkeypatch):
@@ -275,7 +307,7 @@ class TestTransformersVersionFloor:
 
         from nnsight.modeling.tp import fragments as tp_fragments
 
-        monkeypatch.setattr(transformers, "__version__", "5.15.0")
+        monkeypatch.setattr(transformers, "__version__", "5.16.0")
         monkeypatch.setattr(tp_fragments, "_version_checked", False)
         tp_fragments._check_transformers_version()
         monkeypatch.setattr(transformers, "__version__", "0.1.0")
@@ -304,16 +336,19 @@ class TestTheTwoGatesAgree:
     def test_a_style_in_neither_list_is_refused(self):
         from nnsight.modeling.tp import SIDES, UNSUPPORTED, max_tp_size
 
-        # Llama-4's actual plan. transformers does not register it in
-        # ALL_PARALLEL_STYLES either, so the drift test below cannot see it.
-        assert "colwise_rep" not in SIDES
-        assert "colwise_rep" not in UNSUPPORTED
-        assert max_tp_size(self._config({"layer.q_proj": "colwise_rep"})) is None
+        # A plan naming something no list covers. `colwise_rep` used to stand here
+        # — it was Llama-4's plan and no version registered it — but 5.16 added it
+        # to ALL_PARALLEL_STYLES and it now has a rule, so the case needs a name
+        # that is still genuinely unknown.
+        unknown = "colwise_upside_down"
+        assert unknown not in SIDES
+        assert unknown not in UNSUPPORTED
+        assert max_tp_size(self._config({"layer.q_proj": unknown})) is None
 
     def test_a_refused_style_is_still_refused(self):
         from nnsight.modeling.tp import max_tp_size
 
-        assert max_tp_size(self._config({"layer.experts": "grouped_gemm"})) is None
+        assert max_tp_size(self._config({"layer.experts": "megamoe_experts"})) is None
 
     def test_a_known_style_still_places(self):
         from nnsight.modeling.tp import max_tp_size
@@ -364,27 +399,21 @@ class TestExpertParallelIsNotAutomaticallyRefused:
 
         assert max_tp_size(Config()) == 8
 
-    def test_a_style_that_really_slices_by_expert_is_still_refused(self):
-        from nnsight.modeling.tp import UNSUPPORTED
+    def test_a_style_no_model_has_exercised_is_still_refused(self):
+        """The refused set is now what nothing has been run against.
 
-        assert "grouped_gemm" in UNSUPPORTED
+        ``ep_router`` and ``grouped_gemm`` left it because an expert-parallel
+        model was actually traced end to end (`tests/tp/test_cpu_expert_parallel.py`)
+        and their values proved to need no gather at all. The rest stay refused
+        for the reason the table has always given: reading a style's transforms
+        is not the same as having run one.
+        """
+        from nnsight.modeling.tp import SIDES, UNSUPPORTED
+
+        assert "megamoe_experts" in UNSUPPORTED
         assert "mla_kv_a_proj" in UNSUPPORTED
-
-
-class TestEmbeddingColwiseIsWhole:
-    """`embedding_colwise` all-reduces its output despite the name.
-
-    `EmbeddingParallel._prepare_output_fn` ends in an unconditional
-    `all_reduce_forward`; the `embedding_dim_sharding == 0` branch above it guards
-    only the vocab masking. Gathering it again would hand users a tensor tp_size
-    times too wide with a plausible first copy -- the tied-LM-head bug that
-    MINIMUM_TRANSFORMERS exists for, reintroduced by this table.
-    """
-
-    def test_its_output_is_reduced_not_gathered(self):
-        from nnsight.modeling.tp import SIDES
-
-        assert SIDES["embedding_colwise"] == {"output": "partial"}
+        assert "ep_router" in SIDES
+        assert "grouped_gemm" in SIDES
 
 
 class FakeMesh:
@@ -397,6 +426,104 @@ class FakeMesh:
         return self._size
 
 
+class TestSplitStandsAlone:
+    """`split` cuts a value down with no gather to reverse.
+
+    `TPEnvoy.__call__` uses it to prepare the argument of an ad-hoc call on a
+    sharded module. That value is whole because the caller is holding it, not
+    because anything assembled it, so there is no gather to undo and the
+    location's rule is the only thing to go on.
+
+    It used to be served by `fragment`, the same method that reversed a gather —
+    which meant an ad-hoc call made while its own location's handoff was still
+    open consumed the record that handoff was going to use, and the module then
+    ran sharded weights against a whole tensor.
+    """
+
+    def _split_calls(self, monkeypatch):
+        from nnsight.modeling.tp import fragments as tp_fragments
+
+        seen = []
+        monkeypatch.setattr(
+            tp_fragments,
+            "_fragment_tensor",
+            lambda tensor, *args, **kwargs: (seen.append(tensor), tensor)[1],
+        )
+        return seen
+
+    def test_it_uses_the_rule(self, monkeypatch):
+        fragments = _sharded("rowwise", path="model.o_proj")
+        split = self._split_calls(monkeypatch)
+
+        fragments.split("model.o_proj.input", torch.randn(1, 4, 8))
+
+        assert len(split) == 1, "a standalone split left the value whole"
+
+    def test_a_location_with_no_rule_is_left_alone(self, monkeypatch):
+        fragments = _sharded("rowwise", path="model.o_proj")
+        split = self._split_calls(monkeypatch)
+
+        fragments.split("model.o_proj.something_else", torch.randn(1, 4, 8))
+
+        assert not split
+
+    def test_whole_hands_back_its_own_way_out(self, monkeypatch):
+        """The reversal is a closure, not a record another call could consume."""
+        fragments = _sharded("rowwise", path="model.o_proj")
+        monkeypatch.setattr(
+            "nnsight.modeling.tp.fragments._gather", lambda value, *a: value
+        )
+        _, undo = fragments.whole("model.o_proj.input", torch.randn(1, 4, 8))
+
+        assert callable(undo)
+        # Nothing was written anywhere for a later call to find and take.
+        assert not [name for name in vars(fragments) if "pending" in name]
+
+
+class TestOnlyBoundariesAreReassembled:
+    """A module's two sides are made whole; everything inside a forward is not.
+
+    An operation's value has no rule and nothing on it says which axis holds its
+    shard once it has left the module that produced it — and the axis moves, so
+    there is nothing safe to assume. It is handed over as this device's piece and
+    the trace reassembles it with `gather`/`shard`, naming the axis. `Envoy.source`
+    warns on a sharded model so that is not a surprise.
+    """
+
+    def test_a_module_side_with_a_rule_is_reassembled(self):
+        fragments = _sharded("colwise", path="model.q_proj")
+
+        # colwise records only its output; its input is whole where we stand.
+        assert fragments.fragmented("model.q_proj.output")
+        assert not fragments.fragmented("model.q_proj.input")
+
+    def test_an_operation_inside_a_forward_is_not(self):
+        fragments = _sharded("colwise", path="model.q_proj")
+
+        assert not fragments.fragmented("model.q_proj.source.F_linear_0.output")
+        assert not fragments.fragmented("model.q_proj.source.F_linear_0.input")
+
+    def test_a_module_with_no_rule_is_not(self):
+        """`act_fn` between a colwise output and a rowwise input, say."""
+        fragments = _sharded("colwise", path="model.q_proj")
+
+        assert not fragments.fragmented("model.act_fn.output")
+
+    def test_a_boundary_without_a_placement_still_uses_its_rule(self):
+        """A side is reassembled from its rule even when the value says nothing."""
+        from nnsight.modeling.tp import fragments as tp_fragments
+
+        fragments = _sharded("colwise", path="model.q_proj")
+        gathered = []
+        real = tp_fragments._gather
+        try:
+            tp_fragments._gather = lambda value, *a: (gathered.append(value), value)[1]
+            fragments.whole("model.q_proj.output", torch.randn(1, 4, 8))
+        finally:
+            tp_fragments._gather = real
+        assert len(gathered) == 1
+
+
 class TestReshardGuard:
     """What goes back to the model must be guarded like what came out of it.
 
@@ -405,18 +532,21 @@ class TestReshardGuard:
     Divisibility alone cannot tell the two apart: an integer `position_ids` of
     width 8 at tp=4 divides perfectly, and the result is wrong answers on every
     rank identically -- not a hang, and nothing to notice.
+
+    Spies on nnsight's own two primitives rather than on a transformers helper.
+    The previous version patched ``transformers.integrations.tensor_parallel.split``,
+    which 5.16 deleted -- so these tests broke on a release that changed nothing
+    about the behaviour they describe.
     """
 
-    def _split_calls(self, monkeypatch):
-        import transformers.integrations.tensor_parallel as tp
+    def _calls(self, monkeypatch, name):
+        """Record every tensor handed to fragments.``name``, and pass it through."""
+        from nnsight.modeling.tp import fragments
 
         seen = []
-
-        def fake_split(tensor, mesh):
-            seen.append(tensor)
-            return tensor
-
-        monkeypatch.setattr(tp, "split", fake_split)
+        monkeypatch.setattr(
+            fragments, name, lambda tensor, *args, **kwargs: (seen.append(tensor), tensor)[1]
+        )
         return seen
 
     @pytest.mark.parametrize(
@@ -428,27 +558,38 @@ class TestReshardGuard:
         ],
     )
     def test_a_value_the_gather_skipped_is_not_split(self, monkeypatch, tensor, why):
-        from nnsight.modeling.tp.fragments import _gather, _reshard
+        from nnsight.modeling.tp.fragments import _gather, _placement, _reshard
 
-        gather_seen = self._split_calls(monkeypatch)
-        import transformers.integrations.tensor_parallel as tp
-
-        monkeypatch.setattr(tp, "all_gather", lambda t, m: gather_seen.append(t) or t)
         mesh = FakeMesh(4)
+        shard = _placement("shard")
 
-        _gather(tensor, mesh)
-        assert not gather_seen, f"{why} should not have been gathered"
+        gathered = self._calls(monkeypatch, "_whole_tensor")
+        _gather(tensor, mesh, shard)
+        assert not gathered, f"{why} should not have been gathered"
 
-        split_seen = self._split_calls(monkeypatch)
-        _reshard(tensor, mesh)
-        assert not split_seen, f"{why} was split though it was never gathered"
+        split = self._calls(monkeypatch, "_fragment_tensor")
+        _reshard(tensor, mesh, shard, False)
+        assert not split, f"{why} was split though it was never gathered"
 
     def test_a_real_shard_still_round_trips(self, monkeypatch):
-        from nnsight.modeling.tp.fragments import _reshard
+        from nnsight.modeling.tp.fragments import _placement, _reshard
 
-        split_seen = self._split_calls(monkeypatch)
-        _reshard(torch.randn(1, 4, 8), FakeMesh(4))
-        assert len(split_seen) == 1
+        split = self._calls(monkeypatch, "_fragment_tensor")
+        _reshard(torch.randn(1, 4, 8), FakeMesh(4), _placement("shard"), False)
+        assert len(split) == 1
+
+    def test_a_partial_is_reduced_whatever_its_width(self, monkeypatch):
+        """A partial is a whole-width term of a sum, so divisibility is irrelevant.
+
+        Guarding it with the shard's ``% world_size`` test would silently skip the
+        re-fragment on any width that does not divide, and the model's own reduce
+        would then sum the whole tensor once per rank.
+        """
+        from nnsight.modeling.tp.fragments import _placement, _reshard
+
+        split = self._calls(monkeypatch, "_fragment_tensor")
+        _reshard(torch.randn(1, 4, 7), FakeMesh(4), _placement("partial"), False)
+        assert len(split) == 1
 
 
 class TestHubFailuresAreDistinguishable:

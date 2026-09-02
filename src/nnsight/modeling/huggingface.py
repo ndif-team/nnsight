@@ -147,9 +147,14 @@ class HuggingFaceModel(Remotable):
         differently on each path, and a check that silently sees nothing is worse
         than no check.
         """
-        from .tp import check_tp_request, requested_tp_size
+        from .tp import (
+            check_tp_request,
+            requested_expert_parallel,
+            requested_tp_size,
+        )
 
-        tp_size = requested_tp_size(kwargs.get("distributed_config"))
+        distributed = kwargs.get("distributed_config")
+        tp_size = requested_tp_size(distributed)
         if tp_size is None:
             # The ordinary path: no degree asked for, so no config to read.
             return
@@ -157,7 +162,9 @@ class HuggingFaceModel(Remotable):
         from transformers import AutoConfig
 
         check_tp_request(
-            AutoConfig.from_pretrained(repo_id, revision=self.revision), tp_size
+            AutoConfig.from_pretrained(repo_id, revision=self.revision),
+            tp_size,
+            requested_expert_parallel(distributed)
         )
 
     def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
