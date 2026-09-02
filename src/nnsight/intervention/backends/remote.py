@@ -177,10 +177,14 @@ class RemoteBackend(Backend):
         reaches its result through here.
         """
         self.display.update(response)
-        if response.status == Status.ERROR:
-            raise RemoteError(response.description)
+        # Recorded before the raise: a failed job reports its cost too, and on an
+        # OOM that report is the most useful thing it has to say. `tracer` is
+        # bound by the time the backend runs, so an `except RemoteError` can read
+        # `tracer.backend.meta_data`.
         if response.meta_data is not None:
             self.meta_data = response.meta_data
+        if response.status == Status.ERROR:
+            raise RemoteError(response.description)
         return response.status == Status.COMPLETED
 
     def handle(self, response: ResponseModel) -> Optional[RESULT]:

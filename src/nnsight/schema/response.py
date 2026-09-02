@@ -40,7 +40,9 @@ class ResponseModel(BaseModel):
     Streamed over the websocket for a blocking job, or saved to the object store
     and fetched by the client for a non-blocking one. [`data`][nnsight.schema.response.ResponseModel.data] holds the
     saved values only on a ``COMPLETED`` response, and [`meta_data`][nnsight.schema.response.ResponseModel.meta_data]
-    what the run cost on the server -- also COMPLETED-only.
+    what the run cost on the server -- on ``COMPLETED`` and on a failure alike,
+    since a job that ran out of memory or timed out is exactly when its cost is
+    worth reading.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())

@@ -94,7 +94,22 @@ print(tracer.backend.meta_data)
 
 The memory figures are what *your block* drove on top of the resident weights, not the card's total usage — the weights are the server's, and they are already there before your job starts. GPU keys are strings.
 
-It is a plain dict, not a model: a server can report more than the client knows about, and an older one that reports nothing leaves `meta_data` as `None`. Don't assume a key is present — `meta_data` is populated only on `COMPLETED`, so it stays `None` for a job that errored, and for a job that hasn't finished.
+It is a plain dict, not a model: a server can report more than the client knows about, and an older one that reports nothing leaves `meta_data` as `None`. Don't assume a key is present.
+
+A **failed** job reports its cost too, which is when it matters most. The backend records it before raising, so catch the error and read it off the tracer:
+
+```python
+from nnsight.intervention.backends.remote import RemoteError
+
+try:
+    with model.trace(prompt, remote=True) as tracer:
+        acts = model.transformer.h[-1].output.save()
+except RemoteError:
+    print(tracer.backend.meta_data)
+    # {'runtime': 3.1, ..., 'extra_memory_needed': {'0': 1310000000}}
+```
+
+`extra_memory_needed` appears only when the server ran out of GPU memory. It maps **each card that ran out** to how many bytes past its allowance the block reached there — on a sharded model, *which* card is itself the finding. It is — the number that says how much you need to free, which the traceback cannot tell you: the allocation that failed is by definition the one that never counted. Treat it as approximate; the allocator drops cached blocks and retries before it gives up.
 
 A non-blocking job's `poll()` and an `AsyncRemoteBackend` record it the same way, on the backend you already hold.
 

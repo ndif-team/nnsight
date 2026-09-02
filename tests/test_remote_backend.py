@@ -205,6 +205,26 @@ class TestBackendMetaData:
         backend.note(ResponseModel(id="job", status=Status.RUNNING))
         assert backend.meta_data == META
 
+    def test_recorded_even_when_the_job_fails(self):
+        # The report is taken off the response *before* note() raises. A failed
+        # job is exactly when it earns its keep -- an OOM's meta_data carries
+        # extra_memory_needed, which the traceback cannot tell you.
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test")
+        failure = dict(META, extra_memory_needed={"0": 1_310_000_000})
+        with pytest.raises(RemoteError, match="out of memory"):
+            backend.note(
+                ResponseModel(
+                    id="job",
+                    status=Status.ERROR,
+                    description="CUDA out of memory",
+                    meta_data=failure,
+                )
+            )
+        assert backend.meta_data == failure
+        assert backend.meta_data["extra_memory_needed"] == {"0": 1_310_000_000}
+
     def test_stays_none_against_an_older_server(self):
         backend = _backend([Status.RUNNING, Status.COMPLETED], result={"out": 1})
         asyncio.run(backend.resolve())
