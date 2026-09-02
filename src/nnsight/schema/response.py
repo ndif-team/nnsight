@@ -3,7 +3,9 @@
 Each update NDIF pushes for a job — whether streamed over a blocking websocket or
 saved to the object store and polled — arrives as a [`ResponseModel`][nnsight.schema.response.ResponseModel]. Its
 `Status` names where the job is in its lifecycle; on ``COMPLETED`` the
-returned values ride in [`data`][nnsight.schema.response.ResponseModel.data].
+returned values ride in [`data`][nnsight.schema.response.ResponseModel.data]
+and what the run cost the server rides in
+[`meta_data`][nnsight.schema.response.ResponseModel.meta_data].
 """
 
 from __future__ import annotations
@@ -37,7 +39,8 @@ class ResponseModel(BaseModel):
 
     Streamed over the websocket for a blocking job, or saved to the object store
     and fetched by the client for a non-blocking one. [`data`][nnsight.schema.response.ResponseModel.data] holds the
-    saved values only on a ``COMPLETED`` response.
+    saved values only on a ``COMPLETED`` response, and [`meta_data`][nnsight.schema.response.ResponseModel.meta_data]
+    what the run cost on the server -- also COMPLETED-only.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
@@ -46,6 +49,7 @@ class ResponseModel(BaseModel):
     status: Status
     description: str = ""
     data: Optional[Any] = None
+    meta_data: Optional[Dict[str, Any]] = None
 
     def __str__(self) -> str:
         return f"[{self.id}] {self.status.value.ljust(12)} {self.description}"

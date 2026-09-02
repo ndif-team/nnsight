@@ -77,6 +77,27 @@ Status updates are `ResponseModel` objects carrying one of these (`src/nnsight/s
 
 The client renders these as a single in-place status line (animated spinner in terminals, an in-place HTML element in Jupyter). See `StatusDisplay` (`src/nnsight/intervention/backends/display.py:58`). There is no `STREAM` status — the old `tracer.local()` hybrid-streaming path does not exist here.
 
+## What the job cost
+
+The `COMPLETED` response also carries `meta_data` — what the run cost on the server. The backend keeps the last one it saw, and the tracer keeps the backend it ran on, so read it after the block exits (the backend runs in `__exit__`, so it is still `None` inside):
+
+```python
+with model.trace("Hello", remote=True) as tracer:
+    out = model.lm_head.output.save()
+
+print(tracer.backend.meta_data)
+# {'runtime': 0.42,                      # wall-clock seconds on the server
+#  'max_memory_usage': 2147483648,       # peak bytes on the worst-pressured card
+#  'max_mem_by_gpu': {'0': 2147483648},  # ...per card
+#  'max_mem_pct_by_gpu': {'0': 20.0}}    # ...against the headroom the job had
+```
+
+The memory figures are what *your block* drove on top of the resident weights, not the card's total usage — the weights are the server's, and they are already there before your job starts. GPU keys are strings.
+
+It is a plain dict, not a model: a server can report more than the client knows about, and an older one that reports nothing leaves `meta_data` as `None`. Don't assume a key is present — `meta_data` is populated only on `COMPLETED`, so it stays `None` for a job that errored, and for a job that hasn't finished.
+
+A non-blocking job's `poll()` and an `AsyncRemoteBackend` record it the same way, on the backend you already hold.
+
 ## What "meta device" means client-side
 
 When you instantiate `TransformersModel("meta-llama/Llama-3.1-70B")` without `dispatch=True`, the model is built on `torch.device("meta")` — the architecture is constructed (so `model.transformer.h[0].output` is a real envoy path) but no weights are allocated. This is what lets a machine with no GPU write intervention code against a 70B model.

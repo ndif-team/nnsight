@@ -95,6 +95,7 @@ class RemoteBackend(Backend):
         self.blocking = blocking
         self.job_id = job_id
         self.status: Optional[Status] = None
+        self.meta_data: Optional[dict] = None
         self.host = host or CONFIG.API.HOST
         if not self.host.startswith(("http://", "https://")):
             raise ValueError(
@@ -169,10 +170,17 @@ class RemoteBackend(Backend):
         The shared status handling for every update, however it arrived (websocket,
         poll): update the display, raise [`RemoteError`][nnsight.intervention.backends.remote.RemoteError] on ERROR, and return
         whether the status is COMPLETED (so the caller knows to fetch the result).
+
+        Also where [`meta_data`][nnsight.intervention.backends.remote.RemoteBackend.meta_data]
+        is taken off the response, since every waiting mode but
+        [`stream`][nnsight.intervention.backends.remote.AsyncRemoteBackend.stream]
+        reaches its result through here.
         """
         self.display.update(response)
         if response.status == Status.ERROR:
             raise RemoteError(response.description)
+        if response.meta_data is not None:
+            self.meta_data = response.meta_data
         return response.status == Status.COMPLETED
 
     def handle(self, response: ResponseModel) -> Optional[RESULT]:
@@ -476,6 +484,8 @@ class AsyncRemoteBackend(RemoteBackend):
         try:
             while True:
                 response = await self.receive()
+                if response.meta_data is not None:
+                    self.meta_data = response.meta_data
                 yield response
                 if response.status == Status.COMPLETED:
                     yield await self.download(response.data)
