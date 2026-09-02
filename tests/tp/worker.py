@@ -28,7 +28,7 @@ SECOND_PROMPT = "The capital of Japan is the city of"
 LAYER = 1
 
 
-def build(repo_id: str, tp: int, dtype: torch.dtype):
+def build(repo_id: str, tp: int, dtype: torch.dtype, device: str = "cuda"):
     from nnsight.modeling.tp import TPFragments
     from nnsight.modeling.transformers import TransformersModel
 
@@ -40,9 +40,11 @@ def build(repo_id: str, tp: int, dtype: torch.dtype):
             distributed_config=DistributedConfig(tp_size=tp),
         )
     else:
+        # Rank 0's card on CUDA; on CPU there is no index to pin to. The
+        # reference run is single-process either way.
         model = TransformersModel(
             repo_id, task="text-generation", dispatch=True, dtype=dtype,
-            device_map={"": 0},
+            device_map={"": 0} if device == "cuda" else {"": "cpu"},
         )
 
     # Nothing installs or enables anything: every HuggingFace model is built with
@@ -70,10 +72,11 @@ def main() -> None:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--dtype", default="float32")
+    parser.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
     args = parser.parse_args()
 
     rank = int(os.environ.get("RANK", 0))
-    model = build(args.repo, args.tp, getattr(torch, args.dtype))
+    model = build(args.repo, args.tp, getattr(torch, args.dtype), args.device)
 
     layer = model.model.layers[LAYER]
     results: dict[str, torch.Tensor] = {}
