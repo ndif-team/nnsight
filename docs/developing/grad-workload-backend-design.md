@@ -1,8 +1,8 @@
 ---
 title: Backend design for gradient workloads on very large models
-one_liner: What it takes for nnsight/NDIF to support Jacobian-lens-style features on models at Kimi K3 scale, and which execution backend fits.
+one_liner: What it takes for nnsight/NDIF to support Jacobian-lens-style features on models at Kimi K3 scale: substrate tiers, the general-infrastructure vs per-model split, and the staged plan.
 tags: [developing, design, gradients, ndif, moe]
-status: exploration, no implementation started
+status: stage 1 built and validated; plan revised 2026-08-26
 date: 2026-08-10
 ---
 
@@ -154,13 +154,34 @@ Probe results 2026-08-11 (`tests/manual/fsdp2_probe.py`, GPT-2 fp32 under `fully
 5. KTransformers: Envoy hooks on the injected module tree, and backward coverage beyond the LoRA-exercised ops (DeepSeek-V2-Lite at 150 GB host RAM is the natural target).
 6. torch.func / batched-VJP (`is_grads_batched`) composability with DTensor, as an optimization over the plain backward loop.
 
-## 10. Recommendation
+## 10. Recommendation and staged plan (revised 2026-08-26)
 
-- For J-lens specifically, validate the finite-difference path on the existing serving stack first; it may need no new infrastructure at all.
-- For the grad pool, fork torchtitan: FSDP2 + EP, no TP, no PP, all parameters frozen, no optimizer. Full-tensor activations everywhere except inside the MoE block; DTensor placements as typed input to any remaining merge logic; one autograd graph per rank so multi-seed backward works as on a single GPU.
-- Ladder: FSDP2-only on eager modeling code first (slow MoE, correct, near-zero integration) to validate the nnsight-grad pipeline end to end, then grouped-mm EP for throughput.
-- Megatron-Core is the escalation path if TE kernel support (MXFP4-native) or the compute bill at torchtitan efficiency becomes binding.
-- KTransformers is the low-cost single-node alternative worth one probe (hooks + backward coverage), attractive when sketched direction counts make CPU-expert throughput acceptable.
+### Substrate tiers
+
+Two substrates, sharing one nnsight-side architecture (same-process SPMD execution, hooks on eager modules, a fragments layer that reassembles sharded values forward and backward, rank-0 collection):
+
+- **Tier 1, distributed transformers.** The vendor's HF modeling code, sharded from outside: FSDP2 for parameters (needs no per-model configuration, so coverage equals everything transformers runs; validated bit-identical on dense and MoE, section 9) and transformers' native parallel plans for TP/EP where a plan is authored. Measured on transformers 5.12: 90 of 485 model families carry `base_model_tp_plan`; the large-MoE families do (DeepSeek-V2/V3, Qwen3-MoE/Next/3.5, Mixtral, Llama-4, GLM-4-MoE, MiniMax, dots1, ERNIE-4.5-MoE, OLMoE), Nemotron, gpt-oss, Hunyuan-MoE, and Granite-MoE do not, and Kimi is remote code, not in-tree. The plans already use MoE styles (`moe_tp_experts`, `grouped_gemm`, `ep_router`). nnsight 0.8's `modeling/tp/` (`TPFragments`, requires transformers >= 5.15) is the intervention layer over these plans. This tier is the default for anything HF can host acceptably.
+- **Tier 2, nnsight-megatron.** The model reimplemented as a megatron.core `GPTModel`, with mcore's own parallelism and optional Transformer Engine kernels and precision paths. Escalation for what tier 1 cannot execute: FP4-native compute for a 2.8T checkpoint, throughput-critical trillion-scale expert parallelism, precision paths HF eager lacks. Costs one converter per architecture family. v0 (single GPU) is built and validated (section 9).
+
+Remote-code frontier releases with custom-kernel dependencies (mamba_ssm, fla Triton kernels) cost the same on both tiers: the kernels must run eagerly on tier 1 and be ported on tier 2.
+
+### What is general and what is per model
+
+The infrastructure is model-agnostic and built once: wrapper class, HF-convention adapter, the `[seq, batch, hidden]` batcher, single-process init, the backward guard, config derivation from HF config fields, the fragments layer (forward and backward), the SPMD execution convention, rank-0 collection, the service plumbing (worker groups, broadcast, routing, artifact persistence), and the probe suite as acceptance test. None of it knows which model it runs.
+
+The per-model slot is one converter entry (HF parameter names and layouts to mcore's, about 80 lines per family) plus the family config flags (qkv bias, norm type, tied embeddings, rope parameters), kept honest by strict accounting: every parameter written once, every checkpoint tensor consumed, or the load refuses. Layer types new to the substrate (a hybrid-attention block, a new MoE routing scheme) are implemented once in the substrate and shared by every later model that uses them. The layer spec (local vs TE) is a load-time knob of the shared infrastructure with its visibility consequences documented once, generically.
+
+Generality goals, in priority order: intervention generality on the hosted model (the full interp-serve-bench method inventory, plus batching, `.source` where kernels permit); workflow completeness (collect or train a probe with activation gradients through the frozen model, then apply it forward-only, on the same resident instance). Model-zoo breadth is not a goal: the population needing this backend (roughly >= 200B parameters) is a dozen-odd families arriving a few per year, each hosted deliberately; small and mid-size models are already fully served by the existing HF path on one GPU or one node.
+
+### Stages
+
+1. **Forward and backward with hooks, single GPU. Done.** Megatron v0 on `megatron-on-08`: converter (qwen2 family), adapter, batcher, backward guard; validated against the HF oracle to about 1e-6 on logit lens, steering, ablation, activation patching, attribution patching, and the J-lens collection loop (`docs/developing/megatron-backend.md`). FSDP2 compatibility of tier 1 validated. Measured: nnsight adds 3.8 ms per trace and nothing per backward seed; small-scale wall-clock is the kernel-launch floor of unfused eager code, which amortizes with batch, sequence length, and model scale.
+2. **Multi-GPU, one node, intervention-general.** Tier 1: TP through `TPFragments` (transformers >= 5.15 environment), then verify the native MoE styles at hook points forward and backward. Tier 2: EP-only layout (no TP, no PP), fragments for the expert block only (per-rank expert partials, forward and backward), SPMD conventions (rank-0 saves, identical seeding, interventions at reassembled points only). Exit: the probe suite passes on 2 to 8 GPUs on both tiers with the single-GPU numbers.
+3. **First large family at real scale, multi-node.** DeepSeek-V3-class first: in-tree HF plan (tier 1 as the at-scale oracle where it fits), existing mcore lineage, and the converter generalizes to its descendants including K3. Convert once and persist in `dist_checkpointing`; measure per-pass cost on the real fabric (`nccl-tests` plus one forward, no estimates); run J-lens collection and attribution at full dimension with batched prompts. Exit: a lens artifact produced at scale and checked against small-scale sketches.
+4. **Workflow completeness on the service** (NDIF side, backend-independent): multi-rank worker groups with request broadcast, grad-pool routing on the presence of a backward context, memory policy sized for retained graphs, hours-scale resumable jobs, and the probe lifecycle (collect or train, persist the artifact server-side, reference it from later traces on the same resident instance). Exit: collect-then-apply runs end to end remotely on the stage-3 model.
+5. **Escalation cases.** K3-class at MXFP4 on Blackwell: TE spec, hybrid-attention layer support in the substrate, per-spec visibility documentation. Reached when a hosted model needs it; stages 2 to 4 decide per model which tier hosts it.
+
+Cross-cutting: the probe scripts (`tests/manual/megatron_probe.py`, `interp_workloads_probe.py`, `jlens_demo.py`, `fsdp2_probe.py`) are the acceptance suite for every stage and run unchanged; anything a stage adds must keep them passing.
 
 ## Sources
 

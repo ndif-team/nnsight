@@ -95,8 +95,9 @@ checkpoint (Qwen2.5-0.5B-Instruct), which is the correctness oracle throughout.
   error and cannot load wrong (strict accounting: every parameter written
   exactly once, every checkpoint tensor consumed).
 - Trace-only: no generation.
-- Single GPU: parallel layouts are the next stage; 0.8's `modeling/tp/`
-  shard-aware interleaver rules are the intended in-house lineage for it.
+- Single GPU: parallel layouts are stage 2 of the plan in
+  `docs/developing/grad-workload-backend-design.md` (section 10); 0.8's
+  `modeling/tp/` shard-aware interleaver rules are the in-house lineage for it.
 - Lazy loading (`dispatch=False`) and `edit()` are inherited and untested.
 - Batch-dim detection in `MegatronBatcher` is by size match and is ambiguous
   when a padded sequence length equals the total batch size (resolved as
