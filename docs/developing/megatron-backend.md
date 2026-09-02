@@ -88,6 +88,39 @@ checkpoint (Qwen2.5-0.5B-Instruct), which is the correctness oracle throughout.
   backward on a 9-token prompt), which amortizes with batch, sequence length,
   and model scale.
 
+## Stage 2, track 1: the same workloads on a tensor-parallel HF model
+
+The next stage's first track is the distributed-transformers tier (the
+default substrate in the plan, `grad-workload-backend-design.md` section 10):
+transformers' native tensor parallelism (`DistributedConfig(tp_size=N)`)
+reassembled at hook points by nnsight 0.8's `TPFragments`, requiring
+transformers >= 5.15. `tests/manual/tp_workloads_probe.py` runs the same five
+bench workloads plus MoE-internal hook points on a TP=2 model (one process
+per rank under torchrun) and compares against the unsharded single-GPU run.
+
+| model | workload | TP=2 vs unsharded (fp32) |
+|---|---|---|
+| Qwen2.5-0.5B-Instruct | logit_lens, steering, ablation, activation_patching | rel 6e-7 to 2e-6, argmax 100% |
+| Qwen2.5-0.5B-Instruct | attribution_patching (gradients through reassembly) | rel 3.2e-6 |
+| Qwen1.5-MoE-A2.7B (60 experts) | the five workloads | rel 3e-7 to 7e-7, argmax 100% |
+| Qwen1.5-MoE-A2.7B | router weights, experts module output (sharded by the plan's `ep_router` / `moe_tp_experts` / `grouped_gemm` styles) | rel 5e-7 and 1e-6 |
+
+Two things learned:
+
+- HF's expert-parallel styles are reassembled correctly at MoE-internal hook
+  points, forward and backward, so on this tier the MoE block is not a special
+  case for interventions.
+- transformers keeps TP shards as plain local tensors, not DTensors. An
+  intervention that derives a quantity from a rank-local parameter read (the
+  steering direction from `lm_head.weight`, which is half the vocabulary on
+  each rank at TP=2) silently diverges across ranks, and the collectives then
+  mix the divergent results. Interventions must derive such quantities from
+  reassembled values (the probe all-gathers the weight first). This is the
+  SPMD discipline the plan names, seen concretely.
+
+Setup: `PYTHONPATH=<transformers-5.15 overlay>:src`; the overlay is a
+`pip install --no-deps --target` of transformers 5.15.0 and safetensors 0.8.
+
 ## Known limits of this stage
 
 - Model coverage is the converter registry (`loading.py`), currently the
