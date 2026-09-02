@@ -79,9 +79,16 @@ class TPEnvoy(Envoy):
         Every rank runs the block, so every rank reaches the same collectives in
         the same order — as long as the call is not under rank-dependent control
         flow, the condition every collective in a block carries.
+
+        ``hook`` does not change this. It says whether the *trace* watches the
+        call, which is a separate question from whether the caller is holding
+        whole tensors; and the handoff it turns on brackets the value and puts it
+        back, so it leaves this caller's return value exactly as it found it. When
+        ``hook`` short-circuited the bracket, an observer at ``.output`` saw the
+        whole tensor while the caller of the same call got this rank's slice.
         """
         fragments = self.interleaver.fragments
-        if hook or fragments is None or not fragments.enabled:
+        if fragments is None or not fragments.enabled:
             return super().__call__(*args, hook=hook, **kwargs)
 
         # Asked of the fragments rather than read off the module: up to 5.15

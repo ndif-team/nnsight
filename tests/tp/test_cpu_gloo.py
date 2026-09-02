@@ -156,6 +156,7 @@ def test_the_ranks_agree(runs) -> None:
         "partial_edit_logits",  # an edit straddling the rank boundary
         "adhoc_colwise",
         "adhoc_rowwise",
+        "adhoc_hooked",   # hook=True must not skip the bracket
         "adhoc_nested",   # an ad-hoc call inside its own open handoff
         "skip_read_back",   # a .skip replacement is not gathered
         "skip_logits",

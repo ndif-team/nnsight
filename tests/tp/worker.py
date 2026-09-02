@@ -161,6 +161,13 @@ def main() -> None:
         layer.self_attn.source.query_states_0.output = shard(model, whole, dim=1)
         record("manual_ablated_logits", model.lm_head.output.save())
 
+    # `hook=True` only decides whether the trace watches the call; the caller is
+    # holding whole tensors either way. It used to skip the bracket, so the same
+    # call returned this rank's slice with the flag on and the whole without it.
+    with model.trace(PROMPT):
+        mlp_in = layer.mlp.input
+        record("adhoc_hooked", layer.mlp.gate_proj(mlp_in, hook=True).save())
+
     # A cache must record whole tensors too, and only for what it selects.
     with model.trace(PROMPT) as tracer:
         cache = tracer.cache(modules=[layer.mlp.gate_proj], include_inputs=True).save()

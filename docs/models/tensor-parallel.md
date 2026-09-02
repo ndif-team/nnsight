@@ -227,6 +227,31 @@ one GPU and on eight.
 If you are not sure which axis holds the shard, print the shape at tp=1 and at
 tp=2 and compare: the axis that shrank by `tp_size` is the one.
 
+## A sharded model wrapped with `NNsight` directly
+
+`TransformersModel` attaches the tensor-parallel rules for you. A tree built with
+plain `NNsight` over an already-sharded module does not get them by default — it
+has no way to know the module came from `transformers` — so every sharded value
+would be handed over as this device's piece. Opt in:
+
+```python
+from nnsight import NNsight
+from nnsight.intervention.interleaver import Interleaver
+from nnsight.modeling.tp import TPFragments
+from nnsight.modeling.tp.envoys import tp_envoys
+
+model = NNsight(
+    sharded_hf_model,
+    interleaver=Interleaver(fragments=TPFragments()),
+    envoys=tp_envoys(),          # ad-hoc calls on sharded modules
+)
+```
+
+`TPFragments` works the rules out for itself as the tree is built, and stays
+inert on a model that is not sharded — so this is safe to pass unconditionally.
+`tp_envoys()` is what makes `model.lm_head(hidden)` return a whole tensor rather
+than this rank's slice.
+
 ## Requires transformers >= 5.16
 
 5.16 rebuilt tensor parallelism on DTensor. The sharding plan moved from a stamp

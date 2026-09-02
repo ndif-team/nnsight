@@ -144,6 +144,7 @@ VALUES = [
     "generated_steps",
     "adhoc_colwise",
     "adhoc_rowwise",
+    "adhoc_hooked",   # hook=True must not skip the bracket
     "adhoc_nested",   # an ad-hoc call inside its own open handoff
     "skip_read_back",   # a .skip replacement is not gathered
     "skip_logits",
