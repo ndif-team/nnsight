@@ -85,16 +85,16 @@ The `COMPLETED` response also carries `meta_data` — what the run cost on the s
 with model.trace("Hello", remote=True) as tracer:
     out = model.lm_head.output.save()
 
-print(tracer.backend.meta_data)
-# {'runtime': 0.42,                      # wall-clock seconds on the server
-#  'max_memory_usage': 2147483648,       # peak bytes on the worst-pressured card
-#  'max_mem_by_gpu': {'0': 2147483648},  # ...per card
-#  'max_mem_pct_by_gpu': {'0': 20.0}}    # ...against the headroom the job had
+meta = tracer.backend.meta_data
+meta.runtime             # 0.42        wall-clock seconds on the server
+meta.max_memory_usage    # 2147483648  peak bytes on the worst-pressured card
+meta.max_mem_by_gpu      # {'0': 2147483648}   ...per card
+meta.max_mem_pct_by_gpu  # {'0': 20.0}         ...against the headroom the job had
 ```
 
 The memory figures are what *your block* drove on top of the resident weights, not the card's total usage — the weights are the server's, and they are already there before your job starts. GPU keys are strings.
 
-It is a plain dict, not a model: a server can report more than the client knows about, and an older one that reports nothing leaves `meta_data` as `None`. Don't assume a key is present.
+It is a `MetaData` model (`src/nnsight/schema/response.py`), so the fields autocomplete and are documented on the type. Every field is optional — an older server may report none of them — so check before trusting one. Unknown fields from a newer server are kept and readable as attributes rather than dropped, and a report the client cannot parse is discarded on its own without failing the response that carried it.
 
 A **failed** job reports its cost too, which is when it matters most. The backend records it before raising, so catch the error and read it off the tracer:
 
@@ -105,11 +105,10 @@ try:
     with model.trace(prompt, remote=True) as tracer:
         acts = model.transformer.h[-1].output.save()
 except RemoteError:
-    print(tracer.backend.meta_data)
-    # {'runtime': 3.1, ..., 'extra_memory_needed': {'0': 1310000000}}
+    print(tracer.backend.meta_data.alloc_shortfall_by_gpu)   # {'0': 1310000000}
 ```
 
-`extra_memory_needed` appears only when the server ran out of GPU memory. It maps **each card that ran out** to how many bytes past its allowance the block reached there — on a sharded model, *which* card is itself the finding. It is — the number that says how much you need to free, which the traceback cannot tell you: the allocation that failed is by definition the one that never counted. Treat it as approximate; the allocator drops cached blocks and retries before it gives up.
+`alloc_shortfall_by_gpu` appears only when the server ran out of GPU memory. For each card that ran out it gives the part of the refused allocation that would not fit — the number that says how much you need to free. That is not the size of the refused allocation: asking for 2 GB with 1.9 GB free and asking for it with nothing free are the same request and completely different problems. The traceback can't tell you either, since the allocation that failed is by definition the one that never counted. On a sharded model, *which* card is itself the finding. Treat it as approximate; the allocator drops cached blocks and retries before it gives up.
 
 A non-blocking job's `poll()` and an `AsyncRemoteBackend` record it the same way, on the backend you already hold.
 

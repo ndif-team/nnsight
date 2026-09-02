@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import pytest
 
 from nnsight.intervention.backends.remote import AsyncRemoteBackend, RemoteError
-from nnsight.schema.response import ResponseModel, Status
+from nnsight.schema.response import MetaData, ResponseModel, Status
 
 MODEL_KEY = "nnsight.modeling.transformers.TransformersModel:{}"
 
@@ -135,6 +135,10 @@ META = {
     "max_mem_pct_by_gpu": {"0": 12.5, "1": 6.25},
 }
 
+# The same report once parsed. The wire carries a dict; the client hands back a
+# MetaData, so this is what every assertion below compares against.
+EXPECTED = MetaData(**META)
+
 
 class TestResponseMetaData:
     """`meta_data` on the wire: it survives both encodings, and is optional."""
@@ -144,12 +148,46 @@ class TestResponseMetaData:
         response = ResponseModel(id="job", status=Status.COMPLETED, meta_data=META)
         assert ResponseModel.model_validate_json(
             response.model_dump_json()
-        ).meta_data == META
+        ).meta_data == EXPECTED
 
     def test_survives_the_pickled_frame(self):
         # Binary frames — a COMPLETED whose data is the result blob itself.
         response = ResponseModel(id="job", status=Status.COMPLETED, meta_data=META)
-        assert ResponseModel.unpickle(response.pickle()).meta_data == META
+        assert ResponseModel.unpickle(response.pickle()).meta_data == EXPECTED
+
+    def test_an_unknown_field_from_a_newer_server_is_kept(self):
+        # extra="allow": a server may report a measurement this client has never
+        # heard of, and it stays readable rather than being dropped on the floor.
+        response = ResponseModel.model_validate_json(
+            '{"id": "job", "status": "COMPLETED",'
+            ' "meta_data": {"runtime": 1.0, "future_metric": 42}}'
+        )
+        assert response.meta_data.runtime == 1.0
+        assert response.meta_data.future_metric == 42
+
+    def test_an_unreadable_report_does_not_fail_the_response(self):
+        # meta_data is diagnostic; data is the job. A malformed report must not
+        # turn a run that finished perfectly well into a client-side crash.
+        with pytest.warns(RuntimeWarning, match="unreadable cost report"):
+            response = ResponseModel.model_validate_json(
+                '{"id": "job", "status": "COMPLETED", "data": "s3://result",'
+                ' "meta_data": {"runtime": "not-a-number"}}'
+            )
+        assert response.status is Status.COMPLETED
+        assert response.data == "s3://result"   # the job survived
+        assert response.meta_data is None       # only the report was dropped
+
+    def test_a_server_that_reports_nothing_warns_about_nothing(self):
+        # None from an older server is normal and must stay quiet -- otherwise
+        # the warning above stops meaning anything.
+        import warnings as w
+
+        with w.catch_warnings():
+            w.simplefilter("error")
+            response = ResponseModel.model_validate_json(
+                '{"id": "job", "status": "COMPLETED"}'
+            )
+        assert response.meta_data is None
 
     def test_absent_from_an_older_server(self):
         # A server that doesn't report cost sends no such key; parsing must not fail.
@@ -171,7 +209,7 @@ class TestBackendMetaData:
             [Status.RUNNING, Status.COMPLETED], result={"out": 1}, meta_data=META
         )
         asyncio.run(backend.resolve())
-        assert backend.meta_data == META
+        assert backend.meta_data == EXPECTED
 
     def test_recorded_when_streamed(self):
         # stream() bypasses note(), so it records the report on its own path.
@@ -184,7 +222,7 @@ class TestBackendMetaData:
                 pass
 
         asyncio.run(go())
-        assert backend.meta_data == META
+        assert backend.meta_data == EXPECTED
 
     def test_recorded_off_a_polled_response(self):
         # The blocking and non-blocking paths both reach a response through note().
@@ -194,7 +232,7 @@ class TestBackendMetaData:
         assert backend.note(
             ResponseModel(id="job", status=Status.COMPLETED, meta_data=META)
         )
-        assert backend.meta_data == META
+        assert backend.meta_data == EXPECTED
 
     def test_intermediate_updates_leave_it_alone(self):
         # RUNNING carries no report; it must not clear one already recorded.
@@ -203,16 +241,16 @@ class TestBackendMetaData:
         backend = RemoteBackend(MODEL_KEY, host="http://ndif.test")
         backend.note(ResponseModel(id="job", status=Status.COMPLETED, meta_data=META))
         backend.note(ResponseModel(id="job", status=Status.RUNNING))
-        assert backend.meta_data == META
+        assert backend.meta_data == EXPECTED
 
     def test_recorded_even_when_the_job_fails(self):
         # The report is taken off the response *before* note() raises. A failed
         # job is exactly when it earns its keep -- an OOM's meta_data carries
-        # extra_memory_needed, which the traceback cannot tell you.
+        # alloc_shortfall_by_gpu, which the traceback cannot tell you.
         from nnsight.intervention.backends.remote import RemoteBackend
 
         backend = RemoteBackend(MODEL_KEY, host="http://ndif.test")
-        failure = dict(META, extra_memory_needed={"0": 1_310_000_000})
+        failure = dict(META, alloc_shortfall_by_gpu={"0": 1_310_000_000})
         with pytest.raises(RemoteError, match="out of memory"):
             backend.note(
                 ResponseModel(
@@ -222,8 +260,8 @@ class TestBackendMetaData:
                     meta_data=failure,
                 )
             )
-        assert backend.meta_data == failure
-        assert backend.meta_data["extra_memory_needed"] == {"0": 1_310_000_000}
+        assert backend.meta_data == MetaData(**failure)
+        assert backend.meta_data.alloc_shortfall_by_gpu == {"0": 1_310_000_000}
 
     def test_stays_none_against_an_older_server(self):
         backend = _backend([Status.RUNNING, Status.COMPLETED], result={"out": 1})

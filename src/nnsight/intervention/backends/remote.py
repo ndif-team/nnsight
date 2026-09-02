@@ -27,7 +27,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any, AsyncIterator, Optional, Union
 
 from ...schema.config import CONFIG
-from ...schema.response import RESULT, ResponseModel, Status
+from ...schema.response import RESULT, MetaData, ResponseModel, Status
 from ...schema.request import RequestModel
 from ...tracing.backend import Backend
 from ...tracing.tracer import Tracer, save
@@ -95,7 +95,7 @@ class RemoteBackend(Backend):
         self.blocking = blocking
         self.job_id = job_id
         self.status: Optional[Status] = None
-        self.meta_data: Optional[dict] = None
+        self.meta_data: Optional[MetaData] = None
         self.host = host or CONFIG.API.HOST
         if not self.host.startswith(("http://", "https://")):
             raise ValueError(
