@@ -203,7 +203,7 @@ class WrapperModule(torch.nn.Module):
     """Identity module: returns its input unchanged.
 
     Lets nnsight expose a value that isn't produced by a real submodule — the
-    value is passed *through* this module so it becomes hookable at the module's
+    value is passed *through* this module so it is served at the module's
     ``.output``.
     """
 
@@ -248,7 +248,7 @@ _GENERATOR_OUTPUT_DEPRECATED = (
 class GeneratorEnvoy(Envoy):
     """The envoy for `Generator`, whose ``.output`` is deprecated.
 
-    ``model.generator.output`` is the only hookable value in nnsight that is
+    ``model.generator.output`` is the only served value in nnsight that is
     deprecated rather than removed, so the warning lives on the envoy of the one
     module that has it — the rest of the tree keeps the plain `Envoy`.
     """
