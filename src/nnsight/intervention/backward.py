@@ -18,6 +18,13 @@ whose gradients you want are the real tensors produced during the run::
 Gradients flow in the reverse of the forward pass, so ``.grad`` must be requested
 in reverse-forward order — requesting an earlier-forward tensor's gradient before
 a later one raises `OutOfOrderError`.
+
+Only ``.grad`` is served inside the block; the forward is over by the time autograd
+runs, so capture any ``.output`` or ``.input`` you want gradients for beforehand.
+A forward that carried no gradient tracking has no graph to walk and opening a
+backward trace over it raises `NotImplementedError` — that covers a frozen model,
+and every ``model.generate()`` trace, since HuggingFace decorates ``generate``
+with ``@torch.no_grad()``.
 """
 
 from __future__ import annotations

@@ -119,6 +119,11 @@ heatmap = torch.stack([
 ], dim=0)   # torch.Size([12, 10]) for this prompt
 ```
 
+A column index is a position in the batch's padded sequence, not in the prompt —
+see [invoke-and-batching.md](../usage/invoke-and-batching.md). Pairs whose clean and
+corrupt prompts tokenize to different lengths do not line up column by column;
+assert equal token counts, or index from the end.
+
 ### Sub-block attribution (attention vs MLP)
 
 Track `block.attn.output[0]` (attention output is a **tuple** — index `[0]` for the
@@ -157,6 +162,13 @@ See `docs/usage/session.md`.
 - **First-order limits.** Exact only when the metric is linear in the activation;
   for deep nets it's a screen, not ground truth — validate top components with full
   activation patching.
+- **Validate against a local patch, not a whole-layer one.** Overwriting layer L's
+  entire residual output with the clean one makes the rest of the run a
+  deterministic function of a clean state, so every layer returns the same metric —
+  on this prompt pair, `2.4247` at all twelve layers, spread `1.2e-05`. Correlating
+  attribution against that vector correlates it with float32 rounding. Patch a
+  position span, a head, or a sub-block, where what happens after layer L still
+  depends on layer L.
 - **Fractional effect:** many practitioners report `attribution[L] / |full_diff|`.
 - **Normalize per-row** when plotting heatmaps, or one big layer drowns the rest.
 
