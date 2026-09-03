@@ -276,7 +276,11 @@ swap the prompts and invoke order.
 - Within one invoke, modules must be accessed in forward-pass order, or you hit
   `OutOfOrderError`. You cannot capture `h[5]` after `h[10]` in the same invoke.
 - Clean and corrupt prompts of **different token lengths** can't share a position
-  slice. Match lengths, or patch a common suffix / the last position.
+  slice. Match lengths, or patch a common suffix / the last position. Every invoke
+  in a batched trace sees its activations padded to the batch's longest prompt, so
+  an absolute index like `slice(1, 5)` means something different depending on what
+  else is in the batch; `[:, -1, :]` survives left padding, an absolute index does
+  not. See `docs/usage/invoke-and-batching.md`.
 - Block outputs are plain tensors in current `transformers`; attention outputs are
   tuples. Adjust `[0]` indexing accordingly. See `docs/usage/access-and-modify.md`.
 - Patching mutates the running tensor. `.clone().save()` first if you also want the
