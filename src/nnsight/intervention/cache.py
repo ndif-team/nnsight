@@ -48,7 +48,11 @@ class Entry:
         if self.inputs is None:
             return None
         args, kwargs = self.inputs
-        return (list(args) + list(kwargs.values()))[0]
+        values = list(args) + list(kwargs.values())
+        # A module can legally be called with no arguments, which records
+        # `((), {})` — a visit with nothing to hand back, not an unrecorded one.
+        # Indexing position 0 unconditionally raised IndexError there.
+        return values[0] if values else None
 
 
 class Cache:
@@ -91,6 +95,9 @@ class Cache:
             else {m if isinstance(m, str) else m.path for m in modules}
         )
         self.entries: dict[str, list[Entry]] = {}
+        # Which slots of each path's newest Entry have been written this visit.
+        # Recording-time bookkeeping only; see `_record`.
+        self._open: dict[str, set[str]] = {}
 
     def __getstate__(self) -> dict:
         # `model` is a live Envoy used only for CacheView navigation, and it drags
@@ -98,7 +105,7 @@ class Cache:
         # recorded data (entries) can be serialized — e.g. torch.save-d as a remote
         # trace's result. Access by path string still works without it (see
         # CacheView); tree navigation needs a model re-attached.
-        return {**self.__dict__, "model": None}
+        return {**self.__dict__, "model": None, "_open": {}}
 
     def _select(self, location: str) -> "tuple[str, str] | None":
         """``(module_path, slot)`` if ``location`` is one this cache keeps, else None.
@@ -192,11 +199,21 @@ class Cache:
         # Pair the input and output of one visit into a single Entry: the input
         # handoff fires before the output handoff, so fill the open slot on the
         # current entry, or start a new entry (a new visit) when it's taken.
+        #
+        # Which slots are taken is tracked here rather than read back off the
+        # Entry. A module's output can legitimately *be* None -- a module called
+        # for its side effect, or one whose branch returned nothing on this visit
+        # -- and `entries[-1].output is None` cannot tell "not recorded yet" from
+        # "recorded None". Every visit after the first to such a module then
+        # refilled the same Entry, so a module reached N times reported one visit.
         entries = self.entries.setdefault(path, [])
-        if entries and getattr(entries[-1], key) is None:
+        filled = self._open.setdefault(path, set())
+        if entries and key not in filled:
             setattr(entries[-1], key, value)
         else:
             entries.append(Entry(**{key: value}))
+            filled.clear()
+        filled.add(key)
 
 
 class CacheView:

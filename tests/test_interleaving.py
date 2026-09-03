@@ -759,6 +759,139 @@ class TestCache:
         assert torch.equal(cache.model.l1.output, cache["model.l1"].output)
         assert torch.equal(cache.l1.output, cache["model.l1"].output)
 
+    # -- one Entry per visit, whatever the value is ------------------------
+
+    def test_repeated_module_records_one_entry_per_visit(self, x):
+        # A module reached N times in one forward is N visits.
+        class Loop(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = nn.Linear(4, 4)
+
+            def forward(self, value):
+                for _ in range(3):
+                    value = self.lin(value)
+                return value
+
+        envoy = Envoy(Loop())
+        with envoy.trace(torch.randn(1, 4)) as tracer:
+            cache = tracer.cache()
+
+        assert len(cache["model.lin"].output) == 3
+
+    def test_repeated_module_returning_none_records_every_visit(self, x):
+        # `Entry.output` defaults to None to mean "not recorded", so a module
+        # whose output *is* None looked like an entry with a slot still open,
+        # and each later visit refilled it instead of appending -- three visits
+        # were reported as one.
+        class Probe(nn.Module):
+            def forward(self, value):
+                return None
+
+        class Loop(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.probe = Probe()
+                self.lin = nn.Linear(4, 4)
+
+            def forward(self, value):
+                for _ in range(3):
+                    self.probe(value)
+                    value = self.lin(value)
+                return value
+
+        envoy = Envoy(Loop())
+        with envoy.trace(torch.randn(1, 4)) as tracer:
+            cache = tracer.cache()
+
+        assert cache["model.probe"].output == [None, None, None]
+        # The sibling that returns a tensor was always counted correctly; it is
+        # here so a regression can't pass by breaking both the same way.
+        assert len(cache["model.lin"].output) == 3
+
+    def test_none_output_pairs_with_its_own_inputs(self, x):
+        # With include_inputs the `inputs` slot drove entry creation, so the
+        # count was already right -- but each None output must still land on the
+        # visit it belongs to rather than on a later one.
+        class Probe(nn.Module):
+            def forward(self, value):
+                return None
+
+        class Loop(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.probe = Probe()
+                self.lin = nn.Linear(4, 4)
+
+            def forward(self, value):
+                for _ in range(3):
+                    self.probe(value)
+                    value = self.lin(value)
+                return value
+
+        envoy = Envoy(Loop())
+        with envoy.trace(torch.randn(1, 4)) as tracer:
+            cache = tracer.cache(include_inputs=True)
+
+        entries = cache["model.probe"]
+        assert len(entries.inputs) == 3
+        assert entries.output == [None, None, None]
+        # Each visit saw the value the preceding lin produced, so the three
+        # recorded inputs are distinct.
+        first, second, third = (i[0][0] for i in entries.inputs)
+        assert not torch.equal(first, second)
+        assert not torch.equal(second, third)
+
+    def test_input_of_a_module_called_with_no_arguments(self, x):
+        # `Entry.inputs` is `((), {})` for a module invoked with no arguments —
+        # a recorded visit with nothing to hand back, not an unrecorded one.
+        # Indexing position 0 unconditionally raised IndexError instead.
+        class NoArgs(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = nn.Parameter(torch.ones(4))
+
+            def forward(self):
+                return self.w * 2
+
+        class Net(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.noargs = NoArgs()
+                self.lin = nn.Linear(4, 4)
+
+            def forward(self, value):
+                return self.lin(value) + self.noargs()
+
+        envoy = Envoy(Net())
+        with envoy.trace(torch.randn(1, 4)) as tracer:
+            cache = tracer.cache(include_inputs=True)
+
+        assert cache["model.noargs"].inputs == ((), {})
+        assert cache["model.noargs"].input is None
+        # The visit itself was still recorded.
+        assert cache["model.noargs"].output is not None
+
+    def test_input_prefers_the_first_positional_then_the_first_keyword(self, x):
+        class KwOnly(nn.Module):
+            def forward(self, *, value):
+                return value * 2
+
+        class Net(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.kw = KwOnly()
+
+            def forward(self, value):
+                return self.kw(value=value)
+
+        envoy = Envoy(Net())
+        data = torch.randn(1, 4)
+        with envoy.trace(data) as tracer:
+            cache = tracer.cache(include_inputs=True)
+
+        assert torch.equal(cache["model.kw"].input, data)
+
     def test_cache_must_be_created_before_model_access(self, envoy, x):
         with pytest.raises(ValueError, match="before reading or modifying"):
             with envoy.trace(x) as tracer:
