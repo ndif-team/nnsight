@@ -119,7 +119,7 @@ class Envoy:
             Every location the interleaver reads (``{path}.output``, ``{path}.skip``)
             is derived from it.
         interleaver: The [`Interleaver`][nnsight.intervention.interleaver.Interleaver]
-            shared across the whole tree; it installs the hooks and routes values.
+            shared across the whole tree; it installs the controllers and routes values.
         _module: The wrapped `torch.nn.Module`.
         _edits: Default interventions registered by [`edit`][nnsight.intervention.envoy.Envoy.edit], replayed on every
             trace (a list of [`Mediator`][nnsight.intervention.interleaver.Mediator]).
@@ -139,8 +139,9 @@ class Envoy:
         self.interleaver = interleaver if interleaver is not None else Interleaver()
         # This tree's envoy for the module, so a later path to it aliases this one.
         self.interleaver.envoys[id(module)] = self
-        # instrument installs the input/output hooks and the source/skip controller
-        # (registering this interleaver on the module) — see Interleaver.instrument.
+        # instrument installs the module's controller — the input/output handoffs and
+        # the source/skip gate — registering this interleaver on the module.
+        # (See Interleaver.instrument.)
         self.interleaver.instrument(self)
 
         # Default interventions registered via .edit(), replayed on every trace.
@@ -312,12 +313,12 @@ class Envoy:
     def _update(self, module: torch.nn.Module) -> None:
         # Re-point an existing envoy tree at a new module of the same structure
         # (e.g. swapping meta weights for real ones). instrument() removes this
-        # path's old hooks before re-adding, and we recurse over children by
+        # path's old controller before re-adding, and we recurse over children by
         # name (as in __init__), so modules shared across paths line up.
         self.interleaver.envoys.pop(id(self._module), None)
         self._module = module
         self.interleaver.envoys[id(module)] = self
-        # instrument re-installs the hooks and the source/skip controller on the new
+        # instrument re-installs the controller and the source/skip gate on the new
         # module (its own forward; the previous module's controller doesn't carry
         # over) — see Interleaver.instrument.
         self.interleaver.instrument(self)
@@ -326,7 +327,7 @@ class Envoy:
             name = child.path.rsplit(".", 1)[-1]
             # A child that isn't a submodule of the new module — e.g. a standalone
             # module added to the tree (TransformersModel's `generator`) — has nothing
-            # to re-point at, so leave it as-is (it keeps its own module and hooks).
+            # to re-point at, so leave it as-is (it keeps its own module and controller).
             if name in children:
                 child._update(children[name])
 
@@ -355,6 +356,13 @@ class Envoy:
 
         Args:
             *args: Arguments to pass to the tracer
+            fn: The method to trace, as a name or a bound callable. Defaults to
+                ``"__call__"`` — the module's own forward. `traceable` passes the
+                bound method here so ``with model.generate(...):`` traces
+                ``generate`` instead.
+            backend: Where the captured block runs. ``None`` (default) executes it
+                in this process; `RemoteBackend` ships it to NDIF. Set for you by
+                ``remote=`` on the models that support it.
             tracer_cls: Tracer class to construct instead of the default
                 [`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer] — an
                 extension point for a custom tracer.
@@ -418,9 +426,7 @@ class Envoy:
         return EditingTracer(self, inplace=inplace, backend=backend)
 
     def clear_edits(self) -> None:
-        """
-        Clear all edits for this Envoy.
-        """
+        """Drop every edit stored on this envoy, restoring its unedited behavior."""
         self._edits = []
 
     def session(self, backend: Any = None, tracer_cls: type[Tracer] | None = None) -> Tracer:
@@ -997,7 +1003,7 @@ class Envoy:
             child_lines.append(f"({alias}): " + _addindent(repr(getattr(self, alias)), 2))
 
         # eproperties given a description surface as their own lines, so special
-        # hookable values (e.g. a model's .logits) show up in the tree; the plain
+        # served values (e.g. a model's .logits) show up in the tree; the plain
         # .input/.output views carry no description and stay hidden.
         eproperty_lines = []
         seen = set()

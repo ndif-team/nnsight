@@ -3,17 +3,18 @@ title: Modification Pitfalls
 one_liner: Common mistakes when modifying activations — in-place vs replacement, tuple outputs, and aliasing the "before" state.
 tags: [gotcha, intervention, modify]
 related: [docs/usage/access-and-modify.md, docs/gotchas/cross-invoke.md]
-sources: [src/nnsight/intervention/envoy.py:448, src/nnsight/intervention/eproperty.py, src/nnsight/intervention/interleaver.py:279]
+sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, src/nnsight/intervention/interleaver.py]
 ---
 
 # Modification Pitfalls
 
 ## TL;DR
-- `output[:] = v` mutates the existing tensor in place; `output = v` rebinds the name **and** schedules a `SWAP` event that replaces what the model sees downstream. They are not interchangeable, but both take effect.
+- `output[:] = v` mutates the existing tensor in place; `output = v` is an assignment through the `eproperty` descriptor, which hands the model a different object to continue with. They are not interchangeable, but both take effect.
 - A GPT-2 (transformers 5+) **block** `.output` is a **plain tensor** `(batch, seq, hidden)` — index/edit it directly. Do **not** write `output[0]` expecting a tuple. Some *sub*modules (e.g. attention) still return tuples — for those, `.output[0]` is the tensor.
 - Assigning into a tuple output — `attn.output[0] = t` — raises `TypeError` (tuples don't support item assignment). Rebuild the tuple and assign the whole thing, or edit in place: `attn.output[0][:] = ...`.
 - To keep the "before" state of a value you're about to mutate, `.clone().save()` it first — otherwise `before` and `after` alias the same modified tensor.
 - Prefer replacing a **whole** tensor over an in-place slice-assign into a *tuple element* view across a barrier — the latter can crash. Assign the whole value instead.
+- A replacement with no connection to the value it replaced — `output = torch.zeros_like(output)` — cuts autograd. Derive it from the old value, or write in place.
 - Editing an **activation** is scoped to that run; editing a **weight** is permanent, and the syntax looks identical. There is no warning.
 
 ---
@@ -25,7 +26,11 @@ sources: [src/nnsight/intervention/envoy.py:448, src/nnsight/intervention/eprope
 
 ### Cause
 - `output[:] = v` is `__setitem__` on the tensor `.output` handed you. It mutates storage the forward pass already holds a reference to, so the change is visible.
-- `output = v` is a Python rebind that also fires the eproperty **setter**: `.output` is an `eproperty` (`src/nnsight/intervention/eproperty.py`) whose `__set__` calls `Mediator.swap(...)`, sending a `SWAP` event so the interleaver substitutes your value into the forward pass for the rest of the run.
+- `output = v` is an assignment through a data descriptor. `.output` is an `eproperty`
+  (`src/nnsight/intervention/eproperty.py`) whose `__set__` calls `Mediator.swap(...)`,
+  sending a `SWAP` event so the interleaver substitutes your value into the forward pass for
+  the rest of the run. Nothing in your own namespace is rebound — the name on the left is a
+  module attribute, not a local.
 
 Both work; they differ in what they touch. In-place edits the existing tensor (other references see it); replacement substitutes a new tensor downstream (the original object is untouched).
 
@@ -64,13 +69,61 @@ with model.trace("Hello world"):
 
 ---
 
+## A replacement built from scratch cuts autograd
+
+### Symptom
+An intervention runs fine on its own, and adding a `with loss.backward():` block to read a
+gradient turns it into an `OutOfOrderError` whose location is a raw number:
+
+```
+OutOfOrderError: '139932764543792.grad.i0' was requested but the model already ran past it
+```
+
+### Cause
+A `.grad` read waits at a location derived from the tensor it belongs to. When you replace an
+activation with a tensor autograd has never seen — `torch.zeros_like(...)`, a fresh
+`torch.randn(...)`, anything loaded from disk — the graph is cut at that point, so the
+gradient the earlier tensor is waiting for is never produced and the wait is reported against
+an object id.
+
+### Wrong code
+```python
+with model.trace("Hello world"):
+    hs = model.transformer.h[0].output
+    model.transformer.h[6].output = torch.zeros_like(model.transformer.h[6].output)
+    loss = model.output.logits.sum()
+    with loss.backward():
+        grad = hs.grad.clone().save()      # OutOfOrderError, id location
+```
+
+### Right code
+```python
+with model.trace("Hello world"):
+    hs = model.transformer.h[0].output
+    model.transformer.h[6].output[:] = 0      # in-place: the graph survives
+    loss = model.output.logits.sum()
+    with loss.backward():
+        grad = hs.grad.clone().save()         # a real (here, all-zero) gradient
+```
+
+Any replacement *derived* from the old value works the same way —
+`output = output * 0`, `output = output + steering`, `output = torch.cat([...])`. The rule is
+that the new value has to descend from the old one.
+
+### Mitigation / how to spot it early
+- If a location in an error message is a long number rather than a module path, it is a
+  `.grad` whose tensor was orphaned by a replacement.
+- Reach for `[:] =` by default when gradients are anywhere in the experiment.
+
+---
+
 ## Tensor vs tuple outputs
 
 ### Symptom
 `AttributeError: 'tuple' object has no attribute 'shape'`, or `TypeError: 'tuple' object does not support item assignment`.
 
 ### Cause
-In transformers 5+, transformer **blocks** return a plain tensor, so `model.transformer.h[i].output` *is* the hidden state `(batch, seq, hidden)`. But some submodules still return tuples — the **attention** module returns `(attn_out, attn_weights)`, so `.output` is that tuple and tensor ops live on `.output[0]`.
+In transformers 5+, transformer **blocks** return a plain tensor, so `model.transformer.h[i].output` *is* the hidden state `(batch, seq, hidden)`. But some submodules still return tuples — GPT-2's **attention** module returns a 2-tuple whose first element is the attention output, so `.output` is that tuple and tensor ops live on `.output[0]`. Its second element is `None` unless the model was loaded asking for attention weights: carry it along, don't read it.
 
 Verified structure on GPT-2:
 ```python

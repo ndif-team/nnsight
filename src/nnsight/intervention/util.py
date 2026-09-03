@@ -1,4 +1,13 @@
-"""Small helpers shared across the intervention package.
+"""Helpers shared across the intervention package.
+
+Two concerns live here, both of them about the boundary between a trace body and
+the frame it was written in. The ``input`` helpers give a module's ``(args,
+kwargs)`` pair the single-value view users actually write against — ``.input``
+reads the first argument and writes it back without the caller having to know the
+module's signature. `shared_locals` gives the blocks written in one frame — an
+outer trace and the ``tracer.invoke(...)`` blocks inside it — a place to see each
+other's names, without letting those names leak into the frame itself: what
+escapes a trace is what `save` marked, and nothing else.
 """
 
 from __future__ import annotations
@@ -9,7 +18,11 @@ from typing import Any
 
 
 def first_input(args: tuple, kwargs: dict) -> Any:
-    """The first positional argument, or the first keyword one if none positional."""
+    """The first positional argument, or the first keyword one if none positional.
+
+    Raises `StopIteration` for a module called with no arguments at all — there is
+    no first input to name. Read ``.inputs`` instead, which is ``((), {})`` there.
+    """
     if args:
         return args[0]
     return next(iter(kwargs.values()))
@@ -64,10 +77,10 @@ def clear_shared_locals() -> None:
     """Drop this thread's per-frame shared stores.
 
     Called from `InterleavingTracer.execute`, once the trace whose body held the
-    invokes is done with them. This used to wait for the *outermost* trace, which
-    is fine for one trace and a leak for a loop of them: each trace body runs in a
-    fresh mediator frame, so every iteration added an entry holding that frame —
-    and, through its locals, that iteration's tensors — until the session ended.
+    invokes is done with them — not at the outermost trace. Each trace body runs
+    in a fresh mediator frame, so waiting for the outermost one would hold one
+    dead frame per iteration of a loop of traces, and through its locals that
+    iteration's tensors, until the session ended.
     """
     store = getattr(_shared, "store", None)
     if store is not None:

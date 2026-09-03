@@ -424,7 +424,7 @@ class Mediator:
         the worker parks again (returning its new event tuple) or finishes
         (returning ``None``). If the worker raises, its traceback is stashed on
         the exception as ``__intervention_tb__`` — a clean, intervention-only
-        trace captured before the re-raise unwinds the model/hook stack on top —
+        trace captured before the re-raise unwinds the model's own stack on top —
         and the exception propagates, halting the run.
 
         Re-point the worker's parent at whoever is switching in *now*, so both its
@@ -432,7 +432,7 @@ class Mediator:
         greenlet auto-returns to its parent) — go back here rather than to a fixed
         greenlet. This keeps the chain correct when a worker is served from inside
         another worker's greenlet, e.g. an ``Envoy.__call__(hook=True)`` adapter
-        run whose submodule hooks serve a second worker mid-call.
+        run whose submodule controllers serve a second worker mid-call.
         """
         self.worker.parent = getcurrent()
         try:
@@ -440,7 +440,7 @@ class Mediator:
         except BaseException as exception:
             # The worker raised. Its traceback right now holds only the
             # intervention frames; stash it before the re-raise unwinds the
-            # model/hook stack on top, so the top can restore a clean trace.
+            # model stack on top, so the top can restore a clean trace.
             # The exception still propagates, stopping execution immediately.
             if not hasattr(exception, "__intervention_tb__"):
                 exception.__intervention_tb__ = exception.__traceback__
@@ -595,12 +595,12 @@ def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]
 
 
 class Interleaver:
-    """Drives the model side of interleaving: model hooks in, workers served.
+    """Drives the model side of interleaving: model handoffs in, workers served.
 
     An interleaver owns the module controllers that turn a model's forward pass
     into a stream of `handle` calls, and the list of [`Mediator`][nnsight.intervention.interleaver.Mediator] workers
     those calls feed. One interleaver is shared across an [`Envoy`][nnsight.intervention.envoy.Envoy] tree, so
-    every module's hooks report into the same set of workers.
+    every module's controller reports into the same set of workers.
 
     Lifecycle of a run (see [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave]):
 
@@ -720,7 +720,7 @@ class Interleaver:
         ]
 
     def __enter__(self) -> Interleaver:
-        """Begin interleaving: arm the hooks and start each not-yet-started worker.
+        """Begin interleaving: arm the controllers and start each not-yet-started worker.
 
         Only a worker with no greenlet yet (``worker is None``) is started; one that
         already has a worker is left as is — parked mid-run on a re-entered interleaver.
