@@ -104,10 +104,10 @@ layer 10  test accuracy 1.00
 
 **Perfect accuracy at layer 0 is a red flag, not a result.** Layer 0 has barely
 processed anything, so a probe that succeeds there is reading token identity:
-"wonderful" and "terrible" are different tokens with different embeddings. The
-curve's shape is the finding, not its height — high from layer 0 means a surface
-feature, a rise in the middle means something the model computes, and high only at
-the end may be the prediction itself.
+"wonderful" and "terrible" are different tokens with different embeddings. Read the
+shape of the curve rather than its height. High from layer 0 means a surface
+feature; a rise through the middle means something the model computes; high only
+at the end may be the prediction itself.
 
 ## Controls
 

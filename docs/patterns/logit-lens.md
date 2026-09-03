@@ -144,7 +144,7 @@ if cap is not None:
 
 That is bit-identical to `model.output.logits` at the last layer. Check
 `model.config` rather than a list of model names: Gemma-3 sets
-`final_logit_softcapping` to `None`, and other families may set it.
+`final_logit_softcapping` to `None`.
 
 ## Variations
 
