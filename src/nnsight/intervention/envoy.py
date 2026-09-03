@@ -355,6 +355,17 @@ class Envoy:
 
         Args:
             *args: Arguments to pass to the tracer
+            fn: What the trace runs, defaulting to the module's ``"__call__"``.
+                Either a method name on this envoy or a bound callable. A subclass
+                that drives the model through its own method points at it here —
+                which is also how a plain [`NNsight`][nnsight.modeling.base.NNsight]
+                subclass runs a driver that passes values through an attached
+                standalone child. The [`traceable`][nnsight.intervention.envoy.traceable]
+                decorator sets it, so ``model.generate(...)`` is
+                ``trace(..., fn=self.generate)``.
+            backend: What running the captured block means, defaulting to local
+                execution. Set by ``remote=`` on the model classes that support it;
+                see [`Backend`][nnsight.tracing.backend.Backend].
             tracer_cls: Tracer class to construct instead of the default
                 [`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer] — an
                 extension point for a custom tracer.

@@ -186,11 +186,12 @@ class DiffusionModel(HuggingFaceModel):
 
     Args:
         repo_id: A ``diffusers`` pipeline repo id (or local path) to load.
-        rename: Optional mapping to expose components under different envoy names
-            (e.g. ``{"unet": "denoiser"}``).
-        dispatch: If ``True``, load real weights immediately; otherwise build
-            lazily on the meta device and dispatch on the first run.
-        **kwargs: Forwarded to ``DiffusionPipeline.from_pretrained`` on dispatch.
+        *args: Forwarded to the mixin chain.
+        **kwargs: Forwarded to the mixin chain and, on dispatch, to
+            ``DiffusionPipeline.from_pretrained``. ``rename=`` exposes components
+            under different envoy names (e.g. ``{"unet": "denoiser"}``);
+            ``dispatch=True`` loads real weights immediately instead of building
+            lazily on the meta device.
 
     Examples:
         >>> from nnsight.modeling.diffusion import DiffusionModel

@@ -21,7 +21,7 @@ change **what is done with the captured block**, not what model it runs against.
 
 ## The contract
 
-`Backend` (`src/nnsight/tracing/backend.py:9`) is a callable taking the tracer:
+`Backend` (`src/nnsight/tracing/backend.py`) is a callable taking the tracer:
 
 ```python
 class Backend:
@@ -41,10 +41,10 @@ store it. `tracer.execute` for an `InterleavingTracer` is what sets up the
 interleaver and runs the model; the base `Tracer.execute` just `exec`s the body and
 pushes results back.
 
-There is no compile step to inherit and no `Globals.enter/exit` to balance — those
-concepts from older nnsight don't exist here. Trace-scope depth and traceback
-cleanup are handled by `Tracer.__exit__` (`tracing/tracer.py:449`) around your
-backend call, so you don't manage them.
+A backend inherits no compile step and balances no global state: trace-scope depth
+and traceback cleanup are handled by `Tracer.__exit__` (`tracing/tracer.py`) around
+your backend call. Your `__call__` decides what happens to the block, and nothing
+else.
 
 ## Minimal recipe: run locally, but do something first
 
@@ -86,7 +86,7 @@ cache the tracer already populated: `nnsight.tracing.globals.SOURCES[code.co_fil
 Don't call `tracer.execute`. Serialize the tracer and ship it however you like; the
 compiled code and captured scope travel via the source-reduced interventions payload
 (see `docs/developing/serialization.md`). The reference is
-`RemoteBackend.request` (`src/nnsight/intervention/backends/remote.py:304`):
+`RemoteBackend.request` (`src/nnsight/intervention/backends/remote.py`):
 
 ```python
 class MyRemoteBackend(Backend):
@@ -116,13 +116,13 @@ status-display, and download/decompress helpers.
 
 If you want to validate the serialization path without a server, don't write it
 from scratch — use `LocalSimulationBackend`
-(`src/nnsight/intervention/backends/local.py:37`) via `model.trace(...,
+(`src/nnsight/intervention/backends/local.py`) via `model.trace(...,
 remote="local")`. To model a tighter or different server environment, subclass it
 and adjust `_SERVER_MODULES` / `_hide_local_modules`.
 
 ## Async backends
 
-Follow `AsyncRemoteBackend` (`remote.py:339`). The pattern is a **dual-call**
+Follow `AsyncRemoteBackend` (`remote.py`). The pattern is a **dual-call**
 object:
 
 1. `__call__(tracer)` runs at `__exit__` time: it fires the request synchronously
@@ -138,16 +138,16 @@ its saves from the await / iterator rather than pushing them into a frame.
 
 - Pass it explicitly: `model.trace(..., backend=MyBackend())`.
 - Or, for a remote-style backend keyed off `remote=`, add a branch in your model's
-  `Remotable._remote_backend` (`src/nnsight/modeling/mixins/remotable.py:52`).
+  `Remotable._remote_backend` (`src/nnsight/modeling/mixins/remotable.py`).
 
 ## Key files / classes
 
-- `src/nnsight/tracing/backend.py:9` — `Backend`. The one-method contract.
-- `src/nnsight/tracing/tracer.py:431` — `Tracer.execute`. What `tracer.execute` does by default.
-- `src/nnsight/tracing/tracer.py:449` — `Tracer.__exit__`. Calls your backend; owns depth + traceback cleanup.
-- `src/nnsight/intervention/tracer.py:223` — `InterleavingTracer.execute`. The local run you'd usually delegate to.
-- `src/nnsight/intervention/backends/remote.py:39` — `RemoteBackend`. Subclass this for remote transports.
-- `src/nnsight/intervention/backends/local.py:37` — `LocalSimulationBackend`. Serialize-and-run example.
+- `src/nnsight/tracing/backend.py` — `Backend`. The one-method contract.
+- `src/nnsight/tracing/tracer.py` — `Tracer.execute`. What `tracer.execute` does by default.
+- `src/nnsight/tracing/tracer.py` — `Tracer.__exit__`. Calls your backend; owns depth + traceback cleanup.
+- `src/nnsight/intervention/tracer.py` — `InterleavingTracer.execute`. The local run you'd usually delegate to.
+- `src/nnsight/intervention/backends/remote.py` — `RemoteBackend`. Subclass this for remote transports.
+- `src/nnsight/intervention/backends/local.py` — `LocalSimulationBackend`. Serialize-and-run example.
 
 ## Lifecycle of your backend (one trace)
 
