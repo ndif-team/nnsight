@@ -70,6 +70,14 @@ class Iterations(Tracer):
     [`check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators]),
     keeping the values from every step that did run.
 
+    An end the user named — ``tracer.iter[:10]``, ``iter[2]``, ``iter[[0, 2, 4]]``
+    — is a claim about the run, so a run that makes fewer steps than that raises
+    instead. Ending the loop there would be the kind thing to do, but the loop is
+    the user's own ``for`` statement and the worker is parked inside its body: the
+    only way out is to unwind it, which discards whatever the block does after the
+    loop. Failing says so; warning leaves the block half-run and its later names
+    holding whatever they held before.
+
     A ``with tracer.iter[...]:`` block does the same thing and is deprecated; the
     loop moves inside `execute`, which re-runs the block per step. Prefer the
     ``for`` form.
@@ -118,11 +126,18 @@ class Iterations(Tracer):
         (``stop is None``) keeps handing out steps indefinitely — the model
         stopping is what ends the loop, via a dangling final request. Whatever
         ``iteration`` was before the loop is restored on exit, so loops can nest.
+
+        The mediator also carries whether this selection has an end, which is what
+        [`check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators]
+        reads to tell a loop that outran the run by mistake from one that ends
+        that way by design.
         """
         # The loop body runs inside the worker greenlet, which carries a weakref
         # to its own mediator (set in Mediator.start).
         mediator: Mediator = getcurrent().mediator()
         previous = mediator.iteration
+        enclosing = mediator.iteration_bounded
+        mediator.iteration_bounded = self.stop is not None or self.steps is not None
         try:
             for step in self._indices():
                 if step < 0:
@@ -132,6 +147,7 @@ class Iterations(Tracer):
                 step += 1
         finally:
             mediator.iteration = previous
+            mediator.iteration_bounded = enclosing
 
     def execute(self, code: CodeType) -> None:
         """Run the block once per selected occurrence — the deprecated ``with`` form.
