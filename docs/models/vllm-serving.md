@@ -15,9 +15,9 @@ Construct with `mode="async"`; a trace then streams `RequestOutput`s. Iterate `t
 import asyncio
 from nnsight.modeling.vllm import VLLM
 
-model = VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True, mode="async")
-
 async def main():
+    model = VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True, mode="async")
+
     with model.trace("The Eiffel Tower is located in the city of",
                      temperature=0.0, max_tokens=5) as tracer:
         logits = model.logits.save()
@@ -27,8 +27,11 @@ async def main():
         if output.finished:
             print("saves:", list(output.saves.keys()))
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
+
+Two things about that shape are load-bearing. `AsyncLLM` binds to the loop that built it, where it keeps its output handler and per-request futures, so build the model **inside** the coroutine you will await it from; an engine built at import and then used from two `asyncio.run()` calls never answers the second, and does not error either. And the `__main__` guard is what makes the file runnable at all — see [the engine page](vllm.md).
 
 Saves are attached **only to the finished output** (`output.finished == True`), fetched from the worker via `collect_nnsight` at that point (`async_backend.py`). Intermediate yields carry no saves — accumulate per-step values inside `tracer.iter[:]` instead.
 
@@ -39,10 +42,10 @@ last = await tracer.backend
 print(last.saves["logits"].shape)
 ```
 
-**Read saves off the output, not out of your variables.** The async path is the one
-backend that does not push saved names back into the calling frame: after the await,
-`logits` in the example above is still unbound and `output.saves["logits"]` is where the
-value is. Name the save the same as the key you will read.
+**Read saves off the output, not out of your variables.** The async path is the one backend that
+does not push saved names back into the calling frame: `logits` is still unbound after the stream,
+and the tensor is `last.saves["logits"]`, exactly as written above. The name you save under is the
+key you read.
 
 ## Async notes
 
