@@ -583,9 +583,12 @@ def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]
             f"{requester.iteration} of '{requester.provider}' and the run "
             f"reached it {mediator.occurrence(requester.provider)} times, so "
             f"the loop was cut short and nothing after it ran. Bound the "
-            f"loop to the iterations the run makes (`min_new_tokens=` holds "
-            f"a generation to a step count), or loop with `tracer.all()` and "
-            f"put what follows the loop after the `with` block."
+            f"loop to the iterations the run makes — a generation is held to "
+            f"a step count by `min_new_tokens=` on transformers and by "
+            f"`min_tokens=` or `ignore_eos=True` on vLLM, though neither "
+            f"holds a run that a stop string ends — or loop with "
+            f"`tracer.all()` and put what follows the loop in a separate "
+            f"`tracer.invoke()`."
         ),
         None,
     )
