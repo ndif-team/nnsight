@@ -3,13 +3,15 @@ title: Ordering and Execution Pitfalls
 one_liner: Rules about WHEN you can access modules — out-of-order access (OutOfOrderError, not a hang), missing input, and nested invokes.
 tags: [gotcha, order, execution, greenlets]
 related: [docs/concepts/threading-and-mediators.md, docs/errors/out-of-order-error.md, docs/usage/invoke-and-batching.md]
-sources: [src/nnsight/intervention/interleaver.py:83, src/nnsight/intervention/interleaver.py:605, src/nnsight/intervention/tracer.py:266, src/nnsight/intervention/tracer.py:346]
+sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/tracer.py]
 ---
 
 # Ordering and Execution Pitfalls
 
 ## TL;DR
 - Within a single block, request modules in **forward-pass order**. Asking for layer 5's output then layer 2's raises **`OutOfOrderError`** — not a deadlock/hang. Interleaving is cooperative (greenlets), so an unservable request surfaces as an error when the run finishes, with the traceback on the waiting line.
+- **Forward-pass order is depth-first, not layer-by-layer.** A module runs *inside* the one that contains it, so read the finer submodule before the block around it: `h[0].attn.output` before `h[0].output`, `h[0].attn.c_proj.input` before `h[0].attn.output`. The reverse raises.
+- Inside a `tracer.iter` loop the same mistake can park the request on the **next** step instead of raising — see [iteration.md](iteration.md).
 - `model.trace()` with no positional input *and* no `tracer.invoke(...)` raises `ValueError: trace() needs an input, or at least one \`with tracer.invoke(...)\` block`.
 - You cannot open a `tracer.invoke(...)` while the model is running (nested invokes, or an invoke inside an `iter` loop) — `ValueError: Cannot invoke while the model is already running.`
 
@@ -24,7 +26,7 @@ nnsight.intervention.interleaver.OutOfOrderError: 'model.transformer.h.2.output.
 Import to catch it: `from nnsight.intervention.interleaver import OutOfOrderError`.
 
 ### Cause
-Each block runs in its own **greenlet worker** (a `Mediator`) that runs in lockstep with the forward pass. Reading `module.output` *parks* the worker until the model reaches that module. A worker holds one pending request at a time and can only be served locations in the order the model reaches them. If the run finishes with a worker still parked on a location the model already ran past (or never reached), `check_dangling_mediators` (`src/nnsight/intervention/interleaver.py:605`) throws `OutOfOrderError` into the worker so the traceback points at the exact waiting line. The `.i0` suffix is the occurrence index (`i0` = first forward pass; see [iteration.md](iteration.md)).
+Each block runs in its own **greenlet worker** (a `Mediator`) that runs in lockstep with the forward pass. Reading `module.output` *parks* the worker until the model reaches that module. A worker holds one pending request at a time and can only be served locations in the order the model reaches them. If the run finishes with a worker still parked on a location the model already ran past (or never reached), `check_dangling_mediators` (`interleaver.py`) throws `OutOfOrderError` into the worker so the traceback points at the exact waiting line. The `.i0` suffix is the occurrence index (`i0` = first forward pass; see [iteration.md](iteration.md)).
 
 ### Wrong code
 ```python
@@ -52,7 +54,7 @@ with model.trace() as tracer:
 
 ### Mitigation / how to spot it early
 - Read the location in the message and confirm you accessed it after a later module.
-- Note attention runs *inside* its block: reading `h[0].output` then `h[0].attn.output` is out of order (attn already ran). Read the finer submodule first.
+- Containment counts as "later": attention runs *inside* its block, so `h[0].output` then `h[0].attn.output` is out of order — the whole block, attention included, has already run. The same holds one level down (`attn.c_proj` inside `attn`) and on any architecture (`layers[0].self_attn.o_proj` inside `layers[0].self_attn`). Read inward-out.
 
 ---
 
@@ -63,7 +65,7 @@ with model.trace() as tracer:
 - `ValueError: Cannot access \`model.output\` outside of interleaving` (body reads a module — the block runs to collect invokes *before* the model starts, so no worker exists yet).
 
 ### Cause
-`trace(*args)` with positional args creates one implicit invoke. With no args and no inner `tracer.invoke(...)`, there is no batched input; `execute` (`src/nnsight/intervention/tracer.py:266`) raises rather than run the model on nothing.
+`trace(*args)` with positional args creates one implicit invoke. With no args and no inner `tracer.invoke(...)`, there is no batched input; `execute` (`tracer.py`) raises rather than run the model on nothing.
 
 ### Wrong / Right
 ```python
@@ -91,7 +93,7 @@ ValueError: Cannot invoke while the model is already running.
 ```
 
 ### Cause
-`Invoker.__init__` (`src/nnsight/intervention/tracer.py:346`) refuses if the interleaver is already interleaving. Invokes are collected *before* the model runs; once a worker is executing (inside another invoke's body, or an `iter` step), you can't register a new one.
+`Invoker.__init__` (`tracer.py`) refuses if the interleaver is already interleaving. Invokes are collected *before* the model runs; once a worker is executing (inside another invoke's body, or an `iter` step), you can't register a new one.
 
 ### Wrong code
 ```python
@@ -126,4 +128,4 @@ with model.trace() as tracer:
 - [docs/errors/out-of-order-error.md](../errors/out-of-order-error.md) — the error in detail.
 - [docs/concepts/threading-and-mediators.md](../concepts/threading-and-mediators.md) — greenlet workers and the interleaver.
 - [docs/usage/invoke-and-batching.md](../usage/invoke-and-batching.md) — how invokes batch inputs.
-- [docs/gotchas/iteration.md](iteration.md) — ordering across generation steps.
+- [docs/gotchas/iteration.md](iteration.md) — ordering across generation steps, and what an out-of-order request does inside an iteration loop.

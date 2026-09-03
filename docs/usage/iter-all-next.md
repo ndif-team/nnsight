@@ -2,7 +2,7 @@
 title: Iteration — iter / all
 one_liner: Target intervention code at specific generation steps with `for step in tracer.iter[...]` and `tracer.all()`.
 tags: [usage, generation, iteration]
-related: [docs/usage/generate.md, docs/usage/source.md, docs/usage/invoke-and-batching.md]
+related: [docs/usage/generate.md, docs/gotchas/iteration.md, docs/usage/source.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/intervention/iterator.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/interleaver.py]
 ---
 
@@ -99,33 +99,79 @@ across the selected steps — before each yield it pins `iteration` so the first
 in the body binds to that occurrence. Whatever `iteration` was before the loop is
 restored on exit, so loops can nest. `tracer.all()` is `tracer.iter[:]`.
 
-## Deprecated: the `with` form
+## The one rule
 
-`with tracer.iter[...]:` still works but emits a `DeprecationWarning`. It does the
-same thing the long way — the loop is moved inside, re-running the block per step.
-Prefer `for step in tracer.iter[...]:`.
+**A loop must not ask for a step the run does not make.** A bound the run meets
+is fine and the code after the loop runs. A bound it does not meet raises
+`OutOfOrderError`, naming the iteration asked for and the count the run reached:
 
 ```python
 with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
-    with tracer.iter[:3]:            # DeprecationWarning
+    for step in tracer.iter[:10]:                # 10 steps of a 3-step run
+        model.transformer.h[0].output[:] = 0
+# OutOfOrderError: '...i3' was never reached: the loop asked for iteration 3 ...
+```
+
+`max_new_tokens` is an upper bound, so a bound matching it is safe only when
+nothing ends the generation sooner. `min_new_tokens=N` suppresses EOS until N
+tokens have been generated, which makes a bound of N hold:
+
+```python
+with model.generate("Hello", max_new_tokens=5, min_new_tokens=5) as tracer:
+    picks = nnsight.save([])
+    for step in tracer.iter[:5]:
+        picks.append(model.lm_head.output[0, -1].argmax(dim=-1))
+    ids = tracer.result.save()                   # runs
+```
+
+A stop string ends the run wherever it matches regardless, so pair
+`stop_strings=` with an open loop.
+
+### When the step count is unknown
+
+`tracer.iter[:]` / `tracer.all()` end *by* asking for a step the run does not
+make, so they warn rather than raise — and the same unwind still discards the
+statements after the loop. Anything you need afterwards goes in a separate empty
+invoke, which is its own worker:
+
+```python
+with model.generate(max_new_tokens=3, do_sample=False) as tracer:
+    with tracer.invoke("Hello"):
+        picks = nnsight.save([])
+        for step in tracer.all():
+            picks.append(model.lm_head.output[0, -1].argmax(dim=-1))
+    with tracer.invoke():
+        ids = tracer.result.save()               # runs
+```
+
+Values saved inside the loop survive either way. See
+[../gotchas/iteration.md](../gotchas/iteration.md) for the full set of cases.
+
+## Deprecated: the `with` form
+
+`with tracer.iter[...]:` still works but emits an `NNsightDeprecationWarning`. It
+does the same thing the long way — the loop is moved inside, re-running the block
+per step — with one visible difference: because it owns the loop, it catches its
+own over-run, truncates to the steps that ran, and lets the code after the block
+run silently. Prefer `for step in tracer.iter[...]:`.
+
+```python
+with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
+    with tracer.iter[:3]:            # NNsightDeprecationWarning
         x = model.transformer.h[0].output.save()
 ```
 
 ## Gotchas
 
-- **Open-ended `iter[:]` / `all()` do not let trailing code run.** They loop until
-  the model stops generating; the final over-run request is thrown into the worker
-  as `OutOfOrderError` (caught and warned), which unwinds the loop **and every line
-  after it**. So `tracer.result.save()` placed *after* an open-ended loop never
-  runs. To capture per-step values *and* the final result, use a **bounded**
-  `iter[:N]` matching `max_new_tokens` — then trailing code runs (see the canonical
-  pattern above).
-- **`max_new_tokens` is a cap, not a guarantee.** If the model stops early (EOS /
-  stop string), steps that didn't happen warn `'...' was never reached: the model
-  ran fewer iterations than the loop requested. Values from reached iterations are
-  kept.`
+- **An open loop whose body reads no module never returns.** Nothing parks the
+  worker, so the index generator spins with no warning and no timeout. Bound the
+  loop, or read something inside it.
 - **Negative step values raise `ValueError`** (`tracer.iter step cannot be
   negative: -1`) — there is no "last step" shorthand.
+- **Order the body the way the forward runs.** Reading layer 6 and then writing
+  layer 2 inside the loop parks the write on the *next* step, so every
+  intervention lands one step late (see
+  [../gotchas/iteration.md](../gotchas/iteration.md)).
 - **Regular-module access after the loop is out of order.** Those forward passes are
   already done, so requesting a module's `.output`/`.input` after the loop raises
   `OutOfOrderError`.
@@ -138,5 +184,6 @@ with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
 ## Related
 
 - [generate.md](generate.md) — generation context.
+- [../gotchas/iteration.md](../gotchas/iteration.md) — every way a loop goes wrong.
 - [source.md](source.md) — how `.source` interacts with iteration.
 - [invoke-and-batching.md](invoke-and-batching.md) — per-invoke iteration.
