@@ -37,8 +37,7 @@ CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm --ignore=tes
   (`MINIMUM_TRANSFORMERS`, `src/nnsight/modeling/tp/fragments.py`). On an older
   transformers `tests/tp/` errors at collection and
   `tests/test_tensor_parallel_rules.py` fails — 45 red results that say nothing
-  about your change. `tests/vllm/` is the same shape of constraint: without `vllm`
-  installed, four of its files error at collection rather than skipping.
+  about your change.
 
 That collects 933 tests; 1031 with `tests/tp/` included. Config is minimal —
 `pyproject.toml` has only:
@@ -66,8 +65,11 @@ Heavy models are shared fixtures; small ones are constructed inline per test fil
 `__init__.py` files, so pytest imports each test module by its bare basename, and
 `tests/test_tracing.py` and `tests/vllm/test_tracing.py` claim the same one. A
 plain `pytest tests/` therefore aborts with `import file mismatch` on whichever it
-reaches second. Running the two trees separately — or with the `--ignore` flags
-above — avoids it entirely.
+reaches second, whether or not `vllm` is installed. Running the two trees
+separately — or with the `--ignore` flags above — avoids it. `tests/vllm/` also
+has one file that reads a `vllm` submodule at import (`test_moe_batching.py`), so
+it errors at collection rather than skipping when `vllm` is absent; the rest of
+the subtree collects (207 tests) and skips at run time.
 
 ## The C extension (`.save()`)
 
