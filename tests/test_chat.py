@@ -67,6 +67,11 @@ class TestPipelineOwnChatClass:
     def any_to_any(self):
         pytest.importorskip("PIL")
         pytest.importorskip("timm")  # the tiny checkpoint's vision tower
+        # AnyToAnyPipeline requires librosa at construction whenever the model
+        # has an audio input modality, even for a text/image-only call. librosa
+        # needs numba, which trails new Python releases — hence a skip rather
+        # than a dev dependency (CI installs it where numba exists).
+        pytest.importorskip("librosa")
         return TransformersModel(self.REPO, task="any-to-any", dispatch=True)
 
     @torch.no_grad()

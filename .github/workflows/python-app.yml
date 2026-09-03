@@ -53,6 +53,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install ".[dev]"
 
+      # The any-to-any test's checkpoint has an audio modality, and its
+      # pipeline requires librosa at construction even for a text/image-only
+      # call. librosa needs numba, which trails new Python releases, so it
+      # can't sit in the dev extra without breaking the newest matrix leg;
+      # install it where numba exists and let the test importorskip elsewhere.
+      - name: Install audio extras
+        if: matrix.python-version == '3.12'
+        run: pip install librosa
+
       # CPU only (the runner has no GPU); skip the vLLM suite, which needs a GPU
       # and the vllm extra.
       #
