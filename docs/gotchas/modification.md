@@ -14,7 +14,7 @@ sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.
 - Assigning into a tuple output — `attn.output[0] = t` — raises `TypeError` (tuples don't support item assignment). Rebuild the tuple and assign the whole thing, or edit in place: `attn.output[0][:] = ...`.
 - To keep the "before" state of a value you're about to mutate, `.clone().save()` it first — otherwise `before` and `after` alias the same modified tensor.
 - Prefer replacing a **whole** tensor over an in-place slice-assign into a *tuple element* view across a barrier — the latter can crash. Assign the whole value instead.
-- A replacement with no connection to the value it replaced — `output = torch.zeros_like(output)` — cuts autograd. Derive it from the old value, or write in place.
+- A replacement with no connection to the value it replaced — `output = torch.zeros_like(output)` — cuts autograd there. If every path is cut (a whole block's `.output`), a later upstream `.grad` read fails loudly; if other paths bypass the replaced module (an MLP or attention output — the residual stream survives), upstream `.grad` reads succeed and are silently missing that module's contribution. Derive it from the old value, or write in place.
 - Editing an **activation** is scoped to that run; editing a **weight** is permanent, and the syntax looks identical. There is no warning.
 
 ---
@@ -72,19 +72,33 @@ with model.trace("Hello world"):
 ## A replacement built from scratch cuts autograd
 
 ### Symptom
-An intervention runs fine on its own, and adding a `with loss.backward():` block to read a
-gradient turns it into an `OutOfOrderError` whose location is a raw number:
+Two symptoms, depending on what was replaced. Replace a **whole block's** `.output` and adding
+a `with loss.backward():` block to read an upstream gradient turns it into an `OutOfOrderError`
+whose location is a raw number:
 
 ```
 OutOfOrderError: '139932764543792.grad.i0' was requested but the model already ran past it
 ```
 
+Replace a **submodule's** `.output` (an MLP, an attention branch) and there is no error at
+all: upstream gradient reads succeed and return numbers that are quietly wrong.
+
 ### Cause
 A `.grad` read waits at a location derived from the tensor it belongs to. When you replace an
 activation with a tensor autograd has never seen — `torch.zeros_like(...)`, a fresh
-`torch.randn(...)`, anything loaded from disk — the graph is cut at that point, so the
-gradient the earlier tensor is waiting for is never produced and the wait is reported against
-an object id.
+`torch.randn(...)`, anything loaded from disk — the graph is cut at that point. What happens
+next depends on whether any other path survives:
+
+- **Every path cut** (a whole block's `.output` replaced): the gradient the earlier tensor is
+  waiting for is never produced, and the wait is reported against an object id — the loud
+  failure above. Reading the fresh tensor's *own* `.grad` is also loud:
+  `RuntimeError: cannot register a hook on a tensor that doesn't require gradient`.
+- **A bypassed cut** (a submodule's `.output` replaced — the residual stream and sibling
+  branches route around it): upstream `.grad` reads **succeed** and silently return a
+  gradient missing that module's path. Measured on gpt2: replacing `h[3].mlp.output` with a
+  *detached copy of the very same values* leaves the forward pass bit-identical, yet moves
+  the layer-0 gradient's norm from 125,659 to 130,349 — a 45% difference in L2 — the entire
+  MLP-path contribution dropped with no warning.
 
 ### Wrong code
 ```python
@@ -94,6 +108,15 @@ with model.trace("Hello world"):
     loss = model.output.logits.sum()
     with loss.backward():
         grad = hs.grad.clone().save()      # OutOfOrderError, id location
+```
+
+```python
+with model.trace("Hello world"):
+    hs = model.transformer.h[0].output
+    model.transformer.h[6].mlp.output = torch.zeros_like(model.transformer.h[6].mlp.output)
+    loss = model.output.logits.sum()
+    with loss.backward():
+        grad = hs.grad.clone().save()      # succeeds — silently partial
 ```
 
 ### Right code
@@ -113,6 +136,10 @@ that the new value has to descend from the old one.
 ### Mitigation / how to spot it early
 - If a location in an error message is a long number rather than a module path, it is a
   `.grad` whose tensor was orphaned by a replacement.
+- The worse case is the one with no error message: a fresh-tensor replacement on a bypassed
+  submodule leaves every upstream gradient quietly missing that module's contribution. No
+  symptom flags it — audit any `= torch.zeros_like(...)`-style replacement whenever
+  gradients are in the experiment.
 - Reach for `[:] =` by default when gradients are anywhere in the experiment.
 
 ---

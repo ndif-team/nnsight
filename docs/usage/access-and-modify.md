@@ -68,12 +68,19 @@ model a different object and leaves the original alone.
 
 One consequence catches people writing gradients: **a replacement that has no connection to
 the value it replaced cuts the graph.** `output = torch.zeros_like(output)` produces a tensor
-autograd has never seen, so a `.grad` read on anything captured upstream has nothing to wait
-for and fails with an object id for a location:
+autograd has never seen, so the graph is cut at that point — with two different consequences.
+If every path is severed (you replaced a whole block's `.output`), a `.grad` read on anything
+captured upstream has nothing to wait for and fails with an object id for a location:
 
 ```
 OutOfOrderError: '139932764543792.grad.i0' was requested but the model already ran past it
 ```
+
+If other paths bypass the replaced module (an MLP or attention `.output` — the residual
+stream and sibling branches survive), upstream `.grad` reads **succeed** and silently return
+a gradient missing that module's path. Measured on gpt2: replacing `h[3].mlp.output` with a
+detached copy of the very same values leaves the forward pass bit-identical, yet moves the
+layer-0 gradient's norm from 125,659 to 130,349 — a 45% difference in L2, with no warning.
 
 `output[:] = 0` writes through the existing tensor and keeps the graph (the gradient is then
 zero, which is usually what you wanted). So is any replacement derived from the old value —
@@ -180,7 +187,7 @@ If a module's class has a submodule named `input`, `output`, `inputs`, etc. (e.g
 - Within an invoke, access modules in forward-pass order or hit `OutOfOrderError`. See `docs/errors/out-of-order-error.md`.
 - For tuple-returning modules, `module.output[0] = x` is a `__setitem__` on a tuple and fails. Use `module.output[0][:] = x` (in-place on the first element) or rebuild the tuple and assign to `module.output`.
 - Reading `.output` returns the real runtime tensor — `print`, `.shape`, `.mean()`, `.item()` all work; there is no proxy to unwrap.
-- Replacing an activation with a tensor built from scratch (`torch.zeros_like(...)`) severs autograd. Derive the replacement from the old value, or write in place.
+- Replacing an activation with a tensor built from scratch (`torch.zeros_like(...)`) severs autograd there: replace a whole block's output and upstream `.grad` reads fail loudly; replace a bypassed submodule's output (MLP, attention) and they succeed with silently partial gradients. Derive the replacement from the old value, or write in place.
 - Outside interleaving, `.output` raises `ValueError: Cannot access ... outside of interleaving`. Use `model.scan(...)` for shapes without execution.
 
 ## Related
