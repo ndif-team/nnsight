@@ -124,8 +124,13 @@ with model.generate("Hello", max_new_tokens=5, min_new_tokens=5) as tracer:
     ids = tracer.result.save()                   # runs
 ```
 
-A stop string ends the run wherever it matches regardless, so pair
-`stop_strings=` with an open loop.
+`min_new_tokens` holds off the end-of-sequence token and nothing else. A
+`stop_strings=` criterion still ends the run where it matches, and so does a
+`tracer.stop()` in any block of the same trace — pair either with an open loop.
+
+The rule is about the run, not about generation: a `tracer.iter[:2]` inside a
+single-forward `model.trace()` outruns it the same way, and every runtime that
+serves a trace applies the same policy.
 
 ### When the step count is unknown
 

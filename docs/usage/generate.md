@@ -116,13 +116,17 @@ Pass a list of prompts, or use `tracer.invoke(...)` per prompt. Shorter prompts 
 
 ```python
 with model.generate(
-    ["The Eiffel Tower is in", "The Colosseum is in"],
+    ["The Eiffel Tower is in", "Paris"],
     max_new_tokens=3, do_sample=False,
 ) as tracer:
     ids = tracer.result.save()
 # ids.shape -> torch.Size([2, 10])
-# rows decode to "...is in the middle of" each
+# row 0: 'The Eiffel Tower is in the middle of'
+# row 1: '<|endoftext|>' * 6 + 'Paris, France,'
 ```
+
+The padding is still there in the result, so decode with
+`skip_special_tokens=True` (or slice the row) unless you want it.
 
 ## Difference vs `trace` and `pipe`
 
