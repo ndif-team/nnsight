@@ -22,7 +22,7 @@ early layers predict generic frequent tokens, late layers converge on the answer
 
 On `VLLM`, `model.lm_head(h)` raises (`LMHead's weights should be used in the sampler`); the
 lens is `model.logits_processor(model.lm_head, model.model.norm(h))` on `h = (out[0] + out[1])[-1:]`
-— see [Tensor parallelism](../models/vllm.md#tensor-parallelism-is-transparent).
+— see [Tensor parallelism](../models/vllm-parallelism.md#tensor-parallelism-is-transparent).
 
 Calling `model.lm_head(...)` inside a trace runs the module with the trace
 **stood down** — it is just the linear math you want, applied out of order

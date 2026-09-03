@@ -18,15 +18,14 @@ back on the way out — belongs to
 shared with every other distributed runtime; see
 [`nnsight.intervention.fragments`][nnsight.intervention.fragments].
 
-That sharing is what this module is. The same job used to be done by
-[`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher] with two extra pairs
-of forward hooks per parallel layer, installed by the model runner either side of
-building the Envoy tree so they bracketed the interleaver's own. It needed them
-because ``Batcher.narrow`` runs once per *parked worker*, so the gather had to be
-memoized and explicitly released — several workers reading one value would
-otherwise have run several collectives and deadlocked the ranks. Sitting on the
-interleaver instead, the bracket is already once-per-visit and none of that is
-needed: no memo, no ``watch``/``release``, no extra hooks.
+That sharing is what this module is. Doing the same job from
+[`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher] instead costs two
+extra pairs of forward hooks per parallel layer, bracketing the interleaver's
+own, plus a memo and an explicit release: ``Batcher.narrow`` runs once per
+*parked worker*, so several workers reading one value would otherwise run several
+collectives and deadlock the ranks. On the interleaver the bracket is already
+once-per-visit, so none of that is needed — no memo, no ``watch``/``release``, no
+extra hooks.
 """
 
 from __future__ import annotations

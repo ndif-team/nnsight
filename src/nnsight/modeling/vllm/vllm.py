@@ -517,13 +517,13 @@ class VLLM(Remotable):
         prompt = inputs[0]
 
         # `Mapping`, not `dict`: a tokenizer hands back a `BatchEncoding`, which is
-        # a `UserDict` and so fails an `isinstance(..., dict)` test — which is why
-        # the tokenizer-output path below was unreachable from an actual tokenizer.
+        # a `UserDict` and so fails an `isinstance(..., dict)` test, which would put
+        # the tokenizer-output path below out of an actual tokenizer's reach.
         if isinstance(prompt, Mapping):
             # That output is ours to convert. Anything else is one of vLLM's own
             # prompt dicts — `TypedDict`s, so plain dicts at runtime — and the
-            # engine knows them better than we do; taking those for tokenizer
-            # output is how `TokensPrompt(...)` came back as `KeyError: 'input_ids'`.
+            # engine knows them better than we do. Taking one of those for tokenizer
+            # output turns `TokensPrompt(...)` into `KeyError: 'input_ids'`.
             if "input_ids" in prompt:
                 return self._tokenized_prompt(prompt)
             return prompt
@@ -577,9 +577,9 @@ class VLLM(Remotable):
     def _sampling_kwargs(kwargs: dict) -> dict:
         """A copy of `kwargs` with generation length spelled the way vLLM spells it.
 
-        vLLM's is ``max_tokens``; ``max_new_tokens`` is the ``LanguageModel`` API's
-        and is accepted on trace and generate alike, rewritten before it reaches
-        SamplingParams — where an unknown keyword now raises rather than being
+        vLLM's is ``max_tokens``; ``max_new_tokens`` is what the rest of nnsight
+        spells it, and is accepted on trace and generate alike, rewritten before it
+        reaches SamplingParams — where an unknown keyword raises rather than being
         quietly ignored. The copy is what lets a caller pass its own dict through
         twice (``generate`` hands one to ``trace`` and keeps the original).
         """
@@ -981,9 +981,9 @@ class VLLM(Remotable):
 
         "Did not set them" is what the invoke recorded in `_batch`, not "still
         equals vLLM's default". The two are not the same: ``temperature=1.0`` and
-        ``max_tokens=16`` *are* the defaults, so an invoke asking for either used
-        to have it overwritten by the trace-level setting while a neighbouring
-        ``temperature=0.99`` was honoured.
+        ``max_tokens=16`` *are* the defaults, so inferring it from the value would
+        let the trace-level setting overwrite an invoke that asked for one of them
+        while honouring a neighbouring ``temperature=0.99``.
 
         Returns:
             The workers that were attached, in request order.
