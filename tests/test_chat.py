@@ -66,6 +66,7 @@ class TestPipelineOwnChatClass:
     @pytest.fixture(scope="class")
     def any_to_any(self):
         pytest.importorskip("PIL")
+        pytest.importorskip("timm")  # the tiny checkpoint's vision tower
         return TransformersModel(self.REPO, task="any-to-any", dispatch=True)
 
     @torch.no_grad()

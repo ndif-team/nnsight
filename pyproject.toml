@@ -52,6 +52,10 @@ dev = [
     "pillow",
     "diffusers",
     "accelerate",
+    # Task-shape tests: TAPAS table-question-answering builds a DataFrame;
+    # the tiny any-to-any checkpoint's vision tower is a timm model.
+    "pandas",
+    "timm",
 ]
 # High-throughput / tensor-parallel serving (needs a CUDA GPU).
 vllm = [

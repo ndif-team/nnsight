@@ -144,6 +144,7 @@ class TestTaskInputDict:
         # by __call__, not preprocess), so the trace has to route the task
         # dict through it. The expected width comes from the same parse +
         # preprocess the trace makes.
+        pytest.importorskip("pandas")
         model = TransformersModel(TAPAS, task="table-question-answering", dispatch=True)
         task_input = {
             "table": {
