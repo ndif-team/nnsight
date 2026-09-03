@@ -415,6 +415,94 @@ class TestEarlyStop:
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
 
+class TestIterationBounds:
+    """What a ``tracer.iter`` loop that outruns its request is told.
+
+    The same policy the interleaver applies to a local run, applied here: a count
+    the block named is a claim about the request, so a request that cannot supply
+    it fails; an open loop ends by outrunning generation, so it does not. The
+    engine only differs in where the answer lands — the client is in another
+    process, so the error rides home as the request's deferred error and is raised
+    there, while the warning is emitted on the engine.
+    """
+
+    @torch.no_grad()
+    def test_bounded_iter_past_the_end_surfaces(self, vllm_gpt2, MSG_prompt):
+        # Eight steps asked of a three-step request. The worker is unwound at the
+        # loop, so the append after it never runs and `steps` goes home three long
+        # and looking complete — which is the whole reason this is an error.
+        with pytest.raises(RuntimeError, match="nothing after it ran"):
+            with vllm_gpt2.trace(
+                MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
+            ) as tracer:
+                steps = list().save()
+                for _ in tracer.iter[:8]:
+                    steps.append(vllm_gpt2.logits.argmax(dim=-1))
+                steps.append("after the loop")
+
+    @torch.no_grad()
+    def test_bounded_iter_matching_the_request_keeps_its_tail(
+        self, vllm_gpt2, MSG_prompt
+    ):
+        # The other side of the same rule: a count the request does reach leaves the
+        # loop to end on its own, so what follows it runs.
+        with vllm_gpt2.trace(
+            MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
+        ) as tracer:
+            steps = list().save()
+            for _ in tracer.iter[:3]:
+                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+            steps.append("after the loop")
+
+        assert len(steps) == 4 and steps[-1] == "after the loop"
+
+    @torch.no_grad()
+    def test_a_generation_cut_short_surfaces(self, vllm_gpt2, MSG_prompt):
+        # The count need not be absurd to go unmet, which is the case the policy is
+        # for: this request stops on its second token — what an EOS does to a
+        # generation — while the loop is still bound to six.
+        york = vllm_gpt2.tokenizer.encode(" York")
+        with pytest.raises(RuntimeError, match="nothing after it ran"):
+            with vllm_gpt2.trace(
+                MSG_prompt,
+                temperature=0.0,
+                top_p=1,
+                max_tokens=6,
+                stop_token_ids=york,
+            ) as tracer:
+                for _ in tracer.iter[:6]:
+                    vllm_gpt2.logits
+
+    @torch.no_grad()
+    def test_open_iter_past_the_end_is_not_an_error(self, vllm_gpt2, MSG_prompt):
+        # `tracer.all()` has no end of its own, so asking for the step after the
+        # last is how it finishes: warned about on the engine, never raised, and
+        # every step it did reach comes home.
+        with vllm_gpt2.trace(
+            MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
+        ) as tracer:
+            steps = list().save()
+            for _ in tracer.all():
+                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+
+        assert vllm_gpt2.tokenizer.batch_decode(steps) == [" New", " York", " City"]
+
+    @torch.no_grad()
+    def test_engine_survives_a_bounded_over_run(self, vllm_gpt2, ET_prompt):
+        # The unwind ends one request; every other tenant of the engine, and every
+        # later trace, is untouched.
+        with pytest.raises(RuntimeError, match="nothing after it ran"):
+            with vllm_gpt2.trace(
+                ET_prompt, temperature=0.0, top_p=1, max_tokens=2
+            ) as tracer:
+                for _ in tracer.iter[:9]:
+                    vllm_gpt2.logits
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+
 class TestDeferredErrors:
     @torch.no_grad()
     def test_error_surfaces_to_client(self, vllm_gpt2, ET_prompt):
