@@ -7,11 +7,18 @@ entailment pair per candidate label in ``zero-shot-classification``. Their
 rows of the trace's single forward — so a read inside the block sees one row per
 chunk, in the order the task yields them.
 
-Two of these tasks take the pipeline's own input dict (``{"image": ...,
-"question": ...}``) rather than model inputs, which is preprocessed here like any
-other input; ``mask-generation``, whose preprocess runs the model to embed the
-image before yielding one input per batch of points, has no single forward to
-trace and is refused.
+Some tasks take the pipeline's own input dict (``{"image": ..., "question":
+...}``) rather than model inputs, which is preprocessed here like any other
+input — through the pipeline's ``_args_parser`` first when it has one, since
+that is where ``table-question-answering`` builds its ``pd.DataFrame``. A
+dual-encoder zero-shot task (CLIP, CLAP) nests the candidate labels' text
+encoding inside its preprocess row, and those tensors are merged into the
+forward rather than silently dropped.
+
+Two tasks are refused: ``mask-generation``, whose preprocess runs the model to
+embed the image before yielding one input per batch of points, has no single
+forward to trace; ``keypoint-matching`` takes a pair of images as one input,
+which the list convention (one prompt per element) would split.
 """
 
 import pytest
@@ -28,6 +35,10 @@ NLI = "hf-internal-testing/tiny-random-DistilBertForSequenceClassification"
 OWLVIT = "hf-internal-testing/tiny-random-OwlViTForObjectDetection"
 LAYOUTLM = "hf-internal-testing/tiny-random-LayoutLMForQuestionAnswering"
 SAM = "hf-internal-testing/tiny-random-SamModel"
+TAPAS = "hf-internal-testing/tiny-random-TapasForQuestionAnswering"
+CLIP = "hf-internal-testing/tiny-random-CLIPModel"
+CLAP = "hf-internal-testing/tiny-clap-htsat-unfused"
+SUPERGLUE = "magic-leap-community/superglue_outdoor"
 
 LABELS = ["travel", "cooking", "dancing"]
 
@@ -127,6 +138,52 @@ class TestTaskInputDict:
             start = model.output.start_logits.save()
         assert start.shape[0] == 1
 
+    @torch.no_grad()
+    def test_table_question_answering_takes_the_task_s_dict(self):
+        # The dict->DataFrame step lives in the pipeline's _args_parser (run
+        # by __call__, not preprocess), so the trace has to route the task
+        # dict through it. The expected width comes from the same parse +
+        # preprocess the trace makes.
+        model = TransformersModel(TAPAS, task="table-question-answering", dispatch=True)
+        task_input = {
+            "table": {
+                "City": ["Paris", "London"],
+                "Population": ["2000000", "9000000"],
+            },
+            "query": "Which city has the biggest population?",
+        }
+        parsed = model.pipeline._args_parser(dict(task_input))[0]
+        encoded = model.pipeline.preprocess(parsed)
+        with model.trace(task_input):
+            logits = model.output.logits.save()
+        assert logits.shape == encoded["input_ids"].shape
+
+
+class TestDualEncoderZeroShot:
+    # These pipelines nest the candidate labels' text encoding inside their
+    # preprocess row and unwrap it in _forward; the trace merges those tensors
+    # into its one forward, giving one text row per candidate label against
+    # the single image/audio row.
+
+    @torch.no_grad()
+    def test_zero_shot_image_classification_keeps_the_text_half(self):
+        model = TransformersModel(CLIP, task="zero-shot-image-classification", dispatch=True)
+        labels = ["cat", "dog", "bird"]
+        with model.trace(Image.new("RGB", (64, 64)), candidate_labels=labels):
+            per_image = model.output.logits_per_image.save()
+        assert per_image.shape == (1, len(labels))
+
+    @torch.no_grad()
+    def test_zero_shot_audio_classification_keeps_the_text_half(self):
+        import numpy as np
+
+        model = TransformersModel(CLAP, task="zero-shot-audio-classification", dispatch=True)
+        labels = ["speech", "music"]
+        audio = np.zeros(16000, dtype=np.float32)
+        with model.trace(audio, candidate_labels=labels):
+            per_audio = model.output.logits_per_audio.save()
+        assert per_audio.shape == (1, len(labels))
+
 
 class TestMaskGeneration:
     def test_tracing_an_image_is_refused(self):
@@ -134,3 +191,33 @@ class TestMaskGeneration:
         with pytest.raises(NotImplementedError, match="task='mask-generation'"):
             with model.trace(Image.new("RGB", (64, 64))):
                 pass
+
+
+class TestKeypointMatching:
+    MESSAGE = (
+        "task='keypoint-matching' takes a pair of images as one input, which "
+        "a trace's list convention (one prompt per element) would split. Run "
+        "the whole task with model.pipe([image_a, image_b]), or trace one "
+        "forward on an encoding you build yourself: "
+        "model.image_processor(images=[image_a, image_b], "
+        "return_tensors='pt')."
+    )
+
+    @pytest.fixture(scope="class")
+    def matcher(self):
+        return TransformersModel(SUPERGLUE, task="keypoint-matching", dispatch=True)
+
+    def test_tracing_a_pair_of_images_is_refused(self, matcher):
+        pair = [Image.new("RGB", (64, 64)), Image.new("RGB", (64, 64))]
+        with pytest.raises(NotImplementedError) as excinfo:
+            with matcher.trace(pair):
+                pass
+        assert str(excinfo.value) == self.MESSAGE
+
+    def test_tracing_a_nested_pair_is_refused_too(self, matcher):
+        # A nested pair would otherwise be read as pre-tokenized ids.
+        pair = [Image.new("RGB", (64, 64)), Image.new("RGB", (64, 64))]
+        with pytest.raises(NotImplementedError) as excinfo:
+            with matcher.trace([pair]):
+                pass
+        assert str(excinfo.value) == self.MESSAGE

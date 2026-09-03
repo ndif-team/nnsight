@@ -50,6 +50,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
+import sys
 import warnings
 
 import torch
@@ -813,12 +814,14 @@ class TransformersModel(HuggingFaceModel):
         return 1
 
     @staticmethod
-    def _as_chats(data: Any) -> Optional[list]:
+    def _as_chats(data: Any, chat_cls: Optional[type] = None) -> Optional[list]:
         """Chat message(s) -> a list of ``Chat`` inputs (one per conversation).
 
         Mirrors the chat detection `Pipeline.__call__` does before preprocess,
         which calling `Pipeline.preprocess` directly would otherwise skip.
-        Returns ``None`` when ``data`` isn't chat messages.
+        Returns ``None`` when ``data`` isn't chat messages. ``chat_cls`` is the
+        wrapper class to use — the pipeline's own when it defines one (see
+        `_chat_cls`); the base ``Chat`` otherwise.
         """
         try:
             from transformers.pipelines.base import Chat, is_valid_message
@@ -828,16 +831,30 @@ class TransformersModel(HuggingFaceModel):
             # input handling take it from here.
             return None
 
+        chat_cls = chat_cls or Chat
         if not isinstance(data, (list, tuple)) or not data:
             return None
         if is_valid_message(data[0]):
-            return [Chat(list(data))]
+            return [chat_cls(list(data))]
         if all(
             isinstance(chat, (list, tuple)) and chat and is_valid_message(chat[0])
             for chat in data
         ):
-            return [Chat(list(chat)) for chat in data]
+            return [chat_cls(list(chat)) for chat in data]
         return None
+
+    def _chat_cls(self) -> Optional[type]:
+        """The ``Chat`` wrapper class this model's pipeline expects.
+
+        Most chat pipelines isinstance-check ``transformers.pipelines.base.Chat``
+        (or import it as a module attribute, which resolves to the same object),
+        but ``any-to-any`` defines its *own* ``Chat`` and checks against that —
+        a base-``Chat`` instance falls through to its raw-dict branch and fails
+        on ``Chat.copy``. So a pipeline module that carries a ``Chat`` gets its
+        own class.
+        """
+        module = sys.modules.get(type(self.pipeline).__module__)
+        return getattr(module, "Chat", None)
 
     def _batch(self, invokes: list, fn: Any) -> tuple:
         """Combine invokes into one input for ``fn``.
@@ -956,6 +973,21 @@ class TransformersModel(HuggingFaceModel):
             return None, media
         if self._is_opaque(data, kwargs):
             return None, kwargs
+        if self.task == "keypoint-matching":
+            # This task's unit input is a *pair* of images, which collides with
+            # the list convention (one prompt per element): the pair is split
+            # into two single-image preprocess calls, and a nested pair reads
+            # as pre-tokenized ids — which is why this check sits before
+            # `_is_pretokenized`. (An encoding you built yourself is opaque and
+            # never reaches here.)
+            raise NotImplementedError(
+                "task='keypoint-matching' takes a pair of images as one input, "
+                "which a trace's list convention (one prompt per element) "
+                "would split. Run the whole task with model.pipe([image_a, "
+                "image_b]), or trace one forward on an encoding you build "
+                "yourself: model.image_processor(images=[image_a, image_b], "
+                "return_tensors='pt')."
+            )
         if self._is_pretokenized(data, kwargs):
             return self._encode_pretokenized(data, kwargs)
         if self.task == "mask-generation":
@@ -977,9 +1009,10 @@ class TransformersModel(HuggingFaceModel):
         preprocess_params, forward_params, _ = self.pipeline._sanitize_parameters(**kwargs)
         # Chat message(s) are wrapped in Chat (as Pipeline.__call__ would) so the
         # template is applied; otherwise a list of strings is one input per prompt.
-        inputs = self._as_chats(data)
+        inputs = self._as_chats(data, self._chat_cls())
         if inputs is None:
             inputs = list(data) if isinstance(data, (list, tuple)) else [data]
+            inputs = self._parse_task_args(inputs)
         rows = []
         for one in inputs:
             row = self.pipeline.preprocess(one, **preprocess_params)
@@ -990,7 +1023,72 @@ class TransformersModel(HuggingFaceModel):
             # generator to `_collate` is what makes it ask a generator for
             # `.items()`.
             rows.extend([row] if hasattr(row, "items") else row)
+        merged = [self._merge_nested_encodings(row) for row in rows]
+        if any(row is not None for row in merged):
+            # A dual-encoder zero-shot task (CLIP, CLAP) runs one forward whose
+            # batch dims differ per half — one image/audio row against one text
+            # row per candidate label — so its rows don't collate with anything
+            # else's; a lone one goes to the model whole, like an encoding.
+            if len(rows) > 1:
+                raise NotImplementedError(
+                    f"task={self.task!r} pairs each input with its own nested "
+                    "text encoding, so several inputs don't collate into one "
+                    "forward. Trace one input at a time."
+                )
+            encoding = {
+                key: value
+                for key, value in merged[0].items()
+                if isinstance(value, torch.Tensor)
+            }
+            return None, {**encoding, **forward_params}
         return rows, forward_params
+
+    def _parse_task_args(self, inputs: list) -> list:
+        """Run the pipeline's ``_args_parser`` over task-input dicts.
+
+        Some input normalization lives in the parser ``Pipeline.__call__``
+        invokes, not in ``preprocess``: ``table-question-answering`` turns the
+        task dict's ``table`` into the ``pd.DataFrame`` its preprocess requires
+        there. Calling ``preprocess`` directly would skip it.
+        """
+        parser = getattr(self.pipeline, "_args_parser", None)
+        if parser is None:
+            return inputs
+        parsed = []
+        for one in inputs:
+            if hasattr(one, "keys") and self._is_task_input(one):
+                out = parser(one)
+                parsed.extend(out if isinstance(out, list) else [out])
+            else:
+                parsed.append(one)
+        return parsed
+
+    @staticmethod
+    def _merge_nested_encodings(row: Any) -> Optional[dict]:
+        """Flatten a preprocess row whose model inputs sit one level down.
+
+        A dual-encoder zero-shot pipeline (CLIP, CLAP) returns the candidate
+        labels' text encoding *nested* — ``{"pixel_values": ..., "text_inputs":
+        [BatchEncoding]}`` — and unwraps it in its ``_forward`` right before
+        the model call. Collation keeps only top-level tensors, which would
+        silently drop the text half. Returns the row with every nested
+        encoding's tensors merged in, or ``None`` when nothing is nested.
+        """
+        merged, found = {}, False
+        for key, value in row.items():
+            inner = value
+            if isinstance(inner, (list, tuple)) and len(inner) == 1:
+                inner = inner[0]
+            if hasattr(inner, "keys") and not isinstance(inner, torch.Tensor):
+                inner = dict(inner)
+                if inner and all(
+                    isinstance(item, torch.Tensor) for item in inner.values()
+                ):
+                    merged.update(inner)
+                    found = True
+                    continue
+            merged[key] = value
+        return merged if found else None
 
     def _as_processor_encoding(self, data: Any, kwargs: dict) -> Optional[dict]:
         """Run the task's processor when an invoke is written in processor terms.
@@ -1075,10 +1173,14 @@ class TransformersModel(HuggingFaceModel):
 
         Model inputs are tensors, so a mapping holding none of them is not an
         encoding: that, rather than a list of task names, is what tells the two
-        apart.
+        apart. And it must be *tensors* specifically — a shape-duck-typed check
+        misreads ``table-question-answering``'s dict, whose ``pd.DataFrame``
+        table also has a ``.shape``, as an encoding.
         """
         values = list(dict(data).values()) if hasattr(data, "keys") else []
-        return bool(values) and not any(hasattr(value, "shape") for value in values)
+        return bool(values) and not any(
+            isinstance(value, torch.Tensor) for value in values
+        )
 
     @staticmethod
     def _has_nontext_keys(encoding: Any) -> bool:
