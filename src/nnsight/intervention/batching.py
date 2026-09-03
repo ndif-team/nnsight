@@ -16,7 +16,7 @@ invoke out to the batch's longest input, so a position index counted from the le
 names a different token depending on what else is in the batch, while one counted
 from the right does not. And a write is spliced back into rows the block does not
 own, so it has to keep the row count it was served —
-[`Batcher._widen_tensor`][nnsight.intervention.batching.Batcher._widen_tensor]
+`Batcher._widen_tensor`
 refuses one that doesn't.
 
 Batching only actually narrows when there are two or more non-empty invokes — a
