@@ -72,44 +72,56 @@ from ...intervention.fragments import Fragments
 from ...util import apply
 
 # What each side of a module is at the interleaver's handoff, per transformers
-# TP style. The handoff runs inside the module's forward — after the style's
-# pre-hook, before its post-hook — so a side is one of:
+# TP style. A style is applied by wrapping ``module.forward``, and the handoff
+# runs inside that wrapper — after the style's input transform, before its output
+# transform — so a side is one of:
 #
 #   "shard"    this rank's slice along the LAST dim; made whole by an all-gather
 #              and handed back as this rank's slice again.
-#   "partial"  this rank's term of a sum the style's post-hook will all-reduce
-#              (or reduce-scatter); made whole by an all-reduce and handed back as
-#              the whole on rank 0 and zeros elsewhere, so the post-hook's own
-#              reduce yields exactly the (possibly edited) whole on every rank.
+#   "partial"  this rank's term of a sum the style's output transform will
+#              all-reduce (or reduce-scatter); made whole by an all-reduce and
+#              handed back as the whole on rank 0 and zeros elsewhere, so the
+#              style's own reduce yields exactly the (possibly edited) whole on
+#              every rank.
 #
 # A side left out is already whole there. Starred entries were measured on
 # Llama-3.2-3B at tp=4; the rest follow from
-# transformers/integrations/tensor_parallel.py but no model in the test set
+# transformers/distributed/tensor_parallel.py but no model in the test set
 # exercised them — treat them as unverified.
 SIDES: Dict[str, Dict[str, str]] = {
     "colwise": {"output": "shard"},                       # * output features split
     "packed_colwise": {"output": "shard"},                #   (fused gate_up, same split)
-    "colwise_gather_output": {"output": "shard"},         # * gathered by its post-hook, after us
+    "colwise_gather_output": {"output": "shard"},         # * gathered by its output transform, after us
     "colwise_rep": {"output": "shard"},                   # = colwise_gather_output (see below)
-    "rowwise": {"input": "shard", "output": "partial"},   # * input pre-split; post-hook all-reduces
-    "rowwise_split_input": {"input": "shard", "output": "partial"},  # pre-hook splits the input
+    "rowwise": {"input": "shard", "output": "partial"},   # * input pre-split; output transform all-reduces
+    "rowwise_split_input": {"input": "shard", "output": "partial"},  # its input transform splits the input
     "rowwise_rep": {"input": "shard", "output": "partial"},          # = rowwise_split_input
     "packed_rowwise": {"input": "shard", "output": "partial"},
-    "embedding_rowwise": {"output": "partial"},           # * vocab-parallel; post-hook all-reduces
-    "sequence_parallel": {"output": "partial"},           # + post-hook reduce-scatters, on the LAST dim
+    "embedding_rowwise": {"output": "partial"},           # ! vocab-parallel; see the note below
+    "sequence_parallel": {"output": "partial"},           # + output transform reduce-scatters, on the LAST dim
     "all_reduce": {"output": "partial"},
     "replicated_with_grad_allreduce": {},                 #   params replicated; activations whole
     "ep_router": {},                                      # * router is replicated; its post-transform
                                                           #   masks non-local experts, after us
     "grouped_gemm": {},                                   # * shards expert parameters only; the
                                                           #   wrapper it installs is the identity
-    "moe_tp_experts": {"output": "partial"},              # + post-hook all-reduces (see below)
+    "moe_tp_experts": {"output": "partial"},              # + output transform all-reduces (see below)
 }
 
 # Entries marked + follow from reading transformers' style classes rather than
 # from running a model: ``moe_tp_experts`` ends in an unconditional all-reduce (so
 # a partial, not the shard its name suggests), and ``sequence_parallel``
 # reduce-scatters on the last dim (a whole-width partial at the handoff).
+#
+# ``embedding_rowwise`` is marked ! because the rule above is right and unreachable
+# in practice: a vocab-parallel embedding's value carries a ``_MaskPartial``
+# placement, which is stateful and single-use — its mask buffer is consumed by the
+# first reassembly, and ``_fragment_tensor`` then rebuilds a DTensor around the
+# spent one, so the module's own reduce asserts. Parking on ``embed_tokens.output``
+# raises a bare ``AssertionError`` from torch's embedding op on any plan that names
+# ``embed_tokens`` (Llama-3.2-1B/3B and other tied-embedding checkpoints); plans
+# that leave the embedding replicated (Llama-3.3-70B, Qwen3-8B) never reach this.
+# ``layers[0].input`` is the same tensor and is whole either way.
 
 # Styles refused rather than guessed at, with the reason a user is shown: these
 # slice something other than the last dim — by expert, or into a fused kv

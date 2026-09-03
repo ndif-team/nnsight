@@ -140,12 +140,24 @@ class HuggingFaceModel(Remotable):
         checkpoint that cannot be split would otherwise load a full copy onto
         every rank and look like it worked.
 
+        ``_load`` is where the weights are, so with the default
+        ``dispatch=False`` the constructor returns and the refusal arrives at
+        ``.dispatch()``; ``_load_meta`` builds from the config alone and has
+        nothing to refuse yet.
+
         A subclass that builds the model some other way -- ``TransformersModel``
         goes through ``transformers.pipeline`` -- has to call this itself, since
         it does not reach the base's ``_load``. Reading the raw ``kwargs`` rather
         than a split-out subset is deliberate: ``distributed_config`` travels
         differently on each path, and a check that silently sees nothing is worse
         than no check.
+
+        It reads ``distributed_config`` only. A bare ``tp_plan="auto"`` goes
+        straight to transformers, so this never sees it and the degree goes
+        unchecked -- which is the one way to reach the outcome above. The docs say
+        to ask with ``distributed_config``; see
+        [`wants_tensor_parallel`][nnsight.modeling.tp.envoys.wants_tensor_parallel],
+        which does count a ``tp_plan`` because erring towards True is free there.
         """
         from .tp import (
             check_tp_request,

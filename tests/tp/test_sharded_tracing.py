@@ -3,7 +3,7 @@
 A model loaded with ``distributed_config=DistributedConfig(tp_size=N)`` has its
 linears split across ranks, so the value at a column-parallel *output* or a
 row-parallel *input* is only that rank's slice.
-[`TPInterleaver`][nnsight.modeling.tp.fragments.TPInterleaver] gathers those
+[`TPFragments`][nnsight.modeling.tp.fragments.TPFragments] gathers those
 before a worker sees them and re-splits whatever the worker leaves, so a trace is
 written exactly as it would be against one GPU.
 
