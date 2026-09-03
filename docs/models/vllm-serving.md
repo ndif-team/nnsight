@@ -31,7 +31,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Two things about that shape are load-bearing. `AsyncLLM` binds to the loop that built it, where it keeps its output handler and per-request futures, so build the model **inside** the coroutine you will await it from; an engine built at import and then used from two `asyncio.run()` calls never answers the second, and does not error either. And the `__main__` guard is what makes the file runnable at all — see [the engine page](vllm.md).
+Both halves of that shape are required. `AsyncLLM` binds to the loop that built it, where it keeps its output handler and its per-request futures, so build the model **inside** the coroutine you will await it from: an engine built at import and then used from two `asyncio.run()` calls never answers the second, and does not error either. The `__main__` guard is what makes the file runnable at all — see [the engine page](vllm.md).
 
 Saves are attached **only to the finished output** (`output.finished == True`), fetched from the worker via `collect_nnsight` at that point (`async_backend.py`). Intermediate yields carry no saves — accumulate per-step values inside `tracer.iter[:]` instead.
 
