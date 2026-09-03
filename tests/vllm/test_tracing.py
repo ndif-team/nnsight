@@ -789,3 +789,24 @@ class TestModelRunnerSelection:
                 VLLM._require_v1_model_runner()
         finally:
             os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+
+
+class TestScan:
+    """Shapes come from a real request here; a scan says so instead of crashing."""
+
+    def test_scan_is_refused_before_anything_is_built(self):
+        # The refusal is the whole behaviour, so it needs no engine — and that is
+        # the point: reaching the engine would build it, dispatch, and then hand
+        # the meta forward's name to `interleave` as if it were callable.
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM.__new__(VLLM)
+
+        with pytest.raises(NotImplementedError, match="scan is unavailable on vLLM"):
+            with model.scan("The capital of France is"):
+                pass
+
+        # Bare, outside a `with`, it is the call itself that has to refuse:
+        # returning a tracer nobody enters is a silent no-op.
+        with pytest.raises(NotImplementedError, match="scan is unavailable on vLLM"):
+            model.scan("The capital of France is")
