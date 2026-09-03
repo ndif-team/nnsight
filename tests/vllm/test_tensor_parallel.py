@@ -223,6 +223,77 @@ class TestShardedEdit:
         assert tp_logits.argmax(dim=-1).item() == ref_logits.argmax(dim=-1).item()
 
 
+class TestAdHocCall:
+    """An ad-hoc call on a sharded module takes and returns whole tensors.
+
+    ``ParallelEnvoy.__call__`` is the only consumer of ``Fragments.split`` and
+    ``Fragments.whole`` outside the interleaver, so these are the tests that
+    keep that callsite on the current API — it once drifted onto a deleted
+    method name and shipped ``whole()``'s ``(value, undo)`` record to the
+    caller. Both styles are exercised because they break differently: a
+    row-parallel call splits the caller's whole input on the way in (the drift
+    was an ``AttributeError``), a column-parallel call reassembles the sharded
+    output on the way out (the drift was a silent wrong value).
+    """
+
+    @torch.no_grad()
+    def test_row_parallel_call_takes_and_returns_the_whole(
+        self, vllm_qwen_ref, vllm_qwen_tp, ET_prompt
+    ):
+        path = "mlp.down_proj"
+
+        with vllm_qwen_tp.trace(ET_prompt, temperature=0.0, top_p=1):
+            module = _submodule(vllm_qwen_tp, path)
+            hidden = module.input  # gathered whole; the caller holds the real thing
+            expected = module.output[0].save()
+            result = module(hidden)
+            # The module's own (output, bias) pair, not whole()'s (value, undo).
+            assert torch.is_tensor(result[0]), f"ad-hoc call returned {type(result[0])}"
+            adhoc = result[0].save()
+
+        assert adhoc.shape == expected.shape
+        assert _min_row_cosine(adhoc, expected) > 0.99
+
+        with vllm_qwen_ref.trace(ET_prompt, temperature=0.0, top_p=1):
+            module = _submodule(vllm_qwen_ref, path)
+            ref = module(module.input)[0].save()
+
+        # A row-parallel output is all-reduced, so its layout matches the
+        # single-rank run's and the values compare directly.
+        assert adhoc.shape == ref.shape
+        assert _min_row_cosine(adhoc, ref) > 0.99
+
+    @torch.no_grad()
+    def test_column_parallel_call_returns_the_whole(
+        self, vllm_qwen_ref, vllm_qwen_tp, ET_prompt
+    ):
+        path = "mlp.gate_up_proj"
+
+        with vllm_qwen_tp.trace(ET_prompt, temperature=0.0, top_p=1):
+            module = _submodule(vllm_qwen_tp, path)
+            hidden = module.input  # replicated, already whole
+            expected = module.output[0].save()
+            result = module(hidden)
+            assert torch.is_tensor(result[0]), f"ad-hoc call returned {type(result[0])}"
+            adhoc = result[0].save()
+
+        # Same engine, same gather: the reassembled ad-hoc output lays out
+        # exactly as the traced read of the same location.
+        assert adhoc.shape == expected.shape
+        assert _min_row_cosine(adhoc, expected) > 0.99
+
+        with vllm_qwen_ref.trace(ET_prompt, temperature=0.0, top_p=1):
+            module = _submodule(vllm_qwen_ref, path)
+            ref = module(module.input)[0].save()
+
+        # Full width and every value present; the fused packing groups columns
+        # by rank, so compare per-row sorted values (as TestShardedRead does).
+        assert adhoc.shape == ref.shape
+        assert _min_row_cosine(
+            adhoc.sort(dim=-1).values, ref.sort(dim=-1).values
+        ) > 0.99
+
+
 class TestEveryRankWindsUp:
     """Cleanup is per rank, not just the one whose values go home.
 
