@@ -91,7 +91,13 @@ NO_SKIP = object()
 
 
 class SourceNotAvailable(Exception):
-    """A module's ``forward`` can't be source-instrumented (no source, decorated…)."""
+    """There is no Python source to instrument.
+
+    A builtin or C function, a function compiled from a string, a call into a
+    submodule (which has its own ``.source``), or an assignment (which has no
+    callee). A decorated ``forward`` is not one of these: it is peeled,
+    instrumented, and rebuilt.
+    """
 
 
 class Compiled(NamedTuple):
@@ -844,9 +850,12 @@ class Source:
     ``print(model.layer1.source.torch_relu_0)`` zooms in on one. Iterating a
     ``Source`` yields its operations in execution order.
 
-    Source values are only meaningful inside a trace, and ordinary inference is
-    unaffected. Requesting an operation on a ``forward`` whose source can't be
-    recovered (e.g. a decorated ``forward``) raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable].
+    Source values are only meaningful inside a trace: outside one every operation
+    calls straight through, which costs an idle model a few percent and changes
+    nothing about what it computes. Requesting an operation on a ``forward`` with no
+    recoverable Python source — a builtin or C function — raises
+    [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable]; a
+    decorated ``forward`` is peeled and instrumented.
 
     A ``Source`` also decomposes a *called function* — reached as
     ``some_op.source`` (see [`SourceEnvoy.source`][nnsight.intervention.source.SourceEnvoy.source]) — the same way, one level
