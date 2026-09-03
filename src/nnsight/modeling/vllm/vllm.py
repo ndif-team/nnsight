@@ -620,6 +620,24 @@ class VLLM(Remotable):
         kwargs.setdefault("fn", self._call)
         return super().trace(*inputs, **kwargs)
 
+    def scan(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse: there is no local forward for a fake-tensor pass to run.
+
+        [`scan`][nnsight.modeling.mixins.meta.Meta.scan] reads shapes by running the
+        model's own forward under a fake-tensor mode, on the meta module, with no
+        weights. Here that module is a client-side shell: the forward runs in the
+        engine's worker, on real weights, under ``torch.inference_mode``. Refused
+        up front rather than at the engine, which would build itself and then ask
+        a fake mode to run a request it can't fake.
+        """
+        raise NotImplementedError(
+            "scan is unavailable on vLLM: it runs the model's forward under a "
+            "fake-tensor mode to propagate shapes, and there is no forward here to "
+            "run — the engine's worker runs the real one, under "
+            "torch.inference_mode. Trace a prompt and read the shapes off the "
+            "activations it serves."
+        )
+
     def edit(
         self,
         *,
