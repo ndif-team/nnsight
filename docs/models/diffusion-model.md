@@ -69,7 +69,8 @@ DiffusionModel(REPO, dtype=torch.float16, dispatch=True).unet.dtype         # to
 
 ## Canonical pattern
 
-`.trace()` and `.generate()` both run the **whole pipeline**, and `model.output` (like `tracer.result`) is the pipeline's return object (with `.images`). 
+`.trace()` and `.generate()` both run the **whole pipeline**, and `model.output` (like `tracer.result`) is the pipeline's return object (with `.images`).
+
 !!! warning "A traced run denoises once by default"
 
     `.trace()` defaults to `num_inference_steps=1` — a fast one-step pass for inspecting or editing activations — and `with model.generate(...):` is a traced run, so it takes that default too. Only a bare `model.generate(...)` call, outside a trace, uses the pipeline's own default. On SD 1.4 the same call is 51 denoiser forwards outside a `with` and 1 inside it, and a single step gives a noise blob rather than an image, with nothing printed to say so.
