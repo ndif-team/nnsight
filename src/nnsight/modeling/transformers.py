@@ -34,6 +34,16 @@ Three ways in, and the difference matters:
 Some inputs can't be padded into a batch at all — a raw feature tensor, or a
 multimodal encoding — so a lone invoke carries them straight to the model, and
 asking to batch several of them is refused rather than silently mangled.
+
+A chunked task splits one input into several encodings, each forwarded on its
+own: ``token-classification`` past the model's length limit, one entailment pair
+per candidate label in ``zero-shot-classification``, a long recording's windows
+in ``automatic-speech-recognition``. Those become rows of the trace's one
+forward — which is what the pipeline does at a ``batch_size`` of its chunk count
+— so a read inside the block sees one row per chunk, in the order the task
+yields them. A chunked invoke is the whole batch: the row count is the task's to
+decide, and the trace counts one row per invoke, so batching it against another
+invoke is refused rather than served the wrong rows.
 """
 
 from __future__ import annotations
@@ -880,6 +890,18 @@ class TransformersModel(HuggingFaceModel):
                 if forward_kwargs is not kwargs:
                     return tuple(), forward_kwargs
                 return inputs, kwargs
+            # A chunked task decides its own row count, and the batcher counted
+            # this invoke's input as its own rows before preprocessing — so with
+            # another invoke in the batch every group after this one names rows
+            # that belong to someone else, and each invoke's reads and edits land
+            # on the wrong ones. Silent, so refuse it.
+            if len(invokes) > 1 and len(rows) != self._batch_size(*inputs, **kwargs):
+                raise NotImplementedError(
+                    f"task={self.task!r} splits this invoke into {len(rows)} forward "
+                    "rows, and a batched trace gives an invoke the rows its input "
+                    "has — the other invokes would read the wrong ones. Trace a "
+                    "chunked input on its own."
+                )
             items.extend(rows)
             forward.update(forward_kwargs)
 
@@ -900,6 +922,20 @@ class TransformersModel(HuggingFaceModel):
             return None, kwargs
         if self._is_pretokenized(data, kwargs):
             return self._encode_pretokenized(data, kwargs)
+        if self.task == "mask-generation":
+            # This task's preprocess *runs the model*: it embeds the image, then
+            # yields one input per batch of candidate points, each carrying a copy
+            # of that embedding. There is no single forward to assemble — the
+            # encoder ran outside the trace, and the rows would be one copy of the
+            # image embedding per point batch (128 of them at the task's default).
+            raise NotImplementedError(
+                "task='mask-generation' has no forward to trace from an image: its "
+                "preprocess embeds the image by running the model, then yields one "
+                "input per batch of candidate points. Run the whole task with "
+                "model.pipe(image), or trace one forward on an encoding you build "
+                "yourself: model.image_processor(image, return_tensors='pt'), with "
+                "the points you want as input_points=."
+            )
         # Text / image / audio: let the pipeline tokenize/featurize it, routing the
         # invoke's kwargs (truncation, chat tools, ...) through its own param split.
         preprocess_params, forward_params, _ = self.pipeline._sanitize_parameters(**kwargs)
@@ -908,7 +944,16 @@ class TransformersModel(HuggingFaceModel):
         inputs = self._as_chats(data)
         if inputs is None:
             inputs = list(data) if isinstance(data, (list, tuple)) else [data]
-        rows = [self.pipeline.preprocess(one, **preprocess_params) for one in inputs]
+        rows = []
+        for one in inputs:
+            row = self.pipeline.preprocess(one, **preprocess_params)
+            # A chunked task's preprocess is a generator: it *yields* the
+            # encodings it splits one input into instead of returning one, and
+            # each is a forward of its own. They are unrolled into rows here, so
+            # the whole input is traced in the trace's one forward; handing the
+            # generator to `_collate` is what makes it ask a generator for
+            # `.items()`.
+            rows.extend([row] if hasattr(row, "items") else row)
         return rows, forward_params
 
     def _as_processor_encoding(self, data: Any, kwargs: dict) -> Optional[dict]:
@@ -976,8 +1021,28 @@ class TransformersModel(HuggingFaceModel):
         if data is None:
             return TransformersModel._has_nontext_keys(kwargs)
         if hasattr(data, "get") and not isinstance(data, (list, tuple, str)):
+            if TransformersModel._is_task_input(data):
+                return False
             return data.get("input_ids") is None or TransformersModel._has_nontext_keys(data)
         return False
+
+    @staticmethod
+    def _is_task_input(data: Any) -> bool:
+        """Whether a mapping is the *task's* own input rather than model inputs.
+
+        Some tasks take a dict — ``{"image": ..., "question": ...}`` for
+        ``document-question-answering``, ``{"image": ..., "candidate_labels":
+        [...]}`` for ``zero-shot-object-detection`` — which is what their
+        ``preprocess`` turns into model inputs. Passed to the model as an encoding
+        it fails deep in modeling code (``missing 2 required positional
+        arguments``), naming nothing the caller wrote.
+
+        Model inputs are tensors, so a mapping holding none of them is not an
+        encoding: that, rather than a list of task names, is what tells the two
+        apart.
+        """
+        values = list(dict(data).values()) if hasattr(data, "keys") else []
+        return bool(values) and not any(hasattr(value, "shape") for value in values)
 
     @staticmethod
     def _has_nontext_keys(encoding: Any) -> bool:
