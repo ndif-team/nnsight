@@ -2,7 +2,7 @@
 title: Generate
 one_liner: Multi-token generation through the model; returns token ids (`tracer.result`). Greedy by default.
 tags: [usage, tracing, generation]
-related: [docs/usage/trace.md, docs/usage/pipe.md, docs/usage/iter-all-next.md, docs/usage/invoke-and-batching.md]
+related: [docs/usage/trace.md, docs/usage/pipe.md, docs/usage/iter-all-next.md, docs/gotchas/iteration.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/modeling/transformers.py, src/nnsight/intervention/tracer.py]
 ---
 
@@ -48,7 +48,19 @@ with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as t
 # torch.equal(a, b) -> True
 ```
 
-Ask for sampling explicitly if you want it: `model.generate(..., do_sample=True, top_k=50)`. Kwargs are forwarded to the model's `generate`, so `generation_config=`, `num_return_sequences=`, etc. all work.
+Ask for sampling explicitly if you want it: `model.generate(..., do_sample=True, top_k=50)`. Sampled generation is reproducible from a plain `torch.manual_seed(n)` immediately before the call — inside a trace or outside one:
+
+```python
+import torch
+
+torch.manual_seed(0)
+with model.generate("The Eiffel Tower is in the city of", max_new_tokens=5, do_sample=True, top_k=50) as tracer:
+    a = tracer.result.save()
+torch.manual_seed(0)
+with model.generate("The Eiffel Tower is in the city of", max_new_tokens=5, do_sample=True, top_k=50) as tracer:
+    b = tracer.result.save()
+# torch.equal(a, b) -> True
+```
 
 ## Accessing the result
 
@@ -59,10 +71,17 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 
 # Deprecated: reading the finished ids through the generator passthrough
 with model.generate("Hello", max_new_tokens=5):
-    ids = model.generator.output.save()   # same value, but use tracer.result
+    ids = model.generator.output.save()   # NNsightDeprecationWarning
 ```
 
-The generated ids are passed through a `Generator` module so a worker parked on `model.generator.output` receives them. Reading the finished ids there is deprecated (use `tracer.result`); the module remains for per-step streamer access.
+The generated ids are passed through a `Generator` module so a worker parked on `model.generator.output` receives them. It is the same tensor `tracer.result` gives, prompt ids included, and reading it warns:
+
+```
+NNsightDeprecationWarning: model.generator.output is deprecated; use
+tracer.result instead (model.generator.streamer.output still gives per-step tokens).
+```
+
+`tracer.result` is served during the run, so it has to be read inside the block — after the `with` block it raises ``ValueError: Cannot access `result` outside of interleaving``.
 
 ## Per-step interventions
 
@@ -75,7 +94,7 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
         per_step.append(model.output.logits[0, -1].argmax(dim=-1))
 ```
 
-For `tracer.iter[...]`, `tracer.all()`, and the unbounded-iterator footgun, see `docs/usage/iter-all-next.md`.
+A loop must not ask for a step the run does not make: `iter[:5]` is right here because `max_new_tokens=5` and nothing ends the generation sooner. See `docs/usage/iter-all-next.md` for the forms and `docs/gotchas/iteration.md` for what happens when a loop outruns the run.
 
 ## Per-step tokens (streamer)
 
@@ -97,13 +116,17 @@ Pass a list of prompts, or use `tracer.invoke(...)` per prompt. Shorter prompts 
 
 ```python
 with model.generate(
-    ["The Eiffel Tower is in", "The Colosseum is in"],
+    ["The Eiffel Tower is in", "Paris"],
     max_new_tokens=3, do_sample=False,
 ) as tracer:
     ids = tracer.result.save()
 # ids.shape -> torch.Size([2, 10])
-# rows decode to "...is in the middle of" each
+# row 0: 'The Eiffel Tower is in the middle of'
+# row 1: '<|endoftext|>' * 6 + 'Paris, France,'
 ```
+
+The padding is still there in the result, so decode with
+`skip_special_tokens=True` (or slice the row) unless you want it.
 
 ## Difference vs `trace` and `pipe`
 
@@ -133,9 +156,10 @@ ids = model.generate("Hello", max_new_tokens=3)   # torch.Tensor
 
 ## Extra kwargs go straight to the model's `generate`
 
-Anything you pass that is not consumed by the tracer is forwarded to
-`model.generate`, and whatever it returns is what lands on `tracer.result`. So
-the return type is yours to choose:
+Anything the tracer does not consume is forwarded to `model.generate` —
+`do_sample`, `temperature`, `top_p`, `num_return_sequences`,
+`generation_config=`, stopping criteria — and whatever it returns is what lands
+on `tracer.result`. So the return type is yours to choose:
 
 ```python
 # default: token ids
@@ -154,15 +178,17 @@ out.scores           # one [batch, vocab] tensor per generated step
 ```
 
 That is the way to get per-step logits out of a traced generation without
-reading `lm_head` under `tracer.iter`. Sampling controls (`do_sample`,
-`temperature`, `top_p`, ...), `num_return_sequences`, `generation_config`, and
-stopping criteria pass through the same way.
+reading `lm_head` under `tracer.iter`.
+
+Two of those kwargs decide how many steps an iteration loop may ask for:
+`max_new_tokens=N` is an upper bound, and `min_new_tokens=N` holds the
+generation to N steps by suppressing EOS until then.
 
 ## Gotchas
 
-- **Unbounded iter eats trailing code**: `for step in tracer.iter[:]: ...` runs until the model stops; code after the loop in the same invoke may not run as expected. Use a bounded slice or a separate invoke. See `docs/gotchas/iteration.md`.
+- **A `tracer.iter` loop must not ask for a step the run does not make.** A bound the run meets is fine and the code after the loop runs; a bound it does not meet raises `OutOfOrderError`. `max_new_tokens` is an upper bound, so pass `min_new_tokens=` when the loop's bound has to hold. An open `tracer.iter[:]` / `tracer.all()` ends by outrunning the run, warns, and drops the statements after the loop. See `docs/gotchas/iteration.md`.
 - Always pass a stop bound (`max_new_tokens=` or a `generation_config`).
-- Within a step, modules must still be accessed in forward-pass order.
+- Within a step, modules must still be accessed in forward-pass order — inside an iteration loop an out-of-order write parks on the *next* step instead.
 - Reading `model.generator.output` for the finished ids is deprecated — use `tracer.result`.
 
 ## Related
@@ -170,5 +196,6 @@ stopping criteria pass through the same way.
 - `docs/usage/trace.md`
 - `docs/usage/pipe.md`
 - `docs/usage/iter-all-next.md`
+- `docs/gotchas/iteration.md`
 - `docs/usage/invoke-and-batching.md`
 - `docs/usage/save.md`
