@@ -130,12 +130,19 @@ def check_tp_request(
 ) -> None:
     """Raise unless ``tp_size`` is a degree ``config``'s model can really be split into.
 
-    transformers does not check this. Asked to shard a checkpoint with no plan it
-    shards *nothing*: ``verify_tp_plan`` returns early on a ``None`` plan and
+    transformers does not check this, and its two failure shapes are both worth
+    refusing. Asked to shard a checkpoint with *no plan* it shards nothing:
+    ``verify_tp_plan`` returns early on a ``None`` plan and
     ``apply_tensor_parallelism`` installs no hooks, so every rank quietly loads a
-    complete copy of the weights. Nothing errors and nothing warns — the model
-    answers correctly off one rank while the other cards hold redundant copies,
-    so the only symptom is *n* times the memory for one model's worth of work.
+    complete copy of the weights — nothing errors, nothing warns, and the only
+    symptom is *n* times the memory for one model's worth of work. Asked for a
+    degree the plan *cannot divide* (SmolLM2's 9 heads at 2 ranks), it loads the
+    checkpoint sharded anyway — DTensor splits the 576 q_proj columns evenly,
+    4.5 heads per rank — and the first forward dies on
+    ``RuntimeError: shape '[1, 9, -1, 64]' is invalid for input of size 2592``,
+    a reshape of the local tensor by the global head count, naming nothing about
+    tensor parallelism. Silent waste or a late opaque crash; the refusal here is
+    early and says what to do.
 
     That is worth refusing rather than reporting, because there is no reading of
     "shard this over 4 GPUs" that is served by putting the whole thing on each of
