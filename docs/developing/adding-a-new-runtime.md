@@ -21,15 +21,15 @@ reference override.
 ## The class chain
 
 ```
-Envoy                      intervention/envoy.py   the tree; hooks; trace/interleave/__call__
+Envoy                      intervention/envoy.py   the tree; the controllers; trace/interleave/__call__
  └─ Loadable               mixins/loadable.py      _load(...): construct from a spec, not a module
      └─ Meta               mixins/meta.py          meta-device build + dispatch(); scan()
          └─ Remotable      mixins/remotable.py     remote key/env; remote & local backends
              └─ HuggingFaceModel   huggingface.py  from_pretrained loading; model-key from repo id
                  ├─ TransformersModel  transformers.py   PRIMARY HF class (pipeline-backed)
-                 │   └─ LanguageModel        (deprecated alias)
-                 │       └─ VisionLanguageModel (deprecated alias)
-                 └─ DiffusionModel     diffusers.py
+                 │   └─ LanguageModel        language.py   (deprecated alias)
+                 │       └─ VisionLanguageModel  vlm.py      (deprecated alias)
+                 └─ DiffusionModel     diffusion.py
              └─ VLLM               vllm/vllm.py     a non-PyTorch engine, straight off Remotable
 ```
 
@@ -52,45 +52,57 @@ a thin, named `Envoy`. It wraps an **already-instantiated** `nn.Module` and has 
 
 ### Loading — `_load_meta` and `_load`
 
-- `_load(*args, **kwargs) -> nn.Module` (`loadable.py:19`, `NotImplementedError` by
+- `_load(*args, **kwargs) -> nn.Module` (`loadable.py`, `NotImplementedError` by
   default) constructs and returns the real model. `Loadable.__init__` calls it unless
   the first arg is already an `nn.Module`.
-- `_load_meta(*args, **kwargs) -> nn.Module` (`meta.py:136`) builds a **meta-device**
+- `_load_meta(*args, **kwargs) -> nn.Module` (`meta.py`) builds a **meta-device**
   version so the Envoy tree exists without GPU memory. `Meta.__init__` runs it inside
-  `with MetaDevice():` (which forces every tensor onto the meta device, `meta.py:31`)
+  `with MetaDevice():` (which forces every tensor onto the meta device, `meta.py`)
   unless `dispatch=True` or an `nn.Module` was passed. `MetaDevice.real()` suspends
   the forcing for parts of a build that need real tensors.
-- `dispatch()` (`meta.py:139`) calls `_load(*self.args, **self.kwargs)` then
+- `dispatch()` (`meta.py`) calls `_load(*self.args, **self.kwargs)` then
   `_update(model)` to re-point the meta tree at real weights. It runs automatically on
   the first `interleave` if not already dispatched and not under fake tensors
-  (`meta.py:177`). Override `_load`, not `dispatch`, if loading needs preconditions —
-  vLLM tears down its meta process group inside `_load` (`vllm.py:191`).
+  (`meta.py`). Override `_load`, not `dispatch`, if loading needs preconditions —
+  vLLM tears down its meta process group inside `_load` (`vllm.py`).
 
-`HuggingFaceModel` implements both from a repo id: `_load_meta` (`huggingface.py:51`)
-via `AutoConfig` + `from_config`; `_load` (`:57`) via `from_pretrained`.
+`HuggingFaceModel` implements both from a repo id: `_load_meta` (`huggingface.py`)
+via `AutoConfig` + `from_config`; `_load` via `from_pretrained`.
 
 ### Input & batching — `_batch_size` and `_batch`
 
-The standard tracer always uses `Batcher(self.envoy)` (`intervention/tracer.py:245`),
-which calls back into your model:
+The standard tracer builds the run's batcher as
+`self.envoy._batcher_class(self.envoy, self.kwargs)` (`intervention/tracer.py`) —
+the base `Batcher` unless the model names a subclass (see below). It calls back
+into your model for the row math:
 
-- `_batch_size(*inputs, **kwargs) -> int` (`envoy.py:588`) — how many batch rows an
+- `_batch_size(*inputs, **kwargs) -> int` (`envoy.py`) — how many batch rows an
   invoke contributes. **Base default:** `1` if there's any input else `0`. Override to
-  report the true row count (`TransformersModel._batch_size`, `transformers.py:570`,
+  report the true row count (`TransformersModel._batch_size`, `transformers.py`,
   counts a prompt/list/tensor).
-- `_batch(invokes, fn) -> (args, kwargs)` (`envoy.py:597`) — combine multiple invokes'
+- `_batch(invokes, fn) -> (args, kwargs)` (`envoy.py`) — combine multiple invokes'
   inputs into one call. **Base default:** pass a single invoke straight through; two or
   more raise `NotImplementedError`. Override to merge (`TransformersModel._batch`,
-  `transformers.py:633`, dispatches by `fn.__name__` and pads/collates; `VLLM._batch`,
-  `vllm.py:245`, extends prompt/params/lora lists — one request per invoke).
+  `transformers.py`, dispatches by `fn.__name__` and pads/collates; `VLLM._batch`,
+  `vllm.py`, extends prompt/params/lora lists — one request per invoke).
 
 For an **exotic tensor layout** (a first dim that isn't the batch — vLLM's flat
 `[total_tokens, hidden]`, tensor-parallel shards), subclass `Batcher`
-(`intervention/batching.py:66`) and override `batching`/`narrow`/`widen`, then wire
-your subclass onto the tracer's `self.batcher` (handed to `interleave(batcher=...)`)
-inside your own execution path.
-`VLLMBatcher` (`vllm/batching.py:32`) is the reference — it's installed by the vLLM
-model runner, not by the generic tracer. See
+(`intervention/batching.py`), override the per-tensor `_narrow_tensor` /
+`_widen_tensor`, and name the subclass on the model class:
+
+```python
+class MyModel(NNsight):
+    _batcher_class = MyBatcher
+```
+
+That is the whole installation — both the standard tracer and the vLLM tracer build
+the run's batcher as `self.envoy._batcher_class(self.envoy, self.kwargs)`.
+`DiffusionModel` is the one-line reference (`_batcher_class = DiffusionBatcher`, for
+classifier-free-guidance doubling); `VLLMBatcher` (`vllm/batching.py`) is the
+worked example of a genuinely different layout, and is the exception — vLLM's model
+runner assigns it onto the live interleaver rather than going through
+`_batcher_class`, because the engine, not a tracer, owns the run. See
 [batching-internals.md](./batching-internals.md).
 
 ### Execution — the forward the tracer runs
@@ -99,16 +111,16 @@ model runner, not by the generic tracer. See
 own method:
 
 - Override `trace` to set `kwargs.setdefault("fn", self._call)` (and to inject a
-  custom backend/tracer — see below). `TransformersModel.trace` (`transformers.py:373`)
-  and `VLLM.trace` (`vllm.py:330`) both do this.
+  custom backend/tracer — see below). `TransformersModel.trace` (`transformers.py`)
+  and `VLLM.trace` (`vllm.py`) both do this.
 - `_call(...)` runs the actual forward/engine request. `TransformersModel._call`
-  (`transformers.py:546`) preprocesses inputs and calls the module; `VLLM._call`
-  (`vllm.py:371`) serializes mediators onto the requests and drives the engine.
+  (`transformers.py`) preprocesses inputs and calls the module; `VLLM._call`
+  (`vllm.py`) serializes mediators onto the requests and drives the engine.
 - Separate `generate` / `pipe` paths are just more `@traceable` methods that set a
   different `fn` (`TransformersModel.generate` runs the model and returns token ids;
   `pipe` runs the whole pipeline).
-- Override `interleave` (`envoy.py:612`) only if your runtime doesn't run a local
-  forward. `VLLM.interleave` (`vllm.py:434`) starts no local workers — they're
+- Override `interleave` (`envoy.py`) only if your runtime doesn't run a local
+  forward. `VLLM.interleave` (`vllm.py`) starts no local workers — they're
   serialized onto the engine's requests and started on the other side.
 
 ### Runtime-internal values — `eproperty`
@@ -121,27 +133,27 @@ open interleaver context, with the eproperty's `.provide`:
 `type(model).logits.provide(model, value)` (which forwards to
 `self.interleaver.handle(location, value)` and returns it, edited if a worker wrote
 back). Give it a `description=` to surface it in the model's repr. vLLM's
-`logits`/`samples` (`vllm.py:144`, served in `GPUModelRunner.py:450`/`:472`) are the
+`logits`/`samples` (`vllm.py`, served in `GPUModelRunner.py`) are the
 reference. Full recipe in [extending-envoy.md](./extending-envoy.md).
 
-### Remote support — `Remotable` hooks
+### Remote support — the `Remotable` extension points
 
 If the runtime should run on NDIF, extend `Remotable` and implement:
 
-- `_remoteable_model_key() -> str` (`remotable.py:108`) and classmethod
-  `_remoteable_from_model_key(cls, key, **kwargs)` (`:111`) — the server-side identity.
-  `to_model_key()` combines them with the class import path (`:125`).
-- `_remoteable_persistent_objects() -> dict` (`:97`) — the `{id: object}` map the
+- `_remoteable_model_key() -> str` (`remotable.py`) and classmethod
+  `_remoteable_from_model_key(cls, key, **kwargs)` — the server-side identity.
+  `to_model_key()` combines them with the class import path.
+- `_remoteable_persistent_objects() -> dict` — the `{id: object}` map the
   server resolves persistent IDs against (base: `{"Interleaver": ...}` plus a
   `Module:<path>` per envoy). Add your tokenizer/preprocessors here and tag them with
   `obj._persistent_id = name` in `__getstate__` so they're referenced, not pickled
-  (`TransformersModel`, `transformers.py:460`/`:533`; `VLLM`, `vllm.py:456`/`:461`).
-- `_remoteable_get_env()` / `_remoteable_set_env(env)` (`:79`/`:88`) — per-request
+  (`TransformersModel`, `transformers.py`; `VLLM`, `vllm.py`).
+- `_remoteable_get_env()` / `_remoteable_set_env(env)` — per-request
   environment applied server-side (e.g. `TransformersModel` transports a PEFT adapter).
-- `_remoteable_class()` (`:115`) — return the canonical class if yours is a deprecated
+- `_remoteable_class()` — return the canonical class if yours is a deprecated
   alias, so it shares one server key (`LanguageModel` returns `TransformersModel`).
 
-`__getstate__` on `Envoy` (`envoy.py:248`) already tags the interleaver and modules;
+`__getstate__` on `Envoy` (`envoy.py`) already tags the interleaver and modules;
 runtimes with a live engine handle null it out (`VLLM.__getstate__` nulls
 `vllm_entrypoint`; `DiffusionModel.__getstate__` pops `pipeline`). See
 [serialization.md](./serialization.md).
@@ -151,17 +163,18 @@ runtimes with a live engine handle null it out (`VLLM.__getstate__` nulls
 Inject a backend or `tracer_cls` from your `trace` override for non-standard
 execution (async streaming, HTTP serve). vLLM injects `AsyncVLLMBackend` +
 `VLLMTracer` for `mode="async"` and `LocalServeBackend` for `serve=url`
-(`vllm.py:330`). See [vllm-integration.md](./vllm-integration.md) and
+(`vllm.py`). See [vllm-integration.md](./vllm-integration.md) and
 [adding-a-new-backend.md](./adding-a-new-backend.md).
 
 ## Lifecycle of a runtime trace
 
 1. `with model.trace(input)` — the tracer captures the block.
-2. On `__exit__`, the backend compiles the block; `Batcher(self.envoy)` runs each
+2. On `__exit__`, the backend runs the compiled block; the batcher runs each
    invoke's `_batch_size`/`_batch` to build the call input and per-invoke groups.
 3. `model.interleave(fn, *args, **kwargs)` runs (dispatching first if needed). `fn`
-   (your `_call`/`generate`/pipeline) executes the forward; hooks + `handle` serve
-   parked interventions; the batcher narrows/widens per invoke.
+   (your `_call`/`generate`/pipeline) executes the forward; each module's
+   controller calls `handle` to serve parked interventions; the batcher
+   narrows/widens per invoke.
 4. The run's return is served at `"result"`; saved values are pushed back into the
    caller's frame.
 

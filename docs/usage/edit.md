@@ -103,6 +103,63 @@ with model.edit(inplace=True) as tracer:
         model.transformer.h[0].output[:] = model.transformer.h[0].adapter(acts, hook=True)
 ```
 
+## Which envoy an edit belongs to
+
+An edit is stored on **the envoy you called `.edit()` on**, and a trace replays
+only the edits of the envoy you called `.trace()` on. `Envoy.interleave` sets the
+run's mediators from `self._edits`, and `self` is the root of that trace.
+
+That makes a sub-envoy edit a no-op for a root trace, and `clear_edits()` on the
+root does not reach it either:
+
+```python
+with model.transformer.h[9].edit(inplace=True):
+    model.transformer.h[9].output[:] = 0
+
+with model.trace("The Eiffel Tower is in the city of"):
+    out = model.output.logits[0, -1].argmax().save()
+# ' Paris' — the edit did not run
+
+model.clear_edits()
+len(model.transformer.h[9]._edits)      # still 1
+```
+
+The edit is real; it runs when that envoy is the root of the trace
+(`model.transformer.h[9].trace(hidden_states)` gives zeros), and
+`model.transformer.h[9].clear_edits()` removes it. To scope an edit to one layer
+of a whole-model run, store it on the model and write the layer's path inside:
+
+```python
+with model.edit(inplace=True):
+    model.transformer.h[9].output[:] = 0
+```
+
+## Edits apply through the interleaver, not to the module
+
+Everything that goes through a tracing call replays the stored edits, including
+`trace=False`. A direct call on the wrapped `torch.nn.Module` does not:
+
+| call | edit applies |
+|---|---|
+| `model.trace(...)` | yes |
+| `model.generate(...)` | yes, at prefill only unless under `tracer.iter` |
+| `model.pipe(...)` | yes |
+| `model.trace(**ids, trace=False)` | yes |
+| `model(**ids)` | **no** |
+| `model._module(**ids)` | **no** |
+
+```python
+with model.edit(inplace=True):
+    model.transformer.h[9].output[:] = 0
+
+model.trace(**ids, trace=False).logits[0, -1].argmax()   # ','      edited
+model(**ids).logits[0, -1].argmax()                      # ' Paris' unedited
+```
+
+So anything holding the underlying module — a HuggingFace `Trainer`, an eval
+harness, `generate()` called on `model._module` — sees the model as it was. Route
+those through `model.trace(...)`, or make the change in the weights instead.
+
 ## Remote edits
 
 Edits ride with the model to a remote server — they live in `envoy._edits`, which serializes by value:
@@ -117,8 +174,12 @@ with edited.trace("The Eiffel Tower is in", remote="local"):
 ## Gotchas
 
 - Stored edits run **first** on every later trace, before user invokes — their effects are visible to your code.
-- Non-inplace `edit()` binds `(tracer, edited)` — bind both and write against `edited`. `inplace=True` binds only `tracer`.
+- Non-inplace `edit()` binds `(tracer, edited)`. Writing the block against `edited` keeps the two models straight in the reader's head; the block lands on the copy either way. `inplace=True` binds only `tracer`.
 - A plain edit applies at the *first* occurrence of a location; use the tracer's `iter` to apply at every occurrence.
+- An edit stored on a sub-envoy does not run when you trace the root, and the root's `clear_edits()` does not remove it.
+- `inplace=False` copies the root envoy's `_edits` only. `edited.transformer is model.transformer`, so attaching a module, renaming, or storing an edit through a *child* of `edited` changes `model` too.
+- `model(**ids)` and `model._module(**ids)` bypass the interleaver and run unedited.
+- On a tensor-parallel model, a weight edit needs `.to_local()`: an in-place write through a `DTensor` raises, and a reduction over a sharded weight returns this rank's answer. See [../models/tensor-parallel.md](../models/tensor-parallel.md).
 
 ## Related
 
@@ -126,3 +187,4 @@ with edited.trace("The Eiffel Tower is in", remote="local"):
 - `docs/usage/access-and-modify.md`
 - `docs/usage/skip.md`
 - `docs/usage/save.md`
+- `docs/usage/iter-all-next.md` — re-applying an edit at every generation step

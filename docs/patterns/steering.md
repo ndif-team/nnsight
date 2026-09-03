@@ -65,9 +65,6 @@ direction = (pos - neg)
 direction = direction / direction.norm()                # [768]
 ```
 
-Sweep `coef` and the layer to find the operating point. Very large coefficients
-(`coef > 10`) usually break fluency.
-
 ## Canonical pattern
 
 Add the direction at one layer and compare the next-token prediction:
@@ -95,6 +92,40 @@ steered  argmax: ' I'
 `block.output` is a plain tensor, so `+=` writes the residual in place. Two invokes
 write disjoint variables and only the second modifies the steered module, so **no
 barrier is needed**.
+
+## Choosing the coefficient
+
+No absolute coefficient transfers, because the quantity you are adding to grows
+with depth. On the prompt below, the last-position residual norm runs 57 at block
+0, 92 at block 6 and 465 at block 11. A coefficient that is a light nudge late is
+a demolition early.
+
+Measure the norm at the layer you are steering and read the coefficient as a
+fraction of it:
+
+```python
+with model.trace(prompt):
+    scale = model.transformer.h[LAYER].output[0, -1].norm().detach().save()
+
+print(f"residual norm {float(scale):.0f}; coef {coef} is {coef / float(scale):.2f}x it")
+# residual norm 92; coef 8.0 is 0.09x it
+```
+
+The canonical example above is a light nudge by that measure. Sweep the fraction,
+not the raw number. GPT-2 holds together well past the point most tutorials warn
+about:
+
+```
+coef   10  (0.11x): 'I went to the bakery and I was told that the bread was good. I was very happy with it.'
+coef   24  (0.26x): 'I went to the bakery and I was surprised to find that the bread was very good. I also found that'
+coef   47  (0.51x): 'I went to the bakery and I found a little bit of the butter and the salt. I also added the'
+coef   93  (1.01x): 'I went to the bakery and I was very happy with the store. I have the same size and I have'
+coef  186  (2.02x): 'I went to the bakery and I was the same you and I you and you and you and you and you'
+```
+
+Fluency holds to 93 and breaks at 186 — a little past one times the residual norm.
+At block 10, where the norm is 244, the same fraction is `coef = 122`. Sweep the
+layer alongside the fraction; the two interact.
 
 ## Variations
 
@@ -136,7 +167,7 @@ for working. To keep the steering on while the model writes, put the edit in a
 **bounded** `tracer.iter[:N]`:
 
 ```python
-with model.generate(prompt, max_new_tokens=20, do_sample=False) as tracer:
+with model.generate(prompt, max_new_tokens=20, min_new_tokens=20, do_sample=False) as tracer:
     for _ in tracer.iter[:20]:                       # every step, prompt included
         model.transformer.h[LAYER].output[:, -1, :] += direction * coef
     ids = tracer.result.save()
@@ -148,10 +179,16 @@ Bounded, not `tracer.all()`: an open-ended loop unwinds every line after it, so
 `tracer.result.save()` would never run (see
 [iter-all-next.md](../usage/iter-all-next.md)).
 
-The two are easy to tell apart once you look: they agree on the **first**
-generated token — both steered the prefill — and diverge from the second onward,
-where only one is still adding anything. With the direction and `coef = 8.0`
-above, continuing `"I went to the bakery and"`:
+`min_new_tokens` matches the bound to what the run will actually do. Steering
+changes when the model emits an end-of-text token, and a bounded loop the run
+stops short of is cut short with a warning — the steering simply stops early and
+`ids` is never bound, with nothing raised in your code. Pinning the step count
+also keeps the rows of a sweep the same length.
+
+The two are easy to tell apart once you look. They agree while the prefill's
+effect is still carrying, then diverge once only one of them is still adding
+anything: here on the third generated token, `' told'` against `' like'`. With the
+direction and `coef = 8.0` above, continuing `"I went to the bakery and"`:
 
 ```
 baseline     :  bought a bag of cookies. I was so excited. I
@@ -196,7 +233,9 @@ it out) to suppress refusal. Same pattern with `coef < 0` or projection
 ## Interpretation tips
 
 - **Sweep coefficient and layer.** A working direction has a band of `(layer, coef)`
-  where behavior shifts and fluency holds. Outside it the model degrades.
+  where behavior shifts and fluency holds; the band moves with the layer's
+  residual norm, so recompute it per layer (see
+  [Choosing the coefficient](#choosing-the-coefficient)).
 - **Look at fluency, not just argmax.** A direction can flip the top token but
   produce gibberish downstream — always inspect a generation.
 - **Last position vs all positions.** Last-position is more surgical; all-position

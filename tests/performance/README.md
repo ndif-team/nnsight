@@ -33,8 +33,8 @@ two side by side with a ratio (`new / old`; > 1 means new is slower).
 | Benchmark | Isolates |
 |---|---|
 | `baseline_forward` | the raw module forward, untraced — the floor every trace sits above |
-| `trace_empty_warm` | an empty trace once its block is captured: interleave setup + teardown + forward |
-| `trace_empty_cold` | the same with the capture cache cleared each time — the gap to warm is what **parsing + compiling the block** costs (paid once per site per process) |
+| `capture_warm` | an empty trace once its block is captured: interleave setup + teardown + forward |
+| `capture_cold` | the same with the capture cache cleared each time — the gap to warm is what **parsing + compiling the block** costs (paid once per site per process) |
 | `invoke_scaling[k]` | one input invoke + `k-1` empty ones; the slope is the **per-invoke** cost (a worker built, its block captured, registered) |
 | `intervention_scaling[n]` | a trace saving `n` layer outputs; the slope is the **per-intervention** cost (parking a worker and serving it a value) |
 | `read_output_warm` vs `read_source_warm` | reading a module's output vs one operation *inside* its forward — the gap is steady-state `.source` overhead |

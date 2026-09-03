@@ -15,13 +15,17 @@ The attention pattern (the softmax-normalized matrix `A` in
 at". Visualizing per-head attention probabilities reveals induction heads, copy
 heads, name-mover heads, and so on.
 
-The attention *block* doesn't expose the probabilities via `.output` — it returns
-the value-weighted result. To get the probabilities you reach into the attention
-computation with `.source`, which hooks intermediate operations inside the module's
-forward (see `docs/usage/source.md`).
+Under `attn_implementation="eager"` the attention module returns the matrix
+alongside its value-weighted output, so `attn.output[1]` is the pattern and
+`model.output.attentions` is every layer's at once. Reach for `.source` when you
+want the raw `softmax(QK^T/√d)` itself — before the dtype cast and the dropout —
+or when a module does not hand the weights back.
 
-For GPT-2, the relevant operation is `attention_interface_0` — the function call
-that returns `(attn_output, attn_weights)`. Discover it with `print(...source)`.
+For GPT-2, the source operation that returns `(attn_output, attn_weights)` is
+`attention_interface_1` (`attention_interface_0` is the assignment that picks the
+implementation), and the softmax inside it is `nn_functional_softmax_0`. Both
+names are `transformers` 5.15 on nnsight 0.8; discover yours with
+`print(...source)`.
 
 ## When to use
 
@@ -37,6 +41,7 @@ You need `attn_implementation="eager"` to get attention weights. GPT-2 defaults 
 them).
 
 ```python
+import torch
 from nnsight.modeling.transformers import TransformersModel
 
 model = TransformersModel(
@@ -48,50 +53,72 @@ model = TransformersModel(
 prompt = "The cat sat on the"
 
 with model.trace(prompt):
-    # attention_interface_0 returns (attn_output, attn_weights).
-    attn_out, attn_weights = (
-        model.transformer.h[0].attn.source.attention_interface_0.output.save()
-    )
+    weights = model.transformer.h[0].attn.output[1].save()
 
-print(attn_weights.shape)                 # [batch, n_heads, q_seq, k_seq]
-print(attn_weights[0, 0].sum(-1))         # rows sum to 1
+print(weights.shape)                      # [batch, n_heads, q_seq, k_seq]
+print(weights[0, 0].sum(-1))              # rows sum to 1
+
+assert weights.shape == (1, 12, 5, 5)
+assert torch.allclose(weights.sum(-1), torch.ones_like(weights.sum(-1)))
+assert (torch.triu(weights, diagonal=1) == 0).all()      # causal mask, exactly zero
 ```
 
 ```
 torch.Size([1, 12, 5, 5])
-tensor([1., 1., 1., 1., 1.])
+tensor([1.0000, 1.0000, 1.0000, 1.0000, 1.0000], grad_fn=<SumBackward1>)
 ```
+
+Every layer at once, from the model's own return value:
+
+```python
+with model.trace(prompt, output_attentions=True):
+    attentions = model.output.attentions.save()
+
+assert len(attentions) == 12
+assert torch.equal(attentions[0], weights)
+```
+
+Both need `eager`. Under `sdpa` or `flash_attention_2` the weights element is
+`None` and `model.output.attentions` is the empty tuple — no warning, and the
+first index raises `IndexError: tuple index out of range` somewhere downstream.
 
 Discover the operation name by printing `.source` (works outside a trace):
 
 ```python
 print(model.transformer.h[0].attn.source)
 # ...
-#  attention_interface_0  -> 71     attn_output, attn_weights = attention_interface(
+#  attention_interface_1  -> 71     attn_output, attn_weights = attention_interface(
 # ...
 ```
 
-The trailing `_0` is the occurrence index inside the forward, not a layer index.
+The trailing number is the occurrence index inside the forward, not a layer
+index; assignments and calls share the sequence.
 
 ## Variations
 
-### All layers in one trace
+### Selected layers in one trace
+
+`model.output.attentions` gives every layer. To pick layers, or to skip
+`output_attentions=True`, accumulate them yourself:
 
 ```python
 import nnsight
 
 with model.trace(prompt):
     patterns = nnsight.save([])
-    for block in model.transformer.h:
-        _, weights = block.attn.source.attention_interface_0.output
-        patterns.append(weights)
+    for block in model.transformer.h[4:8]:
+        patterns.append(block.attn.output[1])
 
-# len(patterns) == 12; patterns[L].shape == [1, 12, 5, 5]
+assert len(patterns) == 4 and patterns[0].shape == (1, 12, 5, 5)
 ```
+
+Unpack the source operation's tuple the same way — `_, w = op.output` — but never
+across a `.save()`: `a, b = op.output.save()` leaves both names unbound after the
+trace. Save the tuple to one name and index it afterwards.
 
 ### Raw softmax weights (recursive source)
 
-`attention_interface_0` resolves at run time to a plain Python function
+`attention_interface_1` resolves at run time to a plain Python function
 (`eager_attention_forward`), so you can chain `.source` again to reach the raw
 softmax — before the dtype cast and dropout:
 
@@ -99,7 +126,7 @@ softmax — before the dtype cast and dropout:
 with model.trace(prompt):
     softmax_w = (
         model.transformer.h[0].attn.source
-        .attention_interface_0
+        .attention_interface_1
         .source.nn_functional_softmax_0
         .output.save()
     )
@@ -108,7 +135,7 @@ with model.trace(prompt):
 
 Recursive `.source` only works **inside a trace** (the called function is resolved
 from the live value). Print the inner ops with
-`print(model.transformer.h[0].attn.source.attention_interface_0.source)` inside a
+`print(model.transformer.h[0].attn.source.attention_interface_1.source)` inside a
 trace. See `docs/usage/source.md`.
 
 ### Average attention across a batch
@@ -122,7 +149,7 @@ with model.trace() as tracer:
     pieces = nnsight.save([])
     for p in prompts:
         with tracer.invoke(p):
-            _, w = model.transformer.h[5].attn.source.attention_interface_0.output
+            _, w = model.transformer.h[5].attn.source.attention_interface_1.output
             pieces.append(w)
 
 # each pieces[i] is [1, 12, seq, seq]; pad/clip if seq lengths differ.
@@ -137,9 +164,9 @@ tuple `(attn_output, attn_weights)`; rebuild it and assign the whole tuple:
 import torch
 
 with model.trace(prompt):
-    out = model.transformer.h[0].attn.source.attention_interface_0.output
+    out = model.transformer.h[0].attn.source.attention_interface_1.output
     new = (torch.zeros_like(out[0]),) + tuple(out[1:])   # zero the attn output
-    model.transformer.h[0].attn.source.attention_interface_0.output = new
+    model.transformer.h[0].attn.source.attention_interface_1.output = new
     logits = model.lm_head.output.save()
 ```
 
@@ -161,16 +188,41 @@ See `tests/test_source.py` for tested source-patching examples.
 
 ## Gotchas
 
-- The operation name can vary between transformer versions. `print(...attn.source)`
-  first to confirm what's available.
-- Request `attention_interface_0` **before** `attn.output` in the same forward —
+- **`print(...source)` lists operations the forward never runs.** GPT-2's
+  attention prints 50 operations, 22 of which are on a cross-attention branch a
+  decoder-only model never takes. Asking for one raises
+  `OutOfOrderError: '...transpose_0.output.i0' was requested but the model already
+  ran past it`, which reads like an ordering bug you do not have. The real key
+  transpose is `transpose_2`, one character away from the dead `transpose_0`.
+- **Drill before you read.** Reaching an inner operation *after* reading the outer
+  one is out of order — the call has already returned:
+
+  ```python
+  with model.trace(prompt):
+      w = model.transformer.h[0].attn.source.attention_interface_1.output[1].save()
+      sm = (model.transformer.h[0].attn.source.attention_interface_1
+            .source.nn_functional_softmax_0.output.save())
+  # OutOfOrderError: '...attention_interface_1.fn.i0' was requested but the model
+  # already ran past it
+  ```
+
+  Reversing the two statements works.
+- **The raw softmax is float32; the returned weights are the model's dtype.** On a
+  bf16 checkpoint `nn_functional_softmax_0.output` and `attn.output[1]` fail
+  `torch.equal` and agree to `2e-3` after a cast. On float32 models they are the
+  same tensor.
+- Request `attention_interface_1` **before** `attn.output` in the same forward —
   the source op runs first, so reading `attn.output` and then the source op is out
   of order (`OutOfOrderError`).
-- For Llama / Mistral / Qwen the path is typically
-  `model.model.layers[i].self_attn.source....`. **There is no universal op-name
-  table — read the model's `forward` (or `print(...source)`) to find it.**
+- Operation names vary between `transformers` versions and model classes. For
+  Llama / Mistral / Qwen the path is `model.model.layers[i].self_attn.source....`;
+  the inner names carry over, because those families and GPT-2 both go through
+  `eager_attention_forward`. **There is no universal op-name table — print
+  `.source` to find yours.**
 - `[batch, n_heads, q_seq, k_seq]` grows as `seq^2` per head per layer. For long
-  contexts, save only the heads / layers you need.
+  contexts, save only the heads / layers you need, and wrap read-only capture in
+  `torch.no_grad()` — a trace runs with autograd on, and a saved pattern otherwise
+  pins the whole forward graph.
 
 ## Related
 
@@ -178,4 +230,6 @@ See `tests/test_source.py` for tested source-patching examples.
   recursive access).
 - [per-head-attention](per-head-attention.md) — operating on individual heads.
 - [logit-lens](logit-lens.md).
+- `nnterp`'s `StandardizedTransformer(..., enable_attention_probs=True)` gives
+  `model.attention_probabilities[i]` with no per-architecture names at all.
 - `tests/test_source.py` — source-tracing tests.

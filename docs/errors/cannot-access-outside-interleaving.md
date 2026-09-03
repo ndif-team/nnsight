@@ -3,7 +3,7 @@ title: Cannot Access Outside of Interleaving
 one_liner: "ValueError: Cannot access `<location>` outside of interleaving — an Envoy value was read or set with no trace running; plus: trace() needs an input or an invoke."
 tags: [error, setup, interleaving]
 related: [docs/errors/save-outside-trace.md, docs/errors/value-was-not-provided.md, docs/usage/trace.md, docs/usage/save.md, docs/concepts/envoy.md]
-sources: [src/nnsight/intervention/interleaver.py:225, src/nnsight/intervention/interleaver.py:241, src/nnsight/intervention/tracer.py:266, src/nnsight/intervention/envoy.py:417]
+sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/envoy.py]
 ---
 
 # Cannot Access Outside of Interleaving
@@ -17,8 +17,7 @@ trace running:
 ValueError: Cannot access `model.transformer.h.0.output` outside of interleaving
 ```
 
-Assigning to one has the **same** message — a swap goes through the same check, so
-there is no separate "Cannot set …" text anymore:
+Assigning to one has the **same** message — a swap goes through the same check:
 
 ```python
 model.transformer.h[0].output = value   # ValueError: Cannot access `model.transformer.h.0.output` outside of interleaving
@@ -35,18 +34,19 @@ ValueError: trace() needs an input, or at least one `with tracer.invoke(...)` bl
 ## Cause
 
 Envoy properties resolve through `Mediator.value` / `Mediator.swap`, which call
-`Mediator.current` (`src/nnsight/intervention/interleaver.py:225`). That looks for
+`Mediator.current`. That looks for
 the greenlet worker driving the current intervention. Intervention code only runs
 *while interleaving*, so no worker means the value was requested outside a run —
 there is nothing to park on and nothing to answer with, so it raises
-`ValueError("Cannot access `<location>` outside of interleaving")`
-(`src/nnsight/intervention/interleaver.py:241`). It is raised as a `ValueError`
+`ValueError("Cannot access `<location>` outside of interleaving")`. It is raised as a `ValueError`
 (not an `AttributeError`) so it isn't swallowed by `__getattr__` and mislabelled as
 a missing attribute.
 
-The "trace() needs an input" error comes from `InterleavingTracer.execute`
-(`src/nnsight/intervention/tracer.py:266`): if `trace()` got no data input and the
-body registered no `tracer.invoke(...)` workers, there is no batch to run.
+The "trace() needs an input" error comes from `InterleavingTracer.execute`: if
+`trace()` got no data input and the body registered no `tracer.invoke(...)`
+workers, there is no batch to run. The body runs first, so a block that also
+reads an envoy raises "Cannot access …" instead — the empty-batch check is what
+an empty body reaches.
 
 ## Common triggers
 
@@ -86,7 +86,7 @@ print(h.shape)
 ```python
 # WRONG — empty trace with nothing to run
 with model.trace() as tracer:               # ValueError: trace() needs an input ...
-    out = model.lm_head.output.save()
+    pass
 ```
 
 ```python

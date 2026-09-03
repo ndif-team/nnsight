@@ -20,7 +20,7 @@ A `Backend` is the bridge between the tracing system (which captures and compile
 
 ### The Backend base
 
-`Backend` (`src/nnsight/tracing/backend.py:9`) is a one-liner:
+`Backend` (`src/nnsight/tracing/backend.py`) is a one-liner:
 
 ```python
 class Backend:
@@ -34,17 +34,16 @@ default just executes it locally — which, for `InterleavingTracer`, means
 `InterleavingTracer.execute` sets up the interleaver and runs the model. A tracer
 gets the default `Backend` unless one is passed to `trace(backend=...)`.
 
-There is **no** `ExecutionBackend`, `EditingBackend`, or `Backend.__call__` compile
-pipeline as in older nnsight. Local execution *is* the default `Backend`; editing is
-done by `EditingTracer.execute` storing the block (not by a backend); exception
-cleanup happens in `Tracer.__exit__` via `clean_traceback` (`tracing/util.py:139`),
-not a backend `wrap_exception`.
+There are only these three responsibilities, and they sit in three places: local
+execution *is* the default `Backend`; editing is `EditingTracer.execute` storing the
+block rather than running it; and exception cleanup is `Tracer.__exit__` calling
+`clean_traceback` (`tracing/util.py`).
 
 ### How a backend is selected
 
-`Tracer.__init__` defaults `self.backend` to `Backend()` (`tracing/tracer.py:248`).
+`Tracer.__init__` defaults `self.backend` to `Backend()` (`tracing/tracer.py`).
 The model layer intercepts the `remote=` kwarg in `Remotable.trace`
-(`src/nnsight/modeling/mixins/remotable.py:19`):
+(`src/nnsight/modeling/mixins/remotable.py`):
 
 ```python
 def trace(self, *inputs, backend=None, remote=False, blocking=True,
@@ -54,7 +53,7 @@ def trace(self, *inputs, backend=None, remote=False, blocking=True,
     return super().trace(*inputs, backend=backend, **kwargs)
 ```
 
-`_remote_backend` (`remotable.py:52`) maps:
+`_remote_backend` (`remotable.py`) maps:
 
 | call | backend |
 |---|---|
@@ -65,32 +64,32 @@ def trace(self, *inputs, backend=None, remote=False, blocking=True,
 | `backend=AsyncRemoteBackend(...)` | async remote (passed explicitly) |
 
 `session()` accepts the same `remote=` and puts the backend on the *session* scope,
-so all inner traces run as one remote job (`remotable.py:35`).
+so all inner traces run as one remote job (`remotable.py`).
 
 ### Model identity: to_model_key
 
 A remote backend never serializes the model — it names it. `to_model_key()`
-(`remotable.py:125`) returns `"{import.path.ClassName}:{model_specific_key}"`. The
-import-path part comes from `_remoteable_class()` (`remotable.py:115`), which a
+(`remotable.py`) returns `"{import.path.ClassName}:{model_specific_key}"`. The
+import-path part comes from `_remoteable_class()` (`remotable.py`), which a
 deprecated alias overrides to return the canonical class, so a model wrapped as
 `LanguageModel` and one wrapped as `TransformersModel` produce the *same* key the
 server knows it by. The server reconstructs with `from_model_key`.
 
 ### RemoteBackend — NDIF over one websocket
 
-`RemoteBackend` (`src/nnsight/intervention/backends/remote.py:39`) serializes the
+`RemoteBackend` (`src/nnsight/intervention/backends/remote.py`) serializes the
 trace, sends it, streams status updates back, and returns the saved values. Two
 modes share one serialize+send step:
 
-- **Blocking** (`blocking=True`, default) — `request` (`remote.py:304`) opens a
+- **Blocking** (`blocking=True`, default) — `request` (`remote.py`) opens a
   websocket to `/subscribe`, takes the session id, POSTs the payload to `/request`,
   then loops on `connection.recv()` until a `COMPLETED` status arrives, downloading
   the result blob from a presigned URL and `torch.load`ing it. The saved values are
   marked (`save`) and pushed back into the caller's frame, just like a local trace
-  (`_push`, `remote.py:112`).
-- **Non-blocking** (`blocking=False`) — `submit` (`remote.py:263`) POSTs without a
+  (`_push`, `remote.py`).
+- **Non-blocking** (`blocking=False`) — `submit` (`remote.py`) POSTs without a
   websocket (the server saves each status to the object store) and stores the
-  server-assigned `job_id`; `poll` (`remote.py:280`) GETs `/response/{job_id}` and
+  server-assigned `job_id`; `poll` (`remote.py`) GETs `/response/{job_id}` and
   returns the saves dict on `COMPLETED`, `None` while still running. Because the
   trace has long exited by the time you poll, the result is *returned*, not pushed
   into a frame. Construct with a `job_id` to make a poll-only backend for an
@@ -98,7 +97,7 @@ modes share one serialize+send step:
 
 Serialization is done by `RequestModel.serialize` (`schema/request.py`), after
 `pull_env()` registers local (non-installed) modules for by-value pickling so their
-source ships with the request (`_serialize`, `remote.py:249`). Status rendering,
+source ships with the request (`_serialize`, `remote.py`). Status rendering,
 compression, and result download are shared helpers (`note`/`handle`/
 `download_result`/`finalize`). `StatusDisplay` (`backends/display.py`) animates the
 progress display when remote logging or `verbose` is on.
@@ -109,8 +108,8 @@ Config comes from `CONFIG.API` / `CONFIG.APP` (`schema/config.py`): `HOST`,
 
 ### AsyncRemoteBackend — the same request, awaited
 
-`AsyncRemoteBackend` (`remote.py:339`) subclasses `RemoteBackend`. Its `__call__`
-(`remote.py:377`) fires the request the way the blocking parent does — subscribe,
+`AsyncRemoteBackend` (`remote.py`) subclasses `RemoteBackend`. Its `__call__`
+(`remote.py`) fires the request the way the blocking parent does — subscribe,
 take the session id, POST — then returns `self` **without** consuming any updates
 (the connect/serialize/POST are synchronous; only the waiting is async). Two ways to
 consume it:
@@ -129,17 +128,17 @@ async for update in backend:           # stream(): raw ResponseModel updates...
         print(update.status)
 ```
 
-`await backend` (`resolve`, `remote.py:398`) renders the display and raises on a
-server error, like the blocking parent. `async for` (`stream`, `remote.py:417`)
+`await backend` (`resolve`, `remote.py`) renders the display and raises on a
+server error, like the blocking parent. `async for` (`stream`, `remote.py`)
 hands you each raw `ResponseModel` and does *not* touch the display or raise. The
-blocking `recv` runs through `asyncio.to_thread` (`receive`, `remote.py:437`) to keep
+blocking `recv` runs through `asyncio.to_thread` (`receive`, `remote.py`) to keep
 the event loop free. The caller's frame is gone by the time the result lands, so
 saves come out of the await / the iterator's final item, not a frame push.
 
 
 ### LocalSimulationBackend — a serverless dry run
 
-`LocalSimulationBackend` (`src/nnsight/intervention/backends/local.py:37`) powers
+`LocalSimulationBackend` (`src/nnsight/intervention/backends/local.py`) powers
 `model.trace(..., remote="local")`. It serializes the trace exactly as
 `RemoteBackend` would, then deserializes it **with local (non-installed) modules
 hidden** — mimicking a server where the user's own source files don't exist — and
@@ -157,9 +156,9 @@ tracer.info.code = restored.info.code
 tracer.execute(tracer.info.code)               # run in-process; push back into the frame
 ```
 
-`_hide_local_modules` (`local.py:81`) removes any `sys.path` entry that isn't
+`_hide_local_modules` (`local.py`) removes any `sys.path` entry that isn't
 site-packages/stdlib/nnsight's own `src`, and any module whose root isn't in
-`_SERVER_MODULES` (`local.py:25` — `torch`, `numpy`, `transformers`, `accelerate`,
+`_SERVER_MODULES` (`local.py` — `torch`, `numpy`, `transformers`, `accelerate`,
 `diffusers`, `einops`, `peft`, `nnsight`) or the stdlib. If the block references a
 local function/class that wasn't shipped by value, the deserialize raises
 `ModuleNotFoundError` exactly as a real server would — so a passing `remote="local"`
@@ -171,14 +170,14 @@ land back in the caller's frame like an ordinary local trace.
 
 ## Key files / classes
 
-- `src/nnsight/tracing/backend.py:9` — `Backend`. `tracer.execute(tracer.info.code)`.
-- `src/nnsight/intervention/backends/remote.py:39` — `RemoteBackend`. Blocking + non-blocking.
-- `:304` — `RemoteBackend.request` (blocking websocket loop).
-- `:263`/`:280` — `submit`/`poll` (non-blocking).
-- `:339` — `AsyncRemoteBackend`; `:398` — `resolve`; `:417` — `stream`.
-- `src/nnsight/intervention/backends/local.py:37` — `LocalSimulationBackend`; `:25` — `_SERVER_MODULES`.
+- `src/nnsight/tracing/backend.py` — `Backend`. `tracer.execute(tracer.info.code)`.
+- `src/nnsight/intervention/backends/remote.py` — `RemoteBackend` (`request` for the
+  blocking websocket loop, `submit`/`poll` for non-blocking) and
+  `AsyncRemoteBackend` (`resolve`, `stream`).
+- `src/nnsight/intervention/backends/local.py` — `LocalSimulationBackend`, `_SERVER_MODULES`.
 - `src/nnsight/intervention/backends/display.py` — `StatusDisplay`.
-- `src/nnsight/modeling/mixins/remotable.py:19` — `Remotable.trace` (backend selection); `:52` — `_remote_backend`; `:125` — `to_model_key`.
+- `src/nnsight/modeling/mixins/remotable.py` — `Remotable.trace` (backend
+  selection), `_remote_backend`, `to_model_key`.
 
 ## Lifecycle (one trace, default backend)
 

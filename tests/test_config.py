@@ -3,9 +3,22 @@
 import sys
 import types
 
+import pytest
 import yaml
 
 from nnsight.schema.config import Config
+
+
+@pytest.fixture(autouse=True)
+def isolate_user_config(monkeypatch, tmp_path):
+    """Point NNSIGHT_CONFIG at a path that doesn't exist.
+
+    Without this, `Config.load()` reads the developer's real
+    ~/.config/nnsight/config.yaml, and any key it sets there (an APIKEY, say)
+    silently decides these assertions. Tests that want a user file on disk set
+    NNSIGHT_CONFIG themselves, which overrides this.
+    """
+    monkeypatch.setenv("NNSIGHT_CONFIG", str(tmp_path / "absent" / "config.yaml"))
 
 
 class TestEnvOverrides:

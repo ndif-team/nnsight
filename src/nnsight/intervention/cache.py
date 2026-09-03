@@ -13,7 +13,7 @@ cache captures *every* selected module across the whole run — every layer, and
 Because the interleaver already funnels every module input/output through
 [`handle`][nnsight.intervention.interleaver.Interleaver.handle] (applying
 interventions first), a cache is just a post-intervention observer: it needs no
-per-module hooks. Navigation and alias/index resolution are delegated to the
+per-module controllers of its own. Navigation and alias/index resolution are delegated to the
 model's [`Envoy`][nnsight.intervention.envoy.Envoy] tree, so a [`CacheView`][nnsight.intervention.cache.CacheView]
 stays thin and aliases / ``ModuleList`` indexing work for free.
 """
@@ -197,7 +197,7 @@ class Cache:
 
     def _record(self, path: str, key: str, value: Any) -> None:
         # Pair the input and output of one visit into a single Entry: the input
-        # pre-hook fires before the output post-hook, so fill the open slot on the
+        # handoff fires before the output handoff, so fill the open slot on the
         # current entry, or start a new entry (a new visit) when it's taken.
         #
         # Which slots are taken is tracked here rather than read back off the

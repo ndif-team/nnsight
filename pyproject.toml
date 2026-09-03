@@ -32,7 +32,10 @@ dependencies = [
     "pydantic",
     "pyyaml",
     "cloudpickle",
-    # HuggingFace models (TransformersModel, tokenizers, hub access).
+    # HuggingFace models (TransformersModel, tokenizers, hub access). Unpinned:
+    # only tensor parallelism needs a floor, and it checks for itself at load
+    # (see `nnsight.modeling.tp.fragments.MINIMUM_TRANSFORMERS`) rather than
+    # holding every other user to it.
     "transformers",
     "huggingface-hub",
     # Remote execution on NDIF.
@@ -49,6 +52,10 @@ dev = [
     "pillow",
     "diffusers",
     "accelerate",
+    # Task-shape tests: TAPAS table-question-answering builds a DataFrame;
+    # the tiny any-to-any checkpoint's vision tower is a timm model.
+    "pandas",
+    "timm",
 ]
 # High-throughput / tensor-parallel serving (needs a CUDA GPU).
 vllm = [

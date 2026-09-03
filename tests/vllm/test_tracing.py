@@ -415,6 +415,99 @@ class TestEarlyStop:
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
 
+class TestIterationBounds:
+    """What a ``tracer.iter`` loop that outruns its request is told.
+
+    The same policy the interleaver applies to a local run, applied here: a loop
+    that asks for a step the request does not make is cut short there — what it
+    saved comes home, the statements after it never run, and the warning is
+    emitted on the engine (the client is in another process, so it is not
+    catchable in user code).
+    """
+
+    @torch.no_grad()
+    def test_iter_past_the_end_is_cut_short(self, vllm_gpt2, MSG_prompt):
+        # Eight steps asked of a three-step request: the loop is cut short at the
+        # fourth ask, the three reached steps come home, and the append after the
+        # loop never runs.
+        with vllm_gpt2.trace(
+            MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
+        ) as tracer:
+            steps = list().save()
+            for _ in tracer.iter[:8]:
+                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+            steps.append("after the loop")
+
+        assert len(steps) == 3
+        assert "after the loop" not in steps
+
+    @torch.no_grad()
+    def test_bounded_iter_matching_the_request_keeps_its_tail(
+        self, vllm_gpt2, MSG_prompt
+    ):
+        # The other side of the same rule: a count the request does reach leaves the
+        # loop to end on its own, so what follows it runs.
+        with vllm_gpt2.trace(
+            MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
+        ) as tracer:
+            steps = list().save()
+            for _ in tracer.iter[:3]:
+                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+            steps.append("after the loop")
+
+        assert len(steps) == 4 and steps[-1] == "after the loop"
+
+    @torch.no_grad()
+    def test_a_generation_cut_short_is_not_an_error(self, vllm_gpt2, MSG_prompt):
+        # The count need not be absurd to go unmet: this request stops on its
+        # second token — what an EOS does to a generation — while the loop is
+        # still bound to six. The trace completes with what the run made. The
+        # exact step count is the output processor's business (it checks
+        # stop_token_ids in the client and aborts the request, so the engine can
+        # run a step past the stop token); what this asserts is that the loop
+        # was cut short of its bound and nothing raised.
+        york = vllm_gpt2.tokenizer.encode(" York")
+        with vllm_gpt2.trace(
+            MSG_prompt,
+            temperature=0.0,
+            top_p=1,
+            max_tokens=6,
+            stop_token_ids=york,
+        ) as tracer:
+            steps = list().save()
+            for _ in tracer.iter[:6]:
+                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+
+        assert 2 <= len(steps) < 6
+
+    @torch.no_grad()
+    def test_open_iter_past_the_end_is_not_an_error(self, vllm_gpt2, MSG_prompt):
+        # `tracer.all()` has no end of its own, so asking for the step after the
+        # last is how it finishes: warned about on the engine, never raised, and
+        # every step it did reach comes home.
+        with vllm_gpt2.trace(
+            MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
+        ) as tracer:
+            steps = list().save()
+            for _ in tracer.all():
+                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+
+        assert vllm_gpt2.tokenizer.batch_decode(steps) == [" New", " York", " City"]
+
+    @torch.no_grad()
+    def test_engine_survives_an_over_run(self, vllm_gpt2, ET_prompt):
+        # The unwind ends one request's loop; every later trace is untouched.
+        with vllm_gpt2.trace(
+            ET_prompt, temperature=0.0, top_p=1, max_tokens=2
+        ) as tracer:
+            for _ in tracer.iter[:9]:
+                vllm_gpt2.logits
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+
 class TestDeferredErrors:
     @torch.no_grad()
     def test_error_surfaces_to_client(self, vllm_gpt2, ET_prompt):
@@ -789,3 +882,24 @@ class TestModelRunnerSelection:
                 VLLM._require_v1_model_runner()
         finally:
             os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+
+
+class TestScan:
+    """Shapes come from a real request here; a scan says so instead of crashing."""
+
+    def test_scan_is_refused_before_anything_is_built(self):
+        # The refusal is the whole behaviour, so it needs no engine — and that is
+        # the point: reaching the engine would build it, dispatch, and then hand
+        # the meta forward's name to `interleave` as if it were callable.
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM.__new__(VLLM)
+
+        with pytest.raises(NotImplementedError, match="scan is unavailable on vLLM"):
+            with model.scan("The capital of France is"):
+                pass
+
+        # Bare, outside a `with`, it is the call itself that has to refuse:
+        # returning a tracer nobody enters is a silent no-op.
+        with pytest.raises(NotImplementedError, match="scan is unavailable on vLLM"):
+            model.scan("The capital of France is")

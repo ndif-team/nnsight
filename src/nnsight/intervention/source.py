@@ -14,7 +14,7 @@ add more, mid-forward:
 
 1. Parse the module's ``forward`` and rewrite every call ``fn(*args, **kwargs)``
    into ``__nnsight_op__("source.{name}_{n}", fn, *args, **kwargs)``. At run time
-   `_make_op` brackets the call with [`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle] on its
+   `make_op` brackets the call with [`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle] on its
    ``.input`` (before) and ``.output`` (after) — both readable/replaceable — and a
    ``.skip`` gate that can bypass the call entirely.
 2. ``name`` is the called function's dotted path joined with ``_``
@@ -22,15 +22,29 @@ add more, mid-forward:
    ``dropout(...)`` → ``dropout``); ``n`` is a per-name counter in **execution
    order** (nested calls run inner-first, so the inner call is ``_0``), which is
    the order the interleaver serves values.
+3. Rewrite every assignment ``x = value`` into
+   ``x = __nnsight_op__("source.x_{n}", __nnsight_bind__, value)`` — the same
+   bracket around an identity, so a value that is *not* a call's return (a
+   ``q @ k`` product, a running state ``S = S * decay + update`` inside a loop) is
+   addressable too. ``n`` is the same per-name counter calls use, so a name that
+   is bound and then called (``attention_interface = ...; attention_interface(...)``)
+   is ``attention_interface_0`` at the binding and ``attention_interface_1`` at the call.
+
+A decorated ``forward`` is instrumented through its decorators: a wrapper that
+calls the function it closes over is peeled and rebuilt around the instrumented
+function (`decorator_chain`, `rewrap`); one that doesn't — a dispatcher that
+hands the function to a lookup and calls the result — is instrumented as it is,
+its closure intact (`compile_source`), so the call that actually runs is
+the operation to drill into.
 
 Installation is permanent. When an envoy is built its module's ``forward`` is
-replaced by a `_make_controller` closure over a single per-module `_State` (see
-`_STATE`): it hands off ``.input``, gates on ``.skip``, runs the *body* — the
+replaced by a `make_controller` closure over a single per-module `State` (see
+`STATE`): it hands off ``.input``, gates on ``.skip``, runs the *body* — the
 original forward, or the source-instrumented one once ``.source`` is used — and
 hands off ``.output``. The controller is inert outside a trace, so later runs
 work regardless of request order, and source and skip compose on one wrapper. A
 module wrapped by several envoys routes to whichever interleaver is running
-(`_State.active`).
+(`State.active`).
 
 An [`Envoy`][nnsight.intervention.envoy.Envoy] exposes operations as ``envoy.source.{name}_{n}``, whose
 ``.input``/``.inputs``/``.output``/``.skip`` mirror an Envoy's own, one level finer.
@@ -58,15 +72,32 @@ if TYPE_CHECKING:
 #: Global name the instrumented forward calls to bracket each operation.
 OP = "__nnsight_op__"
 
-#: Attribute holding a module's `_State` once it has been sourced/skipped.
-_STATE = "__nnsight__"
+#: Global name of the identity an instrumented assignment routes its value through.
+BIND = "__nnsight_bind__"
+
+
+def bind(value: Any) -> Any:
+    """The callee of an assignment operation: ``x = e`` runs as
+    ``x = __nnsight_op__("source.x_n", __nnsight_bind__, e)``, so the bracket
+    `run_op` puts around every call serves the assigned value as ``.output``."""
+    return value
+
+
+#: Attribute holding a module's `State` once it has been sourced/skipped.
+STATE = "__nnsight__"
 
 #: Sentinel returned by the skip gate when no skip is pending for a location.
-_NO_SKIP = object()
+NO_SKIP = object()
 
 
 class SourceNotAvailable(Exception):
-    """A module's ``forward`` can't be source-instrumented (no source, decorated…)."""
+    """There is no Python source to instrument.
+
+    A builtin or C function, a function compiled from a string, a call into a
+    submodule (which has its own ``.source``), or an assignment (which has no
+    callee). A decorated ``forward`` is not one of these: it is peeled,
+    instrumented, and rebuilt.
+    """
 
 
 class Compiled(NamedTuple):
@@ -78,27 +109,27 @@ class Compiled(NamedTuple):
     source: str  #: dedented source text of the original forward
 
 
-class _State:
-    """Per-module source/skip state, stored at ``module.__dict__[_STATE]``.
+class State:
+    """Per-module source/skip state, stored at ``module.__dict__[STATE]``.
 
     Created when a module is first sourced or skipped. The controller and op probes
     read it live on every call, so re-wrapping — or wrapping the same module in more
     than one Envoy at once — just registers another interleaver here.
 
-    [`routes`][nnsight.intervention.source._State.routes] lists each interleaver that instrumented this module with the
-    path it addresses the module by; [`active`][nnsight.intervention.source._State.active] picks the one whose trace is
+    [`routes`][nnsight.intervention.source.State.routes] lists each interleaver that instrumented this module with the
+    path it addresses the module by; [`active`][nnsight.intervention.source.State.active] picks the one whose trace is
     currently running (there is at most one).
 
-    Because this state lives on the module (``module.__dict__[_STATE]``), it holds
+    Because this state lives on the module (``module.__dict__[STATE]``), it holds
     neither the module nor its interleavers *strongly* — the module would sit in a
     reference cycle and never be freed by refcounting. The interleavers are held by
     weakref (a finished local wrapper's interleaver drops out on its own; a
     server's persistent interleaver stays, so the same module serves request after
-    request), and [`body`][nnsight.intervention.source._State.body] is the *unbound* forward
+    request), and [`body`][nnsight.intervention.source.State.body] is the *unbound* forward
     (a plain function taking ``self``) rather than a bound method that would pin it.
     """
 
-    __slots__ = ("routes", "body", "sourced")
+    __slots__ = ("routes", "body", "sourced", "compiled")
 
     def __init__(self, body: Callable) -> None:
         #: (weakref to interleaver, the path it addresses this module by, and the
@@ -106,6 +137,7 @@ class _State:
         self.routes: list[tuple[Any, str, tuple[str, str, str]]] = []
         self.body = body  #: unbound forward to run when not skipped
         self.sourced = False  #: whether body is the source-instrumented forward
+        self.compiled: Compiled | None = None  #: the instrumented forward's `Compiled`, once sourced
 
     def register(self, interleaver: Any, path: str) -> None:
         """Record that ``interleaver`` reaches this module at ``path``."""
@@ -130,7 +162,7 @@ class _State:
 
 
 #: Instrumented forwards, memoized per original ``forward`` code object.
-_FORWARD_CACHE: dict[CodeType, "Compiled"] = {}
+FORWARD_CACHE: dict[CodeType, "Compiled"] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -138,117 +170,229 @@ _FORWARD_CACHE: dict[CodeType, "Compiled"] = {}
 # ---------------------------------------------------------------------------
 
 
-class _Instrument(ast.NodeTransformer):
-    """Rewrite every call into an ``__nnsight_op__(location, fn, *args, **kwargs)``.
+class Instrument(ast.NodeTransformer):
+    """Rewrite every call into ``__nnsight_op__(location, fn, *args, **kwargs)`` and
+    every assignment into ``target = __nnsight_op__(location, __nnsight_bind__, value)``.
 
-    Numbers occurrences in execution order: `generic_visit` descends into a
-    call's arguments (running inner calls first) *before* this node is assigned
-    its counter, so ``f(f(x))`` gives the inner ``f`` ``f_0`` and the outer ``f_1``.
+    Numbers occurrences in execution order: a call's arguments (and an
+    assignment's value) are visited *before* the node is assigned its counter, so
+    ``f(f(x))`` gives the inner ``f`` ``f_0`` and the outer ``f_1``, and
+    ``h = relu(x)`` gives ``relu_0`` then ``h_0``. Calls and assignments share
+    one counter per name.
     """
 
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
         self.names: list[str] = []
-        # label -> 1-based line of the call within the (dedented) forward source,
-        # captured here before increment_lineno shifts it to file coordinates.
+        # label -> 1-based line within the (dedented) source, captured before
+        # increment_lineno shifts it to file coordinates.
         self.lines: dict[str, int] = {}
 
     @staticmethod
-    def _op_name(call: ast.Call) -> str:
-        """The called function's dotted name, joined with ``_``.
+    def dotted(expr: ast.expr) -> tuple[list[str], bool]:
+        """The attribute chain of ``expr`` and whether it is rooted in a name.
 
-        The whole attribute chain is used, not just the last component:
-        ``self.act`` → ``self_act``, ``nn.functional.dropout`` →
-        ``nn_functional_dropout``, ``module.attn_dropout`` → ``module_attn_dropout``.
-        A bare name stays as-is (``dropout`` → ``dropout``).
+        ``self.a.b`` → ``(['self', 'a', 'b'], True)``; ``x[i].y`` → ``(['x', 'y'], True)``
+        (a subscript says where in the object, not what the object is called);
+        ``(a @ b).sum`` → ``(['sum'], False)``.
         """
-        func = call.func
-        if isinstance(func, ast.Attribute):
-            parts = []
-            current = func
-            while isinstance(current, ast.Attribute):
-                parts.append(current.attr)
-                current = current.value
-            if isinstance(current, ast.Name):
-                parts.append(current.id)
-            return "_".join(reversed(parts))
-        if isinstance(func, ast.Name):
-            return func.id
-        return "call"
+        parts = []
+        while True:
+            if isinstance(expr, ast.Attribute):
+                parts.append(expr.attr)
+                expr = expr.value
+            elif isinstance(expr, ast.Subscript):
+                expr = expr.value
+            elif isinstance(expr, ast.Name):
+                parts.append(expr.id)
+                return parts[::-1], True
+            else:
+                return parts[::-1], False
 
-    def visit_Call(self, node: ast.Call) -> ast.AST:
-        # Descend first so nested calls are numbered before this (outer) one —
-        # matching execution order. The wrapper we return is not re-visited, so
-        # our own op insertions never get counted as operations.
-        self.generic_visit(node)
-
-        name = self._op_name(node)
+    def wrap(self, name: str, fn: ast.expr, args: list, keywords: list, node: ast.AST) -> ast.Call:
+        """``__nnsight_op__("source.{name}_{n}", fn, *args, **keywords)`` at ``node``."""
         occurrence = self.counts.get(name, 0)
         self.counts[name] = occurrence + 1
         label = f"{name}_{occurrence}"
         self.names.append(label)
         self.lines[label] = node.lineno
-
-        # fn(*args, **kwargs)  ->  __nnsight_op__("source.<label>", fn, *args, **kwargs)
-        # Copy the original call's source location onto the wrapper so an exception
-        # raised inside the instrumented forward points at the real line. Without it
-        # the wrapper has no lineno, and increment_lineno (which does
-        # `lineno = getattr(node, "lineno", 0) + n`) would stamp it with the raw
-        # offset instead of the real line.
+        # Copy the node's source location onto the wrapper so an exception raised
+        # inside the instrumented forward points at the real line; a locationless
+        # node would take increment_lineno's raw offset instead.
         return ast.copy_location(
             ast.Call(
                 func=ast.Name(id=OP, ctx=ast.Load()),
-                args=[ast.Constant(value=f"source.{label}"), node.func, *node.args],
-                keywords=node.keywords,
+                args=[ast.Constant(value=f"source.{label}"), fn, *args],
+                keywords=keywords,
             ),
             node,
         )
 
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        if isinstance(node.func, ast.Name) and node.func.id == "super" and not (node.args or node.keywords):
+            # Zero-argument super() reads `__class__` and the first argument off
+            # the frame that calls it; from inside __nnsight_op__ there is neither.
+            return node
+        # Descend first so nested calls are numbered before this (outer) one. The
+        # wrapper returned is not re-visited, so it is never counted as an op.
+        self.generic_visit(node)
+        parts, _ = self.dotted(node.func)
+        return self.wrap("_".join(parts) or "call", node.func, node.args, node.keywords, node)
 
-def _inner_cell(wrapper: Callable, wrapped: Callable) -> int | None:
-    """Index of the closure cell in ``wrapper`` holding ``wrapped``, or ``None``.
+    def bound(self, target: ast.expr, value: ast.expr, node: ast.AST) -> ast.expr:
+        """``value`` routed through the identity under the target's name.
 
-    A decorator keeps the function it wraps in a closure cell, so re-pointing that
-    cell redirects the decorator at a different inner callable. Matching is by
-    identity against ``__wrapped__`` rather than by free-variable name, since the
-    name is the decorator author's choice (``func``, ``fn``, ...).
+        ``a, b = e1, e2`` binds each name its own value, so each element gets its
+        own op (the tuple is still built before any name is bound, so ``a, b = b, a``
+        still swaps). Any other unpacking, and a target with no name to label
+        (``f()[0] = v``), is left as it is.
+        """
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+            elements = [*target.elts, *value.elts]
+            if len(target.elts) == len(value.elts) and not any(isinstance(e, ast.Starred) for e in elements):
+                value.elts = [self.bound(t, v, node) for t, v in zip(target.elts, value.elts)]
+            return value
+        parts, rooted = self.dotted(target)
+        if not rooted:
+            return value
+        return self.wrap("_".join(parts), ast.Name(id=BIND, ctx=ast.Load()), [value], [], node)
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        # The value runs before the targets (`x[f(i)] = g()` evaluates g, then x,
+        # then f), so visit it first to keep the counters in execution order.
+        node.value = self.visit(node.value)
+        node.targets = [self.visit(target) for target in node.targets]
+        if len(node.targets) == 1:  # `a = b = v` binds one value to two names; left alone
+            node.value = self.bound(node.targets[0], node.value, node)
+        return node
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AST:
+        if node.value is not None:  # the annotation is not evaluated at run time
+            node.value = self.bound(node.target, self.visit(node.value), node)
+        return node
+
+
+#: Name of the shell every function is recompiled inside (see `compile_source`).
+SHELL = "__nnsight_shell__"
+
+
+def source_tree(code: CodeType) -> tuple[ast.Module, int, str]:
+    """Parse the function ``code`` was compiled from: its module AST, first line, and text.
+
+    From the code object, not the function: given a function, ``inspect`` follows
+    ``__wrapped__`` and hands back the decorated function's source instead of the
+    wrapper's. Raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable] when there is nothing to read.
     """
-    closure = getattr(wrapper, "__closure__", None)
-    if not closure:
+    try:
+        lines, start = inspect.getsourcelines(code)
+    except (OSError, TypeError) as error:
+        raise SourceNotAvailable("callable source is unavailable") from error
+    source = textwrap.dedent("".join(lines))
+    return ast.parse(source), start, source
+
+
+def compile_source(func: Callable) -> Compiled:
+    """Parse, instrument, and compile a Python ``func``, or raise.
+
+    The definition is compiled inside a shell function whose parameters are
+    ``func``'s free variables: recompiled at module level they would become
+    globals and break; as a nested definition they compile as free variables
+    again, and `instrument` attaches the original cells. The caller has peeled
+    ``func``'s decorators and rebuilds them around the result, so the ``@`` lines
+    (which ``getsourcelines`` includes) are dropped rather than doubled.
+    """
+    code_object = func.__code__
+    tree, start, source = source_tree(code_object)
+    definition = tree.body[0]
+    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise SourceNotAvailable("callable is not a plain function")
+    definition.decorator_list = []
+
+    rewriter = Instrument()
+    rewriter.visit(tree)
+    shell = ast.FunctionDef(
+        name=SHELL,
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[ast.arg(arg=name) for name in code_object.co_freevars],
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+        ),
+        body=[definition, ast.Return(value=ast.Name(id=definition.name, ctx=ast.Load()))],
+        decorator_list=[],
+    )
+    tree.body[0] = ast.copy_location(shell, definition)
+    # Line up line numbers with the original file so tracebacks read right.
+    ast.increment_lineno(tree, start - 1)
+    ast.fix_missing_locations(tree)
+
+    module = compile(tree, code_object.co_filename, "exec")
+    shell_code = next(c for c in module.co_consts if isinstance(c, CodeType) and c.co_name == SHELL)
+    # By the code's own name, not `func.__name__`: functools.wraps renames the
+    # wrapper after the function it wraps, but its `def` line does not change.
+    code = next(c for c in shell_code.co_consts if isinstance(c, CodeType) and c.co_name == code_object.co_name)
+    return Compiled(code, tuple(rewriter.names), rewriter.lines, source)
+
+
+def compiled(func: Callable) -> Compiled:
+    """Cached `compile_source`, keyed by ``func``'s code object."""
+    key = getattr(func, "__code__", None)
+    if key is None:
+        raise SourceNotAvailable("callable has no Python source (builtin or C function)")
+    if key not in FORWARD_CACHE:
+        FORWARD_CACHE[key] = compile_source(func)
+    return FORWARD_CACHE[key]
+
+
+def peel_index(wrapper: Callable) -> int | None:
+    """Index of the closure cell holding the function ``wrapper`` decorates, or ``None``.
+
+    A decorator's wrapper keeps the function it decorates in a closure cell and
+    calls it, so the cell is found from the wrapper's own source: the free names
+    it calls directly (``fn(*args, **kwargs)``) that hold a Python function.
+    Exactly one is the decorated function. None means the wrapper doesn't call
+    what it closes over — a dispatcher that hands the function to a lookup and
+    calls the result (transformers' experts wrapper, which runs a fused kernel
+    instead of the eager loop it wraps) — and several is ambiguous; either way
+    the wrapper is instrumented as it is, so the call that actually runs is what
+    shows up. Matching by ``__wrapped__`` would peel the dispatcher too.
+    """
+    code = getattr(wrapper, "__code__", None)
+    if code is None or not code.co_freevars:
         return None
-    for index, cell in enumerate(closure):
-        try:
-            if cell.cell_contents is wrapped:
-                return index
-        except ValueError:  # empty cell
-            continue
-    return None
+    try:
+        tree, _, _ = source_tree(code)
+    except SourceNotAvailable:
+        return None
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    candidates = [
+        index
+        for index, (name, cell) in enumerate(zip(code.co_freevars, wrapper.__closure__))
+        if name in called and isinstance(getattr(cell, "cell_contents", None), FunctionType)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
 
 
-def _decorator_chain(func: Callable) -> tuple[Callable, list[tuple[Callable, int]]]:
-    """Peel ``func``'s decorators, returning the innermost function and the chain.
-
-    Each chain entry is ``(wrapper, cell_index)``, outermost first, and is enough
-    to rebuild that wrapper around a different inner callable. Peeling stops at
-    the first decorator that doesn't set ``__wrapped__`` (i.e. didn't use
-    ``functools.wraps``) or whose inner callable isn't in a closure cell — such a
-    decorator can't be re-pointed, so it is treated as the innermost function and
-    the usual free-variable check rejects it.
-    """
+def decorator_chain(func: Callable) -> tuple[Callable, list[tuple[Callable, int]]]:
+    """Peel ``func``'s decorators: the innermost function and the ``(wrapper, cell)``
+    chain, outermost first, that `rewrap` rebuilds around its replacement."""
     chain: list[tuple[Callable, int]] = []
-    current = func
-    while True:
-        wrapped = getattr(current, "__wrapped__", None)
-        if wrapped is None:
-            return current, chain
-        index = _inner_cell(current, wrapped)
-        if index is None:
-            return current, chain
-        chain.append((current, index))
-        current = wrapped
+    seen = {func}
+    while (index := peel_index(func)) is not None:
+        chain.append((func, index))
+        func = func.__closure__[index].cell_contents
+        if func in seen:  # a closure that calls itself
+            break
+        seen.add(func)
+    return func, chain
 
 
-def _rewrap(chain: list[tuple[Callable, int]], innermost: Callable) -> Callable:
+def rewrap(chain: list[tuple[Callable, int]], innermost: Callable) -> Callable:
     """Rebuild ``chain``'s decorators around ``innermost``, inside out.
 
     Each wrapper is rebuilt with a fresh closure rather than having its cell
@@ -256,85 +400,38 @@ def _rewrap(chain: list[tuple[Callable, int]], innermost: Callable) -> Callable:
     the process, so mutating its cell in place would redirect models nobody is
     tracing.
     """
-    result = innermost
     for wrapper, index in reversed(chain):
         cells = list(wrapper.__closure__)
-        cells[index] = CellType(result)
-        rebuilt = FunctionType(
-            wrapper.__code__,
-            wrapper.__globals__,
-            wrapper.__name__,
-            wrapper.__defaults__,
-            tuple(cells),
-        )
-        rebuilt.__kwdefaults__ = wrapper.__kwdefaults__
-        rebuilt.__qualname__ = wrapper.__qualname__
-        result = rebuilt
-    return result
+        cells[index] = CellType(innermost)
+        innermost = function_like(wrapper, wrapper.__code__, tuple(cells))
+    return innermost
 
 
-def _compile_instrumented(func: Callable) -> Compiled:
-    """Parse, instrument, and compile a Python ``func`` (a ``forward`` or a drilled-into
-    callable), or raise.
+def function_like(fn: Callable, code: CodeType, closure: tuple | None, **globals_: Any) -> Callable:
+    """A new function with ``fn``'s globals, defaults and names but ``code`` and ``closure``."""
+    new = FunctionType(code, {**fn.__globals__, **globals_}, fn.__name__, fn.__defaults__, closure)
+    new.__kwdefaults__ = fn.__kwdefaults__
+    new.__qualname__ = fn.__qualname__
+    return new
 
-    Raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable] for callables we can't safely rewrite:
-    those with free variables, or no recoverable source. The caller has peeled
-    the function's decorators (see [`_decorator_chain`][nnsight.intervention.source._decorator_chain]) and rebuilds them
-    around the result, so the ``@`` lines are dropped from the parsed source.
+
+def instrument(fn: Callable, op: Callable) -> tuple[Callable, Compiled]:
+    """A source-instrumented replacement for ``fn``, calling ``op`` per operation,
+    and its `Compiled` — or raise [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable].
+
+    Peels ``fn``'s decorators, instruments the function they wrap, and rebuilds
+    them around it so their behaviour still runs. The instrumented copy shares
+    the function's closure cells, matched by name (the shell can order them
+    differently), so a wrapper keeps reaching what it closed over. A bound method
+    is rebuilt from its function and re-bound to the same instance.
     """
-    code_object = func.__code__
-    if code_object.co_freevars:
-        # Recompiled at module level, free variables would become globals and
-        # break. A decorator's wrapper always closes over the function it wraps,
-        # so this is also what rejects one we couldn't peel; say which.
-        names = ", ".join(repr(name) for name in code_object.co_freevars)
-        qualname = getattr(func, "__qualname__", "")
-        hint = f" (a wrapper built by @{qualname.split('.<locals>.')[0]})" if "<locals>" in qualname else ""
-        raise SourceNotAvailable(f"callable closes over free variables ({names}){hint}")
-    try:
-        lines, start = inspect.getsourcelines(func)
-    except (OSError, TypeError) as error:
-        raise SourceNotAvailable("callable source is unavailable") from error
-
-    source = textwrap.dedent("".join(lines))
-    tree = ast.parse(source)
-    definition = tree.body[0]
-    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        raise SourceNotAvailable("callable is not a plain function")
-    # getsourcelines hands back the `@` lines because they are syntactically part
-    # of the definition. Applying them here would double them up — the caller
-    # re-applies the real, already-evaluated decorators.
-    definition.decorator_list = []
-
-    instrument = _Instrument()
-    instrument.visit(tree)
-    # Line up line numbers with the original file so tracebacks read right.
-    ast.increment_lineno(tree, start - 1)
-    ast.fix_missing_locations(tree)
-
-    module = compile(tree, code_object.co_filename, "exec")
-    code = next(
-        (
-            const
-            for const in module.co_consts
-            if isinstance(const, CodeType) and const.co_name == func.__name__
-        ),
-        None,
-    )
-    if code is None:
-        raise SourceNotAvailable("could not locate the compiled callable")
-    return Compiled(code, tuple(instrument.names), instrument.lines, source)
-
-
-def _compiled(func: Callable) -> Compiled:
-    """Cached `_compile_instrumented`, keyed by ``func``'s code object."""
-    key = getattr(func, "__code__", None)
-    if key is None:
-        # Builtins / C functions have no code object to key on or parse.
-        raise SourceNotAvailable("callable has no Python source (builtin or C function)")
-    if key not in _FORWARD_CACHE:
-        _FORWARD_CACHE[key] = _compile_instrumented(func)
-    return _FORWARD_CACHE[key]
+    receiver = fn.__self__ if inspect.ismethod(fn) else None
+    inner, chain = decorator_chain(fn.__func__ if receiver is not None else fn)
+    result = compiled(inner)
+    cells = dict(zip(inner.__code__.co_freevars, inner.__closure__ or ()))
+    closure = tuple(cells[name] for name in result.code.co_freevars) or None
+    built = rewrap(chain, function_like(inner, result.code, closure, **{OP: op, BIND: bind}))
+    return (built.__get__(receiver) if receiver is not None else built), result
 
 
 # ---------------------------------------------------------------------------
@@ -342,9 +439,7 @@ def _compiled(func: Callable) -> Compiled:
 # ---------------------------------------------------------------------------
 
 
-def _run_op(
-    interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict
-) -> Any:
+def run_op(interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict) -> Any:
     """Bracket one operation at location ``base``: input, skip, (recursive) run, output.
 
     Reports/replaces ``.input``, honors a ``.skip`` gate, and reports/replaces
@@ -356,8 +451,8 @@ def _run_op(
     making *its* operations addressable under ``{base}.source.*`` — recursively.
     """
     args, kwargs = interleaver.handle(f"{base}.input", (args, kwargs))
-    skipped = interleaver.handle(f"{base}.skip", _NO_SKIP)
-    if skipped is not _NO_SKIP:
+    skipped = interleaver.handle(f"{base}.skip", NO_SKIP)
+    if skipped is not NO_SKIP:
         # Skip: don't call fn; report the replacement as this op's output too.
         return interleaver.handle(f"{base}.output", skipped)
     if base in interleaver.sourced:
@@ -373,64 +468,26 @@ def _run_op(
     return interleaver.handle(f"{base}.output", value)
 
 
-def _make_op(state: "_State") -> Callable:
-    """Build the ``__nnsight_op__`` the instrumented forward calls at each call site.
+def make_op(locate: Callable[[], tuple]) -> Callable:
+    """Build the ``__nnsight_op__`` an instrumented function calls at each operation.
 
-    Reads the module's live `_State`, so re-wrapping and multiple wrappers just
-    work. Outside a trace it calls straight through; inside one it brackets the
-    call via `_run_op` under ``{path}.{location}`` for the interleaver whose trace
-    is running.
+    ``locate`` answers "which trace is running, and under what path?" — for a
+    module's forward, its live `State` (so re-wrapping and multiple wrappers just
+    work); for a drilled-into callable, the interleaver and op path it was drilled
+    from. With no trace running the op calls straight through; inside one it
+    brackets the call via `run_op` under ``{path}.{location}``.
     """
 
     def op(location: str, fn: Callable, *args: Any, **kwargs: Any) -> Any:
-        interleaver, path, _ = state.active()
+        interleaver, path = locate()
         if interleaver is None:
             return fn(*args, **kwargs)
-        return _run_op(interleaver, f"{path}.{location}", fn, args, kwargs)
+        return run_op(interleaver, f"{path}.{location}", fn, args, kwargs)
 
     return op
 
 
-def _make_nested_op(interleaver: Any, prefix: str) -> Callable:
-    """Build the ``__nnsight_op__`` for a source-instrumented *called* function.
-
-    Like `_make_op`, but the location namespace is fixed to ``prefix`` (the
-    drilled-into op's path) rather than resolved from a module's live state — the
-    callable isn't a module and has no `_State`. ``location`` already carries
-    the ``source.`` prefix (added by `_Instrument`), so its operations land
-    under ``{prefix}.source.{label}``.
-    """
-
-    def op(location: str, fn: Callable, *args: Any, **kwargs: Any) -> Any:
-        if not interleaver.interleaving:
-            return fn(*args, **kwargs)
-        return _run_op(interleaver, f"{prefix}.{location}", fn, args, kwargs)
-
-    return op
-
-
-def _build_instrumented(fn: Callable, compiled: Compiled, op: Callable) -> Callable:
-    """Materialize a source-instrumented copy of ``fn`` that calls ``op`` per call site.
-
-    ``compiled`` is ``fn``'s instrumented code (from `_compiled`); ``op`` is the
-    `_make_nested_op` to bind as its ``__nnsight_op__`` global. Bound methods
-    are rebuilt from their underlying function and re-bound to the same instance, so
-    the recompiled body still receives ``self``.
-    """
-    if inspect.ismethod(fn):
-        target, receiver = fn.__func__, fn.__self__
-    else:
-        target, receiver = fn, None
-    globals_ = {**target.__globals__, OP: op}
-    instrumented = FunctionType(
-        compiled.code, globals_, target.__name__, target.__defaults__, None
-    )
-    if target.__kwdefaults__:
-        instrumented.__kwdefaults__ = target.__kwdefaults__
-    return instrumented.__get__(receiver) if receiver is not None else instrumented
-
-
-def _run_body(state: "_State", module: Any, args: tuple, kwargs: dict) -> Any:
+def run_body(state: "State", module: Any, args: tuple, kwargs: dict) -> Any:
     """Run the module's body, honouring accelerate's device-alignment hook.
 
     ``accelerate.add_hook_to_module`` installs alignment by replacing
@@ -454,11 +511,33 @@ def _run_body(state: "_State", module: Any, args: tuple, kwargs: dict) -> Any:
     return hook.post_forward(module, output)
 
 
-def _make_controller(module: Any, state: "_State") -> Callable:
+def _as_fragment(interleaver: Any, location: str, value: Any) -> Any:
+    """A ``.skip`` replacement, cut down to this device's piece of the location.
+
+    Everything past the handoff assumes the value arriving is one device's piece.
+    A replacement is not: the user built it, so on a sharded runtime it is already
+    the whole thing on every device. Cutting it down here means the handoff serves
+    it exactly like a value the module produced, and nothing downstream — not
+    [`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle],
+    not a runtime's [`Fragments`][nnsight.intervention.fragments.Fragments] — needs
+    a second kind of value to reason about.
+
+    Only the skip branch reaches this, so it costs an ordinary forward nothing.
+    Without it a row-parallel skip was reassembled as though the module had
+    produced it: every rank read back ``world_size`` times what it wrote, and the
+    model carried that forward, with nothing raising.
+    """
+    fragments = interleaver.fragments
+    if fragments is not None and fragments.enabled and fragments.fragmented(location):
+        return fragments.split(location, value)
+    return value
+
+
+def make_controller(module: Any, state: "State") -> Callable:
     """Build the forward installed on an instrumented module: the module's handoff.
 
     This is where a module's ``.input``, ``.skip`` and ``.output`` reach the
-    interleaver -- the same three handles [`_run_op`][nnsight.intervention.source._run_op] emits for an operation,
+    interleaver -- the same three handles [`run_op`][nnsight.intervention.source.run_op] emits for an operation,
     one level up. Being the forward rather than a hook keeps the module on
     PyTorch's fast call path, and it runs inside the module's own hooks, so a
     runtime that keeps collectives in them sees the pre-collective value here --
@@ -479,33 +558,34 @@ def _make_controller(module: Any, state: "_State") -> Callable:
         module = module_ref()
         interleaver, _, locations = state.active()
         if interleaver is None:
-            return _run_body(state, module, args, kwargs)
+            return run_body(state, module, args, kwargs)
         handle = interleaver.handle
         args, kwargs = handle(locations[0], (args, kwargs))
-        output = handle(locations[1], _NO_SKIP)  # the skip gate
-        if output is _NO_SKIP:
-            output = _run_body(state, module, args, kwargs)
-        return handle(locations[2], output)
+        output = handle(locations[1], NO_SKIP)  # the skip gate
+        if output is NO_SKIP:
+            return handle(locations[2], run_body(state, module, args, kwargs))
+        # A skipped module's output is the replacement the worker supplied.
+        return handle(locations[2], _as_fragment(interleaver, locations[2], output))
 
     return controller
 
 
-def install_controller(envoy: "Envoy") -> _State:
+def install_controller(envoy: "Envoy") -> State:
     """Install the controller forward on ``envoy``'s module once; (re)bind and return
-    its `_State`.
+    its `State`.
 
     Installed directly into the module's ``__dict__`` (shadowing the class method
     for ``__call__``) and left there permanently — inert outside a trace. The body
     defaults to the original forward; [`install_source`][nnsight.intervention.source.install_source] upgrades it.
     """
     module = envoy._module
-    state = module.__dict__.get(_STATE)
+    state = module.__dict__.get(STATE)
     if state is None:
         # Store the *unbound* forward (a bound method would pin the module, and the
         # module holds this state — a cycle); the controller supplies the module.
-        state = _State(type(module).forward)
-        module.__dict__[_STATE] = state
-        module.__dict__["forward"] = _make_controller(module, state)
+        state = State(type(module).forward)
+        module.__dict__[STATE] = state
+        module.__dict__["forward"] = make_controller(module, state)
     # Register this envoy's interleaver (weakly) under its path, so several envoys
     # can share the module and each routes to its own trace.
     state.register(envoy.interleaver, envoy.path)
@@ -518,19 +598,15 @@ def install_source(envoy: "Envoy") -> Compiled:
     Returns the module's [`Compiled`][nnsight.intervention.source.Compiled]. Upgrades the controller's body to the
     instrumented forward (built once per module, from code cached per code object).
     """
-    # transformers wraps most forwards in decorators (kwarg shims, output
-    # post-processing), which close over the function they wrap and so can't be
-    # recompiled directly. Peel them, instrument the real forward, then rebuild
-    # the decorators around it so their behaviour still runs.
-    func, chain = _decorator_chain(type(envoy._module).forward)
-    compiled = _compiled(func)  # raises if it can't
-
     state = install_controller(envoy)
     if not state.sourced:
-        # Unbound (the controller passes the module); a bound method would pin it.
-        state.body = _rewrap(chain, _build_instrumented(func, compiled, _make_op(state)))
+        # The class's forward: unbound (the controller passes the module), and a
+        # bound method would pin it.
+        state.body, state.compiled = instrument(
+            type(envoy._module).forward, make_op(lambda: state.active()[:2])
+        )
         state.sourced = True
-    return compiled
+    return state.compiled
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +654,7 @@ class SourceEnvoy:
 
             with model.trace(prompt):
                 attn = model.transformer.h[0].attn.source
-                out = attn.attention_interface_0.source.attn_output_transpose_0.output.save()
+                out = attn.attention_interface_1.source.attn_output_transpose_0.output.save()
     """
 
     def __init__(
@@ -589,11 +665,11 @@ class SourceEnvoy:
         source: str,
         line: int,
     ) -> None:
-        self._envoy = envoy
+        self.envoy = envoy
         self.name = name
         self.path = path
-        self._source = source
-        self._line = line
+        self.text = source
+        self.line = line
 
     @property
     def source(self) -> "Source":
@@ -614,17 +690,17 @@ class SourceEnvoy:
 
         Examples:
             >>> with model.trace(prompt):
-            ...     attn = model.transformer.h[0].attn.source.attention_interface_0
+            ...     attn = model.transformer.h[0].attn.source.attention_interface_1
             ...     out = attn.source.attn_output_transpose_0.output.save()
         """
-        interleaver = self._envoy.interleaver
+        interleaver = self.envoy.interleaver
         if not interleaver.interleaving:
             raise SourceNotAvailable(
                 "recursive `.source` is only available inside a trace"
             )
         if self.path not in interleaver.sourced:
             # Mark requested (None placeholder), then park until the operation fires
-            # and the model side hands back the live callable (see _run_op). Build
+            # and the model side hands back the live callable (see run_op). Build
             # and cache its instrumented copy so later fires this run reuse it.
             interleaver.sourced[self.path] = None
             fn = Mediator.value(f"{self.path}.fn")
@@ -633,12 +709,15 @@ class SourceEnvoy:
                     f"{self.name!r} calls a submodule; call `.source` on that "
                     f"submodule directly instead of drilling into the call"
                 )
-            compiled = _compiled(fn)  # raises SourceNotAvailable if it can't
-            instrumented = _build_instrumented(
-                fn, compiled, _make_nested_op(interleaver, self.path)
+            if fn is bind:
+                raise SourceNotAvailable(
+                    f"{self.name!r} is an assignment, not a call; there is no "
+                    f"function to drill into"
+                )
+            interleaver.sourced[self.path] = instrument(  # raises SourceNotAvailable if it can't
+                fn, make_op(lambda: (interleaver, self.path) if interleaver.interleaving else (None, None))
             )
-            interleaver.sourced[self.path] = (instrumented, compiled)
-        return Source(self._envoy, prefix=self.path, compiled=interleaver.sourced[self.path][1])
+        return Source(self.envoy, prefix=self.path, compiled=interleaver.sourced[self.path][1])
 
     @eproperty
     def output(self, value: Any) -> Any:
@@ -726,10 +805,10 @@ class SourceEnvoy:
                 --> h = torch.relu(self.fc1(x)) <--
                     return self.fc2(h)
         """
-        source_lines = self._source.split("\n")
-        # ._line is 1-based; -2 lands in the body frame where the highlighted line
+        source_lines = self.text.split("\n")
+        # .line is 1-based; -2 lands in the body frame where the highlighted line
         # is index (line_number + 1) into source_lines.
-        line_number = self._line - 2
+        line_number = self.line - 2
         start = max(0, line_number - 5)
         end = min(len(source_lines) - 1, line_number + 8)
 
@@ -756,19 +835,27 @@ class Source:
     ``self.fc1(x)`` → ``self_fc1_0``, ``torch.relu(...)`` → ``torch_relu_0``. The
     occurrence counter is per name and runs in execution order (nested calls run
     inner-first, so the inner call gets ``_0``); two ``torch.relu(...)`` calls are
-    therefore ``torch_relu_0`` and ``torch_relu_1``. Index in with that name to get
-    a [`SourceEnvoy`][nnsight.intervention.source.SourceEnvoy]::
+    therefore ``torch_relu_0`` and ``torch_relu_1``. Every assignment is an
+    operation too, named ``{target}_{occurrence}`` — ``h = q @ k`` gives
+    ``h_0``, whose ``.output`` is the assigned value — so a value that is not
+    a call's return (a matmul, a running state inside a loop) is reachable by the
+    name the forward gives it. Index in with that name to get a
+    [`SourceEnvoy`][nnsight.intervention.source.SourceEnvoy]::
 
         model.layer1.source.torch_relu_0    # -> SourceEnvoy for the relu call
+        model.layer1.source.h_0        # -> SourceEnvoy for `h = ...`
 
     You rarely need to memorize the names: ``print(model.layer1.source)`` renders
     the whole ``forward`` with each operation labelled at its call site, and
     ``print(model.layer1.source.torch_relu_0)`` zooms in on one. Iterating a
     ``Source`` yields its operations in execution order.
 
-    Source values are only meaningful inside a trace, and ordinary inference is
-    unaffected. Requesting an operation on a ``forward`` whose source can't be
-    recovered (e.g. a decorated ``forward``) raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable].
+    Source values are only meaningful inside a trace: outside one every operation
+    calls straight through, which costs an idle model a few percent and changes
+    nothing about what it computes. Requesting an operation on a ``forward`` with no
+    recoverable Python source — a builtin or C function — raises
+    [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable]; a
+    decorated ``forward`` is peeled and instrumented.
 
     A ``Source`` also decomposes a *called function* — reached as
     ``some_op.source`` (see [`SourceEnvoy.source`][nnsight.intervention.source.SourceEnvoy.source]) — the same way, one level
@@ -793,22 +880,22 @@ class Source:
         # `compiled` is the instrumented forward (a module's, from
         # `install_source`, or a drilled-into callable's); its operations hang off
         # `prefix`.
-        self._envoy = envoy
-        self._compiled = compiled
-        self._prefix = f"{prefix}.source"
+        self.envoy = envoy
+        self.compiled = compiled
+        self.prefix = f"{prefix}.source"
 
     @property
-    def _names(self) -> tuple[str, ...]:
-        return self._compiled.names
+    def names(self) -> tuple[str, ...]:
+        return self.compiled.names
 
-    def _node(self, name: str) -> SourceEnvoy:
+    def node(self, name: str) -> SourceEnvoy:
         """A [`SourceEnvoy`][nnsight.intervention.source.SourceEnvoy] for ``name``, carrying source text for its repr."""
         return SourceEnvoy(
-            self._envoy,
+            self.envoy,
             name,
-            f"{self._prefix}.{name}",
-            self._compiled.source,
-            self._compiled.lines[name],
+            f"{self.prefix}.{name}",
+            self.compiled.source,
+            self.compiled.lines[name],
         )
 
     def __getattr__(self, name: str) -> SourceEnvoy:
@@ -821,14 +908,16 @@ class Source:
             >>> model.layer1.source.self_fc1_0  # -> SourceEnvoy
             >>> model.layer1.source.nope_0      # AttributeError: ... available: self_fc1_0, torch_relu_0, self_fc2_0
         """
-        if name.startswith("_"):
+        if name.startswith("__"):
+            # Dunder probes (pickle, copy, IPython) are not operations; a private
+            # helper's op (`_grouped_linear_0`) is.
             raise AttributeError(name)
-        if name not in self._compiled.names:
-            available = ", ".join(self._compiled.names) or "(none)"
+        if name not in self.compiled.names:
+            available = ", ".join(self.compiled.names) or "(none)"
             raise AttributeError(
-                f"{self._prefix!r} has no operation {name!r}; available: {available}"
+                f"{self.prefix!r} has no operation {name!r}; available: {available}"
             )
-        return self._node(name)
+        return self.node(name)
 
     def __iter__(self) -> Iterator[SourceEnvoy]:
         """Iterate the operations in execution order, yielding a [`SourceEnvoy`][nnsight.intervention.source.SourceEnvoy] each.
@@ -837,8 +926,8 @@ class Source:
             >>> [op.name for op in model.layer1.source]
             ['self_fc1_0', 'torch_relu_0', 'self_fc2_0']
         """
-        for name in self._compiled.names:
-            yield self._node(name)
+        for name in self.compiled.names:
+            yield self.node(name)
 
     def __repr__(self) -> str:
         """The whole ``forward`` source with every op labelled at its call site.
@@ -856,13 +945,13 @@ class Source:
              torch_relu_0 ->  +     ...
              self_fc2_0   ->  1     return self.fc2(h)
         """
-        names = self._compiled.names
-        # ._compiled.lines is 1-based; -2 matches the loop below, which enumerates
+        names = self.compiled.names
+        # .compiled.lines is 1-based; -2 matches the loop below, which enumerates
         # source_lines[1:] (the body) from 0.
-        line_numbers = {name: self._compiled.lines[name] - 2 for name in names}
+        line_numbers = {name: self.compiled.lines[name] - 2 for name in names}
         max_name_length = max((len(name) for name in names), default=0)
 
-        source_lines = self._compiled.source.split("\n")
+        source_lines = self.compiled.source.split("\n")
         formatted = [" " * (max_name_length + 6) + "* " + source_lines[0]]
 
         ops_by_line: dict[int, list[str]] = {}

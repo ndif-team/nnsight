@@ -135,8 +135,8 @@ class Registration:
         The async engine's ``collective_rpc`` is a coroutine instead, and there is
         no safe way to finish one from here — driving it on a loop of our own
         deadlocks against the loop the engine is already running on. So this
-        refuses rather than returning a coroutine nobody awaits, which is what it
-        used to do: the block was never installed and nothing said so.
+        refuses rather than returning a coroutine nobody awaits — which would
+        leave the block uninstalled with nothing saying so.
         """
         result = self._collective(method, args)
         if inspect.iscoroutine(result):

@@ -13,9 +13,9 @@ rather than assigned once up front. The row math itself is unchanged from
 narrowing to ``[start, size]`` selects exactly a request's tokens.
 
 Gathering a sharded value is *not* here — see
-[`fragments`][nnsight.modeling.vllm.fragments]. It used to be, and the split is
-the point: narrowing happens once per parked worker, while a collective must
-happen once per value however many workers read it.
+[`fragments`][nnsight.modeling.vllm.fragments]. The split is the point: narrowing
+happens once per parked worker, while a collective must happen once per value
+however many workers read it.
 """
 
 from __future__ import annotations

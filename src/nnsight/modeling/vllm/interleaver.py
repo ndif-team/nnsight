@@ -84,6 +84,30 @@ class VLLMInterleaver(Interleaver):
         super().__init__(**kwargs)
         self.taps = frozenset(taps)
 
+    def instrument(self, envoy: Any) -> None:
+        """Route the module through this interleaver, and open its forward if a tap reaches inside.
+
+        A tap on an operation — ``{path}.source.{op}.output`` — is served by the
+        module's source-instrumented forward, which hands each operation to
+        `handle` as it runs. That forward is installed lazily, on the first
+        ``.source`` access, and the graph recording runs before any trace could
+        ask for it; so install it here, as the tree is built, for exactly the
+        modules the taps name — and check the op exists while a typo is still a
+        load error rather than a request that parks forever.
+        """
+        super().instrument(envoy)
+        prefix = f"{envoy.path}.source."
+        ops = {tap[len(prefix):].rpartition(".")[0] for tap in self.taps if tap.startswith(prefix)}
+        if not ops:
+            return
+        source = envoy.source  # installs the instrumented forward; raises SourceNotAvailable
+        missing = sorted(op for op in ops if op not in source.names)
+        if missing:
+            raise ValueError(
+                f"Tap on {envoy.path}.source: its forward has no operation "
+                f"{missing[0]!r}. Its operations are {list(source.names)}."
+            )
+
     def handle(self, provider: str, value: Any) -> Any:
         # While vLLM is recording a graph, a tap's handoff is not served now but
         # registered to be replayed at this point of every later step. The runner

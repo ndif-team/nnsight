@@ -54,3 +54,53 @@ class TestChat:
             chat_model.model.embed_tokens.output[:] = 0
             zeroed = chat_model.output.logits[0, -1].save()
         assert not torch.allclose(base, zeroed)
+
+
+class TestPipelineOwnChatClass:
+    """``any-to-any`` defines its own ``Chat`` and isinstance-checks it in
+    preprocess; wrapping in the base ``Chat`` falls through to its raw-dict
+    branch. The trace wraps with the pipeline module's own class instead."""
+
+    REPO = "yujiepan/gemma-3n-tiny-random"
+
+    @pytest.fixture(scope="class")
+    def any_to_any(self):
+        pytest.importorskip("PIL")
+        pytest.importorskip("timm")  # the tiny checkpoint's vision tower
+        # AnyToAnyPipeline requires librosa at construction whenever the model
+        # has an audio input modality, even for a text/image-only call. librosa
+        # needs numba, which trails new Python releases — hence a skip rather
+        # than a dev dependency (CI installs it where numba exists).
+        pytest.importorskip("librosa")
+        return TransformersModel(self.REPO, task="any-to-any", dispatch=True)
+
+    @torch.no_grad()
+    def test_multimodal_chat_traces(self, any_to_any):
+        from PIL import Image
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": Image.new("RGB", (64, 64))},
+                    {"type": "text", "text": "What is this?"},
+                ],
+            }
+        ]
+        # The expected length comes from the same templating the pipeline does.
+        encoded = any_to_any.processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            return_dict=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        )
+        with any_to_any.trace(messages):
+            logits = any_to_any.output.logits.save()
+        assert logits.shape[:2] == tuple(encoded["input_ids"].shape)
+
+    @torch.no_grad()
+    def test_plain_text_still_traces(self, any_to_any):
+        with any_to_any.trace("Hello world"):
+            logits = any_to_any.output.logits.save()
+        assert logits.shape[0] == 1

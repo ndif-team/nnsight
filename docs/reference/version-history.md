@@ -40,7 +40,9 @@ The `eproperty` descriptor is back, with a new API. Decorate a stub with `@eprop
 
 ### Iteration
 
-Target occurrences across a repeated run with `tracer.iter[...]` (loop form: `for step in tracer.iter[:3]:`) or `tracer.all()`. The `with tracer.iter[...]:` block still works but is deprecated. `tracer.next()`, `model.iter`, and `model.all()` are gone or deprecated.
+Target occurrences across a repeated run with `tracer.iter[...]` (loop form: `for step in tracer.iter[:3]:`) or `tracer.all()`. The `with tracer.iter[...]:` block still works but is deprecated. `tracer.next()` is gone; `model.iter` and `model.all()` are deprecated aliases of the tracer's.
+
+A loop that asks for a step the run does not make — `iter[:8]` over three generated steps, or an open `iter[:]` / `all()`, which ends by outrunning the model by construction — is cut short there with a warning: values saved inside the loop are kept, and the statements after it are discarded, so the result looks complete while being shorter than the bound. Old nnsight bounded `tracer.all()` internally, so code written against it should hold the run to the count (`min_new_tokens=` on transformers, `min_tokens=` or `ignore_eos=True` on vLLM — none of which holds a run a stop string ends) or move its trailing statements into a separate `tracer.invoke()`.
 
 ### Config
 
@@ -56,7 +58,53 @@ Target occurrences across a repeated run with `tracer.iter[...]` (loop form: `fo
 
 ### Removed v0.4-era namespace
 
-`nnsight.apply()`, `nnsight.log()`, `nnsight.local()`, `nnsight.cond()`, `nnsight.iter()`, `nnsight.session()`, and the `nnsight.list/dict/int/...` type wrappers are removed — use plain Python and `model.session()`.
+`nnsight.apply()`, `nnsight.log()`, `nnsight.local()`, `nnsight.cond()`, `nnsight.iter()`, `nnsight.session()`, and the `nnsight.list/dict/int/...` type wrappers are removed — use plain Python and `model.session()`. Each reports itself the same way, naming no replacement:
+
+```
+AttributeError: module 'nnsight' has no attribute 'list'
+```
+
+`CONFIG.APP.CROSS_INVOKER`, `CACHE_DIR`, and `TRACE_CACHING` are gone the same way (`AttributeError: 'AppConfig' object has no attribute 'CROSS_INVOKER'`), and `tracer.local()` / `tracer.next()` / `module.next()` report a missing attribute on the tracer or envoy. A saved value is the value, so `.value` on one raises `AttributeError: 'Tensor' object has no attribute 'value'`.
+
+### Deprecations
+
+Everything still reachable under an old name warns under `nnsight.NNsightDeprecationWarning`, a `FutureWarning` — the category Python shows regardless of where the call is, so a package or helper module being ported sees the same warnings a script does. Silence nnsight's alone with `warnings.filterwarnings("ignore", category=nnsight.NNsightDeprecationWarning)`; nnsight registers no filters of its own.
+
+The whole inventory, with the message each one raises:
+
+| Old | Message | Use instead |
+|---|---|---|
+| `LanguageModel(repo)` | `LanguageModel is deprecated; use TransformersModel(repo_id, task='text-generation') instead.` | `TransformersModel(repo, task="text-generation")` |
+| `VisionLanguageModel(repo)` | `VisionLanguageModel is deprecated; use TransformersModel(repo_id, task='image-text-to-text') instead.` | `TransformersModel(repo, task="image-text-to-text")` |
+| `model.iter[...]` | `model.iter is deprecated; use tracer.iter instead.` | `tracer.iter[...]` |
+| `model.all()` | `model.all() is deprecated; use tracer.all() instead.` | `tracer.all()` |
+| `with tracer.iter[...]:` / `with tracer.all():` | ``The `with tracer.iter[...]:` / `with tracer.all():` block form is deprecated; use `for step in tracer.iter[...]:` instead.`` | `for step in tracer.iter[...]:` |
+| `model.generator.output` (read or write) | `model.generator.output is deprecated; use tracer.result instead (model.generator.streamer.output still gives per-step tokens).` | `tracer.result` |
+| `nnsight.ndif_status()` | `nnsight.ndif_status() is deprecated; use nnsight.status() instead.` | `nnsight.status()` |
+
+`model.generator.output` and `tracer.result` carry the same tensor — the prompt's ids followed by the generated ones — so that one is a straight rename. Per-step tokens are `model.generator.streamer.output`, which is not deprecated.
+
+### `.source`: assignments are operations; decorated forwards are instrumented
+
+Every assignment in an instrumented forward is an operation, `{target}_{n}`, on
+the same per-name counter as calls; its `.output` is the assigned value. Values
+that are not a call's return — a product, a loop's running state — are reachable
+by name, one fire per loop iteration. **Labels shift where a forward binds a name
+and then calls it**: GPT-2's attention call is now `attention_interface_1`
+(`attention_interface_0` is the line that chooses the implementation). Requesting
+the old label raises nothing — it returns the assigned value instead — so update
+any code that used it.
+
+Decorated forwards no longer raise `SourceNotAvailable`: a wrapper that calls the
+function it closes over is peeled and rebuilt around the instrumented function; a
+dispatching wrapper (transformers' `experts_implementation`) is instrumented as it
+is and shows the dispatch, so `experts.source.experts_forward_1.source` reaches the
+implementation that ran. Closures and `super()` forwards are instrumented too.
+`SourceNotAvailable` now means only "no Python source" (a builtin or C function).
+
+### Tensor parallelism on the transformers DTensor backend
+
+Sharding a model across GPUs is `TransformersModel(..., distributed_config=DistributedConfig(tp_size=N))` under `torchrun`, and needs **transformers >= 5.16**. 5.16 rebuilt tensor parallelism on DTensor: the sharding plan moved off the individual modules (up to 5.15 each sharded module carried an `_hf_tp_plan` stamp) onto the model as a glob-pattern `_tp_plan`, the parallel style's transforms moved from forward hooks into a `forward` replacement — the same slot nnsight's controller uses — and the `all_gather` / `split` helpers were removed. nnsight reads the model-level plan and installs its controller around the style's wrapper, so sharded activations are gathered and interventions read and write whole tensors as they would on one GPU. On 5.15 or earlier nothing is recognized as sharded and a trace sees one rank's slice. See [docs/models/tensor-parallel.md](../models/tensor-parallel.md).
 
 ## Where to read more
 
