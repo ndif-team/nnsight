@@ -140,10 +140,10 @@ def wants_tensor_parallel(target: Any, load_kwargs: dict) -> bool:
     class and nothing else, while a false negative silently leaves ad-hoc calls
     handing back slices. Hence ``tp_plan`` counts even with no ``tp_size``.
 
-    Note this asks a *wider* question than
-    ``HuggingFaceModel._refuse_impossible_tp``, which reads ``distributed_config``
-    alone: a false positive there would refuse a load, so it only counts a degree
-    that was asked for explicitly.
+    Note this still asks a *wider* question than
+    ``HuggingFaceModel._refuse_impossible_tp``: a custom ``tp_plan`` dict counts
+    here (the model may come back sharded) but is not degree-checked there (it
+    overrides the published plan the check would read).
     """
     if isinstance(target, torch.nn.Module):
         # transformers keeps both on the model. `_tp_plan` alone proves nothing —

@@ -1049,3 +1049,41 @@ class TestEveryLoadPathChecks:
             transformers.AutoConfig.from_pretrained = original
 
         assert read == [], "the no-tensor-parallel path read a config it did not need"
+
+    def _probe(self):
+        from nnsight.modeling.huggingface import HuggingFaceModel
+
+        class Probe(HuggingFaceModel):
+            def __init__(self):  # bypass Envoy construction; only the check matters
+                self.revision = None
+
+        return Probe()
+
+    def test_a_bare_tp_plan_auto_counts_as_a_request(self, monkeypatch):
+        # ``tp_plan="auto"`` names no degree of its own — transformers shards
+        # over whatever ranks the launcher provided — so the world size is the
+        # degree being asked for. gpt2 publishes no plan, which makes a two-rank
+        # ask the silent full-copy-per-rank case the check exists to refuse.
+        from nnsight.modeling.tp import UnshardableCheckpoint
+
+        monkeypatch.setenv("WORLD_SIZE", "2")
+        with pytest.raises(UnshardableCheckpoint):
+            self._probe()._refuse_impossible_tp(
+                "openai-community/gpt2", {"tp_plan": "auto"}
+            )
+
+    def test_a_lone_rank_asking_auto_asks_for_nothing(self, monkeypatch):
+        # With one rank there is nothing to shard over, so there is no degree to
+        # check — and no config read, same as the ordinary path.
+        monkeypatch.delenv("WORLD_SIZE", raising=False)
+        self._probe()._refuse_impossible_tp(
+            "openai-community/gpt2", {"tp_plan": "auto"}
+        )
+
+    def test_a_custom_plan_dict_is_not_degree_checked(self, monkeypatch):
+        # A dict plan overrides the checkpoint's published plan, so the published
+        # plan's limit — which is all the check can read — says nothing about it.
+        monkeypatch.setenv("WORLD_SIZE", "2")
+        self._probe()._refuse_impossible_tp(
+            "openai-community/gpt2", {"tp_plan": {"h.*.mlp.c_fc": "colwise"}}
+        )

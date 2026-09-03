@@ -152,12 +152,11 @@ class HuggingFaceModel(Remotable):
         differently on each path, and a check that silently sees nothing is worse
         than no check.
 
-        It reads ``distributed_config`` only. A bare ``tp_plan="auto"`` goes
-        straight to transformers, so this never sees it and the degree goes
-        unchecked -- which is the one way to reach the outcome above. The docs say
-        to ask with ``distributed_config``; see
-        [`wants_tensor_parallel`][nnsight.modeling.tp.envoys.wants_tensor_parallel],
-        which does count a ``tp_plan`` because erring towards True is free there.
+        A bare ``tp_plan="auto"`` counts as a request too: it names no degree of
+        its own -- transformers shards over whatever ranks the launcher provided
+        -- so the world size is the degree being asked for. A *custom* plan (a
+        dict of patterns) overrides the checkpoint's published plan, so the
+        published plan's limit says nothing about it; it passes unchecked.
         """
         from .tp import (
             check_tp_request,
@@ -167,6 +166,17 @@ class HuggingFaceModel(Remotable):
 
         distributed = kwargs.get("distributed_config")
         tp_size = requested_tp_size(distributed)
+        if tp_size is None and kwargs.get("tp_plan") == "auto":
+            import os
+
+            import torch.distributed as dist
+
+            world = (
+                dist.get_world_size()
+                if dist.is_available() and dist.is_initialized()
+                else int(os.environ.get("WORLD_SIZE", "1"))
+            )
+            tp_size = world if world > 1 else None
         if tp_size is None:
             # The ordinary path: no degree asked for, so no config to read.
             return

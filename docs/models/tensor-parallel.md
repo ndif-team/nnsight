@@ -66,15 +66,16 @@ with model.trace(prompt):
     logits = model.lm_head.output.save()
 ```
 
-> **Ask with `distributed_config`, not `tp_plan`.** transformers also accepts a
-> bare `tp_plan="auto"`, and it does shard a checkpoint that has a plan — but it
-> travels straight to transformers, so nnsight never sees the request and never
-> runs the degree check below. On a checkpoint that publishes no plan, that is
-> the silent outcome the check exists to prevent: gpt2 under
-> `torchrun --nproc_per_node=2` loads its full 0.5 GB on *both* ranks, answers
-> correctly, and reports `model.interleaver.fragments.enabled` as `False`.
-> `distributed_config=DistributedConfig(tp_size=N)` is the form that gets
-> checked.
+> **`tp_plan="auto"` is checked too.** A bare `tp_plan="auto"` names no degree
+> of its own — transformers shards over whatever ranks the launcher provided —
+> so nnsight reads the degree off the world size and runs the same check below.
+> gpt2 under `torchrun --nproc_per_node=2` is refused with
+> `UnshardableCheckpoint` rather than silently loading its full 0.5 GB on both
+> ranks. A *custom* plan (a dict of patterns) overrides the checkpoint's
+> published plan, so the published plan's limit says nothing about it and it
+> loads unchecked. Prefer `distributed_config=DistributedConfig(tp_size=N)`
+> anyway: it states the degree in the code, and it is the only form that can ask
+> for expert parallelism.
 
 ### When the load fails
 
