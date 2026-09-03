@@ -461,7 +461,11 @@ class TestIterationBounds:
     def test_a_generation_cut_short_is_not_an_error(self, vllm_gpt2, MSG_prompt):
         # The count need not be absurd to go unmet: this request stops on its
         # second token — what an EOS does to a generation — while the loop is
-        # still bound to six. The trace completes with what the run made.
+        # still bound to six. The trace completes with what the run made. The
+        # exact step count is the output processor's business (it checks
+        # stop_token_ids in the client and aborts the request, so the engine can
+        # run a step past the stop token); what this asserts is that the loop
+        # was cut short of its bound and nothing raised.
         york = vllm_gpt2.tokenizer.encode(" York")
         with vllm_gpt2.trace(
             MSG_prompt,
@@ -474,7 +478,7 @@ class TestIterationBounds:
             for _ in tracer.iter[:6]:
                 steps.append(vllm_gpt2.logits.argmax(dim=-1))
 
-        assert len(steps) == 2
+        assert 2 <= len(steps) < 6
 
     @torch.no_grad()
     def test_open_iter_past_the_end_is_not_an_error(self, vllm_gpt2, MSG_prompt):

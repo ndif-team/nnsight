@@ -1,6 +1,6 @@
 ---
 title: A Module Value Was Never Provided
-one_liner: "OutOfOrderError at the end of a run: a worker was still parked on a location the model never reached — the module didn't fire, or a loop asked for more steps than the run made."
+one_liner: "At the end of a run a worker was still parked on a location the model never reached — the module didn't fire (OutOfOrderError), or a loop asked for more steps than the run made (a warning and a cut-short loop)."
 tags: [error, execution-order, dangling-worker]
 related: [docs/errors/out-of-order-error.md, docs/errors/cannot-access-outside-interleaving.md, docs/usage/iter-all-next.md, docs/usage/scan.md, docs/concepts/threading-and-mediators.md]
 sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/iterator.py]
@@ -21,19 +21,12 @@ A worker parked outside any loop — the module simply never fired:
 nnsight.intervention.interleaver.OutOfOrderError: 'model.transformer.h.5.output.i0' was requested but the model already ran past it
 ```
 
-A worker parked inside a loop that named an end — `iter[:8]`, `iter[2]`,
-`iter[[0, 2, 7]]` — which the run did not reach:
+A worker parked inside a `tracer.iter` loop — bounded (`iter[:8]`, `iter[2]`,
+`iter[[0, 2, 7]]`) or open (`iter[:]`, `all()`) — on a step the run did not make.
+That is a warning, not an exception:
 
 ```
-nnsight.intervention.interleaver.OutOfOrderError: 'model.transformer.h.11.output.i3' was never reached: the loop asked for iteration 3 of 'model.transformer.h.11.output' and the run reached it 3 times, so the loop was cut short and nothing after it ran. Bound the loop to the iterations the run makes — a generation is held to a step count by `min_new_tokens=` on transformers and by `min_tokens=` or `ignore_eos=True` on vLLM, though neither holds a run that a stop string ends — or loop with `tracer.all()` and put what follows the loop in a separate `tracer.invoke()`.
-```
-
-A worker parked inside an **open** loop — `tracer.iter[:]` or `tracer.all()` —
-which ends by asking for a step the run does not make. That one is a warning, not
-an exception:
-
-```
-UserWarning: 'model.transformer.h.11.output.i3' was never reached: an open `tracer.iter[:]` / `tracer.all()` loop ends by asking for a step the run does not make. Values saved inside the loop are kept; the statements after it did not run.
+UserWarning: 'model.transformer.h.11.output.i3' was never reached: the loop asked for a step the run did not make, so it was cut short — values saved inside the loop are kept, and the statements after it did not run. An open `tracer.iter[:]` / `tracer.all()` loop ends this way by design. To hold a generation to a bounded loop's count, pass `min_new_tokens=` on transformers or `min_tokens=` / `ignore_eos=True` on vLLM; put what follows the loop in a separate `tracer.invoke()`.
 ```
 
 The location reads `<envoy.path>.<output|input>.i<occurrence>` — e.g.
@@ -63,12 +56,11 @@ stops early on an EOS, leaves the worker parked inside the loop body on a step
 that never comes. Unwinding it takes the worker out *at the loop*, so every
 statement the block has after the loop is discarded.
 
-Whether that is an error depends on what the loop claimed:
-
-| Loop | Outran the run | Why |
-|---|---|---|
-| `tracer.iter[:8]`, `tracer.iter[2]`, `tracer.iter[[0, 2, 7]]` | **raises** | The count is part of what the block says it does. Warning here would leave the names after the loop holding whatever they held before, so the block returns a stale value and says nothing about it. |
-| `tracer.iter[:]`, `tracer.iter[2:]`, `tracer.all()` | **warns** | An open loop has no end of its own; outrunning the model is how it finishes. Values saved inside it are kept — but the statements after it are lost the same way, which is what the warning says. |
+Bounded and open loops end the same way: the warning above, the loop's saved
+values kept, the statements after it dropped. An open loop has no end of its own
+— outrunning the model is how it finishes — while a bounded loop cut short hands
+back fewer values than the bound named. Either way the result looks complete, so
+check the `len()` of what you collected, or hold the run to the count.
 
 A body that reads locations out of order inside a loop strands the worker one
 occurrence past the loop's own selection, and surfaces here too — see
@@ -99,11 +91,13 @@ eval-mode short-circuits, and dispatch hide behind the module tree.
 A bound only holds if the generation makes that many steps, so pin both ends. On
 transformers that is `min_new_tokens=`; on vLLM it is `min_tokens=` or
 `ignore_eos=True`. Neither holds a run that a **stop string** ends — a
-`stop_strings=["Paris"]` generation still stops where it stops, and the loop still
-raises — so a run with stop conditions wants `tracer.all()` instead of a bound.
+`stop_strings=["Paris"]` generation still stops where it stops, and the loop is
+still cut short — so a run with stop conditions wants `tracer.all()` instead of a
+bound.
 
 ```python
-# WRONG — iter[:8] over a run that stops after 3 steps
+# WRONG — when an EOS stops this run after 3 steps, the loop warns, len(hs) == 3,
+# and `ids` is never bound — the statement after the loop did not run
 with model.generate("Hi", max_new_tokens=8) as tracer:
     hs = nnsight.save([])
     for step in tracer.iter[:8]:

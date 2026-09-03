@@ -249,8 +249,8 @@ it puts four obligations on the code:
    holds the shard once it has left the module that produced it, and the axis
    moves — attention's `view`/`transpose` puts it on the head dimension. So the
    trace names the axis and reassembles it, with `gather`/`shard`; see "Reading a
-   value between two sharded modules" below. Reaching for `.source` on a sharded
-   model warns, so this is not a surprise.
+   value between two sharded modules" below. Nothing warns when you reach for
+   `.source` on a sharded model — this page is the notice.
 
    A `.source` value taken from *inside* a sharded module is the subtle case: it
    is a `DTensor`, so its `.shape` reports the whole even though its data is this

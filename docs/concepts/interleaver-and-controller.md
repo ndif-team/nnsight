@@ -74,7 +74,7 @@ Because a **source operation** goes through `handle` every time it fires, an op 
 After the model returns, `check_dangling_mediators` (`interleaver.py`) inspects any worker still parked:
 
 - **`iteration == 0`** (a plain request the model ran past or never made): throw `OutOfOrderError` into the worker so the traceback points at the waiting line.
-- **`iteration != 0`** (an open-ended `tracer.iter[:]` that outran the model's steps): throw to unwind the worker's `finally` blocks, but catch it and **warn** rather than raise — reached steps' saved values are kept.
+- **`iteration != 0`** (a `tracer.iter` loop — bounded or open — that outran the model's steps): throw to unwind the worker's `finally` blocks, but catch it and **warn** rather than raise — reached steps' saved values are kept.
 - **`Event.BARRIER`** still pending: a barrier fewer blocks reached than it was built for — raise a `ValueError` pointing at the waiting line.
 
 ## Caches are post-intervention observers

@@ -102,14 +102,20 @@ restored on exit, so loops can nest. `tracer.all()` is `tracer.iter[:]`.
 ## The one rule
 
 **A loop must not ask for a step the run does not make.** A bound the run meets
-is fine and the code after the loop runs. A bound it does not meet raises
-`OutOfOrderError`, naming the iteration asked for and the count the run reached:
+is fine and the code after the loop runs. A loop that outruns the run is cut
+short there with a warning — what it saved is kept, and the statements after it
+do not run, so the result looks complete while being shorter than the bound.
+Check the `len()` of what you collected, or hold the run to the count:
 
 ```python
 with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
+    zeroed = nnsight.save([])
     for step in tracer.iter[:10]:                # 10 steps of a 3-step run
         model.transformer.h[0].output[:] = 0
-# OutOfOrderError: '...i3' was never reached: the loop asked for iteration 3 ...
+        zeroed.append(step)
+# UserWarning: '...i3' was never reached: the loop asked for a step the run
+# did not make, so it was cut short ...
+# len(zeroed) == 3
 ```
 
 `max_new_tokens` is an upper bound, so a bound matching it is safe only when
@@ -135,7 +141,7 @@ serves a trace applies the same policy.
 ### When the step count is unknown
 
 `tracer.iter[:]` / `tracer.all()` end *by* asking for a step the run does not
-make, so they warn rather than raise — and the same unwind still discards the
+make — the same warning and the same unwind, which still discards the
 statements after the loop. Anything you need afterwards goes in a separate empty
 invoke, which is its own worker:
 

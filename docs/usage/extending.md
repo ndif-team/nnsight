@@ -305,9 +305,10 @@ Non-matching modules stay the base `Envoy`. See
 - **Batching needs both `_batch_size` and `_batch`,** and the failure lands at
   trace time, not construction time. With only the default, a second input invoke
   raises `NNsight does not support batching multiple invokes`.
-- **A batched write has to keep its rows.** Assigning a replacement with a
-  different leading dim than the block owns raises
-  `A batched write has to keep its rows: ...` before the value reaches the model.
+- **A batched write has to keep its rows.** The splice back into the combined
+  batch is a plain `cat`, and nothing checks the height: a replacement with a
+  different leading dim than the block owns builds a batch that is no longer the
+  model's, and the mismatch surfaces in some later module — or not at all.
 - **A class-level attribute on an `Envoy`/`NNsight` subclass is shared across
   instances** — set per-instance config in `__init__`. (`_batcher_class` is meant
   to be class-level; per-instance config is not.)

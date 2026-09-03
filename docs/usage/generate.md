@@ -186,7 +186,7 @@ generation to N steps by suppressing EOS until then.
 
 ## Gotchas
 
-- **A `tracer.iter` loop must not ask for a step the run does not make.** A bound the run meets is fine and the code after the loop runs; a bound it does not meet raises `OutOfOrderError`. `max_new_tokens` is an upper bound, so pass `min_new_tokens=` when the loop's bound has to hold. An open `tracer.iter[:]` / `tracer.all()` ends by outrunning the run, warns, and drops the statements after the loop. See `docs/gotchas/iteration.md`.
+- **A `tracer.iter` loop must not ask for a step the run does not make.** A bound the run meets is fine and the code after the loop runs; a loop that outruns the run — bounded or open — warns, keeps what it saved, and drops the statements after the loop, so the result looks complete while being shorter than the bound. `max_new_tokens` is an upper bound, so pass `min_new_tokens=` when the loop's bound has to hold, and check the `len()` of what you collected. See `docs/gotchas/iteration.md`.
 - Always pass a stop bound (`max_new_tokens=` or a `generation_config`).
 - Within a step, modules must still be accessed in forward-pass order — inside an iteration loop an out-of-order write parks on the *next* step instead.
 - Reading `model.generator.output` for the finished ids is deprecated — use `tracer.result`.

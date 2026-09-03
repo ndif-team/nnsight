@@ -10,17 +10,17 @@ sources: [src/nnsight/intervention/iterator.py, src/nnsight/intervention/interle
 
 ## TL;DR
 
-- **A loop must not ask for a step the run does not make.** That is the whole
-  rule; bounded versus open is not the axis.
+- **A loop that asks for a step the run does not make is cut short there** —
+  bounded and open alike. It warns; it does not raise.
+- Cut short means: values saved inside the loop are kept, and the statements
+  after the loop do not run. The result can look complete — check the `len()`
+  of what you collected, or hold the run to the count.
 - A bound the run meets is fine, and the code after the loop runs.
   `for step in tracer.iter[:3]` against a three-step generation is correct.
-- A bound the run does not meet raises `OutOfOrderError`, naming the iteration
-  asked for and the count reached.
 - `max_new_tokens` is an upper bound — EOS or a stop string ends generation
   sooner. `min_new_tokens=N` holds a generation to N steps against EOS.
-- An open `tracer.iter[:]` / `tracer.all()` ends *by* outrunning the run, so it
-  warns instead. Values saved inside it are kept; the statements after it do not
-  run.
+- An open `tracer.iter[:]` / `tracer.all()` ends *by* outrunning the run — the
+  same warning is how it finishes.
 - The loop form is `for step in tracer.iter[...]:`. A `with tracer.iter[...]:`
   block is deprecated and warns.
 - `tracer.iter[N]` targets the `(N+1)`-th **occurrence** of a location. For a
@@ -33,20 +33,17 @@ sources: [src/nnsight/intervention/iterator.py, src/nnsight/intervention/interle
 
 ### Symptom
 
-```
-OutOfOrderError: 'model.transformer.h.6.output.i3' was never reached: the loop
-asked for iteration 3 of 'model.transformer.h.6.output' and the run reached it 3
-times, so the loop was cut short and nothing after it ran. ...
-```
-
-Or, from an open loop, the same situation as a warning and a name that is never
-bound afterwards:
+A list shorter than the bound you wrote, a name after the loop that never got
+bound — and this warning:
 
 ```
-UserWarning: 'model.transformer.h.6.output.i3' was never reached: an open
-`tracer.iter[:]` / `tracer.all()` loop ends by asking for a step the run does
-not make. Values saved inside the loop are kept; the statements after it did
-not run.
+UserWarning: 'model.transformer.h.6.output.i3' was never reached: the loop
+asked for a step the run did not make, so it was cut short — values saved
+inside the loop are kept, and the statements after it did not run. An open
+`tracer.iter[:]` / `tracer.all()` loop ends this way by design. To hold a
+generation to a bounded loop's count, pass `min_new_tokens=` on transformers
+or `min_tokens=` / `ignore_eos=True` on vLLM; put what follows the loop in a
+separate `tracer.invoke()`.
 ```
 
 ### Cause
@@ -57,10 +54,12 @@ model never runs, the worker stays parked there forever, and
 `check_dangling_mediators` unwinds it at the loop — which discards every
 statement the block has after the loop.
 
-Whether that is an error or a note depends on who chose the end. A bound you
-wrote (`iter[:10]`, `iter[2]`, `iter[[0, 2, 4]]`) is a claim about the run, so a
-run that cannot supply it raises. An open loop has no end of its own —
-outrunning the model is how it finishes — so it warns.
+Bounded and open loops end the same way. An open loop has no end of its own —
+outrunning the model is how it finishes. A bound the run does not meet
+(`iter[:10]` against three steps) is cut short at the last step the run made,
+with the warning above as the only signal. What the loop saved is kept, so the
+result *looks* complete: check the `len()` of what you collected, or hold the
+run to the count.
 
 ### Wrong code
 
@@ -70,7 +69,8 @@ with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
     for step in tracer.iter[:10]:        # 10 steps asked of a 3-step run
         steps.append(model.transformer.h[-1].output[:, -1, :])
     ids = tracer.result.save()
-# OutOfOrderError
+# UserWarning: '...i3' was never reached ...
+# len(steps) == 3; `ids` was never bound — the statement after the loop did not run
 ```
 
 ### Right code (bound the loop to what the run makes)
@@ -114,11 +114,12 @@ A generation that emits EOS stops there, so a loop bound to `max_new_tokens`
 outruns it:
 
 ```python
-# gpt2 continues " Paris, and the Eiff"; make the third token an EOS
-with model.generate(prompt, max_new_tokens=6, eos_token_id=290) as tracer:
+# gpt2 continues " the middle of the city,"; make the third token (" of") an EOS
+with model.generate(prompt, max_new_tokens=6, eos_token_id=286) as tracer:
+    per_step = nnsight.save([])
     for step in tracer.iter[:6]:
-        ...
-# OutOfOrderError — the run reached 3 occurrences, the loop asked for 6
+        per_step.append(model.transformer.h[6].output[:, -1, :].norm())
+# UserWarning — the run made 3 steps, the loop asked for 6; len(per_step) == 3
 ```
 
 `min_new_tokens=N` suppresses EOS until N tokens have been generated, which is
@@ -126,7 +127,7 @@ what makes a bound of N safe:
 
 ```python
 with model.generate(
-    prompt, max_new_tokens=6, min_new_tokens=6, eos_token_id=290,
+    prompt, max_new_tokens=6, min_new_tokens=6, eos_token_id=286,
 ) as tracer:
     per_step = nnsight.save([])
     for step in tracer.iter[:6]:
@@ -139,9 +140,12 @@ run wherever it matches, so a loop over a run with stop strings should be open.
 
 ### Mitigation
 
-- Read the count in the message: it names the occurrence asked for and the number
-  the run reached, so the fix is usually to change one number.
-- `tracer.all()` is `tracer.iter[:]` — same shape, warning instead of an error.
+- The warning names the first occurrence the run did not make (`.i3` above =
+  the fourth ask), which tells you how far the loop got.
+- Assert the length of what you collected — a cut-short loop hands back a
+  result that looks complete.
+- `tracer.all()` is `tracer.iter[:]` — the open form, when the step count is
+  genuinely unknown.
 
 ---
 
@@ -197,7 +201,7 @@ the write on the following step.
 
 Most shapes of this surface on their own: at step 0 the request raises
 `OutOfOrderError` immediately, and a loop that runs to the end of the generation
-raises when the last parked write outruns the run. It stays silent in the one
+warns when the last parked write outruns the run. It stays silent in the one
 case where every skewed write still has a step to land on — an open
 `tracer.iter[a:]` with `a > 0`, or a bound that stops short of the last step.
 
@@ -303,8 +307,9 @@ block form is deprecated; use `for step in tracer.iter[...]:` instead.
 The `with`-block form re-runs the captured block once per step; the `for` form is
 a plain loop over the body. They differ in one visible way: because the block
 form owns its loop, it catches its own over-run, truncates to the steps that ran,
-and lets the code after the block run without a word. The `for` form raises
-there. Prefer the `for` form and a bound the run meets.
+and lets the code after the block run without a word. The `for` form warns there
+and drops the statements after the loop. Prefer the `for` form and a bound the
+run meets.
 
 ```python
 # deprecated

@@ -52,7 +52,7 @@ The model-side driver (`Interleaver`, `src/nnsight/intervention/interleaver.py`)
 
 ## Iteration / occurrence
 
-A location can be reached many times in one run (each step of a generation loop). Each visit is an **occurrence**, tagged `.i0`, `.i1`, … The `Mediator` tracks a per-location count and an `iteration` cursor selecting which occurrence a request binds to; `tracer.iter[...]` / `tracer.all()` move that cursor. Requesting a location out of order raises `OutOfOrderError`, as does a loop that names an end the run never reaches; an open `iter[:]` / `all()` warns there instead, since outrunning the model is how it ends.
+A location can be reached many times in one run (each step of a generation loop). Each visit is an **occurrence**, tagged `.i0`, `.i1`, … The `Mediator` tracks a per-location count and an `iteration` cursor selecting which occurrence a request binds to; `tracer.iter[...]` / `tracer.all()` move that cursor. Requesting a location out of order raises `OutOfOrderError`; a loop that asks for a step the run does not make — bounded or open — is cut short there with a warning, keeping what it saved and dropping the statements after it.
 
 ## Location / provider string
 

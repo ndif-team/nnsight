@@ -168,7 +168,7 @@ with sd.generate("a cat", num_inference_steps=STEPS, output_type="np") as tracer
 
 SD 1.x defaults to `PNDMScheduler`, which calls the denoiser `num_inference_steps + 1` times (50 steps, 51 forwards); `DDIMScheduler` on the same pipeline calls it exactly `num_inference_steps` times. `len(scheduler.timesteps)` after `set_timesteps` is the count in both cases.
 
-Bounding the loop past the calls the run makes raises `OutOfOrderError`, naming the iteration asked for and the count reached. An open `tracer.iter[:]` warns instead, and the statements after the loop never run — `tracer.result.save()` among them, leaving the name unbound after the block. If the loop body touches no module at all, an open `tracer.iter[:]` never returns.
+Bounding the loop past the calls the run makes cuts it short with a warning — bounded and open loops alike — and the statements after the loop never run: `tracer.result.save()` among them, leaving the name unbound after the block. If the loop body touches no module at all, an open `tracer.iter[:]` never returns.
 
 ### Intervening / skipping
 

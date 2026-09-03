@@ -100,20 +100,12 @@ return torch.cat([pre, edited, post], dim=0)
 tensors and avoids aliasing when `edited` is itself a narrowed view of `full`.
 Called from `Mediator.handle` for every `Event.SWAP` (`interleaver.py`).
 
-**A replacement has to keep the group's row count.** `_widen_tensor` checks it and
-raises before the `cat`:
-
-```text
-A batched write has to keep its rows: this block owns rows 2:5 of 5, so the
-replacement must be (3, 8), not (2, 8).
-```
-
-A `cat` of the wrong height succeeds — it just builds a batch that is no longer the
-model's, and the mismatch surfaces, if at all, inside some later module. On vLLM
-that lands as a device-side assert, which poisons the CUDA context and takes the
-engine and every other request with it. Raised here it is still inside the worker's
-handoff, where a deferring interleaver ends that one request. Every other dim is
-left to the `cat` to check.
+**A replacement has to keep the group's row count.** `_widen_tensor` does not
+check it: a `cat` of the wrong height succeeds — it just builds a batch that is
+no longer the model's, and the mismatch surfaces, if at all, inside some later
+module. On vLLM that can land as a device-side assert, which poisons the CUDA
+context and takes the engine and every other request with it. Keeping the height
+is the block author's obligation; every dim is the `cat`'s to check.
 
 ### gather_skip / assemble_skip — batched skips
 

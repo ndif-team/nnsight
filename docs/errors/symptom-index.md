@@ -31,15 +31,13 @@ worth reading: those failures raise nothing, so nothing routes you to a page.
 | What you saw | Where |
 |---|---|
 | `OutOfOrderError: '<location>.i0' was requested but the model already ran past it` | [out-of-order-error.md](out-of-order-error.md) |
-| `OutOfOrderError: '<location>.iN' was never reached: the loop asked for iteration N …` | [value-was-not-provided.md](value-was-not-provided.md) |
-| `UserWarning: '<location>.iN' was never reached: an open tracer.iter[:] …` | [value-was-not-provided.md](value-was-not-provided.md) |
+| `UserWarning: '<location>.iN' was never reached: the loop asked for a step the run did not make …` | [value-was-not-provided.md](value-was-not-provided.md) |
 | `ValueError: Cannot access '<location>' outside of interleaving` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
 | `ValueError: trace() needs an input, or at least one 'with tracer.invoke(...)' block` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
 | `ValueError: save() was called outside a trace. …` | [save-outside-trace.md](save-outside-trace.md) |
 | `ValueError: Cannot invoke while the model is already running.` | [invoke-during-execution.md](invoke-during-execution.md) |
 | ``ValueError: A traced `with` block cannot start with `try:` …`` | [A trace body that starts with try:](#a-trace-body-that-starts-with-try) |
 | ``ValueError: The body of a traced `with` must start on its own line …`` | [A body on the with line](#a-body-on-the-with-line) |
-| `ValueError: A batched write has to keep its rows: …` | [docs/usage/invoke-and-batching.md](../usage/invoke-and-batching.md) |
 | `ValueError: A barrier was never reached by every block it waits for …` | [docs/usage/barrier.md](../usage/barrier.md) |
 | `WithBlockNotFoundError` with no message | [with-block-not-found.md](with-block-not-found.md) |
 | `SyntaxError: 'return' outside function` | [return inside a trace body](#return-inside-a-trace-body) |

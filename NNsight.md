@@ -527,11 +527,13 @@ parked:
 - A plain request (`iteration == 0`) for a location the model ran past or never
   reached is a real error: `OutOfOrderError` is thrown *into* the worker, so the
   traceback points at the exact line that was waiting.
-- A request inside an open-ended `tracer.iter[:]` loop that outran the model's steps
-  is *expected*: the error is thrown to unwind the worker (running its `finally`
-  blocks), then caught and turned into a warning. Values from steps that did run are
-  already saved. This is why an unbounded `iter[:]` / `all()` discards everything
-  after the loop — bound the loop (`iter[:N]`) to keep trailing code.
+- A request inside a `tracer.iter` loop that outran the model's steps — bounded or
+  open — is handled the same way: the error is thrown to unwind the worker (running
+  its `finally` blocks), then caught and turned into a warning. Values from steps
+  that did run are already saved. The unwinding discards everything after the loop,
+  so a loop that outruns the run hands back a result that looks complete — bound
+  the loop to a count the run makes (`min_new_tokens=` holds a generation there)
+  to keep trailing code.
 - A `BARRIER` still pending means fewer blocks reached the barrier than its count —
   a `ValueError` points at the waiting line.
 
@@ -1174,7 +1176,7 @@ with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
 
 `tracer.iter` accepts a slice, an int, or a list: `tracer.iter[:3]` is steps 0–2, `tracer.iter[2]` is just step 2, `tracer.iter[[0, 2, 4]]` is those steps only. `tracer.all()` is exactly `tracer.iter[:]`. `step` is the real integer index, so a plain Python `if step == 2:` works inside the loop. Under the hood, looping over `tracer.iter` walks the running mediator's `iteration` pointer across the selected occurrences (`src/nnsight/intervention/iterator.py`), and restores it on exit, so loops nest.
 
-**The gotcha that defines correct usage: an unbounded `iter[:]` (or `all()`) drops every line after the loop.** An open-ended selection keeps handing out step indices until the model stops generating; the final over-run request — for a step the model never runs — is left parked, and the interleaver throws `OutOfOrderError` into that worker, which is caught and *warned*, not raised. But that unwinding tears down the loop **and every statement after it in the same block**. So a `tracer.result.save()` placed after an unbounded loop never runs.
+**The gotcha that defines correct usage: a loop that outruns the run drops every line after the loop.** An open-ended selection keeps handing out step indices until the model stops generating, and a bounded one that asks past the run's end reaches the same point; the final over-run request — for a step the model never runs — is left parked, and the interleaver throws `OutOfOrderError` into that worker, which is caught and *warned*, not raised. But that unwinding tears down the loop **and every statement after it in the same block**. So a `tracer.result.save()` placed after an over-running loop never runs, and what the loop saved looks complete while being short.
 
 The fix is to use a **bounded** `iter[:N]` matching `max_new_tokens` — then the loop ends normally and trailing code executes:
 
@@ -1561,8 +1563,9 @@ traceback lands on the exact waiting line. Two flavors share this one class:
   each invoke is its own worker with an independent access order.
 - *Never reached.* The model finished with a worker still waiting for a location
   that never fired — a module skipped under `model.eval()`, a branch not taken, a
-  submodule of a `.skip()`-ped module, an `iter` loop that outran the model.
-  Confirm a module actually fires with `model.scan(...)` before reading it.
+  submodule of a `.skip()`-ped module. (An `iter` loop that outran the model is
+  the warning flavor of the same unwind, not this error.) Confirm a module
+  actually fires with `model.scan(...)` before reading it.
 
 The `.i<n>` suffix on the location is the occurrence tag — which visit of that
 location the request targets; `.i0` outside iteration, counting up per step
@@ -1606,15 +1609,15 @@ with model.trace("Hello"):
 (`docs/errors/save-outside-trace.md`; the internal `mark()` is the same mechanism
 without the guard, for backends recording a finished request's values.)
 
-**The unbounded `iter[:]` drops-trailing-code warning.** An open-ended
-`for step in tracer.iter[:]:` (or `tracer.all()`) that outruns the model leaves
-the final over-run request dangling; because the worker is inside an iteration
-loop, nnsight *warns* rather than raising, unwinding the loop to run its
-`finally` blocks and keeping values from the steps that were reached. The catch
-is that unwinding drops the loop *and every line after it* — so a
-`tracer.result.save()` placed after an open-ended loop never runs. Prefer a
-bounded `iter[:N]` when you need code to execute after the loop; full treatment
-in [Iteration](#63-iteration).
+**The over-running loop drops-trailing-code warning.** A
+`for step in tracer.iter[...]:` loop (or `tracer.all()`) that outruns the model
+leaves the final over-run request dangling; because the worker is inside an
+iteration loop, nnsight *warns* rather than raising, unwinding the loop to run
+its `finally` blocks and keeping values from the steps that were reached. The
+catch is that unwinding drops the loop *and every line after it* — so a
+`tracer.result.save()` placed after an over-running loop never runs. When you
+need code to execute after the loop, bound it and hold the run to that count
+(`min_new_tokens=N`); full treatment in [Iteration](#63-iteration).
 
 ## 9. Remote execution
 

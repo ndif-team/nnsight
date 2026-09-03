@@ -128,27 +128,15 @@ sequence). Greedy decoding is `temperature=0.0`; vLLM's default is `1.0`.
 
 An in-place write (`out[0][-1] += v`, `mlp.output[:] = 0`) is the direct form and always fits.
 A *replacement* — `layer.output = t` — is spliced back into the batch the model is running, so it
-has to carry the same rows the block owns. A tensor with a different leading dimension is refused
-before it reaches the next module:
-
-```python
-with model.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tokens=1) as tracer:
-    out = model.transformer.h[6].output            # (10, 768) — this request's ten prompt rows
-    model.transformer.h[6].output = out[:2]        # 2 rows
-# RuntimeError: ValueError: A batched write has to keep its rows: this block owns rows 0:10 of 10,
-#     so the replacement must be (10, 768), not (2, 768).
-```
+has to carry the same rows the block owns — and nothing checks that for you. A tensor with a
+different leading dimension is spliced in as given, the next kernels run on a slab of the wrong
+height, and the mismatch can land as a device-side assert — which poisons the CUDA context and
+takes the engine and every request in it, not just yours.
 
 This is what a patching sweep hits when a donor activation was captured at a different prompt
 length. Slice the donor to the rows you are writing (`served[POS] = donor[POS]`) rather than
-handing back a shorter tensor. Every other dimension is the model's to check, and mismatches
-there surface from the next kernel.
-
-The error ends that request. The engine keeps serving, and a request from another client in the
-same batch finishes normally. The invokes of one trace are not separate that way: they are one
-block, and it raises as a whole, so a batched sweep loses the invokes that were fine along with
-the one that was not. The refusal reaches you as a `RuntimeError` whose message begins with the
-original `ValueError:` line, so match on the message rather than on the class.
+handing back a shorter tensor. Every other dimension is the model's to check the same way, and
+mismatches there surface from the next kernel.
 
 ### `logits` and `samples`
 
@@ -192,33 +180,33 @@ with model.trace(PROMPT, max_tokens=10) as tracer:
 #### A loop that outruns the request
 
 `max_tokens` is a cap, not a promise. An EOS token, a `stop` string, `stop_token_ids`, or a
-`tracer.stop()` in another block all end a request early, and a bounded `tracer.iter[:N]` that
-asked for more steps than the request made is cut short there — so nothing the block has after
-the loop runs. That is an error, not a note:
+`tracer.stop()` in another block all end a request early, and a `tracer.iter` loop that asked
+for more steps than the request made is cut short there — bounded and open alike. The values
+saved inside the loop come home; the statements after it never run; the only signal is a warning,
+and it is emitted in vLLM's EngineCore subprocess, not yours (see [Where an error comes
+from](#where-an-error-comes-from)):
 
 ```python
 with model.trace(PROMPT, temperature=0.0, max_tokens=20, stop=[","]) as tracer:
     samples = list().save()
     for _ in tracer.iter[:20]:
         samples.append(model.samples.item())
-    result = tracer.result.save()          # never reached
-# RuntimeError: OutOfOrderError: 'model.samples.i4' was never reached: the loop asked for
-#     iteration 4 of 'model.samples' and the run reached it 4 times, so the loop was cut short
-#     and nothing after it ran. ...
+    result = tracer.result.save()          # never reached: `result` comes back unbound
+# (EngineCore pid=...) UserWarning: 'model.samples.i4' was never reached: the loop asked for
+#     a step the run did not make, so it was cut short — values saved inside the loop are kept,
+#     and the statements after it did not run. ...
+# len(samples) == 4 — shorter than the bound, and nothing in your process says so
 ```
 
-Two ways out, and the error names both:
+The result looks complete, so check the `len()` of what you collected — or:
 
 - **Hold the run to the count you loop over.** On vLLM that is `ignore_eos=True`, or
-  `min_tokens=N`, which is how vLLM spells a floor on generated tokens. (The error text names
+  `min_tokens=N`, which is how vLLM spells a floor on generated tokens. (The warning text names
   `min_new_tokens=`, which is the `transformers` spelling; on this path it is refused as an
   unknown sampling keyword.)
-- **Loop with `tracer.all()` and put the trailing statements after the `with` block.** An open
-  `tracer.iter[:]` / `tracer.all()` has no count of its own, so outrunning generation is how it
-  ends: it warns rather than raising, and the values saved inside the loop are kept. The
-  statements after it are still dropped, which is what the warning says — and that warning is
-  emitted in vLLM's EngineCore subprocess, so it is not catchable with `warnings.catch_warnings`
-  in your code (see [Where an error comes from](#where-an-error-comes-from)).
+- **Loop with `tracer.all()` and put the trailing statements in a separate `tracer.invoke()`.**
+  An open `tracer.iter[:]` / `tracer.all()` has no count of its own, so outrunning generation is
+  how it ends.
 
 ### `generate` traces, or just runs
 
@@ -275,7 +263,7 @@ with model.trace(max_tokens=3) as tracer:
 
 Common kwargs: `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `stop`, `stop_token_ids`, `seed`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs`, `lora_request` — anything `vllm.SamplingParams` takes. `ignore_eos=True` and
 `min_tokens=N` are what hold a run to the step count a bounded `tracer.iter[:N]` asks for; a run
-that stops short of it raises (see [A loop that outruns the
+that stops short of it cuts the loop short with a warning (see [A loop that outruns the
 request](#a-loop-that-outruns-the-request)).
 
 ### Input forms per invoke
@@ -467,10 +455,10 @@ yours, and a `warnings.catch_warnings()` around the trace records nothing. This 
 the vLLM path is not the local one: the same block warns catchably against a HuggingFace model and
 uncatchably here.
 
-The case you are most likely to meet is an open `tracer.iter[:]` / `tracer.all()` loop that
-outruns the request, which warns that the statements after the loop did not run. A *bounded*
-`tracer.iter[:N]` that outruns it is an error and does come home — see [A loop that outruns the
-request](#a-loop-that-outruns-the-request).
+The case you are most likely to meet is a `tracer.iter` loop — bounded or open — that outruns
+the request, which warns that the loop was cut short and the statements after it did not run.
+That warning stays on the engine; your process sees only a result with fewer steps than the
+bound named — see [A loop that outruns the request](#a-loop-that-outruns-the-request).
 
 ### When the engine builds, or does not
 
@@ -537,7 +525,8 @@ False ...}`.
 - **An empty `tracer.invoke()` with interventions raises** (its work would vanish); a do-nothing empty invoke is a harmless no-op.
 - **A typo'd sampling kwarg raises** (`trace(temperatur=0.0)` → `TypeError`), rather than being silently ignored.
 - **A replacement keeps the rows it replaces** — `layer.output = t` with a different leading
-  dimension is refused before the model sees it (see [Replacing a
+  dimension reaches the model as given, and a shape mismatch downstream can take the engine, not
+  just the request; nothing checks it for you (see [Replacing a
   value](#replacing-a-value-keeps-its-rows)).
 - **Mode is fixed at construction.** Build with `mode="async"` if you want streaming.
 - **`tracer.backend` is iterable only in async mode.** In sync mode, results land in your local variables when the block exits.

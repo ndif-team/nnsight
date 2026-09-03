@@ -114,8 +114,8 @@ what happens when you break it, and one shape of the mistake is silent.
 An out-of-order body does not lose a value; it shifts every request one occurrence
 later. Reading `h[8]` before writing `h[2]` means the write for step *k* is asked
 for after step *k*'s `h[2]` has gone, so it binds to step *k+1* instead. Each pass
-pushes the next one along. Whether that raises depends on one thing: **whether the
-last shifted request still has a step to land on.**
+pushes the next one along. Whether anything says so depends on one thing:
+**whether the last shifted request still has a step to land on.**
 
 ```python
 # the write is meant for steps 1 and 2, but it is asked for after h[8] each time
@@ -139,7 +139,8 @@ the four generated steps:
 Step 1 — the first step the loop selected — is untouched, and step 3, which the
 loop never selected, is zeroed. Nothing says so.
 
-The same body raises as soon as a shifted request runs off the end of the run:
+When a shifted request runs off the end of the run, the loop is cut short with
+a warning naming the occurrence:
 
 ```python
 # now the loop reaches the run's last step, so the shifted write asks for i4
@@ -150,12 +151,12 @@ with model.generate("Hi there", max_new_tokens=4, min_new_tokens=4) as tracer:
 ```
 
 ```
-OutOfOrderError: 'model.transformer.h.2.output.i4' was never reached: the loop
-asked for iteration 4 of 'model.transformer.h.2.output' and the run reached it 4
-times, so the loop was cut short and nothing after it ran. …
+UserWarning: 'model.transformer.h.2.output.i4' was never reached: the loop asked
+for a step the run did not make, so it was cut short — values saved inside the
+loop are kept, and the statements after it did not run. …
 ```
 
-And a loop that includes step 0 raises there, with the plain out-of-order message,
+A loop that includes step 0 does raise, with the plain out-of-order message,
 because the pin at iteration 0 is not treated as a loop at all.
 
 So, for an out-of-order loop body:
@@ -163,19 +164,21 @@ So, for an out-of-order loop body:
 | Loop | Result |
 |---|---|
 | includes step 0 (`iter[:N]`, `iter[0:N]`) | raises `'…i0' was requested but the model already ran past it` |
-| bounded, last selected step **is** the run's last (`iter[1:4]` over 4 steps) | raises the loop message, naming an occurrence past the loop's own selection |
+| bounded, last selected step **is** the run's last (`iter[1:4]` over 4 steps) | warns, naming an occurrence past the loop's own selection; the statements after the loop do not run |
 | bounded, stops **short** of the run's last step (`iter[1:3]` over 4 steps) | **silent** — writes land one step late, trailing code runs |
 | open (`iter[1:]`, `tracer.all()`) | warns; writes land one step late and the last is dropped |
 
-The two silent rows are why an intervention inside a loop deserves a check rather
-than a clean exit. Read a location you edited back in a second invoke and compare
-it against a no-write baseline, per step. If the loop *does* raise, the tell is the
-occurrence number: an `.iN` past anything the loop selected means the body reads a
-later location before an earlier one. Reorder the body — read `h[2]` before `h[8]`
-— and every one of these shapes runs clean.
+The silent row — and the fact that a warning is easy to miss — is why an
+intervention inside a loop deserves a check rather than a clean exit. Read a
+location you edited back in a second invoke and compare it against a no-write
+baseline, per step. If the loop does warn, the tell is the occurrence number: an
+`.iN` past anything the loop selected means the body reads a later location
+before an earlier one. Reorder the body — read `h[2]` before `h[8]` — and every
+one of these shapes runs clean.
 
-A loop whose body is in order but whose *bound* exceeds the run raises the same
-message honestly; that case is [value-was-not-provided.md](value-was-not-provided.md).
+A loop whose body is in order but whose *bound* exceeds the run is cut short
+with the same warning; that case is
+[value-was-not-provided.md](value-was-not-provided.md).
 
 ## Another cause: something replaced the module's forward
 

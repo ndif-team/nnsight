@@ -181,8 +181,9 @@ Bounded, not `tracer.all()`: an open-ended loop unwinds every line after it, so
 
 `min_new_tokens` matches the bound to what the run will actually do. Steering
 changes when the model emits an end-of-text token, and a bounded loop the run
-stops short of raises `OutOfOrderError` naming the iteration it asked for. Pinning
-the step count also keeps the rows of a sweep the same length.
+stops short of is cut short with a warning — the steering simply stops early and
+`ids` is never bound, with nothing raised in your code. Pinning the step count
+also keeps the rows of a sweep the same length.
 
 The two are easy to tell apart once you look. They agree while the prefill's
 effect is still carrying, then diverge once only one of them is still adding

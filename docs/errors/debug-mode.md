@@ -135,7 +135,7 @@ class is not reconstructed across the process boundary, so match on the message:
 
 ```python
 except RuntimeError as error:
-    if "A batched write has to keep its rows" in str(error):
+    if str(error).startswith("IndexError"):
         ...
 ```
 

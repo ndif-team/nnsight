@@ -74,14 +74,9 @@ ValueError: Cannot invoke while the model is already running.
 When a hook fires and `Interleaver.handle` serves a worker:
 
 - **read**: `Batcher.narrow(value, group)` slices every batched tensor (leading dim `== total`) down to `[start, start+size)`. Non-batched tensors and empty invokes pass through.
-- **write**: `Batcher.widen(full, group, edited)` splices the edited rows back into the full batch (via `cat`, keeping autograd correct). The replacement has to keep the group's row count, or `_widen_tensor` raises before the value reaches the model:
+- **write**: `Batcher.widen(full, group, edited)` splices the edited rows back into the full batch (via `cat`, keeping autograd correct). The replacement has to keep the group's row count — the splice takes it as given, so one of the wrong height builds a batch that is no longer the model's, and the mismatch surfaces in some later module or not at all.
 
-```
-ValueError: A batched write has to keep its rows: this block owns rows 0:1 of 2,
-so the replacement must be (1, 7, 768), not (2, 5, 768).
-```
-
-`Batcher.batching` is `True` only with **2+ input invokes**. A lone invoke *is* the whole batch, so `narrow`/`widen` are no-ops — single-input traces pay no slicing overhead, and no row check applies either: a lone invoke's write may change the leading dim and widen the run.
+`Batcher.batching` is `True` only with **2+ input invokes**. A lone invoke *is* the whole batch, so `narrow`/`widen` are no-ops — single-input traces pay no slicing overhead, and a lone invoke's write may change the leading dim and widen the run.
 
 ## Empty invoke semantics
 

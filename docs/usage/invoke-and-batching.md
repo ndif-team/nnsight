@@ -326,10 +326,12 @@ class BatchEnvoy(Envoy):
   the run. The same error covers nesting two invokes.
 - **Reading a cross-invoke name before the binder ran raises `NameError`.** Park
   the reader past the binder's location, or use a barrier — see above.
-- **A batched write has to keep its rows.** A block that owns rows `0:1` of 2 and
-  assigns a two-row tensor raises `ValueError: A batched write has to keep its
-  rows: this block owns rows 0:1 of 2, so the replacement must be (1, 7, 768), not
-  (2, 5, 768).` Every dim but the first is the concatenation's to check.
+- **A batched write has to keep its rows.** A block owns its invoke's rows of the
+  combined batch, and a whole-tensor write is spliced back in as given — nothing
+  checks the height. A block that owns rows `0:1` of 2 and assigns a two-row
+  tensor builds a 3-row batch: downstream modules see a batch that is no longer
+  the model's, rows shift under the other invokes, and the mismatch surfaces in
+  some later module or not at all.
 - **Batching only narrows with two or more input invokes.** A lone invoke *is* the
   whole batch, so it sees every row untouched — and, since nothing is spliced back,
   a write from a lone invoke (or from an empty invoke) may change the leading dim
