@@ -1,7 +1,7 @@
 """The tensor-parallel rule table, checked without a GPU.
 
-`tests/test_transformers_tensor_parallel.py` proves the gather is *correct*, but
-it needs two GPUs and so does not run everywhere. These tests cover the part that
+`tests/tp/test_sharded_tracing.py` proves the gather is *correct*, but it needs
+two GPUs and so does not run everywhere. These tests cover the part that
 goes wrong quietly and can be checked anywhere: whether the table still describes
 the transformers it is running against, and whether the cases it refuses actually
 raise.
@@ -28,7 +28,10 @@ from nnsight.modeling.tp import (
 
 
 def _upstream_styles() -> set:
-    from transformers.integrations.tensor_parallel import ALL_PARALLEL_STYLES
+    # The module `TPFragments._style_of` imports, so the table is checked against
+    # the registry the supported backend actually reads. On transformers below the
+    # 5.16 floor this import is what fails, which is the point.
+    from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
     return set(ALL_PARALLEL_STYLES._global_mapping)
 

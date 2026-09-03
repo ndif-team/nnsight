@@ -67,9 +67,11 @@ class Fragments:
         [`Interleaver.instrument`][nnsight.intervention.interleaver.Interleaver.instrument],
         which is the one moment both the module — carrying whatever its runtime
         stamped on it — and its path are in hand. The handoff runs inside the
-        module's forward, after its runtime's pre-hooks and before its post-hooks,
-        so what is recorded here is what the value is at *that* point. Default:
-        nothing to learn.
+        module's forward, after whatever the runtime does to the inputs and before
+        whatever it does to the outputs, so what is recorded here is what the value
+        is at *that* point. Where those transforms live is the runtime's business:
+        transformers tensor parallelism replaces ``module.forward`` with a wrapper
+        that carries them, vLLM does it another way. Default: nothing to learn.
         """
 
     def fragmented(self, location: str) -> bool:
