@@ -49,6 +49,7 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 
 ### "My model is too big for one GPU"
 - [docs/models/tensor-parallel.md](docs/models/tensor-parallel.md) — `transformers` tensor parallelism: `distributed_config=DistributedConfig(tp_size=N)` under `torchrun`, sharded activations gathered so the trace reads as it would on one GPU
+- [docs/models/quantization.md](docs/models/quantization.md) — hold each weight in 4 or 8 bits instead: `dtype="nf4"`, one GPU, at a measured accuracy and speed cost
 
 ### "I want to run remotely on NDIF"
 - [docs/remote/ndif-overview.md](docs/remote/ndif-overview.md) — what NDIF is, job lifecycle
@@ -73,12 +74,12 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 
 ### "I want to run a research pattern (logit lens / patching / steering / SAE...)"
 - [docs/patterns/index.md](docs/patterns/index.md) — full cookbook
-- Most-asked-for: [logit-lens](docs/patterns/logit-lens.md), [activation-patching](docs/patterns/activation-patching.md), [ablation](docs/patterns/ablation.md), [steering](docs/patterns/steering.md), [attention-patterns](docs/patterns/attention-patterns.md), [sae-and-auxiliary-modules](docs/patterns/sae-and-auxiliary-modules.md), [per-head-attention](docs/patterns/per-head-attention.md)
+- Most-asked-for: [logit-lens](docs/patterns/logit-lens.md), [activation-patching](docs/patterns/activation-patching.md), [ablation](docs/patterns/ablation.md), [steering](docs/patterns/steering.md), [attention-patterns](docs/patterns/attention-patterns.md), [probing](docs/patterns/probing.md), [sae-and-auxiliary-modules](docs/patterns/sae-and-auxiliary-modules.md), [per-head-attention](docs/patterns/per-head-attention.md)
 
 ### "I'm extending nnsight (custom model / runtime / value)"
 - [docs/usage/extending.md](docs/usage/extending.md) — subclass `NNsight`/`Envoy`, `_batch_size`/`_batch`, attach modules
-- [docs/concepts/envoy.md](docs/concepts/envoy.md) — mental model; `eproperty` is the descriptor behind hookable values (`.output`/`.input`/custom)
-- [docs/developing/extending-envoy.md](docs/developing/extending-envoy.md) — custom hookable values via `interleaver.handle` + a property
+- [docs/concepts/envoy.md](docs/concepts/envoy.md) — mental model; `eproperty` is the descriptor behind served values (`.output`/`.input`/custom)
+- [docs/developing/extending-envoy.md](docs/developing/extending-envoy.md) — custom served values via `interleaver.handle` + a property
 
 ### "Something is broken / I got an error"
 - [docs/errors/index.md](docs/errors/index.md) — exception → cause → fix table
@@ -94,7 +95,7 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 | Any `torch.nn.Module` | `NNsight(module)` | [docs/models/nnsight-base.md](docs/models/nnsight-base.md) |
 | **HuggingFace model (text/vision/multimodal/audio)** | `TransformersModel("repo/id", task=...)` | [docs/models/transformers-model.md](docs/models/transformers-model.md) |
 | Diffusion pipelines | `DiffusionModel("repo/id", ...)` | [docs/models/diffusion-model.md](docs/models/diffusion-model.md) |
-| High-throughput / production | `VLLM("repo/id", mode="sync"\|"async")` | [docs/models/vllm.md](docs/models/vllm.md) |
+| High-throughput / production | `VLLM("repo/id", mode="sync"\|"async")` | [docs/models/vllm.md](docs/models/vllm.md) — engine and blocks; [editing](docs/models/vllm-editing.md), [async and serving](docs/models/vllm-serving.md), [parallelism](docs/models/vllm-parallelism.md) |
 | **Model too big for one GPU (tensor parallel)** | `TransformersModel(..., distributed_config=DistributedConfig(tp_size=N))` under `torchrun` | [docs/models/tensor-parallel.md](docs/models/tensor-parallel.md) |
 | Causal LM (**deprecated** alias) | `LanguageModel(...)` → use `TransformersModel(task="text-generation")` | [docs/models/language-model.md](docs/models/language-model.md) |
 | Vision-language (**deprecated** alias) | `VisionLanguageModel(...)` → use `TransformersModel(task="image-text-to-text")` | [docs/models/vision-language-model.md](docs/models/vision-language-model.md) |
@@ -130,7 +131,7 @@ Read at least the first two if the user is asking "why is my code blocking / out
 
 - **Base PRs on the `dev` branch, not `main`.**
 - [docs/developing/index.md](docs/developing/index.md) — top of the developer tree
-- [docs/developing/architecture-overview.md](docs/developing/architecture-overview.md) — how everything fits (Tracer → Backend → Interleaver → Mediator → hooks → Envoy)
+- [docs/developing/architecture-overview.md](docs/developing/architecture-overview.md) — how everything fits (Tracer → Backend → Interleaver → Mediator → controller → Envoy)
 - [docs/developing/tracing-pipeline.md](docs/developing/tracing-pipeline.md) — capture → parse → build → compile → execute
 - [docs/developing/interleaver-internals.md](docs/developing/interleaver-internals.md) — greenlets, mediators, the event protocol
 - [docs/developing/controller.md](docs/developing/controller.md) — the per-module controller: handoff, skip gate, source body
@@ -150,11 +151,11 @@ Read at least the first two if the user is asking "why is my code blocking / out
 - **A module's `.output` is the real object it returns.** For a GPT-2 *block* that's a plain `Tensor (batch, seq, hidden)` — read/write the whole tensor, no `[0]`. An *attention* submodule returns a tuple; check `print(module.source)` or the shape rather than assuming.
 - **A tuple `.output` can't have its elements reassigned, but the tensors inside it can be edited in place.** `attn.output[0] = x` fails (tuples are immutable); `attn.output[0][:, -1] = x` works, because `.output` hands back the live tensor. To swap the element itself, rebuild the tuple: `attn.output = (new,) + tuple(out[1:])`.
 - **Execution is deferred and interleaved (greenlets).** Reading a location the model already ran past raises `OutOfOrderError`; reading `.output`/`.input` *outside* a trace raises "Cannot access `...` outside of interleaving". Capture forward tensors before a `backward()` block.
-- **Unbounded `iter[:]` / `all()` drop everything after the loop.** To keep per-step values *and* a final result, use a bounded `iter[:N]`.
+- **A `tracer.iter` loop must not ask for a step the run does not make.** A bound the run meets keeps the code after the loop; a loop that outruns the run — bounded or open — warns, keeps what it saved, and drops the statements after it, so the result looks complete while being shorter than the bound. Check the `len()` of what you collected, or hold the run to the count: `max_new_tokens` is an upper bound — EOS, a stop string, or a `tracer.stop()` anywhere in the trace can end a run sooner — so pass `min_new_tokens=N` when a bound has to hold. Put what follows the loop in a separate `tracer.invoke()`. `tracer.result` has to be read inside the block.
 - **A value produced inside one `invoke` is not visible in another** without `tracer.barrier(n)`.
 - **`generate` returns token ids** (`tracer.result`), greedy by default; use **`pipe`** for the pipeline's decoded records.
 - **Prefer `TransformersModel` / `NNsight`.** `LanguageModel` / `VisionLanguageModel` are deprecated aliases that warn.
-- **`eproperty` exists** — the descriptor behind `.output`/`.input`; define your own hookable values with it on a model subclass (see [docs/concepts/envoy.md](docs/concepts/envoy.md)).
+- **`eproperty` exists** — the descriptor behind `.output`/`.input`; define your own served values with it on a model subclass (see [docs/concepts/envoy.md](docs/concepts/envoy.md)).
 
 ---
 

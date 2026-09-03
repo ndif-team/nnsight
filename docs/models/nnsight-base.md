@@ -3,30 +3,39 @@ title: NNsight (Base Wrapper)
 one_liner: Wrap any torch.nn.Module to gain trace/intervention access; no tokenizer, no batching.
 tags: [models, base]
 related: [docs/models/index.md, docs/models/transformers-model.md]
-sources: [src/nnsight/modeling/base.py:6, src/nnsight/intervention/envoy.py:123, tests/test_modeling.py:857]
+sources: [src/nnsight/modeling/base.py, src/nnsight/intervention/envoy.py, tests/test_modeling.py]
 ---
 
 # NNsight (Base Wrapper)
 
 ## What this is for
 
-`nnsight.NNsight` is the root wrapper for any pre-instantiated `torch.nn.Module`. Constructing one recursively mirrors every child module as an `Envoy`, so you can trace, observe, and modify intermediate activations via `.trace()` / `.scan()` / `.edit()` / `.session()`. It is the simplest entry point.
+`nnsight.NNsight` wraps a `torch.nn.Module` you already have. Constructing one
+mirrors every child module as an `Envoy`, so `.trace()`, `.edit()` and
+`.session()` work against a model nnsight never loaded. It is the simplest entry
+point, and the one with no opinions about input format.
 
-`NNsight` is a thin, named `Envoy` subclass (`base.py:6`) — `Envoy` is the node type the tree is built from, `NNsight` is the conventional name for wrapping a whole model, and the higher-level wrappers (`TransformersModel`, `DiffusionModel`, ...) are specialized envoys that add loading/tokenization on top of the same behavior.
+`NNsight` is a thin, named `Envoy` subclass (`base.py`): `Envoy` is the node type
+the tree is built from, `NNsight` is the conventional name for wrapping a whole
+model, and the higher-level wrappers (`TransformersModel`, `DiffusionModel`, ...)
+are specialized envoys that add loading and tokenization on top of the same
+behavior.
 
-Use it when you already have a `torch.nn.Module` instance and just need NNsight's intervention machinery on top.
+## When to use it
 
-## When to use / when not to use
+Use `NNsight` for a custom architecture that is not on HuggingFace, for research
+code that builds its model in Python (`torch.nn.Sequential`, hand-built encoders,
+GANs, RL policy nets, autoencoders), or whenever you want the intervention
+machinery and nothing else.
 
-Use `NNsight` when:
-- You have a custom architecture not on HuggingFace.
-- You're working with research code that builds the model in Python (`torch.nn.Sequential`, hand-built encoders, GANs, RL policy nets, classifiers, autoencoders, etc.).
-- You want minimal wrapping with no opinions about input format.
-
-Do not use `NNsight` when:
-- You want HF-style loading from a repo id — use [`TransformersModel`](transformers-model.md) or [`DiffusionModel`](diffusion-model.md).
-- You want automatic tokenization or `.generate()` — use [`TransformersModel`](transformers-model.md).
-- You want input batching across multiple non-empty `tracer.invoke(...)` calls — base `NNsight` does not implement `_batch_size()` / `_batch()`. One input invoke plus any number of empty invokes still works.
+Reach for a subclass instead when you want HF-style loading from a repo id
+([`TransformersModel`](transformers-model.md),
+[`DiffusionModel`](diffusion-model.md)), tokenization or `.generate()`
+([`TransformersModel`](transformers-model.md)), or batching across several
+non-empty `tracer.invoke(...)` calls — base `NNsight` implements neither
+`_batch_size()` nor `_batch()`, and a second non-empty invoke raises
+`NotImplementedError: NNsight does not support batching multiple invokes`. One
+input invoke plus any number of empty invokes does work.
 
 ## Loading
 
@@ -52,23 +61,22 @@ NNsight(module: torch.nn.Module, path="model", interleaver=None, rename=None)
 | `module` | An already-instantiated `torch.nn.Module`. There is no repo loading; the model is wrapped as-is. |
 | `path` | Root path name for the Envoy tree (default `"model"`). Rarely set by hand. |
 | `interleaver` | Optional `Interleaver` to reuse; a fresh one is created if omitted. |
-| `rename` | Optional dict of module-path aliases, e.g. `{"transformer.h": "layers"}`. Both original and aliased paths resolve. See `envoy.py:210` (`_bind_aliases`). |
+| `rename` | Optional dict of module-path aliases, e.g. `{"transformer.h": "layers"}`. Both original and aliased paths resolve (`Envoy._bind_aliases`). |
 
-There is **no** `dispatch=`, **no** `device_map=`, **no** `torch_dtype=` here — those belong to the HF-backed wrappers. Move the model with standard `module.to("cuda")` before or after wrapping, or use the Envoy's own `.to()` / `.cuda()` / `.cpu()`.
-
-### Device movement
-
-`.to()`, `.cuda()`, and `.cpu()` call the underlying module's method but **return the Envoy** (not the raw module), so you stay on the wrapper after moving:
+There is **no** `dispatch=`, `device_map=` or `dtype=` here — those belong to the
+HF-backed wrappers, along with lazy meta-tensor loading and remote execution. The
+module you pass in is the module that is used. Move it with
+`module.to("cuda")` before or after wrapping, or with the Envoy's own `.to()` /
+`.cuda()` / `.cpu()`, which call through to the module and **return the Envoy**,
+so you stay on the wrapper:
 
 ```python
 model = NNsight(net).to("cuda")     # still an NNsight wrapper
 model = model.cpu()                 # still an NNsight wrapper
-
-with model.trace(torch.rand(1, 5, device="cpu")):
-    out = model.output.save()
 ```
 
-Source: `envoy.py:542` (`.to`), `:557` (`.cpu`), `:564` (`.cuda`). The wrapper also exposes `model.device` (first parameter's device) and `model.devices` (set of all parameter devices).
+`model.device` gives the first parameter's device and `model.devices` the set of
+all of them.
 
 ## Canonical pattern
 
@@ -86,7 +94,7 @@ with model.trace(torch.randn(1, 8)):
 print(tuple(hidden.shape), tuple(final.shape))     # (1, 16) (1, 4)
 ```
 
-(Verified in `tests/test_modeling.py:857`.)
+(Verified in `tests/test_modeling.py`.)
 
 ### Modifying activations
 
@@ -99,7 +107,8 @@ with model.trace(torch.rand(1, 8)):
 
 ### Empty invokes (batching workaround)
 
-Base `NNsight` does not implement batching, so multiple non-empty input invokes raise `NotImplementedError`. One input invoke plus empty invokes still works — an empty invoke runs the same forward in its own worker:
+One input invoke plus empty invokes runs the same forward in its own worker,
+which covers most of what batching would have been used for:
 
 ```python
 with model.trace() as tracer:
@@ -109,35 +118,33 @@ with model.trace() as tracer:
         out_b = model[1].output.save()
 ```
 
-To support multi-input batching, subclass `NNsight`/`Envoy` and implement `_batch_size()` and `_batch()` (see `TransformersModel` in `src/nnsight/modeling/transformers.py` for a reference).
+For real multi-input batching, subclass `NNsight`/`Envoy` and implement
+`_batch_size()` and `_batch()`; `TransformersModel` in
+`src/nnsight/modeling/transformers.py` is the reference.
 
 ## Special properties
 
-`NNsight` is an `Envoy`, so the root wrapper exposes only the standard ones:
-
-| Property | Description |
-|----------|-------------|
-| `model.output` | The wrapped module's forward output |
-| `model.input` | First positional arg to the wrapped module |
-| `model.inputs` | Full `(args, kwargs)` tuple |
-| `model._module` | The underlying `torch.nn.Module` |
-
-There is **no** `tokenizer`, **no** `generator`, **no** `processor`, **no** `config` — those are added by the HF-backed subclasses.
-
-## Limitations
-
-- No tokenization. You pass raw tensors (or whatever your module expects).
-- No `.generate()` — subclasses (`TransformersModel`, `DiffusionModel`, `VLLM`) provide their own.
-- No multi-input batching (see [Empty invokes](#empty-invokes-batching-workaround)).
-- No remote execution by itself. `NNsight` is not a remoteable subclass; `TransformersModel` and `VLLM` are.
-- No lazy / meta-tensor loading. The module you pass in is the module that's used.
+The root wrapper exposes the standard envoy set and nothing more: `model.output`
+(the wrapped module's forward output), `model.input` (its first positional arg),
+`model.inputs` (the full `(args, kwargs)` pair), and `model._module` (the
+underlying `torch.nn.Module`). There is no `tokenizer`, `generator`, `processor`
+or `config` — those are added by the HF-backed subclasses, as are `.generate()`,
+`.scan()`, `.pipe()` and `.dispatch()`. Asking for one gives
+`AttributeError: 'NNsight' object (nor its module) has attribute 'scan'`.
 
 ## Gotchas
 
-- **Pre-loaded module required.** `NNsight("repo/id")` does not work — pass a `torch.nn.Module`. Use `TransformersModel("repo/id")` for HF repos.
-- **Re-wrapping the same module is safe.** Wrapping a module twice re-installs its controller rather than stacking (`tests/test_modeling.py` `TestUpdate` / `test_multiple_wrappers.py`).
-- **Module access order matters.** Inside a single invoke, accessing `.output` of a later layer before an earlier one can deadlock — see [docs/gotchas/](../gotchas/).
-- **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` errors when there is no active trace.
+- **Pass a module, not a repo id.** `NNsight("openai-community/gpt2")` raises
+  `AttributeError: 'str' object has no attribute '__dict__'`, which names nothing
+  you wrote. Use `TransformersModel("openai-community/gpt2")` for HF repos.
+- **Re-wrapping the same module is safe.** Wrapping a module twice re-installs
+  its controller rather than stacking (`tests/test_modeling.py` `TestUpdate`,
+  `tests/test_multiple_wrappers.py`).
+- **Module access order matters.** Inside a single invoke, reading `.output` of a
+  later layer before an earlier one can deadlock — see [docs/gotchas/](../gotchas/).
+- **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` errors
+  when there is no active trace, and reading `model.output` outside one gives
+  `Cannot access 'model.output' outside of interleaving`.
 
 ## Related
 

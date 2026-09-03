@@ -59,20 +59,25 @@ cost; source − output is instrumentation.
 
 ```
 single-shot (median of many):
-  baseline forward                 500 us
-  capture (warm)                    36 us      # empty trace over a no-op, cache warm
-  capture (cold)                    97 us      # +61 us to parse + compile the block
-  read a module output            1433 us
-  read a source op (torch_relu_0) 1448 us      # +~15 us for .source steady state
-  first source access             4899 us      # one-time: compiling the instrumented forward
+  baseline forward                 617 us
+  capture (warm)                    32 us      # empty trace over a no-op, cache warm
+  capture (cold)                   101 us      # +69 us to parse + compile the block
+  read a module output             935 us
+  read a source op (torch_relu_0)  960 us      # .source steady state, within noise
+  first source access             4185 us      # one-time: compiling the instrumented forward
 
-intervention scaling (median us):  0->1408, 1->1430, 8->1521, 32->1854
-invoke scaling (median us):        1->1434, 8->2041, 32->4034
+intervention scaling (median us):  0->930, 1->970, 8->1087, 32->1421
+invoke scaling (median us):        1->1009, 8->1128, 32->1377
 ```
 
 Numbers are machine- and load-dependent; µs-scale rows carry real run-to-run
-variance. Treat a ratio near 1.0 as "the same" and re-run before trusting a small
-difference. Do not cite these figures as authoritative — regenerate them.
+variance. Across three back-to-back runs on the same idle machine, `baseline_forward`
+moved by 190 µs and the ordering of `read_output_warm` vs `read_source_warm`
+flipped — which is the point: at this scale the steady-state `.source` read is
+indistinguishable from reading the module's output, and the rows that hold their
+shape are the ones with a real gap (cold − warm, first source access). Treat a ratio
+near 1.0 as "the same" and re-run before trusting a small difference. Do not cite
+these figures as authoritative — regenerate them.
 
 ## Where overhead lives
 
@@ -86,10 +91,13 @@ difference. Do not cite these figures as authoritative — regenerate them.
 - **Per invoke.** Each `tracer.invoke(...)` builds a worker greenlet, captures its
   block, and registers it — the slope of `invoke_scaling`.
 - **Per intervention.** Each `.output`/`.save()` parks a worker and serves it one
-  value through `handle` — the slope of `intervention_scaling` (tens of µs each).
-- **`.source`.** First access compiles the instrumented forward (`source_first_access`,
-  a one-time cost cached in `FORWARD_CACHE`, `source.py`); steady-state reads add a
-  small constant over reading the module's output.
+  value through `handle` — the slope of `intervention_scaling`, around 15 µs each
+  on the run above.
+- **`.source`.** First access compiles the instrumented forward
+  (`source_first_access`, a one-time cost cached in `FORWARD_CACHE`, `source.py`) —
+  the one clearly-visible number in the harness, milliseconds against everything
+  else's microseconds. Steady-state reads are not separable from reading the
+  module's output at this scale.
 
 ## The biggest win: consolidate traces
 

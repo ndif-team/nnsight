@@ -55,8 +55,15 @@ jobs:
 
       # CPU only (the runner has no GPU); skip the vLLM suite, which needs a GPU
       # and the vllm extra.
+      #
+      # `tests/tp` is no longer ignored. Its GPU tests skip themselves on a
+      # runner with no cards (`pytestmark = skipif(device_count() < 2)`), and
+      # what is left is `test_cpu_gloo.py`, which shards a tiny model across two
+      # CPU ranks over gloo in a few seconds. Ignoring the whole directory is why
+      # transformers 5.16 could move its tensor-parallel plan off the modules and
+      # leave nnsight's TP path silently inert with CI green.
       - name: Run tests
         env:
           CUDA_VISIBLE_DEVICES: ""
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
-        run: pytest tests/ -q --ignore=tests/vllm --ignore=tests/tp
+        run: pytest tests/ -q --ignore=tests/vllm

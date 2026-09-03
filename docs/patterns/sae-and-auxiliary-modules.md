@@ -2,7 +2,7 @@
 title: SAEs and Auxiliary Modules
 one_liner: Wire a sparse autoencoder (or any auxiliary `nn.Module`) into a model and trace through it as a first-class submodule.
 tags: [pattern, interpretability, sae, dictionaries, extending]
-related: [docs/usage/edit.md, docs/usage/access-and-modify.md, docs/usage/skip.md, docs/concepts/envoy.md, docs/usage/extending.md]
+related: [docs/usage/edit.md, docs/usage/access-and-modify.md, docs/usage/skip.md, docs/usage/invoke-and-batching.md, docs/concepts/envoy.md, docs/usage/extending.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, tests/test_editing.py, tests/test_language.py]
 ---
 
@@ -23,7 +23,7 @@ Four patterns, in order of setup cost:
    layer through it in an `edit()`, so it applies on *every* trace and its internals
    (e.g. `sae.encoder.output`) become observable.
 3. **Replace a block entirely** with `skip`.
-4. **Expose a first-class hookable derived view** — a custom `eproperty` on an
+4. **Expose a first-class derived view** — a custom `eproperty` on an
    `Envoy` subclass wired to a site via `envoys=`, so the SAE's features (or any
    derived quantity) read/write like a built-in `.output`.
 
@@ -48,6 +48,7 @@ then apply it directly inside the trace. A GPT-2 block's `.output` is a plain
 import torch
 from nnsight.modeling.transformers import TransformersModel
 
+torch.manual_seed(0)                        # the SAE below is randomly initialised
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 # Stand-in for a real SAE.
@@ -76,7 +77,7 @@ print(repr(model.tokenizer.decode(logits.argmax(-1))))   # ' to'
 ```
 
 Calling `sae(hs)` is plain Python — it runs immediately on the real tensor your
-worker greenlet received from the hook. There is no nnsight wrapping unless you ask
+worker greenlet received at the handoff. There is no nnsight wrapping unless you ask
 for it. If you want the SAE's *features*, compute them directly (`sae.encoder(hs)`)
 as above — reading `sae.encoder.output` inline does **not** work, because the worker
 that called `sae(...)` has already run past that location by the time it asks for it
@@ -87,9 +88,9 @@ that called `sae(...)` has already run past that location by the time it asks fo
 Attaching the SAE to the model gives it a permanent path
 (`model.transformer.h[6].sae`) — just assign an `nn.Module` to an envoy attribute
 and it is mirrored into the envoy tree. Route the layer through it with an
-`edit()`, calling the attachment with `hook=True` so its own submodules' hooks fire.
-Now every future trace runs the SAE, and you can read `sae.encoder.output`
-directly.
+`edit()`, calling the attachment with `hook=True` so its own submodules hand off
+their values. Now every future trace runs the SAE, and you can read
+`sae.encoder.output` directly.
 
 ```python
 sae = SAE(d_model, 4 * d_model).to(model.device)
@@ -100,15 +101,15 @@ with model.edit(inplace=True):
     model.transformer.h[LAYER].output = model.transformer.h[LAYER].sae(acts, hook=True)
 
 with model.trace(prompt):
-    feats = model.transformer.h[LAYER].sae.encoder.output.save()   # observed via hook
+    feats = model.transformer.h[LAYER].sae.encoder.output.save()   # served by the call
     recon = model.transformer.h[LAYER].output.save()
 
 print(feats.shape)   # torch.Size([1, 10, 3072])
 ```
 
 Why this works and inline doesn't: `hook=True` runs the attachment's full
-`module(...)` call (not just `forward`), so its submodules' hooks fire. The edit
-runs the SAE call in the *edit worker*, while the trace body — reading
+`module(...)` call (not just `forward`), so its submodules hand off their values.
+The edit runs the SAE call in the *edit worker*, while the trace body — reading
 `sae.encoder.output` — runs in a *separate worker* parked on that location. One
 worker produces the value, the other consumes it. See
 [test_editing.py](../../tests/test_editing.py) `TestEditingWithAttachment` for the
@@ -126,6 +127,7 @@ a generation loop, put the passthrough under the edit tracer's `iter`:
 ```python
 import nnsight
 
+model.clear_edits()                         # or the edit above runs a second time
 model.transformer.h[LAYER].sae = SAE(d_model, 4 * d_model).to(model.device)
 
 with model.edit(inplace=True) as tracer:
@@ -139,9 +141,16 @@ with model.generate("The Eiffel Tower is in", max_new_tokens=3, do_sample=False)
         feats.append(model.transformer.h[LAYER].sae.encoder.output)
 
 print([tuple(f.shape) for f in feats])   # [(1, 7, 3072), (1, 1, 3072), (1, 1, 3072)]
+model.clear_edits()
 ```
 
 Step 0 processes the whole prompt; later (KV-cached) steps process one token.
+
+`edit(inplace=True)` **accumulates**. Installing this one on top of the previous
+section's leaves both in place, the SAE runs twice, and the encoder fires twice on
+the prefill — so the shapes above come out as `[(1, 7, 3072), (1, 7, 3072),
+(1, 1, 3072)]` and the second reading is not the second generation step. Clear
+before you install, or work on a copy with plain `model.edit()`.
 
 ## Pattern C: replace a block entirely with `skip`
 
@@ -163,19 +172,19 @@ print(out.shape)   # torch.Size([1, 10, 768])
 module's own `.input` first (it is offered before the skip gate). See
 `docs/usage/skip.md`.
 
-## Pattern D: a first-class hookable derived view via `eproperty`
+## Pattern D: a first-class derived view via `eproperty`
 
 Patterns A–C compute or attach at the call site every trace. To make the SAE's
-features a *permanent, hookable* quantity — read like any built-in `.output` — give
+features a *permanent, served* quantity — read like any built-in `.output` — give
 the site's `Envoy` a custom `eproperty`.
 
 An `eproperty` is the descriptor behind `.input` / `.output`; you can define your
 own. The decorated stub is the **preprocess**: it receives the raw value served at
 the module's location and returns what you read. Tagging it `@eproperty(key="output")`
-hooks the module's output, so the preprocess can compute a derived view from the
-layer's activation. Put it on an `Envoy` subclass, then wire that subclass to the
-site with the `envoys=` argument, which maps a module **type** or a dotted **path
-suffix** to a custom `Envoy` class.
+attaches it to the module's output location, so the preprocess can compute a
+derived view from the layer's activation. Put it on an `Envoy` subclass, then
+wire that subclass to the site with the `envoys=` argument, which maps a module
+**type** or a dotted **path suffix** to a custom `Envoy` class.
 
 ```python
 from nnsight import Envoy
@@ -260,57 +269,75 @@ accessor in `tests/test_language.py` (`Heads` / `TestCustomEnvoys`) and
   module *and* mirrors it as a child envoy (see `Envoy.__setattr__`). You do not
   call `add_module` yourself.
 - **`hook=True` is required to observe internals.** A plain `aux(x)` call inside a
-  trace runs `forward` and skips hooks — the right default for `model.lm_head(...)`
-  in a logit-lens recipe, but it means `.output`/`.input` on the aux module's
-  submodules are never populated. Pass `hook=True` to opt into the hook path.
+  trace runs `forward` and bypasses the controllers — the right default for
+  `model.lm_head(...)` in a logit-lens recipe, but it means `.output`/`.input` on
+  the aux module's submodules are never populated. Pass `hook=True` to opt into
+  the instrumented path.
 - **`hook=True` only exposes `nn.Module` children.** It runs the attachment's
-  `__call__` so its *submodules* fire; bare `nn.Parameter`s and plain Python
-  methods are not hook points and never will be. Most pretrained SAEs ship as an
+  `__call__` so its *submodules* hand off; bare `nn.Parameter`s and plain Python
+  methods are not locations and never will be. Most pretrained SAEs ship as an
   array file (Gemma Scope is a `.npz` of `W_enc`/`W_dec`/`threshold`), so a
   faithful loader has no submodules at all and `sae.encode.output` raises
   `AttributeError: 'function' object has no attribute 'output'`. Give each step
   you want to read its own module — see below.
 - **Device placement** of the SAE must match the activation site
   (`sae.to(model.device)`).
+- **A batched trace pads, and the SAE fires on the padding.** Everything in one
+  trace is left-padded to the batch's longest input, so
+  `sae.encode(block.output).reshape(-1, d_features)` over prompts of different
+  lengths mixes real activations with pad ones. They are not small: at GPT-2's
+  layer 6 a pad position's residual carries about eight times the norm of a real
+  one, so pad rows dominate any max, mean or top-k along the sequence axis, and a
+  max-activating-example search reports a pad position as a feature's best
+  example. Index the activation with the batch's `attention_mask` before ranking
+  or fitting. The ratio is architecture-specific — pythia-70m's pad residuals are
+  *smaller* than its real ones — so measure it rather than assuming. See
+  [invoke-and-batching.md](../usage/invoke-and-batching.md#rows-padding-and-getting-values-back).
 
 ## Making a parameter-based SAE observable
 
 The SAE above is built from `torch.nn.Linear` submodules, so `sae.encoder.output`
-is a hook point for free. Real pretrained dictionaries usually are not: they ship
+is a location for free. Real pretrained dictionaries usually are not: they ship
 as an array file, and a faithful loader holds bare parameters and does the work in
 plain methods.
 
 ```python
-class RawSAE(torch.nn.Module):                     # nothing here is hookable
-    def __init__(self):
+class RawSAE(torch.nn.Module):                     # nothing here is addressable
+    def __init__(self, d_model, n_features):
         super().__init__()
-        self.W_enc = torch.nn.Parameter(...)
-        self.W_dec = torch.nn.Parameter(...)
+        self.W_enc = torch.nn.Parameter(torch.randn(d_model, n_features) / d_model**0.5)
+        self.W_dec = torch.nn.Parameter(torch.randn(n_features, d_model) / n_features**0.5)
     def encode(self, x):
         return torch.relu(x @ self.W_enc)
     def forward(self, x):
         return self.encode(x) @ self.W_dec
+
+model.transformer.h[LAYER].raw = RawSAE(d_model, 4 * d_model).to(model.device)
+model.transformer.h[LAYER].raw.encode.output
+# AttributeError: 'function' object has no attribute 'output'
 ```
 
-`encode` is a method, so `sae.encode.output` raises
-`AttributeError: 'function' object has no attribute 'output'`. The values are
-computed — there is just nowhere to hang a hook.
+`encode` is a method, so it has no location to address. The values are computed
+and then gone.
 
 **Fix: make every value you want to read pass through a module.** `WrapperModule`
 is an identity module that exists for exactly this — it returns its input
-unchanged, so routing a value through it costs nothing and makes it hookable.
+unchanged, so routing a value through it costs nothing and gives that value a
+location.
 
 ```python
 from nnsight.modeling.transformers import WrapperModule
 
+n_features = 4 * d_model
+
 class ModuleSAE(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, d_model, n_features):
         super().__init__()
-        self.encode = WrapperModule()              # now a hook point
+        self.encode = WrapperModule()              # now a location
         self.decode = WrapperModule()
-        self.W_enc = torch.nn.Parameter(...)
-        self.W_dec = torch.nn.Parameter(...)
-        self.threshold = torch.nn.Parameter(...)
+        self.W_enc = torch.nn.Parameter(torch.randn(d_model, n_features) / d_model**0.5)
+        self.W_dec = torch.nn.Parameter(torch.randn(n_features, d_model) / n_features**0.5)
+        self.threshold = torch.nn.Parameter(torch.zeros(n_features))
 
     def forward(self, x):
         pre = x @ self.W_enc
@@ -318,20 +345,27 @@ class ModuleSAE(torch.nn.Module):
         return self.decode(acts @ self.W_dec)
 ```
 
-Attach it, splice it in with an `edit`, and read its internals from any later
-trace:
+Load your checkpoint's arrays into `W_enc` / `W_dec` / `threshold` in place of the
+random initialisation. Then attach it, splice it in with an `edit`, and read its
+internals from any later trace:
 
 ```python
-model.transformer.h[LAYER].sae = ModuleSAE().to(model.device)
+model.clear_edits()
+model.transformer.h[LAYER].sae = ModuleSAE(d_model, n_features).to(model.device)
 
 with model.edit(inplace=True):
     acts = model.transformer.h[LAYER].output
     model.transformer.h[LAYER].output[:] = model.transformer.h[LAYER].sae(acts, hook=True)
 
 with model.trace(prompt):
-    feats = model.transformer.h[LAYER].sae.encode.output.save()   # (B, S, n_features)
-    recon = model.transformer.h[LAYER].sae.decode.output.save()   # (B, S, d_model)
+    feats = model.transformer.h[LAYER].sae.encode.output.save()
+    recon = model.transformer.h[LAYER].sae.decode.output.save()
+
+print(tuple(feats.shape), tuple(recon.shape))   # (1, 10, 3072) (1, 10, 768)
 ```
+
+`evaluating_saes.ipynb` in the tutorials builds this class against a real Gemma
+Scope `.npz` and checks the result against the dictionary's published L0.
 
 The `edit` matters: calling `sae(acts, hook=True)` inline and then reading
 `sae.encode.output` in the *same* trace body raises `OutOfOrderError`, because the
@@ -347,7 +381,7 @@ an adapter. If you want to read it, route it through a module.
 - `docs/usage/access-and-modify.md` — `hook=True` and the `__call__` vs `forward` dispatch.
 - `docs/usage/skip.md` — replacing a module's output.
 - `docs/concepts/envoy.md` — the extension surface (`eproperty`, subclassing, attaching modules).
-- `docs/usage/extending.md` — custom hookable values and the `envoys=` wiring.
+- `docs/usage/extending.md` — custom served values and the `envoys=` wiring.
 - `docs/patterns/per-head-attention.md` — the tested `eproperty` derived-view example.
 - `tests/test_editing.py` — `TestEditingWithAttachment` worked adapter/SAE examples.
 - `tests/test_language.py` — `Heads` / `TestCustomEnvoys`, the `envoys=` + `eproperty` matrix.

@@ -192,9 +192,21 @@ class TestBuiltConfigs:
         assert config.load_in_8bit
         assert not config.load_in_4bit
 
-    def test_fp8_is_not_a_bitsandbytes_format(self):
-        # It goes to transformers' own quantizer, which is the reason this table
-        # holds a builder per name rather than a bitsandbytes flag.
-        from transformers import FineGrainedFP8Config
+    def test_fp8_is_refused_below_capability_8_9(self):
+        # transformers' own quantizer does not refuse on old hardware — it
+        # dequantizes and loads bfloat16 at twice the width asked for, with the
+        # quantizer object still attached. The builder refuses instead, before
+        # any weights are fetched, naming the card families that qualify.
+        capable = any(
+            torch.cuda.get_device_capability(i) >= (8, 9)
+            for i in range(torch.cuda.device_count())
+        )
+        if capable:
+            from transformers import FineGrainedFP8Config
 
-        assert isinstance(QUANTIZATIONS["fp8"].build(torch.bfloat16), FineGrainedFP8Config)
+            assert isinstance(
+                QUANTIZATIONS["fp8"].build(torch.bfloat16), FineGrainedFP8Config
+            )
+        else:
+            with pytest.raises(ValueError, match="compute capability 8.9"):
+                QUANTIZATIONS["fp8"].build(torch.bfloat16)

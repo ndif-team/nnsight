@@ -18,19 +18,19 @@ back on the way out — belongs to
 shared with every other distributed runtime; see
 [`nnsight.intervention.fragments`][nnsight.intervention.fragments].
 
-That sharing is what this module is. The same job used to be done by
-[`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher] with two extra pairs
-of forward hooks per parallel layer, installed by the model runner either side of
-building the Envoy tree so they bracketed the interleaver's own. It needed them
-because ``Batcher.narrow`` runs once per *parked worker*, so the gather had to be
-memoized and explicitly released — several workers reading one value would
-otherwise have run several collectives and deadlocked the ranks. Sitting on the
-interleaver instead, the bracket is already once-per-visit and none of that is
-needed: no memo, no ``watch``/``release``, no extra hooks.
+That sharing is what this module is. Doing the same job from
+[`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher] instead costs two
+extra pairs of forward hooks per parallel layer, bracketing the interleaver's
+own, plus a memo and an explicit release: ``Batcher.narrow`` runs once per
+*parked worker*, so several workers reading one value would otherwise run several
+collectives and deadlock the ranks. On the interleaver the bracket is already
+once-per-visit, so none of that is needed — no memo, no ``watch``/``release``, no
+extra hooks.
 """
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, Dict, Tuple
 
 import torch
@@ -94,8 +94,12 @@ class VLLMFragments(Fragments):
     def fragmented(self, location: str) -> bool:
         return location in self.rules
 
-    def whole(self, location: str, value: Any) -> Any:
-        """The real tensor behind ``value``, assembled from every rank's piece."""
+    def whole(self, location: str, value: Any) -> "tuple[Any, Any]":
+        """The real tensor behind ``value``, and how to cut it back down.
+
+        vLLM's rules describe a location and nothing else — no value here carries
+        its own layout — so the way back is `split` with this location bound to it.
+        """
         from vllm.distributed.communication_op import (
             tensor_model_parallel_all_gather,
             tensor_model_parallel_all_reduce,
@@ -124,13 +128,15 @@ class VLLMFragments(Fragments):
             # MoE it is the same collective the outer block runs right afterwards.
             collective = tensor_model_parallel_all_reduce
 
-        return apply(value, collective, torch.Tensor)
+        return apply(value, collective, torch.Tensor), partial(self.split, location)
 
-    def fragment(self, location: str, whole: Any) -> Any:
+    def split(self, location: str, whole: Any) -> Any:
         """This rank's piece of ``whole``, as vLLM's own forward expects it.
 
         Applied to whatever intervention code left behind, so an edit made to the
-        assembled tensor is carried back into the model rather than dropped.
+        assembled tensor is carried back into the model rather than dropped — and
+        to a value that was never gathered at all (a `.skip` replacement, or the
+        argument of an ad-hoc call), which is already the real tensor.
         """
         from vllm.model_executor.layers.linear import (
             ColumnParallelLinear,

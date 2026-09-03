@@ -107,7 +107,7 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 `.save()` marks the object you bind to a name; a saved container comes back with its mutated contents. Two ways this goes wrong:
 
 - **Saving the elements** (`per_step.append(x.save())`) marks values with no name to return them under — it happens to work locally (the list is mutated in your own frame) but returns nothing on a remote trace.
-- **Leaving the container unsaved** (`per_step = []` *inside* the trace, or a `[x.save() for ...]` comprehension bound to an unsaved name) never pushes it back, so it is `UnboundLocalError` after the block.
+- **Leaving the container unsaved** (`per_step = []` *inside* the trace, or a `[x.save() for ...]` comprehension bound to an unsaved name) never pushes it back, so the name is undefined after the block.
 
 A comprehension follows the same rule — save the whole list, keep elements raw: `hiddens = nnsight.save([b.output for b in model.transformer.h])`.
 
@@ -134,7 +134,7 @@ with model.trace("Hello", remote=True):
 
 ## Gotchas
 
-- Forgetting `.save()` is the most common footgun — the variable is undefined after `__exit__` (`UnboundLocalError`).
+- Forgetting `.save()` is the most common footgun — the variable is undefined after `__exit__`: `NameError` in a script, `UnboundLocalError` inside a function.
 - **A saved value comes back by its variable *name*, so bind it.** `push_result` returns the body's *locals*, filtered to the saved ones — a value marked but never assigned to a name (a bare `model.logits.save()` on its own line) has no local to return, so it silently doesn't come back. This is invisible locally (you just never read it) but obvious on vLLM/remote/serve, where you read it by name: `output.saves["logits"]` will be missing. Always write `logits = model.logits.save()`.
 - **Saving outside a trace raises** — do it inside the `with` block.
 - `nnsight.save()` is safe to call on the same value multiple times — the saved set is keyed by `id()`.

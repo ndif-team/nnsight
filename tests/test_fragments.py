@@ -12,6 +12,8 @@ The real collectives are covered by `tests/tp` (transformers) and `tests/vllm`
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 import torch
 
@@ -37,10 +39,15 @@ class Recorder(Fragments):
 
     def whole(self, location, value):
         self.calls.append(("whole", location))
-        return torch.cat([value, value], dim=-1)
+        return torch.cat([value, value], dim=-1), partial(self._undo, location)
 
-    def fragment(self, location, whole):
+    def _undo(self, location, whole):
         self.calls.append(("fragment", location))
+        return whole[..., : whole.shape[-1] // 2]
+
+    def split(self, location, whole):
+        # A value that was never gathered: same cut, no gather to reverse.
+        self.calls.append(("split", location))
         return whole[..., : whole.shape[-1] // 2]
 
 
@@ -81,6 +88,46 @@ class TestTheBracket:
         _traced(model, fragments, read=True)
 
         assert ("fragment", "model.output") in fragments.calls
+
+
+class TestASkippedValueIsNormalized:
+    """A `.skip` replacement never came out of the module.
+
+    It is the caller's own whole value, while everything `handle` does assumes
+    this device's *piece*. `handle_replacement` cuts it down to a piece first, so
+    the rest of the path treats it exactly like one the module produced. Without
+    that a row-parallel skip was all-reduced on the way out and every rank read
+    back ``world_size`` times what it wrote, with nothing raising.
+
+    Asserted on what a reader sees, not on which methods ran: the point is that a
+    skip round-trips, however that is arranged.
+    """
+
+    def test_a_reader_sees_what_was_written(self, model):
+        fragments = Recorder(locations={"model.output"})
+        model.interleaver.fragments = fragments
+
+        with model.trace(torch.randn(1, 4)):
+            model.skip(torch.ones(1, 4))
+            seen = model.output.save()
+
+        # 4 is what was written. 8 would be the Recorder's doubling — the
+        # replacement assembled as though it were one device's piece.
+        assert seen.shape[-1] == 4
+        assert torch.equal(seen, torch.ones(1, 4))
+        assert ("split", "model.output") in fragments.calls
+
+    def test_it_is_cut_down_even_with_nobody_reading(self, model):
+        """The model's forward carries on with it whether or not anyone looked."""
+        fragments = Recorder(locations={"model.output"})
+        model.interleaver.fragments = fragments
+
+        with model.trace(torch.randn(1, 4)):
+            model.skip(torch.ones(1, 4))
+
+        assert ("split", "model.output") in fragments.calls
+        # Nothing was parked, so nothing was assembled either.
+        assert ("whole", "model.output") not in fragments.calls
 
 
 class TestGating:

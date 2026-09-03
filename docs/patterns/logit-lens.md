@@ -2,7 +2,7 @@
 title: Logit Lens
 one_liner: Apply the final layer norm and unembedding to intermediate hidden states to read off what each layer "thinks" the next token is.
 tags: [pattern, interpretability, residual-stream, decoding]
-related: [docs/usage/trace.md, docs/usage/access-and-modify.md, docs/patterns/activation-patching.md]
+related: [docs/usage/trace.md, docs/usage/access-and-modify.md, docs/patterns/activation-patching.md, docs/patterns/probing.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/modeling/transformers.py]
 ---
 
@@ -22,44 +22,16 @@ early layers predict generic frequent tokens, late layers converge on the answer
 
 On `VLLM`, `model.lm_head(h)` raises (`LMHead's weights should be used in the sampler`); the
 lens is `model.logits_processor(model.lm_head, model.model.norm(h))` on `h = (out[0] + out[1])[-1:]`
-— see [Tensor parallelism](../models/vllm.md#tensor-parallelism-is-transparent).
+— see [Tensor parallelism](../models/vllm-parallelism.md#tensor-parallelism-is-transparent).
 
 Calling `model.lm_head(...)` inside a trace runs the module with the trace
 **stood down** — it is just the linear math you want, applied out of order
 without re-triggering the model. See `docs/usage/access-and-modify.md`
 ("Calling modules directly inside a trace").
 
-!!! warning "`lm_head.output` is not always the model's logits"
-
-    Some architectures post-process the head's output. **Gemma-2 and Gemma-3 apply
-    `tanh` logit softcapping after `lm_head`** (`final_logit_softcapping=30.0` in
-    the config), and `transformers` does it in `Gemma2ForCausalLM.forward`, *not*
-    inside `lm_head`:
-
-    ```python
-    logits = self.lm_head(hidden_states[:, slice_indices, :])
-    if self.config.final_logit_softcapping is not None:
-        logits = logits / self.config.final_logit_softcapping
-        logits = torch.tanh(logits)
-        logits = logits * self.config.final_logit_softcapping
-    ```
-
-    So on those models `model.lm_head.output` is the *pre-cap* logits: the top-1
-    token usually survives, but probabilities, entropies and perplexities do not —
-    one measured run reported a 46x perplexity error from this alone, with nothing
-    raising.
-
-    Check `model.config` for `final_logit_softcapping` before trusting any
-    probability you compute from `lm_head`. For the true logits use
-    `model.output.logits`; for a *lens* at layer L, apply the same cap yourself
-    after the head, so intermediate layers are read on the model's own scale:
-
-    ```python
-    cap = getattr(model.config, "final_logit_softcapping", None)
-    logits = model.lm_head(model.model.norm(hs))
-    if cap is not None:
-        logits = torch.tanh(logits / cap) * cap
-    ```
+Some architectures post-process the head's output, so `model.lm_head.output` is not
+always the model's logits. One line tells you whether yours is one of them — see
+[Check the wiring](#check-the-wiring) below, and run it before you plot anything.
 
 Tutorial mirror: https://nnsight.net/notebooks/tutorials/logit_lens/
 
@@ -91,8 +63,12 @@ with model.trace(prompt):
         top_tok = logits[:, -1, :].argmax(dim=-1)
         layer_top_tokens.append(top_tok)
 
-for i, tok in enumerate(layer_top_tokens):
-    print(f"layer {i:2d}: {model.tokenizer.decode(tok[0])!r}")
+decoded = [model.tokenizer.decode(tok[0]) for tok in layer_top_tokens]
+for i, tok in enumerate(decoded):
+    print(f"layer {i:2d}: {tok!r}")
+
+assert decoded[:6] == [" the"] * 6
+assert decoded[-2:] == [" Paris", " Paris"]
 ```
 
 Real output on GPT-2 — the answer emerges at layer 10:
@@ -115,6 +91,60 @@ layer 11: ' Paris'
 In current `transformers`, a GPT-2 block's `.output` is a plain
 `Tensor` `(batch, seq, hidden)` — read `block.output` directly, **not**
 `block.output[0]`.
+
+## Check the wiring
+
+Applied to the *last* block, the lens is the model's own final computation. So it
+has to reproduce the model's own logits exactly, and one line says whether the
+norm, the head and the block output you picked are the right three:
+
+```python
+import torch
+
+with model.trace(prompt):
+    lens = model.lm_head(model.transformer.ln_f(model.transformer.h[-1].output)).save()
+    real = model.output.logits.save()
+
+assert torch.equal(lens, real), (lens - real).abs().max()
+```
+
+`True` on GPT-2, SmolLM2-135M, Qwen2.5-0.5B and pythia-70m (nnsight 0.8,
+transformers 5.15). A `False` means one of three things, all of which produce a
+plot rather than an error if you skip this:
+
+- the wrong norm (or none — see the note under [Interpretation tips](#interpretation-tips)),
+- the wrong head (`model.embed_out` does not exist on pythia; it is `model.lm_head`),
+- or the model post-processes the head's output.
+
+The third case is Gemma-2, which applies `tanh` logit softcapping in
+`Gemma2ForCausalLM.forward` rather than inside `lm_head`:
+
+```python
+logits = self.lm_head(hidden_states[:, slice_indices, :])
+if self.config.final_logit_softcapping is not None:
+    logits = logits / self.config.final_logit_softcapping
+    logits = torch.tanh(logits)
+    logits = logits * self.config.final_logit_softcapping
+```
+
+On `google/gemma-2-2b` in float32, `final_logit_softcapping = 30.0`, the check
+above fails by `51.0`, and the uncapped distribution is far too confident: max
+probability `0.9995` against the model's own `0.9257`, entropy `0.0050` against
+`0.6010` — a factor of 120. The top-1 token usually survives; nothing else does.
+
+Apply the same cap yourself and intermediate layers are read on the model's own
+scale:
+
+```python
+cap = getattr(model.config, "final_logit_softcapping", None)
+logits = model.lm_head(model.model.norm(hs))
+if cap is not None:
+    logits = torch.tanh(logits / cap) * cap
+```
+
+That is bit-identical to `model.output.logits` at the last layer. Check
+`model.config` rather than a list of model names: Gemma-3 sets
+`final_logit_softcapping` to `None`.
 
 ## Variations
 
@@ -199,10 +229,12 @@ fig.update_xaxes(tickmode="array", tickvals=x_positions, ticktext=token_labels)
 fig.show()
 ```
 
-### Tuned lens (learned linear map per layer)
+### Tuned lens (learned translator per layer)
 
-If you have a tuned-lens checkpoint with one affine map `A_L` per layer, replace
-`model.transformer.ln_f(hs)` with `A_L(hs)`:
+A tuned lens keeps the model's frozen final norm and unembedding and learns one
+affine *translator* `A_L` that maps layer `L`'s residual into the final layer's
+basis first ([Belrose et al., 2023](https://arxiv.org/abs/2303.08112)). Only the
+translator is new; the norm stays:
 
 ```python
 # tuned_maps: list of nn.Linear, one per layer, on model.device
@@ -210,9 +242,16 @@ with model.trace(prompt):
     per_layer = nnsight.save([])
     for L, block in enumerate(model.transformer.h):
         hs = block.output
-        logits = model.lm_head(tuned_maps[L](hs))
+        translated = tuned_maps[L](hs)               # affine, initialized to the identity
+        logits = model.lm_head(model.transformer.ln_f(translated))
         per_layer.append(logits[:, -1, :].argmax(dim=-1))
 ```
+
+Dropping `ln_f` and decoding `lm_head(A_L(hs))` instead is not the same model and
+not a free reparameterization: a LayerNorm is not affine, and its per-token
+normalization scale varies by a factor of 33 across the positions of one GPT-2
+prompt. The best affine fit to `ln_f` on GPT-2 layer 8 leaves a relative residual
+of 0.42 on natural text.
 
 ### MLP-only / attention-only lens
 
@@ -224,34 +263,44 @@ first element of the attention tuple).
 
 - **Look at the layer where the answer first becomes top-1.** That layer does the
   bulk of the decision; later layers usually refine.
+- **GPT-2's smooth trajectory is not the general case.** On Qwen2.5-0.5B
+  "The capital of France is" decodes to punctuation and code fragments for the
+  first 21 of 24 layers, then `' Paris'` for the last three. SmolLM2-135M gives
+  punctuation for its first half, `' the'` through most of the second, and
+  `' Paris'` only at layer 29 of 30. Both models answer correctly. Once the
+  wiring check passes, a flat curve is as often a fact about the lens as about
+  the model.
 - **Probability, not just argmax.** Argmax hides a 0.51 vs 0.49 race. Softmax
   probabilities over a target are more informative.
 - **Position matters.** `[:, -1, :]` reads the last position (next-token
   prediction). For factual recall the relevant position is often the subject token.
-- **Layer norm matters.** Skipping `ln_f` gives garbage — the unembedding expects
-  normalized inputs. Use the model's own `ln_f`.
+- **Layer norm matters, and skipping it does not look like an error.** Without
+  `ln_f`, GPT-2 decodes `' the'` at *every* layer with probability `1.0000` — a
+  lens that looks more confident than the correct one, and identical to the
+  symptom that is supposed to send you off to fit a tuned lens. Check the wiring
+  before concluding that the lens does not transfer.
 - **Model-specific module names.** GPT-2 uses `model.transformer.h[i]` and
   `model.transformer.ln_f`. Llama / Mistral / Qwen typically use
   `model.model.layers[i]` and `model.model.norm`. Use `print(model)` to inspect.
 
 ## Gotchas
 
-- In current `transformers`, GPT-2 **block** outputs are plain tensors —
-  `block.output` *is* the residual tensor. Older `transformers<5.0` returned a
-  tuple; if `block.output[0]` looks wrong, drop the `[0]`. See
+- In current `transformers`, a **block**'s output is a plain tensor on every
+  family tested — GPT-2, Llama, Qwen, GPT-NeoX, Gemma-2. `block.output` *is* the
+  residual tensor, and `block.output[0]` indexes the batch. (`transformers < 5.0`
+  wraps it in a tuple, which is where the `[0]` in older code comes from.) See
   `docs/usage/access-and-modify.md`.
-- Calling `model.lm_head(...)` inside a trace runs `forward()` (no hooks), which is
-  what you want. Reading `model.lm_head.output` instead would intercept the *real*
-  `lm_head` call the model itself makes — a different operation.
-- To collect values into a list, create the list inside the trace with
-  `xs = nnsight.save([])` and append raw values (no per-element `.save()`).
-  Without the saved, named list the values aren't available after the trace.
+- Calling `model.lm_head(...)` inside a trace runs `forward()` with the trace stood
+  down, which is what you want. Reading `model.lm_head.output` instead would
+  intercept the *real* `lm_head` call the model itself makes — a different
+  operation.
 
 ## Related
 
 - [activation-patching](activation-patching.md) — pair logit lens with patching to
   localize where a fact lives.
 - [attention-patterns](attention-patterns.md)
+- [probing](probing.md) — the other read-only depth measurement, with controls.
 - `docs/usage/access-and-modify.md`
 - https://nnsight.net/notebooks/tutorials/logit_lens/
 - nostalgebraist (2020), "interpreting GPT: the logit lens".

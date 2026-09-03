@@ -517,13 +517,13 @@ class VLLM(Remotable):
         prompt = inputs[0]
 
         # `Mapping`, not `dict`: a tokenizer hands back a `BatchEncoding`, which is
-        # a `UserDict` and so fails an `isinstance(..., dict)` test — which is why
-        # the tokenizer-output path below was unreachable from an actual tokenizer.
+        # a `UserDict` and so fails an `isinstance(..., dict)` test, which would put
+        # the tokenizer-output path below out of an actual tokenizer's reach.
         if isinstance(prompt, Mapping):
             # That output is ours to convert. Anything else is one of vLLM's own
             # prompt dicts — `TypedDict`s, so plain dicts at runtime — and the
-            # engine knows them better than we do; taking those for tokenizer
-            # output is how `TokensPrompt(...)` came back as `KeyError: 'input_ids'`.
+            # engine knows them better than we do. Taking one of those for tokenizer
+            # output turns `TokensPrompt(...)` into `KeyError: 'input_ids'`.
             if "input_ids" in prompt:
                 return self._tokenized_prompt(prompt)
             return prompt
@@ -577,9 +577,9 @@ class VLLM(Remotable):
     def _sampling_kwargs(kwargs: dict) -> dict:
         """A copy of `kwargs` with generation length spelled the way vLLM spells it.
 
-        vLLM's is ``max_tokens``; ``max_new_tokens`` is the ``LanguageModel`` API's
-        and is accepted on trace and generate alike, rewritten before it reaches
-        SamplingParams — where an unknown keyword now raises rather than being
+        vLLM's is ``max_tokens``; ``max_new_tokens`` is what the rest of nnsight
+        spells it, and is accepted on trace and generate alike, rewritten before it
+        reaches SamplingParams — where an unknown keyword raises rather than being
         quietly ignored. The copy is what lets a caller pass its own dict through
         twice (``generate`` hands one to ``trace`` and keeps the original).
         """
@@ -619,6 +619,24 @@ class VLLM(Remotable):
         # the module here has no weights to run.
         kwargs.setdefault("fn", self._call)
         return super().trace(*inputs, **kwargs)
+
+    def scan(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse: there is no local forward for a fake-tensor pass to run.
+
+        [`scan`][nnsight.modeling.mixins.meta.Meta.scan] reads shapes by running the
+        model's own forward under a fake-tensor mode, on the meta module, with no
+        weights. Here that module is a client-side shell: the forward runs in the
+        engine's worker, on real weights, under ``torch.inference_mode``. Refused
+        up front rather than at the engine, which would build itself and then ask
+        a fake mode to run a request it can't fake.
+        """
+        raise NotImplementedError(
+            "scan is unavailable on vLLM: it runs the model's forward under a "
+            "fake-tensor mode to propagate shapes, and there is no forward here to "
+            "run — the engine's worker runs the real one, under "
+            "torch.inference_mode. Trace a prompt and read the shapes off the "
+            "activations it serves."
+        )
 
     def edit(
         self,
@@ -963,9 +981,9 @@ class VLLM(Remotable):
 
         "Did not set them" is what the invoke recorded in `_batch`, not "still
         equals vLLM's default". The two are not the same: ``temperature=1.0`` and
-        ``max_tokens=16`` *are* the defaults, so an invoke asking for either used
-        to have it overwritten by the trace-level setting while a neighbouring
-        ``temperature=0.99`` was honoured.
+        ``max_tokens=16`` *are* the defaults, so inferring it from the value would
+        let the trace-level setting overwrite an invoke that asked for one of them
+        while honouring a neighbouring ``temperature=0.99``.
 
         Returns:
             The workers that were attached, in request order.

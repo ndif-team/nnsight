@@ -1,6 +1,6 @@
 """Low-level, process-wide helpers nnsight installs at import.
 
-- [`py_mount`][nnsight._c.py_mount] — a small C extension that writes a method into ``object``'s
+- ``py_mount`` — a small C extension that writes a method into ``object``'s
   type dict (bypassing its read-only ``mappingproxy``), so it appears on *all*
   objects. nnsight uses it to add ``.save()`` universally. Optional: if it didn't
   build, ``mount``/``unmount`` are ``None`` and callers fall back to

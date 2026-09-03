@@ -1,6 +1,6 @@
 ---
 title: Extending nnsight
-one_liner: Build custom models by subclassing NNsight/Envoy — batching hooks, attached modules, loaders, custom batchers and tracers.
+one_liner: Build custom models by subclassing NNsight/Envoy — batching, attached modules, loaders, custom batchers and tracers.
 tags: [usage, extending, envoy, library-development]
 related: [docs/usage/access-and-modify.md, docs/usage/invoke-and-batching.md, docs/usage/rename-modules.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, src/nnsight/modeling/base.py, src/nnsight/intervention/batching.py, src/nnsight/modeling/mixins/loadable.py, src/nnsight/modeling/transformers.py]
@@ -16,15 +16,16 @@ the higher-level classes (`TransformersModel`, `DiffusionModel`, ...) are
 specialized envoys that add loading/tokenization on top of the same behavior.
 
 So "extending nnsight" means **subclassing `NNsight`/`Envoy`** and overriding a few
-well-defined hooks. The extension surface here is:
+well-defined extension points. Each is an underscore-prefixed attribute or method
+with a working default, so you override only the one you need. The surface is:
 
 1. Override `_batch_size` / `_batch` to support batched invokes.
 2. Add methods/attributes to a model subclass.
 3. Attach standalone modules to the tree so they expose activations.
-4. Subclass `Batcher` for a non-standard batch layout.
+4. Set `_batcher_class` to a `Batcher` subclass for a non-standard batch layout.
 5. Use the `Loadable` mixin to build the model from a repo id / config.
 6. Pass a custom `tracer_cls`.
-7. Define custom hookable values with the `eproperty` descriptor.
+7. Define custom served values with the `eproperty` descriptor.
 
 > `.input` / `.inputs` / `.output` (and `tracer.result`) are `eproperty`
 > descriptors, and you can define your own. To attach a custom `eproperty` to a
@@ -119,9 +120,18 @@ Submodules of the wrapped module are wrapped automatically. To expose a module t
 is **not** part of the wrapped module's tree — a streamer, a sampler, a generated-id
 passthrough — build an `Envoy` over it with the model's interleaver and add it to
 `_children`. This is exactly how `TransformersModel` exposes `model.generator`
-(`src/nnsight/modeling/transformers.py`):
+(`src/nnsight/modeling/transformers.py`).
+
+For its `.output` to be readable, the standalone module has to actually be *called*
+during the run, **with `hook=True`** — that is what leaves the trace watching the
+call, so the value reaches a worker parked on `model.extra.output`. A plain
+`NNsight` has no `generate` to hang that call on, so give the subclass a driver
+method and decorate it with `@traceable`. `with model.run(x):` then traces that
+method, and the model's own `__call__` stays untouched:
 
 ```python
+from nnsight.intervention.envoy import Envoy, traceable
+
 class MyModel(NNsight):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -131,23 +141,50 @@ class MyModel(NNsight):
             interleaver=self.interleaver,
         )
         self._children.append(self.extra)
+
+    @traceable
+    def run(self, x):
+        out = self._module(x)
+        return self.extra(out, hook=True)     # hook=True, or .output is unreadable
+
+with model.run(torch.ones(1, 5)):
+    passed = model.extra.output.save()
 ```
 
-For its `.output` to be readable, the standalone module has to actually be *called*
-during the run — pass values through it in your `generate`/`trace` override, e.g.
-`self.extra(value, hook=True)` (as `TransformersModel.generate` does with
-`self.generator`). Standalone children survive a model-environment rebind (e.g. lazy
-dispatch swapping in real weights): they keep their own module and hooks.
+`@traceable` is sugar for `trace(..., fn=self.run)`; pass `fn=` directly if you'd
+rather not decorate. `TransformersModel.generate` is the same shape, with
+`self.generator` as the attached child.
+
+Standalone children survive a model-environment rebind (e.g. lazy dispatch swapping
+in real weights): they keep their own module and their own place in the tree.
 
 ## 4. Custom `Batcher` for non-standard batch layouts
 
-If your model's batch axis isn't a plain dim-0 stack (e.g. diffusion's
-classifier-free-guidance doubling, or vLLM's flat token axis), subclass
-`Batcher` and override `narrow` (slice a batched activation to a group's rows) and
-`widen` (splice an edit back). See `VLLMBatcher`
-(`src/nnsight/modeling/vllm/batching.py`) for a worked example. A custom batcher is
-installed by a custom tracer that sets `self.batcher` and hands it to
-`Envoy.interleave(fn, batcher=...)`.
+The `Batcher` owns the row math: it slices a full batched activation down to an
+invoke's rows on the way to that block (`_narrow_tensor`) and splices an edit back
+into the whole batch on the way out (`_widen_tensor`). The base layout is a plain
+dim-0 stack. If your model's batch axis isn't that — diffusion's
+classifier-free-guidance doubling, vLLM's flat token axis — subclass `Batcher`,
+override those two, and name your subclass on the model class:
+
+```python
+from nnsight.intervention.batching import Batcher
+
+class MyBatcher(Batcher):
+    def _narrow_tensor(self, tensor, group):
+        ...                                    # slice to group's rows
+    def _widen_tensor(self, full, group, edited):
+        ...                                    # splice `edited` back into `full`
+
+class MyModel(NNsight):
+    _batcher_class = MyBatcher                 # the whole installation
+```
+
+`_batcher_class` is the only wiring needed — both the standard tracer and the vLLM
+tracer build the run's batcher as `envoy._batcher_class(envoy, kwargs)`.
+`DiffusionModel` is the reference override; `VLLMBatcher`
+(`src/nnsight/modeling/vllm/batching.py`) is the worked example of a genuinely
+different layout.
 
 ## 5. Loading from a repo id / config — the `Loadable` mixin
 
@@ -180,13 +217,13 @@ with model.trace(x, tracer_cls=MyTracer):
     ...
 ```
 
-## 7. Custom hookable values: `eproperty`
+## 7. Custom served values: `eproperty`
 
 `.output` / `.input` / `.inputs` and `tracer.result` are `eproperty` descriptors
 (`src/nnsight/intervention/eproperty.py`): reading one parks the worker until the
 model reaches that location (`"{path}.{key}"`) and returns the value there; writing
 one swaps a new value in. Define your own to expose a run-level value the model
-produces outside a normal module hook.
+produces outside a module's own input/output.
 
 Decorate a stub with `@eproperty` (or `@eproperty(key=..., description=...)`). The
 stub **is the preprocess** — it maps the raw served value to what the user reads, so
@@ -265,11 +302,20 @@ Non-matching modules stay the base `Envoy`. See
 - **`envoys=` targets specific modules.** Map a module type or dotted path suffix
   to a custom `Envoy` subclass to attach a custom `eproperty` there; without it a
   custom `eproperty` lives on the model subclass.
-- **Batching needs both `_batch_size` and `_batch`.** With only the default,
-  multiple input invokes raise `NotImplementedError`.
+- **Batching needs both `_batch_size` and `_batch`,** and the failure lands at
+  trace time, not construction time. With only the default, a second input invoke
+  raises `NNsight does not support batching multiple invokes`.
+- **A batched write has to keep its rows.** The splice back into the combined
+  batch is a plain `cat`, and nothing checks the height: a replacement with a
+  different leading dim than the block owns builds a batch that is no longer the
+  model's, and the mismatch surfaces in some later module — or not at all.
 - **A class-level attribute on an `Envoy`/`NNsight` subclass is shared across
-  instances** — set per-instance config in `__init__`.
-- **Attached standalone modules must be called** to produce a readable `.output`.
+  instances** — set per-instance config in `__init__`. (`_batcher_class` is meant
+  to be class-level; per-instance config is not.)
+- **Attached standalone modules must be called with `hook=True`** to produce a
+  readable `.output`. Called without it, the read is never served and the trace
+  ends with `'model.extra.output.i0' was requested but the model already ran past
+  it` (an `OutOfOrderError`).
 
 ## Related
 

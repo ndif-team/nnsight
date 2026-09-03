@@ -3,14 +3,14 @@ title: Save Pitfalls
 one_liner: Anything that goes wrong with .save() / nnsight.save() — the outside-a-trace guard, values disappearing, aliasing, remote returns.
 tags: [gotcha, save, remote]
 related: [docs/usage/save.md, docs/errors/save-outside-trace.md, docs/gotchas/remote.md]
-sources: [src/nnsight/tracing/tracer.py:161, src/nnsight/tracing/tracer.py:201, src/nnsight/tracing/hint.py]
+sources: [src/nnsight/tracing/tracer.py, src/nnsight/tracing/hint.py]
 ---
 
 # Save Pitfalls
 
 ## TL;DR
-- **`save()` raises outside a trace.** `nnsight.save(x)` / `x.save()` marks a value to return from the enclosing `with model.trace(...):` block, so calling it with no trace running is a `ValueError` — not the silent no-op old nnsight allowed. Move the save inside the block.
-- Forget `.save()` and the variable does not cross back out of the trace. Inside a function you get `UnboundLocalError` when you read it afterward.
+- **`save()` raises outside a trace.** `nnsight.save(x)` / `x.save()` marks a value to return from the enclosing `with model.trace(...):` block, so calling it with no trace running is a `ValueError`. Move the save inside the block.
+- Forget `.save()` and the variable does not cross back out of the trace: reading it afterward is a `NameError` in a script, an `UnboundLocalError` inside a function.
 - `.save()` / `nnsight.save(x)` return `x` **unchanged** — save the value you bind: `h = module.output.save()`. A value built from a saved one is not itself saved: `(x.save() * 2)` returns `x`, write `(x * 2).save()`.
 - **Nested traces don't need `.save()` between them.** Only the *outermost* trace boundary filters to saved values; inner traces (inside a `model.session()`) push everything up.
 - `.save()` is required inside `model.scan(...)` too — it is a tracing context like `trace`.
@@ -29,7 +29,7 @@ inside one — move the save into the trace block.
 ```
 
 ### Cause
-`save` marks an object (by identity) so the trace's exit knows to hand it back to the caller. With no trace running there is nothing to hand it back *from*, and the mark would be cleared before anything read it — so old nnsight's silent no-op was a footgun. `save` (`src/nnsight/tracing/tracer.py:161`) now checks the per-thread trace depth and raises if it is zero.
+`save` marks an object (by identity) so the trace's exit knows to hand it back to the caller. With no trace running there is nothing to hand it back *from*, and the mark would be cleared before anything read it. `save` (`src/nnsight/tracing/tracer.py`) checks the per-thread trace depth and raises if it is zero.
 
 ### Wrong code
 ```python
@@ -59,16 +59,19 @@ print(len(captured))
 ## Forgetting `.save()`
 
 ### Symptom
-After the `with model.trace(...)` block exits, reading the variable raises `UnboundLocalError: cannot access local variable 'output' where it is not associated with a value` (inside a function).
+After the `with model.trace(...)` block exits, reading the variable raises. At module scope —
+a script — that is `NameError: name 'output' is not defined`; inside a function it is
+`UnboundLocalError: cannot access local variable 'output' where it is not associated with a
+value`, because the assignment inside the block made the name local.
 
 ### Cause
-The trace body runs in a scratch namespace; on exit only the values marked with `save` are written back into your frame (`push_result`, `src/nnsight/tracing/tracer.py:201`). An unsaved name was assigned inside the block but never pushed back, so referencing it afterward hits an unbound local.
+The trace body runs in a scratch namespace; on exit only the values marked with `save` are written back into your frame (`push_result`, `src/nnsight/tracing/tracer.py`). An unsaved name was assigned inside the block but never pushed back, so referencing it afterward hits an unbound local.
 
 ### Wrong code
 ```python
 with model.trace("Hello"):
     output = model.transformer.h[-1].output   # not saved
-print(output)   # UnboundLocalError
+print(output)   # NameError in a script, UnboundLocalError in a function
 ```
 
 ### Right code
@@ -110,10 +113,10 @@ with model.trace("Hello"):
 
 ### Wrong code
 ```python
-# 1) Container assigned inside the trace but not saved -> UnboundLocalError after.
+# 1) Container assigned inside the trace but not saved -> unbound after.
 with model.trace("Hello"):
     hiddens = [block.output.save() for block in model.transformer.h]   # not saved
-print(len(hiddens))            # UnboundLocalError
+print(len(hiddens))            # NameError / UnboundLocalError
 
 # 2) Saving the elements into an outer list -> works locally by frame side effect,
 #    but returns nothing on a remote trace (the appends happen server-side).
@@ -161,7 +164,8 @@ print(patched)
 ## `.save()` inside `model.scan(...)`
 
 ### Symptom
-`model.scan("Hello")` to inspect shapes, then reading the result outside the block: `UnboundLocalError`.
+`model.scan("Hello")` to inspect shapes, then reading the result outside the block: the name
+is not there.
 
 ### Cause
 `model.scan(...)` is a tracing context like `trace` (it runs the forward under fake tensors). The same exit filter applies. Shapes come back as `torch.Size` / `int`, which have `.save()` mounted only when the C extension is built — so `nnsight.save(...)` is the safe form.
@@ -184,7 +188,7 @@ See [types-and-values.md](types-and-values.md) for scan value semantics.
 ### Cause
 `x.save()` on an arbitrary object exists only because nnsight optionally mounts a `save` method onto every object via a C extension, gated by `CONFIG.APP.PYMOUNT` (default `True`, `src/nnsight/__init__.py`). If the extension didn't build, the mount is silently skipped and `list().save()` / `some_size.save()` raise `AttributeError`. Tensors read from `.output`/`.input` always have `.save()` (they behave as nnsight's `Object` tensor stand-in).
 
-`nnsight.save(x)` (`src/nnsight/tracing/tracer.py:161`) is a plain function that marks `id(x)` and returns `x`. It works on every object with no mount dependency.
+`nnsight.save(x)` (`src/nnsight/tracing/tracer.py`) is a plain function that marks `id(x)` and returns `x`. It works on every object with no mount dependency.
 
 ### Mitigation
 - For non-tensor values (shapes, ints, lists, dicts), prefer `nnsight.save(...)`.

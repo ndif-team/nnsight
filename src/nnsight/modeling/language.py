@@ -13,6 +13,7 @@ from __future__ import annotations
 import warnings
 from typing import Any, Optional
 
+from .. import NNsightDeprecationWarning
 from .transformers import TransformersModel
 
 
@@ -36,7 +37,7 @@ class LanguageModel(TransformersModel):
             warnings.warn(
                 "LanguageModel is deprecated; use "
                 "TransformersModel(repo_id, task='text-generation') instead.",
-                DeprecationWarning,
+                NNsightDeprecationWarning,
                 stacklevel=2,
             )
         # A causal LM: use the text-generation pipeline (it is what the checkpoint

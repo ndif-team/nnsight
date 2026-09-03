@@ -3,7 +3,7 @@ title: Cannot Invoke While the Model Is Already Running
 one_liner: "ValueError: Cannot invoke while the model is already running. — a tracer.invoke(...) was opened after the model started executing."
 tags: [error, setup, invoke]
 related: [docs/errors/cannot-access-outside-interleaving.md, docs/usage/invoke-and-batching.md, docs/usage/trace.md]
-sources: [src/nnsight/intervention/tracer.py:344, src/nnsight/intervention/tracer.py:347]
+sources: [src/nnsight/intervention/tracer.py]
 ---
 
 # Cannot Invoke While the Model Is Already Running
@@ -16,7 +16,7 @@ ValueError: Cannot invoke while the model is already running.
 
 ## Cause
 
-`Invoker.__init__` (`src/nnsight/intervention/tracer.py:344`) rejects construction
+`Invoker.__init__` (`src/nnsight/intervention/tracer.py`) rejects construction
 when the tracer's interleaver is already interleaving:
 
 ```python
@@ -55,12 +55,18 @@ with model.trace() as tracer:
         b = model.lm_head.output.save()
 ```
 
+A trace nested inside another trace is a different shape and does not reach this
+check — the inner `trace` builds a tracer against an interleaver that is already
+running, and fails while wiring it up:
+
 ```python
 # WRONG — nested traces
 with model.trace("Hello"):
-    with model.trace("World"):              # ValueError on the inner invoke
+    with model.trace("World"):              # AttributeError: 'NoneType' object has no attribute 'event'
         out = model.lm_head.output.save()
 ```
+
+The fix is the same one.
 
 ```python
 # FIXED — use a session to run multiple traces

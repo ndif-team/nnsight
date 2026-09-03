@@ -26,7 +26,7 @@ import os
 import sys
 import types
 from types import FrameType, TracebackType
-from typing import Any
+from typing import Any, Callable
 
 # Flushes a frame's f_locals dict into its fast-locals array; removed in 3.13,
 # where f_locals writes through on its own (PEP 667). Declared with an explicit
@@ -119,7 +119,7 @@ _INTERNAL = os.path.dirname(os.path.dirname(__file__))
 
 
 def filter_traceback(
-    traceback: TracebackType | None, keep
+    traceback: TracebackType | None, keep: Callable[[FrameType], bool]
 ) -> TracebackType | None:
     """Rebuild a traceback keeping only frames for which ``keep(frame)`` is true.
 

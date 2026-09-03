@@ -3,21 +3,21 @@ title: Interleaver and Controller
 one_liner: One shared Interleaver installs a controller forward on every wrapped module; it passes through when idle and hands input/output to Interleaver.handle when interleaving, counting each visit once on the interleaver.
 tags: [concept, mental-model, controller]
 related: [docs/concepts/threading-and-mediators.md, docs/concepts/envoy.md, docs/concepts/source-tracing.md]
-sources: [src/nnsight/intervention/interleaver.py:430, src/nnsight/intervention/interleaver.py:521, src/nnsight/intervention/interleaver.py:566, src/nnsight/intervention/interleaver.py:375, src/nnsight/intervention/interleaver.py:605]
+sources: [src/nnsight/intervention/interleaver.py]
 ---
 
 # Interleaver and Controller
 
 ## What this is for
 
-How values get from the running model into a parked worker. One `Interleaver` (`interleaver.py:430`) is shared across an entire `Envoy` tree, so every module reports into the same set of workers.
+How values get from the running model into a parked worker. One `Interleaver` (`interleaver.py`) is shared across an entire `Envoy` tree, so every module reports into the same set of workers.
 
 How a module reaches it:
 
 - **One controller per module, installed at wrap time.** When an `Envoy` is built it calls `interleaver.instrument(self)`, which installs the module's **controller** as its `forward` (`source.py`, `make_controller`). The controller is the whole per-module mechanism: it hands the input to `handle("{path}.input", ...)`, consults the `.skip` gate, runs the real forward, and hands the output to `handle("{path}.output", ...)`. No PyTorch forward hooks are registered — a module with none is called on PyTorch's fast path, which is most of what makes an instrumented model cheap.
 - **Pass-through when idle.** The controller first checks that its interleaver is `interleaving` *and* `busy` (has workers); otherwise it runs the body and nothing else. So an instrumented model runs at engine speed when you're not tracing, and a vLLM step with no nnsight requests in it costs each module one attribute test.
 - **Routed when interleaving.** Inside a trace, the handoffs return the handled value, so an intervention can edit input or output in place.
-- **No hooks under tensor parallelism either.** transformers TP all-reduces and all-gathers in *its* forward hooks, which run after the controller — so the controller sees a row-parallel output as this rank's partial sum and a gathered head as a shard. `TPFragments` records which, and makes the value whole (all-reduce or all-gather) only when a worker is actually waiting there.
+- **No hooks under tensor parallelism either.** transformers TP all-reduces and all-gathers in the wrapper it installs over `module.forward` (each style's `install_forward`), and the controller runs inside that wrapper — so the controller sees a row-parallel output as this rank's partial sum and a gathered head as a shard. `TPFragments` records which, and makes the value whole (all-reduce or all-gather) only when a worker is actually waiting there.
 - **One occurrence counter per location**, on the interleaver, bumped once per visit; each worker holds the counts it started at, so its own occurrence of a location is a subtraction, not a per-worker increment at every handoff.
 
 There is **one** primitive — a location string plus `Interleaver.handle` — and modules, source operations, `.skip`, and `result` all ride on it.
@@ -51,9 +51,9 @@ def controller(*args, **kwargs):                      # the module's forward, pe
 
 ## Interleaver.handle: one call, every worker
 
-`Interleaver.handle(provider, value)` (`interleaver.py:566`) is the whole model→worker interface:
+`Interleaver.handle(provider, value)` (`interleaver.py`) is the whole model→worker interface:
 
-1. Offer `value` to every mediator in turn via `Mediator.handle` (`interleaver.py:375`). A read is served the value; a swap replaces it. The value threads through all workers, so each sees the previous one's edits.
+1. Offer `value` to every mediator in turn via `Mediator.handle` (`interleaver.py`). A read is served the value; a swap replaces it. The value threads through all workers, so each sees the previous one's edits.
 2. If batching, reassemble a batched `.skip` from its per-invoke parts (`Batcher.assemble_skip`).
 3. Offer the now post-intervention value to any active caches (`tracer.cache()`), narrowed to each cache's own batch rows.
 4. Return the possibly-edited value back to the controller, which substitutes it into the forward.
@@ -71,10 +71,10 @@ Because a **source operation** goes through `handle` every time it fires, an op 
 
 ## Out-of-order and dangling workers
 
-After the model returns, `check_dangling_mediators` (`interleaver.py:605`) inspects any worker still parked:
+After the model returns, `check_dangling_mediators` (`interleaver.py`) inspects any worker still parked:
 
 - **`iteration == 0`** (a plain request the model ran past or never made): throw `OutOfOrderError` into the worker so the traceback points at the waiting line.
-- **`iteration != 0`** (an open-ended `tracer.iter[:]` that outran the model's steps): throw to unwind the worker's `finally` blocks, but catch it and **warn** rather than raise — reached steps' saved values are kept.
+- **`iteration != 0`** (a `tracer.iter` loop — bounded or open — that outran the model's steps): throw to unwind the worker's `finally` blocks, but catch it and **warn** rather than raise — reached steps' saved values are kept.
 - **`Event.BARRIER`** still pending: a barrier fewer blocks reached than it was built for — raise a `ValueError` pointing at the waiting line.
 
 ## Caches are post-intervention observers

@@ -9,7 +9,7 @@ really just *how wide is a weight*.
 
 So it goes in the dtype slot, next to the widths torch does have::
 
-    LanguageModel("meta-llama/Llama-3.2-3B", dtype="nf4", dispatch=True)
+    TransformersModel("meta-llama/Llama-3.2-3B", dtype="nf4", dispatch=True)
 
 ``dtype`` here is what the weights are **held** as. Everything the format leaves
 alone — norms, embeddings, the LM head — and everything the model *computes* in
@@ -30,6 +30,18 @@ class holding a differently-shaped weight, but it sits at the same path with the
 same children, so module paths — and therefore interventions, envoys, and remote
 requests naming them — are unchanged. Reading a raw ``.weight`` is the exception;
 see [`Quantization`][nnsight.modeling.quantization.Quantization].
+
+The bitsandbytes formats swap ``nn.Linear`` and nothing else, which decides what
+a checkpoint actually saves. transformers 5 holds a mixture-of-experts model's
+experts as stacked 3-D parameters on one module rather than as linears, so those
+weights, most of an MoE, stay at the compute dtype and the model shrinks by a few
+percent.
+
+A remote model key is ``{repo_id, revision}`` and says nothing about how the
+weights are held, so ``dtype`` on a remote model shapes only the client's own meta
+build: the deployment decides what a replica holds. Routing to a replica by dtype
+would mean putting the dtype in the key, and treating two dtypes of one checkpoint
+as two deployments, which is a routing question rather than a loading one.
 """
 
 from __future__ import annotations
@@ -84,10 +96,31 @@ def _bitsandbytes_8bit(compute_dtype: Any) -> Any:
 def _fp8(compute_dtype: Any) -> Any:
     """transformers' own block-wise FP8, which is not a bitsandbytes format.
 
-    Needs hardware with FP8 support (H100 and later). transformers raises on
-    anything older, which is left to it rather than duplicated here — the check
-    belongs to the backend that knows what it needs.
+    Needs a GPU of compute capability 8.9 or better (4090, L40S, H100 and
+    later). Below that, transformers' own quantizer does not refuse: it logs a
+    warning, sets ``dequantize`` on the config and loads bfloat16, leaving the
+    quantizer object attached so the model reports itself as quantized while
+    holding weights at twice the width asked for. Twice the width also means
+    twice the memory that ``bytes_per_element`` predicts, so anything sized off
+    the name — an NDIF deployment placing models by footprint — is placed at
+    half reality. Refused here instead, where the message can say which card
+    families qualify.
+
+    Raises:
+        ValueError: if no visible CUDA device has compute capability >= 8.9.
     """
+    import torch  # lazy, matching the rest of this module
+
+    if not any(
+        torch.cuda.get_device_capability(i) >= (8, 9)
+        for i in range(torch.cuda.device_count())
+    ):
+        raise ValueError(
+            'dtype="fp8" needs a GPU of compute capability 8.9 or better '
+            "(4090, L40S, H100 and later); on this machine transformers would "
+            "silently dequantize and load bfloat16 at twice the width asked "
+            'for. Use dtype="int8" or dtype="nf4" here instead.'
+        )
     from transformers import FineGrainedFP8Config
 
     return FineGrainedFP8Config()
@@ -98,12 +131,19 @@ class Quantization:
     """One way of holding weights that torch has no dtype for.
 
     Args:
-        bytes_per_element: Nominal width of one stored weight. **Nominal**: the
-            formats here leave the LM head, embeddings and norms in 16 bits and
-            store a scale per block, none of which this counts, so the real
-            footprint is larger — measurably so for a model whose vocabulary is
-            a large fraction of it. Anything placing a model on this number has
-            to pad. `accelerate`'s own estimator makes the same simplification.
+        bytes_per_element: Nominal width of one stored weight. **Nominal**:
+            the formats here leave the LM head, embeddings and norms in 16 bits
+            and store a scale per block, none of which this counts, so the real
+            footprint is larger. On Llama-3.2-1B, whose embeddings are 21% of
+            its parameters, ``nf4`` measures 1.00 GB against the 0.58 this
+            predicts, and ``int8`` 1.40 against 1.15; bfloat16 lands on it
+            exactly. Counting the embeddings separately closes that gap:
+            ``vocab_size * hidden_size * (1 if tied else 2)`` weights at 2 bytes
+            and the rest at the format's width gives 0.94 and 1.40 for the same
+            two, within 6% and within 0.1%. Anything placing a model on the
+            nominal number has to pad for the difference, and NDIF's default
+            padding of 0.15 does not cover ``nf4``. `accelerate`'s own estimator
+            makes the same simplification.
         build: Takes the compute dtype and returns the transformers quantizer
             config. Imports its backend inside, so a name nobody asks for costs
             nothing and a missing backend fails when it is actually wanted.
@@ -234,22 +274,3 @@ def _torch_dtype(dtype: Any) -> Any:
     if not isinstance(resolved, torch.dtype):
         raise ValueError(f"Unknown compute dtype: {dtype!r}")
     return resolved
-
-
-# TODO: `bytes_per_element` under-counts, and by more than a padding factor
-# absorbs. Measured on Llama-3.2-1B (1.236B params): nf4 estimates 0.618 GB
-# against 1.073 GB really allocated (0.58x), int8 1.236 against 1.501 (0.82x),
-# where bfloat16 lands on 1.00x. The gap is the weights the format does not
-# touch — embeddings and the LM head are 21% of the parameters here, and they
-# stay 16-bit — plus a scale per block. It is derivable from the config, which
-# `_remoteable_describe_checkpoint` already holds: size
-# `vocab_size * hidden_size * (1 if tied else 2)` at 2 bytes and the rest at the
-# format's width. Until then a server placing a quantized model has to pad for
-# it, and NDIF's default 0.15 does not.
-
-# TODO: a remote model key is `{repo_id, revision}` and says nothing about how
-# the weights are held, so a client cannot ask for a quantized replica — the
-# deployment decides, and a client-side `dtype=` only shapes its own meta build.
-# Routing a request to a replica by dtype means putting it in the key (and
-# teaching the server to treat two dtypes of one checkpoint as two deployments),
-# which is a routing change, not a loading one.

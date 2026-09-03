@@ -91,7 +91,13 @@ NO_SKIP = object()
 
 
 class SourceNotAvailable(Exception):
-    """A module's ``forward`` can't be source-instrumented (no source, decorated…)."""
+    """There is no Python source to instrument.
+
+    A builtin or C function, a function compiled from a string, a call into a
+    submodule (which has its own ``.source``), or an assignment (which has no
+    callee). A decorated ``forward`` is not one of these: it is peeled,
+    instrumented, and rebuilt.
+    """
 
 
 class Compiled(NamedTuple):
@@ -505,6 +511,28 @@ def run_body(state: "State", module: Any, args: tuple, kwargs: dict) -> Any:
     return hook.post_forward(module, output)
 
 
+def _as_fragment(interleaver: Any, location: str, value: Any) -> Any:
+    """A ``.skip`` replacement, cut down to this device's piece of the location.
+
+    Everything past the handoff assumes the value arriving is one device's piece.
+    A replacement is not: the user built it, so on a sharded runtime it is already
+    the whole thing on every device. Cutting it down here means the handoff serves
+    it exactly like a value the module produced, and nothing downstream — not
+    [`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle],
+    not a runtime's [`Fragments`][nnsight.intervention.fragments.Fragments] — needs
+    a second kind of value to reason about.
+
+    Only the skip branch reaches this, so it costs an ordinary forward nothing.
+    Without it a row-parallel skip was reassembled as though the module had
+    produced it: every rank read back ``world_size`` times what it wrote, and the
+    model carried that forward, with nothing raising.
+    """
+    fragments = interleaver.fragments
+    if fragments is not None and fragments.enabled and fragments.fragmented(location):
+        return fragments.split(location, value)
+    return value
+
+
 def make_controller(module: Any, state: "State") -> Callable:
     """Build the forward installed on an instrumented module: the module's handoff.
 
@@ -535,8 +563,9 @@ def make_controller(module: Any, state: "State") -> Callable:
         args, kwargs = handle(locations[0], (args, kwargs))
         output = handle(locations[1], NO_SKIP)  # the skip gate
         if output is NO_SKIP:
-            output = run_body(state, module, args, kwargs)
-        return handle(locations[2], output)
+            return handle(locations[2], run_body(state, module, args, kwargs))
+        # A skipped module's output is the replacement the worker supplied.
+        return handle(locations[2], _as_fragment(interleaver, locations[2], output))
 
     return controller
 
@@ -821,9 +850,12 @@ class Source:
     ``print(model.layer1.source.torch_relu_0)`` zooms in on one. Iterating a
     ``Source`` yields its operations in execution order.
 
-    Source values are only meaningful inside a trace, and ordinary inference is
-    unaffected. Requesting an operation on a ``forward`` whose source can't be
-    recovered (e.g. a decorated ``forward``) raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable].
+    Source values are only meaningful inside a trace: outside one every operation
+    calls straight through, which costs an idle model a few percent and changes
+    nothing about what it computes. Requesting an operation on a ``forward`` with no
+    recoverable Python source — a builtin or C function — raises
+    [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable]; a
+    decorated ``forward`` is peeled and instrumented.
 
     A ``Source`` also decomposes a *called function* — reached as
     ``some_op.source`` (see [`SourceEnvoy.source`][nnsight.intervention.source.SourceEnvoy.source]) — the same way, one level
