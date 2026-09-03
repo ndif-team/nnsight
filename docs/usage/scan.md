@@ -85,8 +85,8 @@ a real trace will not.
 **Devices, on an undispatched model.** Weights that have not been loaded live on `meta`, so
 every activation a scan hands you reports `device='meta'` — and `FakeTensorMode` is
 constructed with `allow_non_fake_inputs=True`, which deliberately lets a real CPU tensor
-combine with a fake one. A steering vector on the wrong device is the commonest intervention
-bug there is, and the scan that was supposed to catch it says nothing:
+combine with a fake one. A steering vector on the wrong device is a common intervention bug,
+and the scan that was supposed to catch it says nothing:
 
 ```python
 model = TransformersModel("openai-community/gpt2", device_map="cuda")   # undispatched
