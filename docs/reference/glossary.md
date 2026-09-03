@@ -26,7 +26,7 @@ The user-facing proxy (`src/nnsight/intervention/envoy.py`) wrapping a single `t
 
 ## eproperty
 
-The descriptor (`src/nnsight/intervention/eproperty.py`) behind a hookable value on an interleaving host (`Envoy`, `SourceEnvoy`, the tracer, `VLLM`): reading it parks the worker until the model reaches `"{host.path}.{key}"` and returns the value there; writing it fires a `SWAP`. Defined by decorating a stub with `@eproperty` (or `@eproperty(key=..., description=...)`) — the stub **is** the *preprocess*, mapping the served value to what the user reads (identity is just `return value`). Optional callbacks refine it: `.postprocess` (transform a written value before the swap), `.transform` (write an edited preprocess *view* back to the model's layout, spliced in like a swap after the read), and `.provide(obj, value)` (serve the value from the model side via `interleaver.handle`). `key` defaults to the method name and may be shared to give different views of one location. A `description=` surfaces it in the Envoy repr as `(name): description`. `Envoy.input` / `.inputs` / `.output`, `tracer.result`, and `VLLM.logits` / `.samples` are all eproperties.
+The descriptor (`src/nnsight/intervention/eproperty.py`) behind a served value: reading it parks the worker until the model reaches `"{host.path}.{key}"`, writing it fires a `SWAP`. `Envoy.input` / `.inputs` / `.output`, `tracer.result`, and `VLLM.logits` / `.samples` are all eproperties, and you can define your own on a model subclass. See [docs/developing/extending-envoy.md](../developing/extending-envoy.md) for the decorator, its `preprocess` / `postprocess` / `transform` / `provide` callbacks, and `key` sharing.
 
 ## Event (VALUE / SWAP / SKIP / BARRIER)
 
@@ -52,7 +52,7 @@ The model-side driver (`Interleaver`, `src/nnsight/intervention/interleaver.py`)
 
 ## Iteration / occurrence
 
-A location can be reached many times in one run (each step of a generation loop). Each visit is an **occurrence**, tagged `.i0`, `.i1`, … The `Mediator` tracks a per-location count and an `iteration` cursor selecting which occurrence a request binds to; `tracer.iter[...]` / `tracer.all()` move that cursor. Requesting a location out of order raises `OutOfOrderError`; iterating past the model's last step warns rather than errors.
+A location can be reached many times in one run (each step of a generation loop). Each visit is an **occurrence**, tagged `.i0`, `.i1`, … The `Mediator` tracks a per-location count and an `iteration` cursor selecting which occurrence a request binds to; `tracer.iter[...]` / `tracer.all()` move that cursor. Requesting a location out of order raises `OutOfOrderError`, as does a loop that names an end the run never reaches; an open `iter[:]` / `all()` warns there instead, since outrunning the model is how it ends.
 
 ## Location / provider string
 
@@ -66,13 +66,17 @@ The per-block worker object (`Mediator`, `src/nnsight/intervention/interleaver.p
 
 Where an undispatched model lives — module structure with no real weight data (`MetaDevice`, `src/nnsight/modeling/mixins/meta.py`). Lets nnsight build a model's envoy tree and run `scan` without loading gigabytes of weights.
 
+## NNsightDeprecationWarning
+
+The category every nnsight deprecation is raised under (`nnsight.NNsightDeprecationWarning`). A `FutureWarning` rather than a `DeprecationWarning`, so it is shown wherever the deprecated call sits — a script, an imported module, a library — instead of only in `__main__`. Silence nnsight's alone with `warnings.filterwarnings("ignore", category=nnsight.NNsightDeprecationWarning)`.
+
 ## OutOfOrderError
 
-Raised when intervention code asks for a location the model already ran past (or never reached). Workers must request locations in the order the model produces them.
+Raised when intervention code asks for a location the model already ran past, or one it never reached. Workers must request locations in the order the model produces them. See [docs/errors/out-of-order-error.md](../errors/out-of-order-error.md).
 
 ## Persistent object (serialization)
 
-An object marked persistent is **not** pickled by value — only an opaque id is written into the stream, and the receiver swaps in the real object it already holds. Used for NDIF: a model's `nn.Module`s already live on the server, so a remote request ships their ids (`"Module:<path>"`, `"Interleaver"`, tokenizer ids, ...) rather than re-pickling the model. Set via `obj._persistent_id = "<id>"`; resolved from the `_remoteable_persistent_objects()` map server-side.
+An object marked persistent is **not** pickled by value — only an opaque id goes into the stream, and the receiver swaps in the real object it already holds. It is how a remote request ships a model's modules as ids (`"Module:<path>"`, `"Interleaver"`, ...) instead of re-pickling weights the server already has. See [docs/developing/serialization.md](../developing/serialization.md).
 
 ## Scope
 

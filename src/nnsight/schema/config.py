@@ -26,9 +26,12 @@ class ApiConfig(BaseModel):
 class AppConfig(BaseModel):
     """Client-side behavior settings (``CONFIG.APP``)."""
 
-    #: Whether to run remote jobs verbosely (payload/result sizes, per-status
-    #: lines) and show full tracebacks. Also enabled by the ``NNSIGHT_DEBUG`` env
-    #: var.
+    #: Whether to keep nnsight's own frames in a trace's traceback (they are
+    #: stripped otherwise, so the traceback points at the block), and to run
+    #: remote jobs verbosely (payload/result sizes, per-status lines). Read when
+    #: an exception is raised, so setting it mid-run takes effect. Also enabled by
+    #: the ``NNSIGHT_DEBUG`` env var and by ``-v``/``--verbose`` on the command
+    #: line.
     DEBUG: bool = False
     #: Whether to show the live status display while a remote job runs.
     REMOTE_LOGGING: bool = True

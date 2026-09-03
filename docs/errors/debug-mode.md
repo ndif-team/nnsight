@@ -1,26 +1,92 @@
 ---
 title: Debug Mode and Tracebacks
-one_liner: "What CONFIG.APP.DEBUG does (remote verbose logging), and how trace tracebacks are cleaned so they point at your code."
+one_liner: "Why a trace's traceback is short, what CONFIG.APP.DEBUG puts back, and how to read a traceback that ends inside torch."
 tags: [error, debug, traceback]
-related: [docs/errors/index.md, docs/concepts/threading-and-mediators.md, docs/remote/index.md]
-sources: [src/nnsight/schema/config.py:19, src/nnsight/schema/config.py:100, src/nnsight/intervention/backends/remote.py:83, src/nnsight/tracing/util.py:139, src/nnsight/tracing/tracer.py:465]
+related: [docs/errors/index.md, docs/reference/config.md, docs/concepts/threading-and-mediators.md]
+sources: [src/nnsight/tracing/util.py, src/nnsight/tracing/tracer.py, src/nnsight/schema/config.py, src/nnsight/intervention/errors.py]
 ---
 
 # Debug Mode and Tracebacks
 
+## Why the traceback is short
+
+Intervention code doesn't run where you wrote it. nnsight captures the `with`
+block's body, compiles it, and runs it in a greenlet worker interleaved with the
+model's forward pass, so a raw traceback arrives buried under nnsight's own
+machinery. When a trace body raises, `clean_traceback`
+(`src/nnsight/tracing/util.py`) drops the frames whose file lives inside the
+nnsight package and keeps everything else.
+
+For an error raised in the block itself that leaves four frames, ending on the
+line you wrote:
+
+```
+  File "script.py", line 22, in <module>
+    with model.trace(prompt):
+  File "…/nnsight/tracing/tracer.py", line 521, in __exit__
+    raise exception.with_traceback(
+  File "script.py", line 23, in <module>
+    h = model.transformer.h[100].output.save()
+IndexError: list index out of range
+```
+
+The exception **type is preserved** — the real exception propagates, there is no
+wrapper class and no `.original` attribute:
+
+```python
+try:
+    with model.trace("Hello"):
+        h = model.transformer.h[100].output.save()   # IndexError
+except IndexError as error:
+    print(type(error).__name__)   # IndexError
+```
+
+`Mediator.switch` also stashes the intervention-only traceback on the exception as
+`__intervention_tb__` before the model and controller frames pile on during
+unwinding, which is what lets the surfaced trace point at the exact intervention
+line. `InterleavingTracer.traceback` and the deferred-error path prefer that
+stashed traceback.
+
+## Reading a traceback that ends inside torch
+
+Only *nnsight's* frames are dropped. Frames from torch, transformers, and your own
+helper functions all stay, so a failure that happens inside the model because of
+what an intervention wrote arrives with the model's stack intact:
+
+```python
+with model.trace(prompt):
+    acts = model.transformer.h[0].output
+    model.transformer.h[0].output = torch.zeros(3, 3, device=acts.device)
+```
+
+```
+RuntimeError: Given normalized_shape=[768], expected input with shape [*, 768], but got input of size[3, 3]
+```
+
+That traceback runs to twenty frames and ends in `torch.layer_norm`. The line that
+wrote the bad value is not in it at all — the write succeeded; the *next* module
+is what failed. Read it from the top: the `with` line names the block, and the
+bottom names the module that could not use what the block put there. Then look at
+your writes for a shape that does not match the activation it replaces.
+
+Building the replacement from the activation avoids the whole class of them:
+
+```python
+with model.trace(prompt):
+    acts = model.transformer.h[0].output
+    model.transformer.h[0].output = torch.zeros_like(acts)
+```
 
 ## What `CONFIG.APP.DEBUG` does
 
-`CONFIG.APP.DEBUG` has two effects:
-
-1. **Full tracebacks.** By default an error raised inside a `with model.trace(...):`
-   block has nnsight's own frames stripped, so it points at your code
-   (`clean_traceback`, `src/nnsight/tracing/util.py`). With `DEBUG` on, nothing is
-   stripped — the full stack, nnsight internals included, is shown. Turn it on when
-   you suspect the bug is in nnsight's plumbing.
+1. **Keeps nnsight's frames.** `clean_traceback` returns the traceback untouched
+   under `DEBUG`, so the interleaver, the controller, and the backend are all
+   visible. Measured on GPT-2: an `IndexError` or an `OutOfOrderError` raised in a
+   block goes from 4 frames to 14, and the layer-norm failure above from 20 to 34.
+   Turn it on when you suspect the bug is in nnsight's plumbing rather than in
+   your intervention.
 2. **Verbose remote logging.** `RemoteBackend.__init__` sets
-   `self.verbose = verbose or CONFIG.APP.DEBUG`
-   (`src/nnsight/intervention/backends/remote.py:83`), so remote runs log payload /
+   `self.verbose = verbose or CONFIG.APP.DEBUG`, so remote runs log payload and
    result byte sizes and print each status update on its own line.
 
 ## How to set it
@@ -30,6 +96,8 @@ import nnsight
 nnsight.CONFIG.APP.DEBUG = True     # this process
 ```
 
+The flag is read when the exception is raised, so setting it after import works.
+
 On the command line, pass `-v` / `--verbose` (a plain `sys.argv` scan at import, so
 any launcher using `-v` — e.g. `pytest -v` — enables it too):
 
@@ -37,7 +105,7 @@ any launcher using `-v` — e.g. `pytest -v` — enables it too):
 python your_script.py -v
 ```
 
-Environment variable (`src/nnsight/schema/config.py`):
+Environment variable:
 
 ```bash
 NNSIGHT_DEBUG=1 python your_script.py
@@ -52,55 +120,27 @@ nnsight.CONFIG.save()
 ```
 
 `save()` writes the whole config to YAML and persists until you change it back and
-`save()` again. Default is `False` (`src/nnsight/schema/config.py:19`).
+`save()` again. Default is `False`. `CONFIG.APP.REMOTE_LOGGING` (default `True`)
+controls the remote status display independently of `DEBUG`. See
+[docs/reference/config.md](../reference/config.md).
 
-Related remote-logging switch: `CONFIG.APP.REMOTE_LOGGING` (default `True`) controls
-the status display independently of `DEBUG`.
+## Errors from a deferring driver
 
-## How trace tracebacks are cleaned
-
-Intervention code doesn't run where you wrote it — nnsight captures the `with`
-block's body, compiles it, and runs it in a greenlet worker interleaved with the
-model's forward pass. A raw traceback would be buried under nnsight and model
-frames. So when a trace body raises, nnsight cleans the traceback with
-`clean_traceback` (`src/nnsight/tracing/util.py:139`), which drops frames whose file
-lives inside the nnsight package, leaving your own frames (across whatever files
-they span). This happens in `Tracer.__exit__` (`src/nnsight/tracing/tracer.py:465`),
-unconditionally — there is no flag to keep the internal frames.
-
-The exception **type is preserved**: the real exception propagates directly, so
+A driver that keeps running past a worker's error — vLLM, whose engine schedules
+the next step itself — records the error on the mediator rather than raising it out
+of the controller. It comes back at the client as a `RuntimeError` whose message
+begins with the original type name and message, followed by the intervention
+traceback (`raise_deferred`, `src/nnsight/intervention/errors.py`). The original
+class is not reconstructed across the process boundary, so match on the message:
 
 ```python
-try:
-    with model.trace("Hello"):
-        h = model.transformer.h[100].output.save()   # IndexError
-except IndexError as e:
-    print(type(e).__name__)   # IndexError
+except RuntimeError as error:
+    if "A batched write has to keep its rows" in str(error):
+        ...
 ```
-
-works as written. There is no wrapper class and no `.original` attribute — `e` *is*
-the underlying exception.
-
-### Pointing at the waiting line
-
-When a worker raises, `Mediator.switch` (`src/nnsight/intervention/interleaver.py:366`)
-stashes the intervention-only traceback on the exception as `__intervention_tb__`
-*before* the model/hook frames pile on during unwinding, so the surfaced trace can
-point at the exact intervention line. `InterleavingTracer.traceback` and the
-deferred-error path (`src/nnsight/intervention/errors.py`) prefer that stashed
-traceback.
-
-## Deferred (remote / vLLM) worker errors
-
-When a driver keeps running past a worker's error (e.g. vLLM, whose engine schedules
-the next step itself), the interleaver records the error on the mediator instead of
-raising it out of the hook (`Interleaver.defer_exceptions`). The error is reduced to
-a wire-safe dict (`capture_exception`) and re-raised at the client as a
-`RuntimeError` carrying the original type name, message, and intervention traceback
-(`raise_deferred`, `src/nnsight/intervention/errors.py:45`) — the original class
-isn't reconstructed across the process boundary.
 
 ## Related
 
-- [docs/errors/index.md](index.md) — the exceptions nnsight raises.
+- [index.md](index.md) — the exceptions nnsight raises.
+- [symptom-index.md](symptom-index.md) — failures that raise nothing at all.
 - [docs/concepts/threading-and-mediators.md](../concepts/threading-and-mediators.md) — why intervention code runs in a greenlet worker.

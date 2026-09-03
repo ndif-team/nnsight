@@ -16,7 +16,7 @@ All are subclasses of `Envoy` (the tree node type). `NNsight` is the thin, named
 |-------|--------|-----------|
 | `NNsight` | `from nnsight import NNsight` | Wrap any `torch.nn.Module`. Recursively mirrors the module tree as envoys. |
 | `TransformersModel` | `from nnsight import TransformersModel` | **Primary** HuggingFace class, backed by a `transformers.pipeline`. Any task via `task=...` (inferred if unset). |
-| `DiffusionModel` | `from nnsight import DiffusionModel` | Wraps any `diffusers.DiffusionPipeline`; components (`unet`, `vae`, ...) are envoys. Was `DiffusionModel`. |
+| `DiffusionModel` | `from nnsight import DiffusionModel` | Wraps any `diffusers.DiffusionPipeline`; components (`unet`, `vae`, ...) are envoys. |
 | `VLLM` | `from nnsight.modeling.vllm import VLLM` | vLLM-backed model; interventions run inside the engine's worker. `mode="sync"` (default) or `mode="async"`. |
 | `LanguageModel` | `from nnsight import LanguageModel` | **Deprecated** — warns on construction. Use `TransformersModel(repo_id, task="text-generation")`. |
 | `VisionLanguageModel` | `from nnsight import VisionLanguageModel` | **Deprecated** — warns on construction. Use `TransformersModel(repo_id, task="image-text-to-text")`. |
@@ -25,13 +25,15 @@ Common constructor kwargs (via `HuggingFaceModel` / `Meta`): `dispatch=False` (l
 
 ## Run methods
 
-Each returns a tracer usable as `with model.<method>(...) as tracer:`. Called directly (no `with`), each just runs and returns the result. Give a run method input directly and the whole block is one implicit invoke; give it no input and define the batch with `tracer.invoke(...)` blocks.
+Each returns a tracer usable as `with model.<method>(...) as tracer:`. Give a run method input directly and the whole block is one implicit invoke; give it no input and define the batch with `tracer.invoke(...)` blocks.
+
+`generate` and `pipe` called without a `with` run and return their result. **`trace` and `scan` without a `with` run nothing** — they return the tracer, and the `with` statement is what captures a body and starts the model. For a plain forward with no intervention, pass `trace=False`.
 
 | Method | On | Runs | Returns (`tracer.result`) |
 |--------|-----|------|--------------------------|
 | `model.trace(*inputs, **kw)` | all | One forward pass. | The forward's return value (e.g. a `CausalLMOutput`). |
 | `model.generate(*inputs, max_new_tokens=N, **kw)` | `TransformersModel`, `DiffusionModel` | Generation through the **model** (greedy by default). | **Token ids** `[batch, seq]` (Transformers); pipeline output (Diffusers). |
-| `model.pipe(*inputs, **kw)` | `TransformersModel` | The whole task **pipeline** (preprocess + forward + postprocess). | Its **records** — decoded text, labels, etc. (what old `generate` returned). |
+| `model.pipe(*inputs, **kw)` | `TransformersModel` | The whole task **pipeline** (preprocess + forward + postprocess). | Its **records** — decoded text, labels, etc. |
 | `model.scan(*inputs, **kw)` | all | One forward under fake tensors — shapes/dtypes only, no weights, no dispatch. | (Read shapes inside the block; fake tensors are invalid after it.) |
 | `model.edit(*, inplace=False)` | all | Captures interventions as **defaults** replayed on every future trace. | `as (tracer, edited)` when `inplace=False`; `as tracer` when `inplace=True`. |
 | `model.session(*, remote=False)` | all | A scope enclosing several traces that share values without `.save()`. | (Only `nnsight.save`d values survive the session.) |
@@ -57,7 +59,7 @@ Notes:
 | `tracer.result` | `tracer.result` | The traced call's return value. |
 | `tracer.iter` | `tracer.iter[slice\|int\|list]` | Target occurrences of a location across a repeated run (e.g. generation steps). Loop: `for step in tracer.iter[:3]:`. |
 | `tracer.all` | `tracer.all()` | Shorthand for `tracer.iter[:]` — every occurrence. |
-| `tracer.cache` | `tracer.cache(modules=None, device=cpu, dtype=None, detach=True, include_output=True, include_inputs=False)` | Record many modules' activations at once; returns a `CacheView` that fills as the run proceeds. |
+| `tracer.cache` | `tracer.cache(modules=None, device=cpu, dtype=None, detach=True, include_output=True, include_inputs=False, non_blocking=False)` | Record many modules' activations at once; returns a `CacheView` that fills as the run proceeds. |
 | `tracer.barrier` | `tracer.barrier(n: int) -> Barrier` | A meeting point for `n` of this trace's blocks; the last to call it releases them all. |
 | `tracer.stop` | `tracer.stop()` | Halt the model's forward pass early (raises `EarlyStopException`). |
 
@@ -90,7 +92,7 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `envoy.source.<op>_<n>` | e.g. `.source.relu_0` | A `SourceEnvoy` for the n-th call of `<op>` in the forward; same `.input`/`.output`/`.skip`/`.source` interface. `print(envoy.source)` lists them. |
 | `envoy.source.<name>_<n>` | e.g. `.source.h_0` | A `SourceEnvoy` for the n-th assignment to `<name>` in the forward; `.output` is the assigned value (read or replace it). One counter per name, shared with calls: `f = pick(); f(x)` is `f_0` then `f_1`. Fires once per loop iteration for an assignment inside a loop. |
 
-Deprecated aliases (warn; use the `tracer.*` forms): `model.iter`, `model.all()`.
+Deprecated aliases (warn under `NNsightDeprecationWarning`; use the `tracer.*` forms): `model.iter`, `model.all()`. The full inventory of deprecated names is in [version-history.md](./version-history.md).
 
 ## Model-specific handles
 
@@ -98,7 +100,7 @@ Deprecated aliases (warn; use the `tracer.*` forms): `model.iter`, `model.all()`
 |------|-----|-----------|
 | `model.tokenizer` / `.processor` / `.image_processor` / `.feature_extractor` | `TransformersModel` | The preprocessors the task loaded (any may be `None`). |
 | `model.pipeline` | `TransformersModel`, `DiffusionModel` | The underlying `transformers.pipeline` / `DiffusionPipeline`. |
-| `model.generator.output` | `TransformersModel` | Generated ids passthrough — **deprecated**; use `tracer.result`. |
+| `model.generator.output` | `TransformersModel` | The same tensor `tracer.result` carries (prompt ids then generated ids) — **deprecated**; use `tracer.result`. |
 | `model.generator.streamer.output` | `TransformersModel` | Per-step generated tokens during decoding. |
 | `model.logits` | `VLLM` | This request's pre-sampling logits for the step. |
 | `model.samples` | `VLLM` | The token ids the sampler drew for the step, `[1, 1]` for one sequence. |
@@ -120,6 +122,7 @@ Imported from the top-level `nnsight` package.
 | `nnsight.compare` | `nnsight.compare() -> EnvComparison` | Diff local vs NDIF Python/package versions; `print()` for the table. |
 | `nnsight.CONFIG` | `Config` | The config singleton (see [config.md](./config.md)). |
 | `nnsight.Object` | type | Tensor-like static type for values read inside a trace (typing hints). |
+| `nnsight.NNsightDeprecationWarning` | `FutureWarning` subclass | The category every nnsight deprecation is raised under. `warnings.filterwarnings("ignore", category=...)` silences nnsight's and nothing else. |
 
 (`get_local_env` / `get_remote_env` live on `nnsight.ndif`, not the top level. `nnsight.session`, `nnsight.apply`, `nnsight.cond`, `nnsight.log`, `nnsight.local`, and the `nnsight.list/dict/int/...` wrappers are **removed** — use plain Python and `model.session()`.)
 
