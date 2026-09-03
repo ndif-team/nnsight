@@ -10,7 +10,7 @@ philosophy should tell you what to do.
 ## Philosophy
 
 **nnsight's machinery is subtle, and its subtlety is not visible in the code.**
-A forward hook that fires a greenlet switch, a controller that must replace
+A handoff that fires a greenlet switch, a controller that must replace
 `forward` before `nn.Module.__call__` binds it, a `cat` chosen over an in-place
 write to keep autograd correct — none of that is legible from the statements
 themselves. The code says what happens. Everything we write around it exists to
@@ -51,6 +51,23 @@ to disambiguate it forever. `swap` names exactly one thing — replacing a value
 a location. Splicing a block's rows back into a batch is `widen`, the true
 antonym of `narrow`. When you need a second sense of a word you already use, that
 is a signal to find the right word, not to overload the one you have.
+
+The one that keeps trying to overload itself is **hook**, so it is settled here:
+
+| Word | Means |
+|---|---|
+| **controller** | the callable installed as a module's `forward` (`install_controller`, `make_controller`) |
+| **handoff** | one controller-to-interleaver exchange |
+| **location** | the string a handoff happens at (`"model.h.0.output"`, `"result"`, `"model.logits"`) |
+| **served value** | a value an eproperty exposes over a location |
+| **hook** | a genuine PyTorch hook, and nothing else |
+
+nnsight registers no forward hooks — `grep register_forward_hook src/nnsight`
+returns nothing. It installs a controller into `module.__dict__["forward"]`.
+"Hook" is right for `tensor.register_hook` in `intervention/backward.py`,
+accelerate's `_hf_hook`, transformers' tensor-parallel hooks, and the public
+`Envoy.__call__(hook=...)` kwarg (which asks whether the *trace* watches a call);
+everywhere else it names something that isn't one.
 
 **Delete before you add.** The strongest version of a change is usually the one
 that removes a concept rather than introducing one. Prefer a plain method to a
@@ -264,10 +281,26 @@ paragraph immediately above it — that's the common form in the machinery, wher
 example earns its place by making one sentence concrete. Module docstrings use
 `.. code-block:: python`.
 
-**Cross-link aggressively.** `:class:`, `:meth:`, `:attr:`, `:func:`, `:mod:`,
-`:data:`, with `~`-shortened targets for anything out-of-module. Double-backtick
-every literal, including ``None`` and ``False``. The docstrings form a navigable
-graph; that only works if you link.
+**Cross-link aggressively, in mkdocstrings syntax.** A link is
+`` [`Text`][full.dotted.target] `` — the bracketed text is what the reader sees,
+the target is the full dotted path from `nnsight`:
+
+```
+A [`Batcher`][nnsight.intervention.batching.Batcher] (one per trace) collects each
+invoke's input, and [`Batcher.narrow`][nnsight.intervention.batching.Batcher.narrow]
+slices a batched activation down to a block's rows.
+```
+
+The generated docs are built by mkdocstrings, which reads docstrings as Markdown.
+Sphinx roles (`:class:`, `:meth:`, `:attr:`) render as literal text there and link
+nowhere, so they are not used. Double-backtick every literal, including ``None``
+and ``False``. The docstrings form a navigable graph; that only works if you link.
+
+**A link target must resolve to a documented object**, or the site build fails
+under `--strict` with `Could not find cross-reference target`. Two things break it:
+a module with no page under `nnsight-website/docs/documentation/` (add the stub and
+its `mkdocs.yml` nav entry), and a private (`_`-prefixed) member, which no page
+publishes — name a private member in plain backticks instead of linking it.
 
 **Voice:** imperative for mechanics ("Slice every batched tensor…"). Second person
 for concepts, addressing the user ("no need to repeat it each time"). First person
@@ -291,8 +324,8 @@ docstring-only — no `__init__`, no `pass`.
 ## Comments
 
 **Explain why, never what.** If the comment paraphrases the code, delete it.
-Comment the non-obvious: greenlet and weakref lifetimes, hook ordering, descriptor
-rules, autograd aliasing, serialization boundaries. Self-evident code gets
+Comment the non-obvious: greenlet and weakref lifetimes, handoff ordering,
+descriptor rules, autograd aliasing, serialization boundaries. Self-evident code gets
 nothing — whole functions here carry no inline comments at all, and that is
 correct.
 
@@ -378,7 +411,15 @@ except Exception:  # noqa: BLE001 — extension optional; save(value) still work
 
 **Raise by default; warn only when the program can proceed with a
 degraded-but-sane result** and the user needs to know what it did instead.
-Deprecations warn with `DeprecationWarning` and `stacklevel=2`.
+
+**Deprecations warn under `NNsightDeprecationWarning` with `stacklevel=2`** — a
+`FutureWarning` subclass, because Python's default filters (`default::DeprecationWarning:__main__`, then `ignore::DeprecationWarning`) hide a `DeprecationWarning`
+raised from inside a package, which is where every one of ours is raised. The
+message names the replacement and nothing else: `"<old> is deprecated; use <new>
+instead."` For a whole callable, `@deprecated("...")` does both. **The library
+registers no warning filters** — mutating the global filter list overrides the
+`-W` flags and `PYTHONWARNINGS` the user chose; the dedicated category is what
+lets them silence ours alone.
 
 **Error messages are terse and state the observed condition.** Quote values with
 `{x!r}` rather than hand-rolled quotes. Continue with `;` and a lowercase clause

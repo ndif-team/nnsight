@@ -22,7 +22,7 @@ alike. Its philosophy drives every rule, so when a rule doesn't cover your case 
 philosophy tells you what to do. The load-bearing points:
 
 - **Comment *why*, never *what*.** If a comment paraphrases the line under it,
-  delete it. Say what the reader can't see: greenlet/weakref lifetimes, hook
+  delete it. Say what the reader can't see: greenlet/weakref lifetimes, handoff
   ordering, autograd aliasing, serialization boundaries. The source is present
   tense — no "this used to", no issue numbers, no TODO/FIXME. Git holds history.
 - **Three-layer docs.** The module docstring teaches the concept; a thing's
@@ -40,14 +40,51 @@ philosophy tells you what to do. The load-bearing points:
   module docstring; `X | None`, `list[str]`, not `Optional`/`List`. Annotate every
   parameter and return.
 - **Raise by default; warn only** when the program can proceed with a
-  degraded-but-sane result. Deprecations use `DeprecationWarning`, `stacklevel=2`.
-  No `assert`, no `logging` in library code. Error messages are terse, quote values
-  with `{x!r}`, and name the user-facing API rather than internals.
+  degraded-but-sane result. No `assert`, no `logging` in library code. Error
+  messages are terse, quote values with `{x!r}`, and name the user-facing API
+  rather than internals.
+
+## Deprecations
+
+Every deprecation warns under `nnsight.NNsightDeprecationWarning`, with
+`stacklevel=2` so the warning points at the caller's line:
+
+```python
+warnings.warn(
+    "model.generator.output is deprecated; use tracer.result instead.",
+    NNsightDeprecationWarning,
+    stacklevel=2,
+)
+```
+
+Three rules make a deprecation warning that people actually see:
+
+- **The category is `NNsightDeprecationWarning`, a `FutureWarning` subclass.**
+  Not `DeprecationWarning`. Python's default filters are
+  `default::DeprecationWarning:__main__` followed by `ignore::DeprecationWarning`,
+  so a `DeprecationWarning` raised from inside a package — which is where every
+  nnsight deprecation is raised — warns to nobody. `FutureWarning` is the category
+  the language reserves for deprecations addressed to a library's *users*, and no
+  default filter hides it.
+- **The message names the replacement**, in one shape:
+  `"<what is deprecated> is deprecated; use <what to write instead> instead."`
+  Nothing else. A user who reads only the message knows what to type next.
+- **nnsight registers no warning filters.** A library that calls
+  `warnings.simplefilter`/`filterwarnings` at import overrides the `-W` flags and
+  `PYTHONWARNINGS` its user chose. The dedicated category is what lets a caller
+  silence nnsight's deprecations and nothing else:
+  `warnings.filterwarnings("ignore", category=nnsight.NNsightDeprecationWarning)`.
+
+For a whole callable, `@nnsight.deprecated("<old> is deprecated; use <new> instead.")`
+wraps it and does all three. `tests/test_deprecations.py` asserts every deprecation
+warns under the category, from an imported module as well as from `__main__`.
 
 ## Branches
 
-Base PRs on `dev`, not `main` — branch from the latest `dev` for your change.
-`main` is release-stable. Interactive git flags (`git rebase -i`, `git add -i`)
+Base PRs on the active release branch — `0.8` — not `main`. Development happens on
+the release branch, and `.github/workflows/python-app.yml` tests pushes to `main`
+and `0.8` only, so a branch cut from anywhere else is untested. `main` is
+release-stable. Interactive git flags (`git rebase -i`, `git add -i`)
 aren't used here — prefer new commits over force-pushes during review; the
 reviewer squashes on merge.
 
@@ -68,7 +105,7 @@ comments hold to (name the failure mode, the counterfactual). Commits made with
 agent assistance end with a trailer:
 
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Co-Authored-By: <agent name> <noreply@anthropic.com>
 ```
 
 ## Before you open a PR
@@ -79,8 +116,12 @@ Run the offline suite on CPU (see [testing.md](./testing.md) for the details):
 
 ```bash
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm
+CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm --ignore=tests/tp
 ```
+
+Drop `--ignore=tests/tp` on transformers >= 5.16; below it the tensor-parallel
+tests are red for a reason that has nothing to do with your change (see
+[testing.md](./testing.md)).
 
 Then, depending on what you touched, run the mirroring test file(s) — the suite is
 laid out one file per concept:
@@ -89,12 +130,16 @@ laid out one file per concept:
 |-------------------|--------------|
 | `intervention/serialization.py`, `schema/request.py` | `tests/test_serialization.py` |
 | `intervention/source.py` | `tests/test_source.py`, `tests/test_interleaving.py` |
-| `intervention/interleaver.py`, hooks | `tests/test_interleaving.py`, `tests/test_memory.py`, `tests/test_multiple_wrappers.py` |
+| `intervention/interleaver.py`, the controller | `tests/test_interleaving.py`, `tests/test_memory.py`, `tests/test_multiple_wrappers.py` |
 | `tracing/` | `tests/test_tracing.py` |
 | `intervention/batching.py` | `tests/test_batching.py` |
-| `modeling/transformers.py`, `modeling/huggingface.py` | `tests/test_language.py`, `tests/test_modeling.py`, `tests/test_encoder.py` |
+| `intervention/fragments.py` | `tests/test_fragments.py` |
+| `modeling/transformers.py`, `modeling/huggingface.py` | `tests/test_language.py`, `tests/test_modeling.py`, `tests/test_encoder.py`, `tests/test_chunked_tasks.py`, `tests/test_construction_routing.py` |
 | `modeling/diffusion.py` | `tests/test_diffusion.py` |
 | `modeling/vlm.py` | `tests/test_vlm.py` |
+| `modeling/quantization.py` | `tests/test_quantization.py` |
+| `modeling/tp/` | `tests/test_tensor_parallel_rules.py`, `python -m pytest tests/tp/` (needs transformers >= 5.16) |
+| anything you deprecate | `tests/test_deprecations.py` |
 | `intervention/backends/remote.py` | `tests/test_remote_backend.py`, `tests/test_serialization.py` (`remote="local"`) |
 | `modeling/vllm/` | `python -m pytest tests/vllm/` (needs GPU + `vllm`) |
 
