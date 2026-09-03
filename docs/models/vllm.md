@@ -113,6 +113,13 @@ Four things differ from the HuggingFace path, and every one of them changes what
   serialized with the block and arrives in the worker as it was; move it onto the served value
   (`v.to(h.device, h.dtype)`). Saved tensors come back on the worker's device (`cuda:0`) unless
   you `.cpu()` them in the block. `model.device` on an undispatched client is `meta`.
+- **A request's numbers depend on the batch it was scheduled with.** Reduction order inside a
+  fused kernel follows the batch, and in bf16 that moves the last digit — so the same prompt,
+  greedy, run twice in different company can come back with a different token where the argmax
+  was nearly tied, and a sweep's figures reproduce to about a part in a hundred rather than
+  exactly. `temperature=0.0` pins the sampler, not the arithmetic. Compare effect sizes and
+  distributions, not exact tokens or exact floats, and read a paired difference (clean against
+  patched *in the same trace*) rather than differencing two separate runs.
 
 `model.logits` is `[1, vocab]` for the step and `model.samples` is `[1, 1]` (`.item()` for one
 sequence). Greedy decoding is `temperature=0.0`; vLLM's default is `1.0`.
@@ -182,6 +189,37 @@ with model.trace(PROMPT, max_tokens=10) as tracer:
 # len(logits) == 10
 ```
 
+#### A loop that outruns the request
+
+`max_tokens` is a cap, not a promise. An EOS token, a `stop` string, `stop_token_ids`, or a
+`tracer.stop()` in another block all end a request early, and a bounded `tracer.iter[:N]` that
+asked for more steps than the request made is cut short there — so nothing the block has after
+the loop runs. That is an error, not a note:
+
+```python
+with model.trace(PROMPT, temperature=0.0, max_tokens=20, stop=[","]) as tracer:
+    samples = list().save()
+    for _ in tracer.iter[:20]:
+        samples.append(model.samples.item())
+    result = tracer.result.save()          # never reached
+# RuntimeError: OutOfOrderError: 'model.samples.i4' was never reached: the loop asked for
+#     iteration 4 of 'model.samples' and the run reached it 4 times, so the loop was cut short
+#     and nothing after it ran. ...
+```
+
+Two ways out, and the error names both:
+
+- **Hold the run to the count you loop over.** On vLLM that is `ignore_eos=True`, or
+  `min_tokens=N`, which is how vLLM spells a floor on generated tokens. (The error text names
+  `min_new_tokens=`, which is the `transformers` spelling; on this path it is refused as an
+  unknown sampling keyword.)
+- **Loop with `tracer.all()` and put the trailing statements after the `with` block.** An open
+  `tracer.iter[:]` / `tracer.all()` has no count of its own, so outrunning generation is how it
+  ends: it warns rather than raising, and the values saved inside the loop are kept. The
+  statements after it are still dropped, which is what the warning says — and that warning is
+  emitted in vLLM's EngineCore subprocess, so it is not catchable with `warnings.catch_warnings`
+  in your code (see [Where an error comes from](#where-an-error-comes-from)).
+
 ### `generate` traces, or just runs
 
 vLLM generation is driven by `max_tokens`, so there is no forward/generate split. Used as a `with` block, `model.generate(...)` is `trace` (and rewrites `max_new_tokens` → `max_tokens`; `trace` accepts either).
@@ -235,8 +273,10 @@ with model.trace(max_tokens=3) as tracer:
         ...
 ```
 
-Common kwargs: `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `stop`, `stop_token_ids`, `seed`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs`, `lora_request` — anything `vllm.SamplingParams` takes. `ignore_eos=True` makes a
-bounded `tracer.iter[:N]` see all `N` steps when the model would stop early.
+Common kwargs: `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `stop`, `stop_token_ids`, `seed`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs`, `lora_request` — anything `vllm.SamplingParams` takes. `ignore_eos=True` and
+`min_tokens=N` are what hold a run to the step count a bounded `tracer.iter[:N]` asks for; a run
+that stops short of it raises (see [A loop that outruns the
+request](#a-loop-that-outruns-the-request)).
 
 ### Input forms per invoke
 
@@ -422,12 +462,15 @@ on the text. The engine keeps serving afterwards, and requests from other client
 are unaffected.
 
 **Warnings do not.** A `warnings.warn` raised while the block runs is emitted by the EngineCore
-process, so it prints to that process's output rather than to yours, and a
-`warnings.catch_warnings()` around the trace records nothing. A `tracer.iter[:N]` that asks for more
-steps than the request generates is the case you are most likely to meet: the loop is cut short,
-nothing after it runs, and the note saying so is in the engine's output. Hold the run to the count
-you loop over — `min_new_tokens=N`, or `ignore_eos=True` when the model would otherwise stop
-early — rather than relying on seeing the warning.
+process, so it prints to that process's output prefixed `(EngineCore pid=...)` rather than to
+yours, and a `warnings.catch_warnings()` around the trace records nothing. This is the one place
+the vLLM path is not the local one: the same block warns catchably against a HuggingFace model and
+uncatchably here.
+
+The case you are most likely to meet is an open `tracer.iter[:]` / `tracer.all()` loop that
+outruns the request, which warns that the statements after the loop did not run. A *bounded*
+`tracer.iter[:N]` that outruns it is an error and does come home — see [A loop that outruns the
+request](#a-loop-that-outruns-the-request).
 
 ### When the engine builds, or does not
 
