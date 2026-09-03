@@ -217,7 +217,6 @@ class Mediator:
         # Iterations.__iter__). A loop with an end that outruns the run is an
         # error rather than the warning an open one gets; see
         # `Interleaver.check_dangling_mediators`.
-        self.iteration_bounded: bool = False
         # The interleaver's counts when this worker started; its own occurrence
         # of a location is the interleaver's count minus this.
         self.counts_at_start: dict[str, int] = {}
@@ -531,18 +530,16 @@ def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]
     can disagree, and a block that is an error locally and a warning on the engine
     is a block whose meaning depends on where it runs.
 
-    Three cases:
+    Two cases:
 
     * **Out of order** — a plain request (``iteration == 0``) for a location the
       model already ran past, or never called. A real error.
-    * **A bounded loop that outran the run** — ``for step in tracer.iter[:10]``
-      against three steps, or a generation an EOS cut short. The unwind takes the
-      worker out at the loop, discarding every statement the block has after it, so
-      warning would leave a block quietly returning a stale value from before the
-      loop. An error too, naming what the loop asked for and what the run made.
-    * **An open loop that outran the run** — ``tracer.iter[:]`` / ``tracer.all()``
-      have no end of their own, so outrunning the model is how they finish. That one
-      warns; values from the steps that were reached are already saved.
+    * **A loop that outran the run** — ``tracer.iter[...]`` asked for a step the
+      run did not make. An open ``tracer.iter[:]`` / ``tracer.all()`` has no end of
+      its own, so outrunning the model is how it finishes; a bounded loop cut short
+      by an EOS or a stop string ends the same way. That one warns: values from the
+      steps that were reached are already saved, and the statements after the loop
+      do not run.
 
     Call this *before* the throw: unwinding the worker's loop restores both the pin
     and the loop's shape it reads.
@@ -565,32 +562,17 @@ def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]
             ),
             None,
         )
-    if not mediator.iteration_bounded:
-        return (
-            OutOfOrderError(
-                f"'{requester}' was requested but the model already ran past it"
-            ),
-            f"'{requester}' was never reached: an open `tracer.iter[:]` / "
-            f"`tracer.all()` loop ends by asking for a step the run does not "
-            f"make. Values saved inside the loop are kept; the statements "
-            f"after it did not run.",
-        )
-    # The count the loop named is part of the block's meaning, so a run that
-    # can't supply it is a failure, not a note.
     return (
         OutOfOrderError(
-            f"'{requester}' was never reached: the loop asked for iteration "
-            f"{requester.iteration} of '{requester.provider}' and the run "
-            f"reached it {mediator.occurrence(requester.provider)} times, so "
-            f"the loop was cut short and nothing after it ran. Bound the "
-            f"loop to the iterations the run makes — a generation is held to "
-            f"a step count by `min_new_tokens=` on transformers and by "
-            f"`min_tokens=` or `ignore_eos=True` on vLLM, though neither "
-            f"holds a run that a stop string ends — or loop with "
-            f"`tracer.all()` and put what follows the loop in a separate "
-            f"`tracer.invoke()`."
+            f"'{requester}' was requested but the model already ran past it"
         ),
-        None,
+        f"'{requester}' was never reached: the loop asked for a step the run "
+        f"did not make, so it was cut short — values saved inside the loop "
+        f"are kept, and the statements after it did not run. An open "
+        f"`tracer.iter[:]` / `tracer.all()` loop ends this way by design. To "
+        f"hold a generation to a bounded loop's count, pass `min_new_tokens=` "
+        f"on transformers or `min_tokens=` / `ignore_eos=True` on vLLM; put "
+        f"what follows the loop in a separate `tracer.invoke()`.",
     )
 
 

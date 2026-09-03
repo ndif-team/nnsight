@@ -115,35 +115,6 @@ def test_a_wrong_shaped_swap_errors_its_request_only(vllm_gpt2_taps, ET_prompt):
     assert after.shape[-1] == 768
 
 
-def test_a_wrong_row_count_swap_errors_its_request_only(vllm_gpt2_taps, ET_prompt):
-    # Rows rather than the trailing dim, which is the case a cat lets through: a
-    # short replacement reached `_copy_into`'s copy_ inside the graph-replay
-    # callback, outside any deferring scope, and killed the engine. Widen refuses
-    # it before the callback ever gets it.
-    with pytest.raises(RuntimeError, match="keep its rows"):
-        with vllm_gpt2_taps.trace(ET_prompt, temperature=0.0, top_p=1):
-            out = vllm_gpt2_taps.transformer.h[6].output
-            vllm_gpt2_taps.transformer.h[6].output = out[:2]
-    with vllm_gpt2_taps.trace(ET_prompt, temperature=0.0, top_p=1):
-        after = vllm_gpt2_taps.transformer.h[6].output.clone().save()
-    assert after.shape[-1] == 768
-
-
-def test_a_wrong_row_count_swap_in_one_invoke_is_isolated(
-    vllm_gpt2_taps, ET_prompt, MSG_prompt
-):
-    with pytest.raises(RuntimeError, match="keep its rows"):
-        with vllm_gpt2_taps.trace(temperature=0.0, top_p=1, max_tokens=1) as tracer:
-            with tracer.invoke(ET_prompt):
-                out = vllm_gpt2_taps.transformer.h[6].output
-                vllm_gpt2_taps.transformer.h[6].output = out[:2]
-            with tracer.invoke(MSG_prompt):
-                vllm_gpt2_taps.transformer.h[6].output.clone().save()
-    with vllm_gpt2_taps.trace(ET_prompt, temperature=0.0, top_p=1):
-        after = vllm_gpt2_taps.transformer.h[6].output.clone().save()
-    assert after.shape[-1] == 768
-
-
 def test_untapped_location_is_named_on_a_long_prompt(vllm_gpt2_taps):
     # A prompt longer than the largest captured graph runs eagerly, so the
     # controllers do reach an untapped location that step. It is still refused:

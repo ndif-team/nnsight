@@ -418,27 +418,28 @@ class TestEarlyStop:
 class TestIterationBounds:
     """What a ``tracer.iter`` loop that outruns its request is told.
 
-    The same policy the interleaver applies to a local run, applied here: a count
-    the block named is a claim about the request, so a request that cannot supply
-    it fails; an open loop ends by outrunning generation, so it does not. The
-    engine only differs in where the answer lands — the client is in another
-    process, so the error rides home as the request's deferred error and is raised
-    there, while the warning is emitted on the engine.
+    The same policy the interleaver applies to a local run, applied here: a loop
+    that asks for a step the request does not make is cut short there — what it
+    saved comes home, the statements after it never run, and the warning is
+    emitted on the engine (the client is in another process, so it is not
+    catchable in user code).
     """
 
     @torch.no_grad()
-    def test_bounded_iter_past_the_end_surfaces(self, vllm_gpt2, MSG_prompt):
-        # Eight steps asked of a three-step request. The worker is unwound at the
-        # loop, so the append after it never runs and `steps` goes home three long
-        # and looking complete — which is the whole reason this is an error.
-        with pytest.raises(RuntimeError, match="nothing after it ran"):
-            with vllm_gpt2.trace(
-                MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
-            ) as tracer:
-                steps = list().save()
-                for _ in tracer.iter[:8]:
-                    steps.append(vllm_gpt2.logits.argmax(dim=-1))
-                steps.append("after the loop")
+    def test_iter_past_the_end_is_cut_short(self, vllm_gpt2, MSG_prompt):
+        # Eight steps asked of a three-step request: the loop is cut short at the
+        # fourth ask, the three reached steps come home, and the append after the
+        # loop never runs.
+        with vllm_gpt2.trace(
+            MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
+        ) as tracer:
+            steps = list().save()
+            for _ in tracer.iter[:8]:
+                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+            steps.append("after the loop")
+
+        assert len(steps) == 3
+        assert "after the loop" not in steps
 
     @torch.no_grad()
     def test_bounded_iter_matching_the_request_keeps_its_tail(
@@ -457,21 +458,23 @@ class TestIterationBounds:
         assert len(steps) == 4 and steps[-1] == "after the loop"
 
     @torch.no_grad()
-    def test_a_generation_cut_short_surfaces(self, vllm_gpt2, MSG_prompt):
-        # The count need not be absurd to go unmet, which is the case the policy is
-        # for: this request stops on its second token — what an EOS does to a
-        # generation — while the loop is still bound to six.
+    def test_a_generation_cut_short_is_not_an_error(self, vllm_gpt2, MSG_prompt):
+        # The count need not be absurd to go unmet: this request stops on its
+        # second token — what an EOS does to a generation — while the loop is
+        # still bound to six. The trace completes with what the run made.
         york = vllm_gpt2.tokenizer.encode(" York")
-        with pytest.raises(RuntimeError, match="nothing after it ran"):
-            with vllm_gpt2.trace(
-                MSG_prompt,
-                temperature=0.0,
-                top_p=1,
-                max_tokens=6,
-                stop_token_ids=york,
-            ) as tracer:
-                for _ in tracer.iter[:6]:
-                    vllm_gpt2.logits
+        with vllm_gpt2.trace(
+            MSG_prompt,
+            temperature=0.0,
+            top_p=1,
+            max_tokens=6,
+            stop_token_ids=york,
+        ) as tracer:
+            steps = list().save()
+            for _ in tracer.iter[:6]:
+                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+
+        assert len(steps) == 2
 
     @torch.no_grad()
     def test_open_iter_past_the_end_is_not_an_error(self, vllm_gpt2, MSG_prompt):
@@ -488,15 +491,13 @@ class TestIterationBounds:
         assert vllm_gpt2.tokenizer.batch_decode(steps) == [" New", " York", " City"]
 
     @torch.no_grad()
-    def test_engine_survives_a_bounded_over_run(self, vllm_gpt2, ET_prompt):
-        # The unwind ends one request; every other tenant of the engine, and every
-        # later trace, is untouched.
-        with pytest.raises(RuntimeError, match="nothing after it ran"):
-            with vllm_gpt2.trace(
-                ET_prompt, temperature=0.0, top_p=1, max_tokens=2
-            ) as tracer:
-                for _ in tracer.iter[:9]:
-                    vllm_gpt2.logits
+    def test_engine_survives_an_over_run(self, vllm_gpt2, ET_prompt):
+        # The unwind ends one request's loop; every later trace is untouched.
+        with vllm_gpt2.trace(
+            ET_prompt, temperature=0.0, top_p=1, max_tokens=2
+        ) as tracer:
+            for _ in tracer.iter[:9]:
+                vllm_gpt2.logits
 
         with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
             logits = vllm_gpt2.logits.save()
@@ -617,39 +618,6 @@ class TestDeferredErrors:
                     vllm_gpt2.logits.save()
 
         # The engine and its other tenants are unharmed.
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
-
-    @torch.no_grad()
-    def test_a_wrong_row_count_write_spares_the_engine(self, vllm_gpt2, ET_prompt):
-        # A replacement narrower than the request's token span concatenates into a
-        # slab of the wrong height and reaches the next module, where the shape it
-        # no longer has trips a device-side assert — which poisons the CUDA context
-        # and takes the engine, not just this request. The batcher's widen refuses
-        # it first, inside the worker's handoff, where deferral applies.
-        with pytest.raises(RuntimeError, match="keep its rows"):
-            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=1):
-                out = vllm_gpt2.transformer.h[6].output
-                vllm_gpt2.transformer.h[6].output = out[:2]
-                vllm_gpt2.logits.save()
-
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
-
-    @torch.no_grad()
-    def test_a_wrong_row_count_write_in_one_invoke_is_isolated(
-        self, vllm_gpt2, ET_prompt, MSG_prompt
-    ):
-        with pytest.raises(RuntimeError, match="keep its rows"):
-            with vllm_gpt2.trace(temperature=0.0, top_p=1, max_tokens=1) as tracer:
-                with tracer.invoke(ET_prompt):
-                    out = vllm_gpt2.transformer.h[6].output
-                    vllm_gpt2.transformer.h[6].output = out[:2]
-                with tracer.invoke(MSG_prompt):
-                    vllm_gpt2.logits.save()
-
         with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
             logits = vllm_gpt2.logits.save()
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"

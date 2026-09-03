@@ -581,36 +581,8 @@ class Envoy:
         # source.{name}_{occurrence} (e.g. source.relu_0.output). A class-level
         # property, so it wins over the __getattr__ module fallthrough. Building
         # it permanently source-instruments the module (inert outside a trace).
-        self._warn_if_fragmented()
         return Source(self, self.path, install_source(self))  # raises SourceNotAvailable
 
-    def _warn_if_fragmented(self) -> None:
-        """Warn that operation values are this device's piece, on a sharded model.
-
-        A module's ``.input``/``.output`` is reassembled for the trace; a value
-        *inside* a forward is not, because nothing on it records which axis holds
-        the shard once it has left the module that produced it — and the axis
-        moves, so there is nothing safe to assume. Handing it over silently is
-        how a per-head read comes back with half the heads and no error, so the
-        one place that cannot happen without notice is here, where the user
-        reaches for it.
-
-        Once per call site, which is Python's default for a warning, so a loop
-        over layers says it once.
-        """
-        fragments = getattr(self.interleaver, "fragments", None)
-        if fragments is None or not fragments.enabled:
-            return
-        warnings.warn(
-            f"'{self.path}' is on a model split across devices, and values inside "
-            "a module's forward are handed over as this device's piece — only a "
-            "module's own .input/.output is made whole. Reassemble one with "
-            "nnsight.modeling.tp.gather(model, value, dim=...), naming the axis "
-            "the shard is on, and put it back with the matching shard(...). See "
-            "the tensor-parallel docs, 'Reading a value between two sharded "
-            "modules'.",
-            stacklevel=3,
-        )
 
     def to(self, device: torch.device) -> Envoy:
         """Move the wrapped module to ``device`` (in place).
