@@ -232,7 +232,9 @@ it out) to suppress refusal. Same pattern with `coef < 0` or projection
 ## Interpretation tips
 
 - **Sweep coefficient and layer.** A working direction has a band of `(layer, coef)`
-  where behavior shifts and fluency holds. Outside it the model degrades.
+  where behavior shifts and fluency holds; the band moves with the layer's
+  residual norm, so recompute it per layer (see
+  [Choosing the coefficient](#choosing-the-coefficient)).
 - **Look at fluency, not just argmax.** A direction can flip the top token but
   produce gibberish downstream — always inspect a generation.
 - **Last position vs all positions.** Last-position is more surgical; all-position
