@@ -1,9 +1,9 @@
 ---
 title: Batching and Invokers
-one_liner: Each tracer.invoke() is one worker on its own [start, size] batch slice; empty invokes see the full batch; the Batcher narrows reads and widens writes; barriers synchronize cross-invoke value sharing.
+one_liner: Each tracer.invoke() is one worker on its own [start, size] batch slice; empty invokes see the full batch; the Batcher narrows reads and widens writes.
 tags: [concept, mental-model, batching, invokers]
 related: [docs/concepts/threading-and-mediators.md, docs/concepts/deferred-execution.md]
-sources: [src/nnsight/intervention/tracer.py:336, src/nnsight/intervention/tracer.py:223, src/nnsight/intervention/batching.py:66, src/nnsight/intervention/batching.py:85, src/nnsight/intervention/barrier.py:35]
+sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/barrier.py]
 ---
 
 # Batching and Invokers
@@ -44,13 +44,13 @@ a: (1, 50257)   b: (2, 50257)   all: (3, 50257)
 
 ## How an invoke becomes a worker
 
-`Invoker` (`intervention/tracer.py:336`) is a `Tracer` subclass. Its `execute` doesn't run the model — it *registers* the invoke:
+`Invoker` (`intervention/tracer.py`) is a `Tracer` subclass. Its `execute` doesn't run the model — it *registers* the invoke:
 
 1. Its body is captured/compiled like any trace block (see [Deferred Execution](deferred-execution.md)).
 2. `self.tracer.batcher.add(*args, **kwargs)` records the input and returns its `batch_group` (the batcher belongs to the outer tracer).
 3. A `Mediator(code, glbls, lcls, node=..., shared=frame.f_locals)` is built with that `batch_group` and appended to `interleaver.mediators`.
 
-The outer `InterleavingTracer.execute` (`intervention/tracer.py:223`) creates the `Batcher` (`self.batcher`) and runs the trace body once to collect all invokes, then hands the batcher to `Envoy.interleave`, which assembles it (→ the model's `_batch`) into the combined input, registers it on the interleaver for the run, and starts every worker.
+The outer `InterleavingTracer.execute` creates the `Batcher` (`self.batcher`) and runs the trace body once to collect all invokes, then hands the batcher to `Envoy.interleave`, which assembles it (→ the model's `_batch`) into the combined input, registers it on the interleaver for the run, and starts every worker.
 
 `tracer.invoke(...)` while the model is already running raises (`Invoker.__init__`):
 
@@ -60,11 +60,11 @@ ValueError: Cannot invoke while the model is already running.
 
 ## Batcher: accumulate, then narrow/widen
 
-`Batcher` (`batching.py:66`) lives on the interleaver for one trace.
+`Batcher` lives on the interleaver for one trace.
 
 ### Accumulating
 
-`add(*inputs, **kwargs)` (`batching.py:171`):
+`Batcher.add(*inputs, **kwargs)`:
 
 - `model._batch_size(...)` reports the input's row count. `0` (no data) → an empty invoke, `groups.append(None)`, returns `None`.
 - Otherwise assign `group = [total, size]`, bump `total`, store the invoke, return the group.
@@ -73,24 +73,33 @@ ValueError: Cannot invoke while the model is already running.
 
 When a hook fires and `Interleaver.handle` serves a worker:
 
-- **read**: `batcher.narrow(value, group)` (`batching.py:85`) slices every batched tensor (leading dim `== total`) down to `[start, start+size)`. Non-batched tensors and empty invokes pass through.
-- **write**: `batcher.widen(full, group, edited)` (`batching.py:103`) splices the edited rows back into the full batch (via `cat`, keeping autograd correct).
+- **read**: `Batcher.narrow(value, group)` slices every batched tensor (leading dim `== total`) down to `[start, start+size)`. Non-batched tensors and empty invokes pass through.
+- **write**: `Batcher.widen(full, group, edited)` splices the edited rows back into the full batch (via `cat`, keeping autograd correct). The replacement has to keep the group's row count, or `_widen_tensor` raises before the value reaches the model:
 
-`batcher.batching` is `True` only with **2+ input invokes** (`batching.py:183`). A lone invoke *is* the whole batch, so `narrow`/`widen` are no-ops — single-input traces pay no slicing overhead.
+```
+ValueError: A batched write has to keep its rows: this block owns rows 0:1 of 2,
+so the replacement must be (1, 7, 768), not (2, 5, 768).
+```
+
+`Batcher.batching` is `True` only with **2+ input invokes**. A lone invoke *is* the whole batch, so `narrow`/`widen` are no-ops — single-input traces pay no slicing overhead, and no row check applies either: a lone invoke's write may change the leading dim and widen the run.
 
 ## Empty invoke semantics
 
 `tracer.invoke()` with no arguments:
 
-- Contributes no rows (`batch_group = None`), sees the full combined batch.
-- Runs as its own worker, so it can access modules in an independent order relative to other invokes.
+- Contributes no rows (`batch_group = None`), sees the full combined batch. The combined input is assembled from every invoke before any worker starts, so this holds wherever the empty invoke is written — first, last, or between two input invokes.
+- Runs as its own worker, so it can access modules in an independent order relative to other invokes. Inside its own block, forward order still applies.
 - Doesn't call `_batch`, so it works even on base `NNsight`.
 
-At least one input invoke must exist, or `trace()` needs direct input — otherwise:
+At least one input invoke must exist, or `trace()` needs direct input. A trace with
+neither is caught up front:
 
 ```
 ValueError: trace() needs an input, or at least one `with tracer.invoke(...)` block
 ```
+
+That guard counts blocks, not rows, so a trace holding *only* an empty invoke gets
+past it and fails further in — see Gotchas.
 
 ## Batched skip
 
@@ -103,11 +112,11 @@ invoke, or none — a shared forward can't run for only the rows an invoke left 
 
 ## Cross-invoke variable sharing
 
-Blocks written in the same frame share their locals through the `Scope`'s `shared` dict (`tracing/util.py:32`), so a name bound in one invoke is visible in a later one. But workers resume in **model-reached** order, not definition order — so a value must be *bound before it's read*. When one block reads an activation and another writes it, use a **barrier**.
+Blocks written in the same frame share their locals through the `Scope`'s `shared` dict (`tracing/util.py`), so a name bound in one invoke is visible in another. Whether it is bound *yet* depends on where each worker has parked: a name is readable once the reader has parked at a location the model reaches after the binding. [usage/invoke-and-batching.md](../usage/invoke-and-batching.md#cross-invoke-value-sharing) states the rule and its two corollaries; a consumer that cannot park in between uses a **barrier**.
 
-## Barriers: cross-invoke handoff on the same location
+## Barriers: an ordered handoff
 
-`tracer.barrier(n)` (`intervention/tracer.py:118`) returns a `Barrier` (`barrier.py:35`). Each block calls it; the first `n-1` park on `Event.BARRIER`; the last to arrive releases the rest by switching each parked worker directly. Everything above a barrier has happened before anything below one.
+`InterleavingTracer.barrier(n)` returns a `Barrier`. Each block calls it; the first `n-1` park on `Event.BARRIER`; the last to arrive releases the rest by switching each parked worker directly. Everything above a barrier has happened before anything below one.
 
 Verified — invoke 2 reuses invoke 1's embeddings:
 
@@ -125,20 +134,20 @@ with model.trace() as tracer:
 # sent == received  ->  both [6342]
 ```
 
-A barrier fewer blocks reach than it was built for never releases; the waiting blocks report it when the run ends.
+A barrier fewer blocks reach than it was built for never releases; `check_dangling_mediators` turns that into a `ValueError` when the run ends, so a mis-count is an error rather than a hang. A barrier *more* blocks reach releases early, and the block it let through raises `NameError` on the value it came for.
 
 ## Order rules
 
-- **Within an invoke:** access modules in forward-pass order (read `.input` before `.output`). Out-of-order raises `OutOfOrderError`.
+- **Within an invoke:** access modules in forward-pass order (read `.input` before `.output`). Out-of-order raises `OutOfOrderError`. An empty invoke is no exception; what it resets is its ordering relative to the *other* invokes.
 - **Across invokes:** they share one forward; workers resume in the order the model reaches what each asked for.
-- **Same module across invokes:** use a `barrier()` so the reader runs before the writer.
+- **Handing a value across:** a `barrier()` when the consumer cannot park past the producer, which includes every consumer whose first statement is a write.
 
 ## Gotchas
 
 - **`_batch_size`/`_batch` required for 2+ input invokes.** Base `NNsight` raises `NotImplementedError` on `_batch` with multiple invokes; use `TransformersModel`, implement them, or restructure as one input invoke + empty invokes.
 - **A tensor is "batched" only if its leading dim equals the combined batch size.** `narrow`/`widen` leave others alone — a shape coincidence could in principle mislead them.
 - **Custom batch layouts subclass `Batcher`** and override `narrow`/`widen`/`assemble`. vLLM's `VLLMBatcher` (`modeling/vllm/batching.py`) maps rows onto a flat token axis.
-- **Empty invoke with no preceding input** has nothing to forward — provide an input invoke first.
+- **A trace whose only invoke is empty has no rows to run.** On `TransformersModel` the tokenizer raises `IndexError: list index out of range`; on base `NNsight` the forward raises `TypeError` for its missing argument. Give the trace an input invoke or a direct input.
 
 ## Related
 

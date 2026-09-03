@@ -52,8 +52,13 @@ class Barrier:
     Built by [`barrier`][nnsight.intervention.tracer.InterleavingTracer.barrier] with
     the number of blocks that will call it. Calling it parks the block until that
     many have arrived; the last one through releases the rest and none of them
-    waits again. A barrier fewer blocks reach than it was built for never
-    releases, and the blocks left waiting say so once the run ends.
+    waits again.
+
+    ``n`` has to be the number of blocks that actually call it, and the two ways to
+    get it wrong fail differently. Too high and the round never releases: the run
+    still ends, and the blocks left waiting say so. Too low and the round releases
+    early, before the block holding the value has arrived, so the block it let
+    through raises a ``NameError`` on a value the barrier was there to sequence.
 
     Attributes:
         n: How many blocks have to arrive before any of them continues.

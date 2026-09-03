@@ -11,8 +11,17 @@ it reads, and [`Batcher.widen`][nnsight.intervention.batching.Batcher.widen] spl
 is dim-0 only; the model's `_batch` equalizes everything else (e.g. sequence
 length) when it builds the combined input.
 
+Two consequences a block's author meets. Equalizing the sequence length pads every
+invoke out to the batch's longest input, so a position index counted from the left
+names a different token depending on what else is in the batch, while one counted
+from the right does not. And a write is spliced back into rows the block does not
+own, so it has to keep the row count it was served —
+[`Batcher._widen_tensor`][nnsight.intervention.batching.Batcher._widen_tensor]
+refuses one that doesn't.
+
 Batching only actually narrows when there are two or more non-empty invokes — a
-lone invoke *is* the whole batch, so it sees every row untouched.
+lone invoke *is* the whole batch, so it sees every row untouched, and neither the
+row scoping nor that row check applies to it.
 """
 
 from __future__ import annotations
