@@ -518,6 +518,79 @@ class Mediator:
         return value
 
 
+def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]:
+    """How a worker still parked when its run is over should be ended.
+
+    Returns the error to throw into the worker — the throw unwinds it, running its
+    ``finally`` blocks, and points the traceback at the line that was waiting — and
+    the warning to emit *instead of* surfacing that error, or ``None`` when the
+    error stands. Two drivers ask, and they differ only in what surfacing means:
+    [`Interleaver.check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators]
+    raises the error, and vLLM's ``Requests.finish_dangling`` carries it home as the
+    request's deferred error. The policy is one copy here because two copies of it
+    can disagree, and a block that is an error locally and a warning on the engine
+    is a block whose meaning depends on where it runs.
+
+    Three cases:
+
+    * **Out of order** — a plain request (``iteration == 0``) for a location the
+      model already ran past, or never called. A real error.
+    * **A bounded loop that outran the run** — ``for step in tracer.iter[:10]``
+      against three steps, or a generation an EOS cut short. The unwind takes the
+      worker out at the loop, discarding every statement the block has after it, so
+      warning would leave a block quietly returning a stale value from before the
+      loop. An error too, naming what the loop asked for and what the run made.
+    * **An open loop that outran the run** — ``tracer.iter[:]`` / ``tracer.all()``
+      have no end of their own, so outrunning the model is how they finish. That one
+      warns; values from the steps that were reached are already saved.
+
+    Call this *before* the throw: unwinding the worker's loop restores both the pin
+    and the loop's shape it reads.
+    """
+    requester = mediator.pending
+    if requester.event is Event.BARRIER:
+        # Fewer blocks reached the barrier than it was built for, so it was never
+        # going to release.
+        return (
+            ValueError(
+                "A barrier was never reached by every block it waits for; "
+                "check the count it was created with"
+            ),
+            None,
+        )
+    if mediator.iteration == 0:
+        return (
+            OutOfOrderError(
+                f"'{requester}' was requested but the model already ran past it"
+            ),
+            None,
+        )
+    if not mediator.iteration_bounded:
+        return (
+            OutOfOrderError(
+                f"'{requester}' was requested but the model already ran past it"
+            ),
+            f"'{requester}' was never reached: an open `tracer.iter[:]` / "
+            f"`tracer.all()` loop ends by asking for a step the run does not "
+            f"make. Values saved inside the loop are kept; the statements "
+            f"after it did not run.",
+        )
+    # The count the loop named is part of the block's meaning, so a run that
+    # can't supply it is a failure, not a note.
+    return (
+        OutOfOrderError(
+            f"'{requester}' was never reached: the loop asked for iteration "
+            f"{requester.iteration} of '{requester.provider}' and the run "
+            f"reached it {mediator.occurrence(requester.provider)} times, so "
+            f"the loop was cut short and nothing after it ran. Bound the "
+            f"loop to the iterations the run makes (`min_new_tokens=` holds "
+            f"a generation to a step count), or loop with `tracer.all()` and "
+            f"put what follows the loop after the `with` block."
+        ),
+        None,
+    )
+
+
 class Interleaver:
     """Drives the model side of interleaving: model hooks in, workers served.
 
@@ -779,76 +852,26 @@ class Interleaver:
         """Surface any worker still parked after the run.
 
         Called once the model has finished. A worker that is still [`alive`][nnsight.intervention.interleaver.Mediator.alive]
-        was waiting for a location the model never reached. Every case throws
-        [`OutOfOrderError`][nnsight.intervention.interleaver.OutOfOrderError] into the worker — that unwinds it, running its
-        ``finally`` blocks, and points the traceback at the line that was waiting
-        — and they differ only in whether the throw is then let through:
-
-        * **Out of order** — a plain request (``iteration == 0``) for a location
-          the model already ran past, or never called. A real error; raised.
-        * **A bounded loop that outran the run** — ``for step in
-          tracer.iter[:10]`` against a run of three steps, or one that stops early
-          on an EOS. The unwind takes the worker out at the loop, so every
-          statement the block has after the loop is discarded; warning about that
-          leaves a block that quietly returns a stale value from before it, so
-          this is raised too, saying what the loop asked for and what the run
-          made.
-        * **An open loop that outran the run** — ``tracer.iter[:]`` /
-          ``tracer.all()``, which have no end of their own: outrunning the model is
-          how they finish, so this one warns. Values from the steps that *were*
-          reached have already been saved; the statements after the loop are lost
-          the same way, which is what the warning says.
+        was waiting for a location the model never reached.
+        [`dangling_unwind`][nnsight.intervention.interleaver.dangling_unwind] decides
+        what that means — an out-of-order read, a bounded ``tracer.iter`` loop the
+        run could not supply, or an open one ending the only way it can — and this
+        is the local half of it: what stands is raised, out of the worker's own
+        frame, and what is expected is warned about.
         """
         for mediator in self.mediators:
             if not mediator.alive:
                 continue
-            # Printed, so it renders as "{location}.i{n}" — which occurrence was
-            # waited for is the part that explains an iter loop that outran the run.
-            requester = mediator.pending
-            if requester.event is Event.BARRIER:
-                # Waiting on blocks that never all arrived — fewer of them reached
-                # the barrier than it was built for, so it was never going to
-                # release. Point at the line that waited.
-                mediator.worker.throw(
-                    ValueError(
-                        "A barrier was never reached by every block it waits for; "
-                        "check the count it was created with"
-                    )
-                )
-                continue
-            # Read the pin and the loop's shape before the throw: unwinding the
-            # worker's iter loop restores both.
-            iterating = mediator.iteration != 0
-            bounded = iterating and mediator.iteration_bounded
-            if bounded:
-                # The count the loop named is part of the block's meaning, so a run
-                # that can't supply it is a failure, not a note — the alternative
-                # is a block whose tail silently never runs.
-                error = OutOfOrderError(
-                    f"'{requester}' was never reached: the loop asked for iteration "
-                    f"{requester.iteration} of '{requester.provider}' and the run "
-                    f"reached it {mediator.occurrence(requester.provider)} times, so "
-                    f"the loop was cut short and nothing after it ran. Bound the "
-                    f"loop to the iterations the run makes (`min_new_tokens=` holds "
-                    f"a generation to a step count), or loop with `tracer.all()` and "
-                    f"put what follows the loop after the `with` block."
-                )
-            else:
-                error = OutOfOrderError(
-                    f"'{requester}' was requested but the model already ran past it"
-                )
+            error, expected = dangling_unwind(mediator)
             try:
                 mediator.worker.throw(error)
-            except OutOfOrderError:
-                if not iterating or bounded:
+            except BaseException as thrown:
+                # `thrown is error` only when the block let the unwind through: a
+                # `finally` that raises something of its own is that error, not a
+                # loop that outran the run, and stands however the loop was written.
+                if expected is None or thrown is not error:
                     raise
-                # An open loop ends by outrunning the model — unwound; warn.
-                warnings.warn(
-                    f"'{requester}' was never reached: an open `tracer.iter[:]` / "
-                    f"`tracer.all()` loop ends by asking for a step the run does not "
-                    f"make. Values saved inside the loop are kept; the statements "
-                    f"after it did not run."
-                )
+                warnings.warn(expected)
 
     def cancel(self) -> None:
         """Drop all mediators and the batcher so the next run starts clean.
