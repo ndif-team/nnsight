@@ -9,7 +9,7 @@ stream rather than returning once at the end::
 
     async for output in tracer.backend:
         ...                        # a RequestOutput per decode step
-    last.saves["logits"]           # saved values arrive on the *finished* output
+    output.saves["logits"]         # saved values arrive on the *finished* output
 
 Every yielded output carries a ``saves`` dict; only the finished one is non-empty.
 ``await tracer.backend`` drains the stream and returns just the last (finished)
@@ -18,6 +18,11 @@ output, when you don't need the intermediate steps::
     last = await tracer.backend
     last.saves["logits"]
 
+Saved values live only on that output. The synchronous and ``serve=`` paths push a
+saved name back into the frame that wrote the block; this one cannot, because the
+block has already returned by the time the stream is consumed — ``logits`` above
+stays unbound and ``saves[name]`` is the only handle.
+
 This backend is what the tracer runs on ``__exit__`` and what ``tracer.backend``
 iterates. On ``__exit__`` it builds and serializes the trace's workers and submits
 the request to the engine, keeping the returned async generator; iterating it
@@ -25,15 +30,17 @@ streams each step's output and, on the finished one, fetches the request's saved
 values from the worker and attaches them (re-raising a real intervention error).
 
 Two caveats. The stream is **single-consumption** — the underlying engine generator
-is consumed once, so iterate (or ``await``) it exactly once. And an **abort** (a
-consumer that stops early) frees the request's worker in ``__aiter__``'s ``finally``,
-which runs on ``aclose()`` — explicit, or when the generator is garbage-collected;
-a bare ``break`` therefore defers the free to GC. To free promptly, ``aclose()`` it.
+is consumed once, so iterate (or ``await``) it exactly once; a second ``await`` gets
+``None`` back rather than an error, and the failure surfaces wherever that ``None``
+is used. And an **abort** (a consumer that stops early) frees the request's worker in
+``__aiter__``'s ``finally``, which runs on ``aclose()`` — explicit, or when the
+generator is garbage-collected; a bare ``break`` therefore defers the free to GC. To
+free promptly, ``aclose()`` it.
 
 Interventions run in the worker exactly as in the synchronous path — the same
 [`NNsightGPUModelRunner`][nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner],
-the same per-request scoping. Only the collection of saved values differs: without
-a ``step()`` to hook, it happens here, in the stream.
+the same per-request scoping. Only the collection of saved values differs: with no
+``step()`` to collect after, it happens here, in the stream.
 """
 
 from __future__ import annotations
