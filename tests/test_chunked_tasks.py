@@ -51,12 +51,18 @@ class TestChunksAreRows:
 
     @torch.no_grad()
     def test_a_long_sentence_is_one_row_per_window(self, ner):
-        # `stride` makes the tokenizer return overflowing windows, so this one
-        # input is seven encodings; every one of them is a row of the forward.
+        # `stride` makes the tokenizer return overflowing windows, and every
+        # encoding the pipeline yields is a row of the forward. How many windows
+        # a given max_length produces is the tokenizer's business and moves
+        # across transformers versions, so the expected count comes from the
+        # same preprocess call the trace makes.
         sentence = " ".join(["John lives in Paris"] * 200)
+        pre_params, _, _ = ner.pipeline._sanitize_parameters(stride=16)
+        windows = sum(1 for _ in ner.pipeline.preprocess(sentence, **pre_params))
+        assert windows > 1  # the sentence really overflows into several windows
         with ner.trace(sentence, stride=16):
             logits = ner.output.logits.save()
-        assert logits.shape[0] == 7
+        assert logits.shape[0] == windows
 
     @torch.no_grad()
     def test_one_row_per_candidate_label(self, nli):
