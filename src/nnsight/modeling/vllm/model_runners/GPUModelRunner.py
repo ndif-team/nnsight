@@ -454,10 +454,11 @@ class Requests:
         of those a parked worker is, and what it should be told, is
         [`dangling_unwind`][nnsight.intervention.interleaver.dangling_unwind]'s to
         decide, so a trace behaves the same on this engine as it does locally: a read
-        past the model's point and a bounded ``tracer.iter`` loop the request could
-        not supply are errors, and only an open loop — which ends by outrunning
-        generation — warns. Surfacing differs, since the client is in another
-        process: the error becomes the request's deferred error and is raised there.
+        past the model's point is an error, and a ``tracer.iter`` loop the request
+        could not supply — bounded and open alike — is cut short with a warning,
+        keeping the values from the steps that ran. Surfacing differs, since the
+        client is in another process: an error becomes the request's deferred error
+        and is raised there.
 
         Runs on the workers' own thread, where the greenlet can be resumed — the throw
         is skipped where that thread differs (e.g. Ray's collect), leaving the worker

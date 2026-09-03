@@ -71,12 +71,13 @@ class Iterations(Tracer):
     keeping the values from every step that did run.
 
     An end the user named — ``tracer.iter[:10]``, ``iter[2]``, ``iter[[0, 2, 4]]``
-    — is a claim about the run, so a run that makes fewer steps than that raises
-    instead. Ending the loop there would be the kind thing to do, but the loop is
-    the user's own ``for`` statement and the worker is parked inside its body: the
-    only way out is to unwind it, which discards whatever the block does after the
-    loop. Failing says so; warning leaves the block half-run and its later names
-    holding whatever they held before.
+    — that the run cannot supply ends the same way: cut short, with the same
+    warning. The loop is the user's own ``for`` statement and the worker is
+    parked inside its body, so the only way out is to unwind it — values saved
+    inside the loop are kept, and whatever the block does after the loop does
+    not run. The warning says so, and names what pins a generation to the
+    loop's count (``min_new_tokens=`` on transformers, ``min_tokens=`` /
+    ``ignore_eos=True`` on vLLM) for when the shortfall was not meant.
 
     A ``with tracer.iter[...]:`` block does the same thing and is deprecated; the
     loop moves inside `execute`, which re-runs the block per step. Prefer the

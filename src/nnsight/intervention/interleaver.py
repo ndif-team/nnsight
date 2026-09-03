@@ -213,10 +213,6 @@ class Mediator:
         # Which occurrence of a location the worker is currently asking for (or
         # None when relaxed). See `handle` for how it is matched.
         self.iteration: int | None = 0
-        # Whether the `tracer.iter` loop moving that pin has an end (set by
-        # Iterations.__iter__). A loop with an end that outruns the run is an
-        # error rather than the warning an open one gets; see
-        # `Interleaver.check_dangling_mediators`.
         # The interleaver's counts when this worker started; its own occurrence
         # of a location is the interleaver's count minus this.
         self.counts_at_start: dict[str, int] = {}
@@ -839,10 +835,10 @@ class Interleaver:
         Called once the model has finished. A worker that is still [`alive`][nnsight.intervention.interleaver.Mediator.alive]
         was waiting for a location the model never reached.
         [`dangling_unwind`][nnsight.intervention.interleaver.dangling_unwind] decides
-        what that means — an out-of-order read, a bounded ``tracer.iter`` loop the
-        run could not supply, or an open one ending the only way it can — and this
-        is the local half of it: what stands is raised, out of the worker's own
-        frame, and what is expected is warned about.
+        what that means — an out-of-order read, which stands as an error, or a
+        ``tracer.iter`` loop that outran the run, bounded and open alike, which
+        warns — and this is the local half of it: what stands is raised, out of
+        the worker's own frame, and what is expected is warned about.
         """
         for mediator in self.mediators:
             if not mediator.alive:
