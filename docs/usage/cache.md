@@ -2,7 +2,7 @@
 title: Activation Cache
 one_liner: tracer.cache() records module outputs (and optionally inputs) into a path- and attribute-addressable view.
 tags: [usage, cache, intervention]
-related: [docs/usage/access-and-modify.md, docs/usage/iter-all-next.md, docs/usage/save.md]
+related: [docs/usage/access-and-modify.md, docs/usage/iter-all-next.md, docs/usage/save.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/intervention/cache.py, src/nnsight/intervention/tracer.py]
 ---
 
