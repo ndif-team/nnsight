@@ -243,15 +243,18 @@ class TestEditingWithAttachment:
     def test_attachment_applies_once_without_iter(self, x):
         # A plain edit block reads and swaps the location's *first* occurrence, so
         # the attachment is applied once even though the layer runs several times.
+        # The loop is open because that is the claim under test: the attachment
+        # fires once, and a loop naming a count the run doesn't reach is an error.
         envoy = Envoy(Repeat())
         envoy.fc1.adapter = Adapter()
         with envoy.edit(inplace=True):
             acts = envoy.fc1.output
             envoy.fc1.output[:] = envoy.fc1.adapter(acts, hook=True)
-        with envoy.trace(x) as tracer:
-            seen = nnsight.save([])
-            for _ in tracer.iter[: Repeat.STEPS]:
-                seen.append(envoy.fc1.adapter.inner.output.clone())
+        with pytest.warns(UserWarning, match="never reached"):
+            with envoy.trace(x) as tracer:
+                seen = nnsight.save([])
+                for _ in tracer.all():
+                    seen.append(envoy.fc1.adapter.inner.output.clone())
         assert len(seen) == 1
 
     def test_attachment_applies_every_occurrence_with_iter(self, x):

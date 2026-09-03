@@ -644,6 +644,35 @@ class TestIteration:
                 for step in tracer.iter[-1:2]:
                     loop_envoy.block.output
 
+    def test_bounded_iter_past_the_end_raises(self, loop, loop_envoy, x):
+        # A loop with an end that the run can't reach is unwound at the loop, so
+        # `tail` below never binds. Raising is what keeps that from passing for a
+        # result: warning would leave the block's later names holding stale values.
+        with pytest.raises(OutOfOrderError, match="nothing after it ran"):
+            with loop_envoy.trace(x) as tracer:  # the model runs 5 steps
+                captured = nnsight.save([])
+                for step in tracer.iter[:8]:
+                    captured.append(loop_envoy.block.output)
+                tail = nnsight.save("after the loop")
+
+    def test_bounded_iter_matching_the_run_keeps_its_tail(self, loop, loop_envoy, x):
+        # The other side of the same rule: a bound the run does reach leaves the
+        # loop to end on its own, so the statements after it run.
+        with loop_envoy.trace(x) as tracer:
+            captured = nnsight.save([])
+            for step in tracer.iter[:5]:
+                captured.append(loop_envoy.block.output)
+            tail = nnsight.save("after the loop")
+        assert len(captured) == 5
+        assert tail == "after the loop"
+
+    def test_sparse_iter_past_the_end_raises(self, loop, loop_envoy, x):
+        # An explicit list names its steps as definitely as a slice does.
+        with pytest.raises(OutOfOrderError, match="nothing after it ran"):
+            with loop_envoy.trace(x) as tracer:
+                for step in tracer.iter[[0, 2, 7]]:
+                    loop_envoy.block.output
+
 
 class TestSourceIteration:
     """``tracer.iter`` over a `.source` op that loops within a single forward."""
