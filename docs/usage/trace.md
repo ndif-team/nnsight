@@ -10,15 +10,9 @@ sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/envoy.py,
 
 ## What this is for
 
-`model.trace(...)` opens an `InterleavingTracer` context that runs a single forward pass of the wrapped model while letting your code read and modify intermediate activations. The body of the `with` block is captured (its source is parsed and compiled — see `src/nnsight/tracing/tracer.py`), then run in a **greenlet worker** (a `Mediator`) that synchronizes with the model's forward pass through hook events.
+`model.trace(...)` opens an `InterleavingTracer` context that runs a single forward pass of the wrapped model while letting your code read and modify intermediate activations. The body of the `with` block is captured (its source is parsed and compiled — see `src/nnsight/tracing/tracer.py`), then run in a **greenlet worker** (a `Mediator`) that takes turns with the forward pass: the worker parks on each value it asks for, and the module's controller hands that value over when the model reaches it.
 
-## When to use / when not to use
-
-- Use for a single forward call (no token-by-token generation).
-- Use `model.generate(...)` for multi-token autoregressive output (returns token ids). See `docs/usage/generate.md`.
-- Use `model.pipe(...)` to run the whole task pipeline and get its decoded records. See `docs/usage/pipe.md`.
-- Use `model.scan(...)` to validate shapes/operations without real compute. See `docs/usage/scan.md`.
-- Use `model.edit(...)` for persistent interventions. See `docs/usage/edit.md`.
+`trace` is for a single forward call. For token-by-token generation reach for `model.generate(...)`, for a whole task pipeline `model.pipe(...)`, for shapes without real compute `model.scan(...)`, and for an intervention that outlives one run `model.edit(...)`.
 
 ## Canonical pattern
 
@@ -28,13 +22,16 @@ from nnsight.modeling.transformers import TransformersModel
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 with model.trace("The Eiffel Tower is in the city of"):
-    hidden = model.transformer.h[-1].output.save()
-    model.transformer.h[0].output[:] = 0        # zero the first block's output
+    model.transformer.h[0].output[:] = 0             # zero the first block
+    hidden = model.transformer.h[-1].output.save()   # then read a later one
     logits = model.output.logits.save()
 
-print(hidden.shape, logits.shape)
-# torch.Size([1, 10, 768]) torch.Size([1, 10, 50257])
+assert tuple(hidden.shape) == (1, 10, 768)
+assert tuple(logits.shape) == (1, 10, 50257)
 ```
+
+The write comes before the read because block 0 runs before block 11. Every access in one
+invoke has to follow the model's own order; see [Gotchas](#gotchas).
 
 ## Two equivalent forms
 
@@ -56,6 +53,17 @@ with model.trace() as tracer:
 ```
 ValueError: trace() needs an input, or at least one `with tracer.invoke(...)` block
 ```
+
+If that body reads an envoy, you get a different message instead:
+
+```
+ValueError: Cannot access `model.transformer.h.0.output` outside of interleaving
+```
+
+which reads like an accusation of being outside a trace when you are plainly inside one. The
+body of an input-less `trace()` is run once, immediately, to collect the `tracer.invoke(...)`
+blocks in it — and that collection pass really does happen before any forward starts. Either
+message means the same thing: give `trace()` an input, or open an invoke.
 
 ## Multiple invokes (batched)
 
@@ -103,6 +111,18 @@ with model.trace("Hello", remote=True, blocking=False) as tracer:
 | `tracer.stop()` | Early-exit the current forward pass |
 | `tracer.result` | The value the traced call returned |
 
+`tracer.result` is served after the forward returns, so it is the last thing a block can ask
+for. Read `model.output` first if you want both — reversed, the `model.output` request comes
+after the model has already produced it:
+
+```python
+with model.trace("Hello") as tracer:
+    out = model.output.save()
+    result = tracer.result.save()
+
+assert result is out
+```
+
 ## Lifecycle
 
 1. `__enter__` parses the with-block source via AST and compiles the body (memoized per site).
@@ -113,12 +133,12 @@ with model.trace("Hello", remote=True, blocking=False) as tracer:
 
 ## Gotchas
 
-- Inside one invoke, modules **must** be accessed in forward-pass order — the worker greenlet blocks on a hook event for each request. Out-of-order access raises `OutOfOrderError`. See `docs/gotchas/order-and-deadlocks.md`.
+- Inside one invoke, modules **must** be accessed in forward-pass order — the worker parks on each request until the model reaches it. Out-of-order access raises `OutOfOrderError`. See `docs/gotchas/order-and-deadlocks.md`.
 - Values you want after the block **must** be marked with `.save()` / `nnsight.save(...)`. See `docs/usage/save.md`.
 - `with model.trace():` with no input and no invoke is a `ValueError`.
 - Standard Python `if` / `for` works inside the body — the greenlet worker sees real tensors. See `docs/usage/conditionals-and-loops.md`.
 - The traced body must start on its own line (not on the `with` line); combining context managers on one line — `with torch.no_grad(), model.trace(...):` — is fine.
-- Tracebacks from inside the trace are cleaned to point at your source lines.
+- Tracebacks are cleaned of nnsight's own frames, so an `OutOfOrderError` or a missed barrier comes back as three frames ending on the line that waited. An ordinary error raised inside the body still carries the torch and transformers frames under it — your line is there, at the bottom of the pile.
 
 ## Related
 
