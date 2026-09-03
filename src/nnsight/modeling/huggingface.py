@@ -280,10 +280,11 @@ class HuggingFaceModel(Remotable):
 
         Memoized because several of the questions a server asks before placing a
         model are all answered from this one object — its size, how many ways it
-        shards, what to show in a status — and each used to fetch it again. A
-        config is immutable for a pinned revision, and for an unpinned one the
-        answer is "whatever the branch said when this process first asked", which
-        is already true of every other read on this path.
+        shards, what to show in a status — so answering them one at a time costs
+        one Hub round-trip each. A config is immutable for a pinned revision, and
+        for an unpinned one the answer is "whatever the branch said when this
+        process first asked", which is already true of every other read on this
+        path.
 
         Returns ``None`` when the repo has no readable config.
 
