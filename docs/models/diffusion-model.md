@@ -3,7 +3,7 @@ title: DiffusionModel
 one_liner: Wraps any diffusers DiffusionPipeline (UNet- or transformer-based) with NNsight tracing.
 tags: [models, diffusion, diffusers]
 related: [docs/models/index.md, docs/models/nnsight-base.md, docs/models/transformers-model.md]
-sources: [src/nnsight/modeling/diffusion.py:38, src/nnsight/modeling/huggingface.py:15, tests/test_diffusion.py]
+sources: [src/nnsight/modeling/diffusion.py, src/nnsight/modeling/huggingface.py, tests/test_diffusion.py]
 ---
 
 # DiffusionModel
@@ -13,7 +13,7 @@ sources: [src/nnsight/modeling/diffusion.py:38, src/nnsight/modeling/huggingface
 
 `nnsight.DiffusionModel` wraps any `diffusers.DiffusionPipeline` so you can trace and intervene on its sub-modules — UNet (Stable Diffusion), transformer (Flux, DiT, SD3), VAE, text encoder — with the same NNsight API as other models. It supports:
 
-- Running the whole pipeline via `.trace()` (defaults to a fast one-step pass) or `.generate()` (the pipeline's default step count)
+- Running the whole pipeline via `.trace()` or `.generate()` — a traced run defaults to a fast one-step pass
 - Iterating across denoising steps with `tracer.iter[:]`
 - Multi-prompt / batched generation via `tracer.invoke(...)`, with denoiser interventions narrowed per-invoke
 - Reproducible runs with `seed=` (or diffusers' native `generator=`)
@@ -54,20 +54,28 @@ DiffusionModel(
 | Parameter | Description |
 |-----------|-------------|
 | `repo_id` | HuggingFace repo id (e.g. `"stabilityai/stable-diffusion-2-1"`, `"black-forest-labs/FLUX.1-schnell"`). |
-| `dispatch` | `True` loads real weights via `DiffusionPipeline.from_pretrained` during `__init__`. `False` (default) builds a meta pipeline: each `nn.Module` component from its config on the `meta` device, light components (schedulers, tokenizers) loaded normally (`diffusers.py:60`). |
+| `dispatch` | `True` loads real weights via `DiffusionPipeline.from_pretrained` during `__init__`. `False` (default) builds a meta pipeline: each `nn.Module` component from its config on the `meta` device, light components (schedulers, tokenizers) loaded normally (`_build_component`). |
 | `rename` | Module-path aliases, e.g. `{"unet": "denoiser"}`. |
 | `torch_dtype`, `safety_checker=None`, `variant`, ... | Forwarded to `from_pretrained` for real loading. |
 
-The concrete pipeline class is resolved automatically from the repo's `model_index.json` (`_class_name`) — there is **no** `automodel=` parameter (that was in old nnsight).
+The concrete pipeline class is resolved automatically from the repo's `model_index.json` (`_class_name`); there is no `automodel=` parameter.
+
+Precision goes by **`torch_dtype=`**, diffusers' spelling, since the keyword is forwarded to `DiffusionPipeline.from_pretrained` untouched. `dtype=`, which is what `TransformersModel` takes, is accepted and ignored:
+
+```python
+DiffusionModel(REPO, torch_dtype=torch.float16, dispatch=True).unet.dtype   # torch.float16
+DiffusionModel(REPO, dtype=torch.float16, dispatch=True).unet.dtype         # torch.float32
+```
 
 ## Canonical pattern
 
-`.trace()` and `.generate()` both run the **whole pipeline**, and `model.output` (like `tracer.result`) is the pipeline's return object (with `.images`). They differ only in the default step count:
+`.trace()` and `.generate()` both run the **whole pipeline**, and `model.output` (like `tracer.result`) is the pipeline's return object (with `.images`).
 
-- **`.trace()`** defaults to `num_inference_steps=1` — a fast one-step pass for inspecting or editing activations.
-- **`.generate()`** uses the pipeline's own default step count.
+!!! warning "A traced run denoises once by default"
 
-Either way, pass `num_inference_steps=N` to override.
+    `.trace()` defaults to `num_inference_steps=1` — a fast one-step pass for inspecting or editing activations — and `with model.generate(...):` is a traced run, so it takes that default too. Only a bare `model.generate(...)` call, outside a trace, uses the pipeline's own default. On SD 1.4 the same call is 51 denoiser forwards outside a `with` and 1 inside it, and a single step gives a noise blob rather than an image, with nothing printed to say so.
+
+    **Pass `num_inference_steps=N` whenever the image itself matters.**
 
 ```python
 from nnsight import DiffusionModel
@@ -141,15 +149,26 @@ Note: reading the *pipeline result object* per-invoke inside a batched trace is 
 
 ### Iterating across denoising steps
 
+The denoiser runs once per iteration of the pipeline's loop, and `tracer.iter[:N]` repeats the block's body for the first `N` of them. Bound the loop by the number of **denoiser calls**, which the scheduler decides — it is not always `num_inference_steps`:
+
 ```python
 import nnsight
 
-with sd.generate("a cat", num_inference_steps=2, output_type="np") as tracer:
+STEPS = 2
+sd.pipeline.scheduler.set_timesteps(STEPS)
+CALLS = len(sd.pipeline.scheduler.timesteps)      # PNDM: 3 for 2 steps
+
+with sd.generate("a cat", num_inference_steps=STEPS, output_type="np") as tracer:
     outs = nnsight.save([])
-    for _ in tracer.iter[:]:
+    for step in tracer.iter[:CALLS]:
         outs.append(sd.unet.output[0])
-# outs has at least one entry per inference step
+    images = tracer.result.save()
+# len(outs) == CALLS; step is a plain int, so `if step > 3:` really branches
 ```
+
+SD 1.x defaults to `PNDMScheduler`, which calls the denoiser `num_inference_steps + 1` times (50 steps, 51 forwards); `DDIMScheduler` on the same pipeline calls it exactly `num_inference_steps` times. `len(scheduler.timesteps)` after `set_timesteps` is the count in both cases.
+
+Bounding the loop past the calls the run makes raises `OutOfOrderError`, naming the iteration asked for and the count reached. An open `tracer.iter[:]` warns instead, and the statements after the loop never run — `tracer.result.save()` among them, leaving the name unbound after the block. If the loop body touches no module at all, an open `tracer.iter[:]` never returns.
 
 ### Intervening / skipping
 
@@ -159,9 +178,13 @@ with sd.generate("a cat", num_inference_steps=2, output_type="np"):
     sd.unet.output[0][:] = 0
     zeroed = sd.output.save()
 
-# bypass a component with a replacement value
-with sd.generate("a cat", num_inference_steps=2, output_type="np"):
-    sd.unet.conv_in.skip(torch.zeros_like(conv_in_shape))
+# bypass a component with a replacement value: skip() takes what that component
+# would have returned, so build it from the config
+cfg = sd.unet.config
+shape = (2, cfg.block_out_channels[0], cfg.sample_size, cfg.sample_size)  # 2 rows = guidance
+with sd.generate("a cat", num_inference_steps=2, output_type="np", seed=0) as tracer:
+    sd.unet.conv_in.skip(torch.zeros(shape))
+    skipped = tracer.result.save()
 ```
 
 ### Caching component activations
@@ -207,18 +230,22 @@ with model.generate("a cat", num_inference_steps=2, output_type="np"):
 
 | Attribute | Description | Source |
 |-----------|-------------|--------|
-| `model.pipeline` | The raw `diffusers.DiffusionPipeline`. Use it for non-traced operations (scheduler swaps, `save_pretrained`, ...). | `diffusers.py:52` |
+| `model.pipeline` | The raw `diffusers.DiffusionPipeline`. Use it for non-traced operations (scheduler swaps, `save_pretrained`, ...). | `DiffusionModel._load` |
 | `model.unet` / `model.transformer` | The denoiser envoy (attribute name depends on the pipeline). | `_PipelineModule.__init__` |
 | `model.vae`, `model.text_encoder` (and `_2` for SDXL/Flux) | Other `nn.Module` components, as envoys. | same |
 | `model.output` | The pipeline's return object (e.g. `.images`) inside a trace. | — |
-| `model._module` | The `_PipelineModule` wrapper; `model._module.pipeline` is the same object as `model.pipeline`. | `diffusers.py:17` |
+| `model._module` | The `_PipelineModule` wrapper; `model._module.pipeline` is the same object as `model.pipeline`. | `_PipelineModule` |
 | `model.dispatched` | Whether real weights are loaded. | `MetaMixin` |
 
 Only `torch.nn.Module` components are wrapped as envoys — the **scheduler is not**. To change scheduler behavior, mutate `model.pipeline` directly before the trace.
 
 ## Limitations
 
-- **`.trace()` defaults to `num_inference_steps=1`; `.generate()` uses the pipeline's default** (which may be large). Pass `num_inference_steps=N` to either to override.
+- **Any traced run defaults to one denoising step.** `.trace()` and `with model.generate(...):` both denoise once; only a bare `model.generate(...)` call uses the pipeline's default. Pass `num_inference_steps=N` when you want an image rather than a probe.
+- **The denoiser call count is the scheduler's, not `num_inference_steps`.** SD 1.x's default `PNDMScheduler` makes one call more than it takes steps, so a `tracer.iter[:num_inference_steps]` loop leaves the last call untouched. Bound by `len(scheduler.timesteps)`.
+- **An open `tracer.iter[:]` drops the statements after the loop**, and hangs if the loop body makes no module access. Bound the loop.
+- **Precision goes by `torch_dtype=`.** `dtype=` is accepted and ignored, leaving the pipeline in float32.
+- **Writes inside the denoising loop are ordered.** Reading a later component and then writing an earlier one raises `OutOfOrderError` rather than parking the write until the next step, whether or not the access sits inside a `tracer.iter` loop.
 - **Per-invoke pipeline result objects aren't supported in a batched trace.** Read component tensors (e.g. `sd.unet.output[0]`) inside `tracer.invoke(...)` blocks, not `sd.output`.
 - **Scheduler / non-module components are not Envoy-wrapped.** Do scheduler swaps on `model.pipeline` pre-trace.
 - **Op-level `.source` raises `SourceNotAvailable`** only when a forward has no Python source to instrument (a builtin or C function); decorated and closure forwards are instrumented — see [source.md](../usage/source.md).
