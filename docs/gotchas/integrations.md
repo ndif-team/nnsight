@@ -121,7 +121,7 @@ Under `tracer.iter`, each pass sees the next decoded step's `logits`/`samples`.
 
 ### Mitigation
 - Sampling kwargs (`temperature`, `top_p`, `top_k`, `max_tokens`, ...) go to `trace`/`invoke`; invalid ones raise when vLLM builds its sampling params.
-- For engine/parallelism setup (tensor parallelism, sync vs async), see [docs/models/vllm.md](../models/vllm.md).
+- For tensor parallelism, see [docs/models/vllm-parallelism.md](../models/vllm-parallelism.md); for sync vs async, [docs/models/vllm-serving.md](../models/vllm-serving.md).
 
 ---
 
