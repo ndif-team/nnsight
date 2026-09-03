@@ -290,9 +290,10 @@ first element of the attention tuple).
   residual tensor, and `block.output[0]` indexes the batch. (`transformers < 5.0`
   wraps it in a tuple, which is where the `[0]` in older code comes from.) See
   `docs/usage/access-and-modify.md`.
-- Calling `model.lm_head(...)` inside a trace runs `forward()` (no hooks), which is
-  what you want. Reading `model.lm_head.output` instead would intercept the *real*
-  `lm_head` call the model itself makes — a different operation.
+- Calling `model.lm_head(...)` inside a trace runs `forward()` with the trace stood
+  down, which is what you want. Reading `model.lm_head.output` instead would
+  intercept the *real* `lm_head` call the model itself makes — a different
+  operation.
 
 ## Related
 

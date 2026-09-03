@@ -158,7 +158,7 @@ module's location and returns what you read. Put it on an `Envoy` subclass, then
 wire that subclass to a module with the `envoys=` argument, which maps a module
 **type** (or a dotted **path suffix**) to a custom `Envoy` class.
 
-Hook the **projection's input**, for the reason Pattern A's warning gives: that is
+Serve the **projection's input**, for the reason Pattern A's warning gives: that is
 the last point at which the hidden dimension still decomposes per head.
 
 ```python
@@ -313,4 +313,4 @@ gradient and sum over `head_dim` for a `[layer, head]` map. See
 - [attribution-patching](attribution-patching.md) — per-head attribution maps.
 - `docs/usage/source.md` — how `.source` exposes intermediate ops.
 - `docs/concepts/envoy.md` — the extension surface (`eproperty`, subclassing `Envoy`).
-- `docs/usage/extending.md` — custom hookable values and the `envoys=` wiring.
+- `docs/usage/extending.md` — custom served values and the `envoys=` wiring.
