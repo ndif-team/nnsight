@@ -25,7 +25,7 @@ A worker parked inside a loop that named an end — `iter[:8]`, `iter[2]`,
 `iter[[0, 2, 7]]` — which the run did not reach:
 
 ```
-nnsight.intervention.interleaver.OutOfOrderError: 'model.transformer.h.11.output.i3' was never reached: the loop asked for iteration 3 of 'model.transformer.h.11.output' and the run reached it 3 times, so the loop was cut short and nothing after it ran. Bound the loop to the iterations the run makes (`min_new_tokens=` holds a generation to a step count), or loop with `tracer.all()` and put what follows the loop after the `with` block.
+nnsight.intervention.interleaver.OutOfOrderError: 'model.transformer.h.11.output.i3' was never reached: the loop asked for iteration 3 of 'model.transformer.h.11.output' and the run reached it 3 times, so the loop was cut short and nothing after it ran. Bound the loop to the iterations the run makes — a generation is held to a step count by `min_new_tokens=` on transformers and by `min_tokens=` or `ignore_eos=True` on vLLM, though neither holds a run that a stop string ends — or loop with `tracer.all()` and put what follows the loop in a separate `tracer.invoke()`.
 ```
 
 A worker parked inside an **open** loop — `tracer.iter[:]` or `tracer.all()` —
@@ -96,7 +96,11 @@ eval-mode short-circuits, and dispatch hide behind the module tree.
 
 ### Hold the run to the step count you loop over
 
-A bound only holds if the generation makes that many steps, so pin both ends:
+A bound only holds if the generation makes that many steps, so pin both ends. On
+transformers that is `min_new_tokens=`; on vLLM it is `min_tokens=` or
+`ignore_eos=True`. Neither holds a run that a **stop string** ends — a
+`stop_strings=["Paris"]` generation still stops where it stops, and the loop still
+raises — so a run with stop conditions wants `tracer.all()` instead of a bound.
 
 ```python
 # WRONG — iter[:8] over a run that stops after 3 steps
@@ -117,8 +121,7 @@ with model.generate("Hi", max_new_tokens=3, min_new_tokens=3) as tracer:
 ```
 
 If you do not know the step count in advance, loop with `tracer.all()` and move
-whatever follows the loop out past the `with` block — the loop's own saved values
-survive:
+whatever follows the loop out of that block — the loop's own saved values survive:
 
 ```python
 with model.generate("Hi", max_new_tokens=8) as tracer:
@@ -126,6 +129,22 @@ with model.generate("Hi", max_new_tokens=8) as tracer:
     for step in tracer.all():
         hs.append(model.transformer.h[-1].output[0, -1])
 print(len(hs))      # however many steps the run made
+```
+
+Anything that has to read a location, `tracer.result` included, goes in a separate
+invoke rather than after the `with` — outside the block there is no run to read
+from, so `tracer.result` there raises
+``ValueError: Cannot access `result` outside of interleaving``. Give the input to
+an invoke rather than to `generate` so there is room for a second one:
+
+```python
+with model.generate(max_new_tokens=8) as tracer:
+    with tracer.invoke("Hi"):
+        hs = nnsight.save([])
+        for step in tracer.all():
+            hs.append(model.transformer.h[-1].output[0, -1])
+    with tracer.invoke():
+        ids = tracer.result.save()
 ```
 
 ### Don't read children of a skipped module

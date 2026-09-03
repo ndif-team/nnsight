@@ -22,7 +22,7 @@ worth reading: those failures raise nothing, so nothing routes you to a page.
 | A name after the block is undefined (`UnboundLocalError`, `NameError`) | Not saved, or the block unwound before reaching it | [docs/usage/save.md](../usage/save.md), [value-was-not-provided.md](value-was-not-provided.md) |
 | A saved list is empty, but only when running remotely | The elements were saved, not the container | [docs/usage/save.md](../usage/save.md) |
 | `.grad` is `None` | Read outside a `with metric.backward():` block | [.grad outside a backward block](#grad-outside-a-backward-block) |
-| Per-step writes land one step late in an open loop | An open `tracer.iter[a:]` whose body reads a later location first | [value-was-not-provided.md](value-was-not-provided.md) |
+| Per-step writes in a loop land one step late | A `tracer.iter` body that reads a later location before an earlier one — silent unless a shifted request runs off the end of the run | [out-of-order-error.md](out-of-order-error.md) |
 | Shapes are plausible but the numbers are for one batch row | `.output[0]` on a module whose output is a plain tensor | [docs/gotchas/types-and-values.md](../gotchas/types-and-values.md) |
 | A name you never saved comes back bound anyway | `save` marks by object identity | [save-outside-trace.md](save-outside-trace.md) |
 

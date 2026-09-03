@@ -42,7 +42,7 @@ The `eproperty` descriptor is back, with a new API. Decorate a stub with `@eprop
 
 Target occurrences across a repeated run with `tracer.iter[...]` (loop form: `for step in tracer.iter[:3]:`) or `tracer.all()`. The `with tracer.iter[...]:` block still works but is deprecated. `tracer.next()` is gone; `model.iter` and `model.all()` are deprecated aliases of the tracer's.
 
-A loop that names an end the run does not reach — `iter[:8]` over three generated steps — raises `OutOfOrderError` naming the iteration asked for and the count the run made. An open `iter[:]` / `all()` ends by outrunning the model by construction, so that one warns; either way the statements after the loop are discarded. Old nnsight bounded `tracer.all()` internally, so code written against it needs a bound (`min_new_tokens=` holds a generation to a step count) or its trailing statements moved past the `with`.
+A loop that names an end the run does not reach — `iter[:8]` over three generated steps — raises `OutOfOrderError` naming the iteration asked for and the count the run made. An open `iter[:]` / `all()` ends by outrunning the model by construction, so that one warns; either way the statements after the loop are discarded. Old nnsight bounded `tracer.all()` internally, so code written against it needs a bound (`min_new_tokens=` on transformers, `min_tokens=` or `ignore_eos=True` on vLLM — none of which holds a run a stop string ends) or its trailing statements moved into a separate `tracer.invoke()`.
 
 ### Config
 

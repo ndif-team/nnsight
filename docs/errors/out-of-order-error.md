@@ -108,12 +108,41 @@ with model.trace() as tracer:
 
 ## Inside a `tracer.iter` loop
 
-The loop body is subject to the same rule, once per step. Out-of-order code in a
-loop body pushes every later request one occurrence past where it belongs, so the
-mistake surfaces at the *end* of the run rather than at the line that made it:
+The loop body is subject to the same rule, once per step — but the loop changes
+what happens when you break it, and one shape of the mistake is silent.
+
+An out-of-order body does not lose a value; it shifts every request one occurrence
+later. Reading `h[8]` before writing `h[2]` means the write for step *k* is asked
+for after step *k*'s `h[2]` has gone, so it binds to step *k+1* instead. Each pass
+pushes the next one along. Whether that raises depends on one thing: **whether the
+last shifted request still has a step to land on.**
 
 ```python
-# the write is meant for every step, but it is asked for after h[8] each time
+# the write is meant for steps 1 and 2, but it is asked for after h[8] each time
+with model.generate("Hi there", max_new_tokens=4, min_new_tokens=4) as tracer:
+    for step in tracer.iter[1:3]:
+        late = model.transformer.h[8].output
+        model.transformer.h[2].output[:] = 0
+    tail = nnsight.save("this line runs")
+```
+
+That completes. No exception, no warning, and the statement after the loop runs.
+The writes land on steps 2 and 3. Measured per-step norms of `h[2].output` over
+the four generated steps:
+
+| variant | step 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| no write | 2570.9 | 54.7 | 58.7 | 66.1 |
+| in-order write at `iter[1:3]` | 2570.9 | **0.0** | **0.0** | 55.9 |
+| late-read write at `iter[1:3]` | 2570.9 | 54.7 | **0.0** | **0.0** |
+
+Step 1 — the first step the loop selected — is untouched, and step 3, which the
+loop never selected, is zeroed. Nothing says so.
+
+The same body raises as soon as a shifted request runs off the end of the run:
+
+```python
+# now the loop reaches the run's last step, so the shifted write asks for i4
 with model.generate("Hi there", max_new_tokens=4, min_new_tokens=4) as tracer:
     for step in tracer.iter[1:4]:
         late = model.transformer.h[8].output
@@ -126,21 +155,27 @@ asked for iteration 4 of 'model.transformer.h.2.output' and the run reached it 4
 times, so the loop was cut short and nothing after it ran. …
 ```
 
-The message describes the loop's bound because that is where the worker was
-standing when the run ended, but the tell is the occurrence number: the loop only
-ever selected steps 1–3, and the request that stranded it is `.i4`. An occurrence
-past anything the loop asked for means the body reads a later location before an
-earlier one. Reorder the body — read `h[2]` before `h[8]` — and the same loop
-runs clean.
+And a loop that includes step 0 raises there, with the plain out-of-order message,
+because the pin at iteration 0 is not treated as a loop at all.
+
+So, for an out-of-order loop body:
+
+| Loop | Result |
+|---|---|
+| includes step 0 (`iter[:N]`, `iter[0:N]`) | raises `'…i0' was requested but the model already ran past it` |
+| bounded, last selected step **is** the run's last (`iter[1:4]` over 4 steps) | raises the loop message, naming an occurrence past the loop's own selection |
+| bounded, stops **short** of the run's last step (`iter[1:3]` over 4 steps) | **silent** — writes land one step late, trailing code runs |
+| open (`iter[1:]`, `tracer.all()`) | warns; writes land one step late and the last is dropped |
+
+The two silent rows are why an intervention inside a loop deserves a check rather
+than a clean exit. Read a location you edited back in a second invoke and compare
+it against a no-write baseline, per step. If the loop *does* raise, the tell is the
+occurrence number: an `.iN` past anything the loop selected means the body reads a
+later location before an earlier one. Reorder the body — read `h[2]` before `h[8]`
+— and every one of these shapes runs clean.
 
 A loop whose body is in order but whose *bound* exceeds the run raises the same
 message honestly; that case is [value-was-not-provided.md](value-was-not-provided.md).
-
-An **open** loop (`tracer.iter[a:]`, `tracer.all()`) is the one shape where this
-does not raise past its first step. Its final over-run request is expected, so
-the interleaver warns instead — and an out-of-order body inside one is warned
-about the same way, with the writes landing one step later than the loop selected
-and the last of them dropped. Bound the loop, or read in order.
 
 ## Another cause: something replaced the module's forward
 
