@@ -47,6 +47,32 @@ class TestChat:
         assert logits.shape[1] != bare.shape[1]
 
     @torch.no_grad()
+    def test_trace_list_of_conversations(self, chat_model):
+        # A list of conversations is a batch of chats — one templated row per
+        # conversation. Each conversation is a list of message dicts, i.e. a
+        # list of lists, which `_is_pretokenized` would claim as pre-tokenized
+        # sub-sequences if chat detection didn't run first (as in `_num_rows`).
+        other = [
+            {"role": "user", "content": "What is the capital of France?"},
+            {"role": "assistant", "content": "Paris."},
+            {"role": "user", "content": "And of Germany?"},
+        ]
+        expected = [
+            len(
+                chat_model.tokenizer.apply_chat_template(
+                    conv, add_generation_prompt=True, return_dict=False
+                )
+            )
+            for conv in (CHAT, other)
+        ]
+        with chat_model.trace([CHAT, other]):
+            inputs = chat_model.inputs.save()
+            logits = chat_model.output.logits.save()
+        assert logits.shape[0] == 2
+        row_lengths = inputs[1]["attention_mask"].sum(dim=1).tolist()
+        assert row_lengths == expected
+
+    @torch.no_grad()
     def test_intervention_changes_chat_logits(self, chat_model):
         with chat_model.trace(CHAT):
             base = chat_model.output.logits[0, -1].save()

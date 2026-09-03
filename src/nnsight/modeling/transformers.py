@@ -988,7 +988,11 @@ class TransformersModel(HuggingFaceModel):
                 "yourself: model.image_processor(images=[image_a, image_b], "
                 "return_tensors='pt')."
             )
-        if self._is_pretokenized(data, kwargs):
+        # Chat detection comes first, as it does in `_num_rows` and in
+        # `Pipeline.__call__`: a list of conversations is a list of lists (of
+        # message dicts), which `_is_pretokenized` would otherwise read as
+        # pre-tokenized sub-sequences and hand to `torch.tensor`.
+        if self._as_chats(data) is None and self._is_pretokenized(data, kwargs):
             return self._encode_pretokenized(data, kwargs)
         if self.task == "mask-generation":
             # This task's preprocess *runs the model*: it embeds the image, then
