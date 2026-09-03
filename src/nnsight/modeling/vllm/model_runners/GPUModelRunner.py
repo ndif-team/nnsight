@@ -450,11 +450,14 @@ class Requests:
 
         A worker still [`alive`][nnsight.intervention.interleaver.Mediator.alive] at the end was waiting on a location the model
         never reached — the interleaver's [`check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators], but for a
-        single request as it retires here rather than after a whole local run. Two
-        cases, both unwound by throwing into the worker (so its ``finally`` blocks run):
-        a plain read past the model's point is a real [`OutOfOrderError`][nnsight.intervention.interleaver.OutOfOrderError] kept as
-        the request's deferred error so it reaches the client; a ``tracer.iter`` loop
-        that outran generation is expected, so it only warns.
+        single request as it retires here rather than after a whole local run. Which
+        of those a parked worker is, and what it should be told, is
+        [`dangling_unwind`][nnsight.intervention.interleaver.dangling_unwind]'s to
+        decide, so a trace behaves the same on this engine as it does locally: a read
+        past the model's point and a bounded ``tracer.iter`` loop the request could
+        not supply are errors, and only an open loop — which ends by outrunning
+        generation — warns. Surfacing differs, since the client is in another
+        process: the error becomes the request's deferred error and is raised there.
 
         Runs on the workers' own thread, where the greenlet can be resumed — the throw
         is skipped where that thread differs (e.g. Ray's collect), leaving the worker
@@ -468,43 +471,37 @@ class Requests:
         from greenlet import error as greenlet_error
 
         from ....intervention.errors import capture_exception
-        from ....intervention.interleaver import Event, OutOfOrderError
+        from ....intervention.interleaver import OutOfOrderError, dangling_unwind
 
         if mediator is None or not mediator.alive:
             return
 
-        # `requester` is printed into the error, where Pending renders as
-        # "{location}.i{n}" — the occurrence is what explains an iter loop that
-        # asked for more steps than the request generated. A worker whose
-        # request is over but which is parked nowhere already erred: the
-        # interleaver deferred its exception and cleared its pending, and that
+        # A worker whose request is over but which is parked nowhere already erred:
+        # the interleaver deferred its exception and cleared its pending, and that
         # error — not a dangling read — is what its request goes home with.
         requester = mediator.pending
         if requester is None:
             return
-        if requester.event is Event.BARRIER:
-            error: BaseException = ValueError(
-                "A barrier was never reached by every block it waits for; "
-                "check the count it was created with"
-            )
-            over_iterated = False
-        elif (
+
+        error, expected = dangling_unwind(mediator)
+        if (
             taps
+            # A barrier unwinds with a ValueError and names no module location.
+            and isinstance(error, OutOfOrderError)
             and requester.provider not in taps
             and requester.provider.rsplit(".", 1)[-1] in ("input", "output", "skip")
         ):
-            error = OutOfOrderError(
-                f"'{requester.provider}' is not a tap on this engine, so a replayed "
-                "CUDA graph never reaches it. Declare it at construction — "
-                "VLLM(..., taps=[...]) — or trace an engine built with "
-                "enforce_eager=True, which serves every location."
+            # Outside the taps nothing is reached however many steps ran, so the
+            # loop's shape is beside the point: this is the whole reason.
+            error, expected = (
+                OutOfOrderError(
+                    f"'{requester.provider}' is not a tap on this engine, so a replayed "
+                    "CUDA graph never reaches it. Declare it at construction — "
+                    "VLLM(..., taps=[...]) — or trace an engine built with "
+                    "enforce_eager=True, which serves every location."
+                ),
+                None,
             )
-            over_iterated = False
-        else:
-            error = OutOfOrderError(
-                f"'{requester}' was requested but the model already ran past it"
-            )
-            over_iterated = mediator.iteration != 0
 
         try:
             mediator.worker.throw(error)
@@ -513,11 +510,10 @@ class Requests:
         except BaseException as thrown:
             if quiet:
                 return
-            if over_iterated:
-                warnings.warn(
-                    f"'{requester}' was never reached: the model ran fewer iterations "
-                    "than the loop requested. Values from reached iterations are kept."
-                )
+            # `thrown is error` only when the block let the unwind through; anything
+            # a `finally` raised on the way out is the request's error instead.
+            if expected is not None and thrown is error:
+                warnings.warn(expected)
             else:
                 mediator.nnsight_error = capture_exception(thrown)
 
