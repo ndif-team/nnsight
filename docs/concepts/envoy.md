@@ -130,7 +130,7 @@ with model.trace("The Eiffel Tower is in"):
 ```
 
 - **`hook=False` (default) while interleaving:** runs the module the ordinary way, with this trace stood down for the duration. `hook=` names whether *nnsight* watches the call — the module's own PyTorch hooks fire either way, so a runtime that keeps collectives in them (transformers tensor parallelism) still works, and a `forward_hook` you registered yourself fires once for the real forward and once for this call. What `hook=False` buys is that nnsight serves no value and spends no occurrence, for this module *or anything under it*, so the call leaves its real place in the forward untouched.
-- **`hook=True`:** calls the full `module(...)` so its hooks fire and its submodules become addressable at `.submodule.output`. Use it for a module *attached* to the tree that isn't part of the real forward — an adapter, LoRA, or SAE applied in an edit.
+- **`hook=True`:** leaves the trace armed, so the call goes through the module's controller and its submodules become addressable at `.submodule.output`. Use it for a module *attached* to the tree that isn't part of the real forward — an adapter, LoRA, or SAE applied in an edit.
 - **Outside a trace:** always the full `module(...)`.
 
 ## Extension surface
