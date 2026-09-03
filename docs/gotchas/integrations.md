@@ -3,7 +3,7 @@ title: Integration Pitfalls
 one_liner: Wrapper-specific traps — deprecated model aliases, .source can't drill into submodule calls, auxiliary modules need hook=True, vLLM specifics.
 tags: [gotcha, transformers, source, vllm, sae, lora]
 related: [docs/models/transformers-model.md, docs/usage/source.md, docs/models/vllm.md]
-sources: [src/nnsight/modeling/language.py:19, src/nnsight/intervention/source.py:536, src/nnsight/intervention/envoy.py:726, src/nnsight/modeling/vllm/vllm.py]
+sources: [src/nnsight/modeling/language.py, src/nnsight/intervention/source.py, src/nnsight/intervention/envoy.py, src/nnsight/modeling/vllm/vllm.py]
 ---
 
 # Integration Pitfalls
@@ -20,11 +20,16 @@ sources: [src/nnsight/modeling/language.py:19, src/nnsight/intervention/source.p
 
 ### Symptom
 ```
-DeprecationWarning: LanguageModel is deprecated; use TransformersModel(repo_id, task='text-generation') instead.
+NNsightDeprecationWarning: LanguageModel is deprecated; use TransformersModel(repo_id, task='text-generation') instead.
 ```
 
+Every nnsight deprecation is raised under `nnsight.NNsightDeprecationWarning`, a
+`FutureWarning`, so it shows wherever the call is — a script, an imported module,
+a notebook. Silence nnsight's and nothing else with
+`warnings.filterwarnings("ignore", category=nnsight.NNsightDeprecationWarning)`.
+
 ### Cause
-`LanguageModel` (`src/nnsight/modeling/language.py:19`) and `VisionLanguageModel` are backwards-compatible names over `TransformersModel`. `TransformersModel` is backed by a `transformers.pipeline`, which loads the tokenizer/processor itself — so `model.tokenizer` is populated without you passing one.
+`LanguageModel` (`src/nnsight/modeling/language.py`) and `VisionLanguageModel` are backwards-compatible names over `TransformersModel`. `TransformersModel` is backed by a `transformers.pipeline`, which loads the tokenizer/processor itself — so `model.tokenizer` is populated without you passing one.
 
 ### Right code
 ```python
@@ -50,7 +55,7 @@ SourceNotAvailable: 'self_c_proj_0' calls a submodule; call `.source` on that su
 ```
 
 ### Cause
-`.source` decomposes a `forward` into its operations. You can drill into a plain *function* call with `op.source`, but if the call target is a `torch.nn.Module` (e.g. `self.c_proj(x)`), source refuses to descend — that module has its own envoy and hooks (`SourceEnvoy.source`, `src/nnsight/intervention/source.py:536`). Operation names include the full dotted path joined with `_` (`self.c_proj(x)` → `self_c_proj_0`).
+`.source` decomposes a `forward` into its operations. You can drill into a plain *function* call with `op.source`, but if the call target is a `torch.nn.Module` (e.g. `self.c_proj(x)`), source refuses to descend — that module has its own envoy and hooks (`SourceEnvoy.source`, `src/nnsight/intervention/source.py`). Operation names include the full dotted path joined with `_` (`self.c_proj(x)` → `self_c_proj_0`).
 
 ### Wrong / Right
 ```python
