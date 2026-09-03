@@ -65,9 +65,10 @@ The one that keeps trying to overload itself is **hook**, so it is settled here:
 nnsight registers no forward hooks — `grep register_forward_hook src/nnsight`
 returns nothing. It installs a controller into `module.__dict__["forward"]`.
 "Hook" is right for `tensor.register_hook` in `intervention/backward.py`,
-accelerate's `_hf_hook`, transformers' tensor-parallel hooks, and the public
-`Envoy.__call__(hook=...)` kwarg (which asks whether the *trace* watches a call);
-everywhere else it names something that isn't one.
+accelerate's `_hf_hook`, and the public `Envoy.__call__(hook=...)` kwarg (which
+asks whether the *trace* watches a call); everywhere else it names something
+that isn't one. (transformers tensor parallelism keeps none either — its
+collectives live in the wrapper `install_forward` puts over `module.forward`.)
 
 **Delete before you add.** The strongest version of a change is usually the one
 that removes a concept rather than introducing one. Prefer a plain method to a

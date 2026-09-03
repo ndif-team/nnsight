@@ -126,8 +126,9 @@ SIDES: Dict[str, Dict[str, str]] = {
 # Styles refused rather than guessed at, with the reason a user is shown: these
 # slice something other than the last dim — by expert, or into a fused kv
 # projection — so neither the gather nor the re-split above means anything for
-# them. Read the style's ``_prepare_input_fn``/``_prepare_output_fn`` before
-# adding one; the name alone misled on ``moe_tp_experts``.
+# them. Read the style's ``transform_inputs_pre_forward``/
+# ``transform_output_post_forward`` before adding one; the name alone misled on
+# ``moe_tp_experts``.
 UNSUPPORTED: Dict[str, str] = {
     "megamoe_router": "expert-parallel (MoE)",
     "megamoe_experts": "expert-parallel (MoE)",

@@ -71,9 +71,25 @@ assign the whole tuple:
     `attn.output[0]` is the output of `c_proj`. After that projection the hidden
     dimension no longer decomposes per head, so columns
     `[h*head_dim : (h+1)*head_dim]` are **not** head `h` — zeroing them removes
-    something, but not that head's contribution. Measured on GPT-2 layer 6 head 3,
-    the logit difference moves by `-0.008` here versus `-0.167` for a real
-    ablation: a 21x understatement, with no error and a plausible-looking number.
+    something, but not that head's contribution. Measure it: take the prompt
+    above, and score each run by how much the final-position logit of the
+    baseline's top token moves —
+
+    ```python
+    with model.trace(prompt):
+        base = model.lm_head.output[0, -1, :].save()
+    tok = base.argmax().item()          # ' floor' for "The cat sat on the"
+    delta = float(logits[0, tok] - base[tok])   # logits: the edited run's save
+    ```
+
+    — running the column-zeroing edit below and the real ablation of
+    [Pattern B](#pattern-b-per-head-straight-from-source) for the same head.
+    On GPT-2 layer 5 head 8, zeroing the columns moves the logit by `+0.016` —
+    a rounding error — while really ablating the head moves it by `-1.47`: a
+    ~90x understatement with the sign flipped. Layer 11 head 7 fails the other
+    way: `+8.25` for the columns, `-0.06` for the head. Across all 144 heads
+    the two deltas disagree in sign for 71 — no error, and a plausible-looking
+    number unrelated to the head.
 
     To actually ablate a head, cut it *before* the projection — see
     [Pattern B](#pattern-b-per-head-straight-from-source) below, or slice
@@ -144,8 +160,11 @@ with model.trace(prompt):
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
-Both routes agree exactly (GPT-2 L6H3: logit difference `+2.0064` → `+1.8399`), and
-both differ from the Pattern A reshape, which is not a head ablation. Prefer this
+Both routes agree exactly — the saved logits are bitwise equal. With the metric
+from Pattern A's warning (GPT-2, layer 5 head 4, "The cat sat on the"), the
+`' floor'` logit moves `-80.654` → `-80.347`, a delta of `+0.307`; the Pattern A
+reshape gives `-0.178` for the same head — a different magnitude and the wrong
+sign, because it is not a head ablation. Prefer this
 one when you just want the ablation; prefer the source-op form when you also want to
 read or edit the per-head tensor.
 
@@ -189,16 +208,17 @@ model = TransformersModel(
 with model.trace(prompt):
     per_head = model.transformer.h[LAYER].attn.c_proj.heads.save()
 
-assert per_head.shape == (1, 14, 12, 64)           # [B, S, n_heads, head_dim]
+assert per_head.shape == (1, 5, 12, 64)            # [B, S, n_heads, head_dim]
 
 with model.trace(prompt):
     model.transformer.h[LAYER].attn.c_proj.heads[:, :, HEAD, :] = 0
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
-On the GPT-2 L6H3 setup above this reproduces the true ablation exactly:
-`+2.0064` → `+1.8399`, the same `-0.1666` as slicing `c_proj.input` by hand and as
-the source-op route, against `-0.0077` for the post-projection reshape.
+On the layer 5 head 4 setup above this reproduces the true ablation exactly —
+the saved logits equal the source-op route's and the `c_proj.input` slice's
+bitwise: the same `+0.307` move of the `' floor'` logit, against `-0.178` for
+the post-projection reshape.
 
 Three things this example turns on, none of them guessable from the signature:
 

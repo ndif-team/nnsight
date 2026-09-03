@@ -17,7 +17,7 @@ machinery. When a trace body raises, `clean_traceback`
 (`src/nnsight/tracing/util.py`) drops the frames whose file lives inside the
 nnsight package and keeps everything else.
 
-For an error raised in the block itself that leaves four frames, ending on the
+For an error raised in the block itself that leaves three frames, ending on the
 line you wrote:
 
 ```
@@ -63,7 +63,7 @@ with model.trace(prompt):
 RuntimeError: Given normalized_shape=[768], expected input with shape [*, 768], but got input of size[3, 3]
 ```
 
-That traceback runs to twenty frames and ends in `torch.layer_norm`. The line that
+That traceback runs to nineteen frames and ends in `torch.layer_norm`. The line that
 wrote the bad value is not in it at all — the write succeeded; the *next* module
 is what failed. Read it from the top: the `with` line names the block, and the
 bottom names the module that could not use what the block put there. Then look at
@@ -82,7 +82,7 @@ with model.trace(prompt):
 1. **Keeps nnsight's frames.** `clean_traceback` returns the traceback untouched
    under `DEBUG`, so the interleaver, the controller, and the backend are all
    visible. Measured on GPT-2: an `IndexError` or an `OutOfOrderError` raised in a
-   block goes from 4 frames to 14, and the layer-norm failure above from 20 to 34.
+   block goes from 3 frames to 13, and the layer-norm failure above from 19 to 33.
    Turn it on when you suspect the bug is in nnsight's plumbing rather than in
    your intervention.
 2. **Verbose remote logging.** `RemoteBackend.__init__` sets

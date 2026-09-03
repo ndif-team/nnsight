@@ -753,9 +753,10 @@ class Envoy:
                 logits = model.lm_head(model.transformer.ln_f(hidden))
 
         While interleaving the module is called the ordinary way, with this
-        trace stood down for the duration. Its own hooks still fire — a runtime
-        that keeps collectives in them (transformers tensor parallelism) needs
-        them to — while nnsight serves nothing and spends no occurrence, for this
+        trace stood down for the duration. Its own hooks and wrappers still fire
+        — a runtime that keeps collectives around the forward (transformers
+        tensor parallelism wraps ``module.forward`` with them) needs them to —
+        while nnsight serves nothing and spends no occurrence, for this
         module *or anything under it*. That keeps the call from switching into
         the very worker greenlet making it, and leaves the module's real place in
         the forward pass untouched: calling a whole layer ad hoc does not consume

@@ -380,8 +380,9 @@ exposes the full argument pair, `.input` the first argument. There are no PyTorc
 forward hooks — that is deliberate: a module with no hooks is called on PyTorch's
 fast path, and the controller costs one frame and one check when no trace is
 running. Under transformers tensor parallelism the controller runs inside the
-model's own collective hooks, so it sees a partial sum or a shard there, which
-`TPFragments` makes whole only when a worker is waiting for it.
+wrapper transformers installs over `module.forward` to carry the style's
+collectives, so it sees a partial sum or a shard there, which `TPFragments`
+makes whole only when a worker is waiting for it.
 
 The single most important property of the controller is that it **passes through
 when idle**. Its first line asks the module's `_State` which interleaver is running
