@@ -533,6 +533,39 @@ class TestDeferredErrors:
             logits = vllm_gpt2.logits.save()
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
+    @torch.no_grad()
+    def test_a_wrong_row_count_write_spares_the_engine(self, vllm_gpt2, ET_prompt):
+        # A replacement narrower than the request's token span concatenates into a
+        # slab of the wrong height and reaches the next module, where the shape it
+        # no longer has trips a device-side assert — which poisons the CUDA context
+        # and takes the engine, not just this request. The batcher's widen refuses
+        # it first, inside the worker's handoff, where deferral applies.
+        with pytest.raises(RuntimeError, match="keep its rows"):
+            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=1):
+                out = vllm_gpt2.transformer.h[6].output
+                vllm_gpt2.transformer.h[6].output = out[:2]
+                vllm_gpt2.logits.save()
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_wrong_row_count_write_in_one_invoke_is_isolated(
+        self, vllm_gpt2, ET_prompt, MSG_prompt
+    ):
+        with pytest.raises(RuntimeError, match="keep its rows"):
+            with vllm_gpt2.trace(temperature=0.0, top_p=1, max_tokens=1) as tracer:
+                with tracer.invoke(ET_prompt):
+                    out = vllm_gpt2.transformer.h[6].output
+                    vllm_gpt2.transformer.h[6].output = out[:2]
+                with tracer.invoke(MSG_prompt):
+                    vllm_gpt2.logits.save()
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
 
 class TestCache:
     @torch.no_grad()

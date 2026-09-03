@@ -235,6 +235,59 @@ class TestMultiInvokeSkip:
         assert mapping["k"].shape == (5, 3)
 
 
+class TestWrongShapedWrite:
+    """An invoke's rows are spliced back into the combined batch, so a whole-tensor
+    write has to keep the row count it was served. A short or long one used to
+    concatenate cleanly into a batch of the wrong height and fail — or not — deep
+    inside a later module."""
+
+    @torch.no_grad()
+    def test_wrong_row_count_is_refused(self):
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_MLP())
+        with pytest.raises(ValueError, match="keep its rows"):
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(2, 8)):
+                    envoy.fc1.output = torch.ones(3, 8)  # invoke owns 2 rows
+                with tracer.invoke(torch.randn(3, 8)):
+                    pass
+
+    @torch.no_grad()
+    def test_the_error_names_both_shapes(self):
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_MLP())
+        with pytest.raises(ValueError, match=r"must be \(2, 8\), not \(3, 8\)"):
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(2, 8)):
+                    envoy.fc1.output = torch.ones(3, 8)
+                with tracer.invoke(torch.randn(3, 8)):
+                    pass
+
+    @torch.no_grad()
+    def test_the_right_row_count_still_lands(self):
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.trace() as tracer:
+            with tracer.invoke(torch.randn(2, 8)):
+                envoy.fc1.output = torch.ones(2, 8)
+                a = envoy.fc1.output.save()
+            with tracer.invoke(torch.randn(3, 8)):
+                b = envoy.fc1.output.save()
+        assert a.shape == (2, 8) and bool((a == 1).all())
+        assert b.shape == (3, 8) and bool((b != 1).any())
+
+    @torch.no_grad()
+    def test_a_lone_invoke_may_change_its_rows(self):
+        # Nothing to splice into: one invoke *is* the batch, so a write is the
+        # whole value and may reshape it, leading dim included.
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.trace(torch.randn(2, 8)):
+            envoy.fc1.output = torch.ones(5, 8)
+            out = envoy.output.save()
+        assert out.shape == (5, 8)
+
+
 class TestCacheAcrossInvokes:
     """A cache belongs to the invoke it was opened in, so it records that invoke's
     own rows of the batch — narrowed the same way the invoke's reads are, not the

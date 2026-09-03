@@ -308,6 +308,42 @@ class TestAsyncEngine:
 
         async_loop.run_until_complete(run())
 
+    def test_a_wrong_row_count_write_spares_the_co_tenant(
+        self, vllm_gpt2_async, async_loop, ET_prompt, MSG_prompt
+    ):
+        # The isolation claim at its strongest: a replacement that does not fit the
+        # request's token span used to build a slab of the wrong height, trip a
+        # device-side assert in the next module and poison the CUDA context — so
+        # the batch-mate's plain vLLM request never came back either, and neither
+        # did the engine. Refused in widen, it costs only the trace that wrote it.
+        async def run():
+            from vllm import SamplingParams
+
+            engine = vllm_gpt2_async.vllm_entrypoint
+            outputs = []
+
+            async def foreign():
+                async for output in engine.generate(
+                    MSG_prompt, SamplingParams(temperature=0.0, max_tokens=5), "wrong-rows-1"
+                ):
+                    outputs.append(output)
+
+            foreign_task = asyncio.ensure_future(foreign())
+            with vllm_gpt2_async.trace(
+                ET_prompt, temperature=0.0, max_tokens=1
+            ) as tracer:
+                out = vllm_gpt2_async.transformer.h[6].output
+                vllm_gpt2_async.transformer.h[6].output = out[:2]
+
+            with pytest.raises(RuntimeError, match="keep its rows"):
+                async for _ in tracer.backend:
+                    pass
+
+            await foreign_task
+            assert "New York City" in outputs[-1].outputs[0].text
+
+        async_loop.run_until_complete(run())
+
 
 class TestAsyncClearEdits:
     """Clearing installed edits on an engine whose workers can only be awaited."""

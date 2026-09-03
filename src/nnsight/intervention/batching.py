@@ -155,11 +155,24 @@ class Batcher:
         """Write ``edited`` into ``full``'s ``group`` rows (base dim-0-stack layout).
 
         A tensor is batched only when its leading dim is [`total`][nnsight.intervention.batching.Batcher.total]; otherwise it
-        passes through. Overridden for non-stacked layouts.
+        passes through. The replacement has to keep the group's row count —
+        every other dim is the cat's to check. Overridden for non-stacked layouts.
         """
         if full.shape[0] != self.total:
             return full
         start, size = group
+        # A cat of the wrong height succeeds: it just builds a batch that is no
+        # longer the model's, and the mismatch surfaces (if at all) inside some
+        # later module — on vLLM as a device-side assert, which poisons the CUDA
+        # context and takes the engine and every other request with it. Raised
+        # here, it is still inside the worker's handoff, where a deferring
+        # interleaver ends this request alone.
+        if isinstance(edited, torch.Tensor) and edited.shape[:1] != (size,):
+            raise ValueError(
+                "A batched write has to keep its rows: this block owns rows "
+                f"{start}:{start + size} of {self.total}, so the replacement must "
+                f"be {(size, *full.shape[1:])}, not {tuple(edited.shape)}."
+            )
         # cat (not in-place) keeps autograd correct for leaves/views and avoids
         # aliasing when `edited` is a narrowed view of `full`.
         pre = full.narrow(0, 0, start)
