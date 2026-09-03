@@ -75,7 +75,7 @@ The pipeline and its preprocessors are exposed as attributes. Which are populate
 | image-classification | — | — | yes | — |
 | image-text-to-text (VLM) | yes (from processor) | yes | — | — |
 
-Any of them may be `None`. `model.pipeline` is always the underlying `transformers.Pipeline`. `model.config` / `model.repo_id` / `model.revision` / `model.dispatched` are available too.
+A task that has no text side leaves `tokenizer` as `None` — `image-classification` and `image-feature-extraction` populate only `image_processor`. A VLM has both: its `processor` is the object that pairs image and text, and `tokenizer` is the text half of that processor rather than a separately loaded one. `model.pipeline` is always the underlying `transformers.Pipeline`, and `model.config` / `model.repo_id` / `model.revision` / `model.dispatched` are available too.
 
 ## The three ways to run it
 
@@ -210,7 +210,51 @@ Two consequences:
 - **A chunked invoke is the whole batch.** The row count belongs to the task and is only known after preprocessing, while the batcher counts one row per invoke before that — so a second invoke would name rows belonging to the first. It is refused with `NotImplementedError: task='zero-shot-classification' splits this invoke into 3 forward rows, and a batched trace gives an invoke the rows its input has ...`.
 - **`mask-generation` has no forward to trace.** Its preprocessing runs the model to embed the image and then yields one input per batch of candidate points, so the encoder would run outside the trace. It is refused with a message pointing at `model.pipe(image)` for the whole task, or at a forward on an encoding you build with `model.image_processor`.
 
-A task whose input is a dict — `{"image": ..., "question": ...}` for `document-question-answering`, `{"image": ..., "candidate_labels": [...]}` for `zero-shot-object-detection` — goes through the task's own preprocessing. A mapping carrying tensors is still read as a model encoding (`transformers.py`, `_is_task_input`). Verified in `tests/test_chunked_tasks.py`.
+A task whose input is a dict — `{"image": ..., "question": ..., "word_boxes": [...]}` for `document-question-answering`, `{"image": ..., "candidate_labels": [...]}` for `zero-shot-object-detection` — goes through the task's own preprocessing. A mapping carrying tensors is still read as a model encoding (`transformers.py`, `_is_task_input`).
+
+Row counts across the five, measured on the checkpoints `tests/test_chunked_tasks.py` uses plus `openai/whisper-tiny`:
+
+| Task | Input | Read inside the block |
+|---|---|---|
+| `token-classification` | `"John lives in Paris"` | `logits` `(1, 18, 2)` |
+| `token-classification` | the same 200x, `stride=16` | `logits` `(7, 512, 2)` |
+| `zero-shot-classification` | one sequence, 3 `candidate_labels=` | `logits` `(3, 2)` |
+| `zero-shot-object-detection` | `{"image", "candidate_labels"}`, 2 labels | `logits` `(2, 256, 1)` |
+| `document-question-answering` | `{"image", "question", "word_boxes"}` | `start_logits` `(1, 25)` |
+| `automatic-speech-recognition` | 70 s of audio, `chunk_length_s=30` | `encoder.layers[0].output` `(3, 1500, 384)` |
+
+**An encoder-decoder ASR trace needs `decoder_input_ids=`.** `trace` runs one forward, and a seq2seq model with no decoder ids builds decoder embeddings for itself, then rejects the pair it just made: `ValueError: You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time`, which names nothing the caller wrote. Pass one row of `decoder_start_token_id` per chunk:
+
+```python
+ids = torch.tensor([[asr.config.decoder_start_token_id]] * 3)
+with asr.trace(audio, chunk_length_s=30, decoder_input_ids=ids):
+    encoded = asr.model.encoder.layers[0].output.save()   # (3, 1500, 384)
+```
+
+`generate` and `pipe` run the decode loop themselves and need none of this.
+
+## Finding the image span in a VLM
+
+An `image-text-to-text` model's prompt is mostly image: the processor expands the
+template's single `<image>` placeholder into one token per image patch, and those
+positions are where an intervention on the image goes. Find them by matching the
+config's image token id:
+
+```python
+enc = model.processor(images=image, text=prompt, return_tensors="pt")
+span = (enc["input_ids"] == model.config.image_token_id).nonzero()
+```
+
+**Only processor-built ids carry that span.** On `llava-hf/llava-interleave-qwen-0.5b-hf`
+the processor returns 742 ids of which **729** are the image token; the same text
+through `model.tokenizer` alone returns 14 ids with the placeholder still a single
+token. Building ids one way and `pixel_values` the other gives
+`ValueError: Image features and image tokens do not match, tokens: 1, features: 746496`,
+which reports the mismatch in features rather than in what you passed.
+
+Build the encoding with `model.processor` and pass it whole, and the count lines
+up. The same encoding is what `trace` gives the model: a multimodal encoding is
+opaque, so it goes straight through and cannot share a batch with another invoke.
 
 ## Generation internals: `generator` / streamer
 
