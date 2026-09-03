@@ -8,8 +8,20 @@ Examples::
     nnsight-serve Qwen/Qwen2.5-0.5B --port 6677 --tensor-parallel-size 2
 
 The host defaults to ``127.0.0.1`` — the server runs serialized client code, so it
-is loopback-only unless ``--host 0.0.0.0`` is passed deliberately. Unrecognized
-flags are forwarded to [`VLLM`][nnsight.modeling.vllm.vllm.VLLM] as engine args.
+is loopback-only unless ``--host 0.0.0.0`` is passed deliberately.
+
+Everything the parser does not recognize is forwarded to
+[`VLLM`][nnsight.modeling.vllm.vllm.VLLM] as an engine keyword, ``--flag value``
+becoming ``flag=value`` with the value coerced to int, float or bool where it can be.
+Three shapes that forwarding cannot express, each quiet at the point of use:
+
+* A **boolean takes a value** — ``--enable-prefix-caching False``. vLLM's own
+  ``--no-enable-prefix-caching`` spelling arrives as ``no_enable_prefix_caching=True``
+  and ``EngineArgs`` rejects the keyword.
+* A **short flag is dropped**, with ``Ignoring unknown argument`` on stderr and the
+  engine built without it: ``-tp 2`` yields a one-rank server.
+* A **value is always a scalar**, so ``taps=`` has no spelling here. A tapped engine
+  is built in Python.
 """
 
 from __future__ import annotations
