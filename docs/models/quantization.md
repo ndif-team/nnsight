@@ -48,18 +48,16 @@ which is what bitsandbytes recommends; `fp4` is reached only by asking for it,
 and measures worse than `nf4` at the same size (see [What it
 costs](#what-it-costs)).
 
-> **`fp8` loads unquantized on a GPU below compute capability 8.9.** It is
-> transformers' own quantizer rather than bitsandbytes, and on older hardware it
-> does not refuse: it logs a warning, sets `dequantize` on the quantization
-> config, and loads bfloat16 instead. The load succeeds, and the
-> `FineGrainedFP8HfQuantizer` object stays attached, so a model that checks
-> `hf_quantizer` or `config.quantization_config` is told it is quantized.
-> Measured on an A6000 (8.6), Llama-3.2-1B at `fp8` is bit-identical to the same
-> model at `bfloat16`: the same 2.30 GB of weights, `Linear` rather than
-> `FP8Linear`, and a KL of 0.000000 against the bfloat16 run. 4090 and L40S
-> (both 8.9) qualify; A100 (8.0) does not. What tells you which you got is
-> `model._module.config.quantization_config.dequantize` — `True` means the
-> weights are bfloat16.
+> **`fp8` needs a GPU of compute capability 8.9 or better, and is refused below
+> it.** It is transformers' own quantizer rather than bitsandbytes, and on older
+> hardware transformers itself does not refuse — it logs a warning, sets
+> `dequantize` on the quantization config, and loads bfloat16 at twice the width
+> asked for, with the `FineGrainedFP8HfQuantizer` object still attached so the
+> model reports itself as quantized. Measured on an A6000 (8.6) before nnsight's
+> refusal: Llama-3.2-1B at `fp8` was bit-identical to `bfloat16` — same 2.30 GB,
+> `Linear` rather than `FP8Linear`, KL 0.000000. nnsight raises a `ValueError`
+> instead, before any weights are fetched. 4090 and L40S (both 8.9) and H100
+> qualify; A100 (8.0) does not.
 
 ## What a trace sees
 

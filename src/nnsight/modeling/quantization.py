@@ -100,10 +100,27 @@ def _fp8(compute_dtype: Any) -> Any:
     later). Below that, transformers' own quantizer does not refuse: it logs a
     warning, sets ``dequantize`` on the config and loads bfloat16, leaving the
     quantizer object attached so the model reports itself as quantized while
-    holding weights at twice the width asked for. That belongs to the backend
-    and is not second-guessed here, so the fallback is documented where a caller
-    picks a name: see `docs/models/quantization.md`.
+    holding weights at twice the width asked for. Twice the width also means
+    twice the memory that ``bytes_per_element`` predicts, so anything sized off
+    the name — an NDIF deployment placing models by footprint — is placed at
+    half reality. Refused here instead, where the message can say which card
+    families qualify.
+
+    Raises:
+        ValueError: if no visible CUDA device has compute capability >= 8.9.
     """
+    import torch  # lazy, matching the rest of this module
+
+    if not any(
+        torch.cuda.get_device_capability(i) >= (8, 9)
+        for i in range(torch.cuda.device_count())
+    ):
+        raise ValueError(
+            'dtype="fp8" needs a GPU of compute capability 8.9 or better '
+            "(4090, L40S, H100 and later); on this machine transformers would "
+            "silently dequantize and load bfloat16 at twice the width asked "
+            'for. Use dtype="int8" or dtype="nf4" here instead.'
+        )
     from transformers import FineGrainedFP8Config
 
     return FineGrainedFP8Config()
