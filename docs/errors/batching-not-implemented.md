@@ -19,7 +19,7 @@ its own name.
 
 `TransformersModel` implements batching, so it won't hit this for ordinary text
 inputs; it raises its own, more specific messages only for un-batchable multimodal
-inputs (`TransformersModel._batch_generate` / `._batch`):
+inputs (`TransformersModel._batch_pipe` / `._batch_forward`):
 
 ```
 NotImplementedError: Batching multimodal generate inputs isn't supported; pass a single text/images payload.
@@ -43,7 +43,8 @@ def _batch(self, invokes, fn):
     )
 ```
 
-`Batcher.assemble` calls it once all invokes are collected, so the error fires only when **two or
+`Batcher.assemble` (`src/nnsight/intervention/batching.py`) calls it once all
+invokes are collected, so the error fires only when **two or
 more invokes contribute input rows**. A single input invoke, or one input invoke
 plus empty invokes, never needs `_batch` to merge anything.
 
