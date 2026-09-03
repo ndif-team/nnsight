@@ -45,6 +45,7 @@ import warnings
 import torch
 from torch._guards import detect_fake_mode
 
+from .. import NNsightDeprecationWarning
 from ..intervention.envoy import Envoy, traceable
 from .huggingface import HuggingFaceModel
 
@@ -228,6 +229,41 @@ class Generator(WrapperModule):
         self.streamer = Generator.Streamer()
 
 
+_GENERATOR_OUTPUT_DEPRECATED = (
+    "model.generator.output is deprecated; use tracer.result instead "
+    "(model.generator.streamer.output still gives per-step tokens)."
+)
+
+
+class GeneratorEnvoy(Envoy):
+    """The envoy for `Generator`, whose ``.output`` is deprecated.
+
+    ``model.generator.output`` is the only hookable value in nnsight that is
+    deprecated rather than removed, so the warning lives on the envoy of the one
+    module that has it — the rest of the tree keeps the plain `Envoy`.
+    """
+
+    @property
+    def output(self) -> Any:
+        """Deprecated: the finished generated ids — read ``tracer.result``.
+
+        A plain property wrapping `Envoy.output`, not an `eproperty` of its own:
+        the warning has to reach the user *before* the read parks the worker, and
+        an eproperty's preprocess runs only once the value has been served.
+        """
+        warnings.warn(
+            _GENERATOR_OUTPUT_DEPRECATED, NNsightDeprecationWarning, stacklevel=2
+        )
+        return Envoy.output.__get__(self)
+
+    @output.setter
+    def output(self, value: Any) -> None:
+        warnings.warn(
+            _GENERATOR_OUTPUT_DEPRECATED, NNsightDeprecationWarning, stacklevel=2
+        )
+        Envoy.output.__set__(self, value)
+
+
 class TransformersModel(HuggingFaceModel):
     """A model backed by a ``transformers.pipeline``, for any of its tasks.
 
@@ -304,7 +340,7 @@ class TransformersModel(HuggingFaceModel):
         # favor of `tracer.result`). Added to `_children` so it shows in the tree;
         # `_update` (dispatch) and `_remoteable_set_env` (PEFT rebind) both preserve
         # standalone children like this one.
-        self.generator = Envoy(
+        self.generator = GeneratorEnvoy(
             Generator(), path=f"{self.path}.generator", interleaver=self.interleaver
         )
         self._children.append(self.generator)

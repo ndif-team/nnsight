@@ -506,10 +506,7 @@ class Envoy:
         return value
 
     @property
-    @deprecated(
-        "model.iter is deprecated and will be removed in a future version. "
-        "Use tracer.iter instead."
-    )
+    @deprecated("model.iter is deprecated; use tracer.iter instead.")
     def iter(self):
         """Deprecated: use ``tracer.iter``.
 
@@ -519,10 +516,7 @@ class Envoy:
 
         return Iterations()
 
-    @deprecated(
-        "model.all() is deprecated and will be removed in a future version. "
-        "Use tracer.all() instead."
-    )
+    @deprecated("model.all() is deprecated; use tracer.all() instead.")
     def all(self):
         """Deprecated: use ``tracer.all()``."""
         from .iterator import Iterations

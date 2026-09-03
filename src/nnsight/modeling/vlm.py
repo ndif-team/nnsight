@@ -25,6 +25,7 @@ from __future__ import annotations
 import warnings
 from typing import Any
 
+from .. import NNsightDeprecationWarning
 from .language import LanguageModel
 
 
@@ -43,7 +44,7 @@ class VisionLanguageModel(LanguageModel):
         warnings.warn(
             "VisionLanguageModel is deprecated; use "
             "TransformersModel(repo_id, task='image-text-to-text') instead.",
-            DeprecationWarning,
+            NNsightDeprecationWarning,
             stacklevel=2,
         )
         # A vision-language model: use the image-text-to-text pipeline (set before
