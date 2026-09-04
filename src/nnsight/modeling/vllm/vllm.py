@@ -253,6 +253,15 @@ class VLLM(Remotable):
         # would be handed to the real engine on dispatch.
         _ROPE_DICT.clear()
 
+        # Whether any layer is recurrent rather than attention (a hybrid
+        # gated-delta / Mamba trunk, or an attention-free model). Recorded here —
+        # vLLM's model config is the authority — because a tapped engine must
+        # not replay a full graph over such a model's prefill (see `_load`).
+        mc = vllm_config.model_config
+        self._graph_unsafe_prefill = bool(
+            getattr(mc, "is_hybrid", False) or getattr(mc, "is_attention_free", False)
+        )
+
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -306,6 +315,19 @@ class VLLM(Remotable):
             self.taps = self._resolve_taps(meta_model)
             # The flag is read by the worker processes, which inherit the environment.
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            if getattr(self, "_graph_unsafe_prefill", False):
+                # A recurrent layer runs a different computation for a prefill
+                # than for a decode step, chosen per batch — a full graph
+                # captured for one composition replays the wrong one for the
+                # other, and the forward is silently wrong (a hybrid trunk's
+                # greedy generation diverges from eager). The compiled engine
+                # avoids this by splitting its graphs around the recurrent op;
+                # breakable graphs run without the compiler, so pin graphs to
+                # pure-decode steps and run prefill eagerly instead. Decode is
+                # where replay pays anyway. A caller's own setting wins.
+                compilation = kwargs.setdefault("compilation_config", {})
+                if isinstance(compilation, dict):
+                    compilation.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
             kwargs["additional_config"] = {
                 **(kwargs.get("additional_config") or {}),
                 "nnsight_taps": list(self.taps),
@@ -380,18 +402,29 @@ class VLLM(Remotable):
         names = [name for name, _ in module.named_modules() if name]
         taps = []
         for tap in self.taps:
-            prefix, _, side = tap.rpartition(".")
+            # A source op — "<module>.source.<op>.output" — is an operation inside
+            # the module's forward. The module part resolves here; the op is
+            # checked on the worker, which is where the forward's source is read.
+            prefix, sourced, rest = tap.partition(".source.")
+            if sourced:
+                op, _, side = rest.rpartition(".")
+            else:
+                prefix, _, side = tap.rpartition(".")
+                op = None
             pattern = re.escape(prefix).replace(r"\*", r"[^.]+")
             matched = [name for name in names if re.fullmatch(pattern, name)]
-            if side not in ("input", "output") or not matched:
+            if side not in ("input", "output") or not matched or (sourced and not op):
                 raise ValueError(
                     f"Tap {tap!r} names no module. A tap is a module path ending in "
                     ".input or .output, where * stands for one path segment — "
-                    "'model.layers.*.output' for every decoder layer's output."
+                    "'model.layers.*.output' for every decoder layer's output — or "
+                    "an operation inside a module's forward, "
+                    "'model.layers.10.self_attn.source.qkv_split_0.output'."
                 )
             # Under the worker's root envoy, which is built with Envoy's default
             # path — the client's own is not set yet on `dispatch=True`.
-            taps.extend(f"model.{name}.{side}" for name in matched)
+            for name in matched:
+                taps.append(f"model.{name}.source.{op}.{side}" if sourced else f"model.{name}.{side}")
         return tuple(taps)
 
     def _load_sync(self, repo_id: str, **kwargs: Any) -> Any:
@@ -452,12 +485,16 @@ class VLLM(Remotable):
             kwargs = dict(kwargs)
             lora_requests.append(kwargs.pop("lora_request", None))
             prompts.append(self._prompt(*inputs))
+            # Which installed edits this request runs — nnsight's, not a sampling
+            # setting; it rides `extra_args` (see `_attach_mediators`).
+            edits = kwargs.pop("edits", None)
             param = SamplingParams(**kwargs)
             # Which settings this invoke named, for `_attach_mediators` to leave
             # alone. Recorded rather than inferred: the value a caller passed
             # cannot be told from the one it would have had by default, and half
             # of vLLM's defaults are the obvious thing to type.
-            param.nnsight_named = frozenset(kwargs)
+            param.nnsight_named = frozenset(kwargs) | ({"edits"} if edits is not None else set())
+            param.nnsight_edits = self._edit_names(edits)
             params.append(param)
 
         return (prompts, params, lora_requests), {}
@@ -480,13 +517,13 @@ class VLLM(Remotable):
         prompt = inputs[0]
 
         # `Mapping`, not `dict`: a tokenizer hands back a `BatchEncoding`, which is
-        # a `UserDict` and so fails an `isinstance(..., dict)` test — which is why
-        # the tokenizer-output path below was unreachable from an actual tokenizer.
+        # a `UserDict` and so fails an `isinstance(..., dict)` test, which would put
+        # the tokenizer-output path below out of an actual tokenizer's reach.
         if isinstance(prompt, Mapping):
             # That output is ours to convert. Anything else is one of vLLM's own
             # prompt dicts — `TypedDict`s, so plain dicts at runtime — and the
-            # engine knows them better than we do; taking those for tokenizer
-            # output is how `TokensPrompt(...)` came back as `KeyError: 'input_ids'`.
+            # engine knows them better than we do. Taking one of those for tokenizer
+            # output turns `TokensPrompt(...)` into `KeyError: 'input_ids'`.
             if "input_ids" in prompt:
                 return self._tokenized_prompt(prompt)
             return prompt
@@ -540,9 +577,9 @@ class VLLM(Remotable):
     def _sampling_kwargs(kwargs: dict) -> dict:
         """A copy of `kwargs` with generation length spelled the way vLLM spells it.
 
-        vLLM's is ``max_tokens``; ``max_new_tokens`` is the ``LanguageModel`` API's
-        and is accepted on trace and generate alike, rewritten before it reaches
-        SamplingParams — where an unknown keyword now raises rather than being
+        vLLM's is ``max_tokens``; ``max_new_tokens`` is what the rest of nnsight
+        spells it, and is accepted on trace and generate alike, rewritten before it
+        reaches SamplingParams — where an unknown keyword raises rather than being
         quietly ignored. The copy is what lets a caller pass its own dict through
         twice (``generate`` hands one to ``trace`` and keeps the original).
         """
@@ -583,9 +620,28 @@ class VLLM(Remotable):
         kwargs.setdefault("fn", self._call)
         return super().trace(*inputs, **kwargs)
 
+    def scan(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse: there is no local forward for a fake-tensor pass to run.
+
+        [`scan`][nnsight.modeling.mixins.meta.Meta.scan] reads shapes by running the
+        model's own forward under a fake-tensor mode, on the meta module, with no
+        weights. Here that module is a client-side shell: the forward runs in the
+        engine's worker, on real weights, under ``torch.inference_mode``. Refused
+        up front rather than at the engine, which would build itself and then ask
+        a fake mode to run a request it can't fake.
+        """
+        raise NotImplementedError(
+            "scan is unavailable on vLLM: it runs the model's forward under a "
+            "fake-tensor mode to propagate shapes, and there is no forward here to "
+            "run — the engine's worker runs the real one, under "
+            "torch.inference_mode. Trace a prompt and read the shapes off the "
+            "activations it serves."
+        )
+
     def edit(
         self,
         *,
+        name: str | None = None,
         inplace: bool = True,
         serve: str | None = None,
         api_key: str | None = None,
@@ -609,6 +665,13 @@ class VLLM(Remotable):
         ``tracer.invoke(...)``.
 
         Args:
+            name: What requests may address this edit by. A request that passes
+                ``edits=[...]`` (to ``trace``, ``invoke`` or a plain ``generate``)
+                runs the named edits it lists **and every edit installed without
+                a name**; a request that passes nothing runs every edit. A name
+                is a tag rather than a key — two edits may share one, and both
+                run when it is asked for. A request naming an edit nothing is
+                installed under fails rather than quietly running nothing.
             inplace: Only ``True``. An edit here lives on the engine every caller
                 shares, so unlike the local form there is no copy to edit
                 instead.
@@ -639,6 +702,15 @@ class VLLM(Remotable):
 
                 >>> with model.edit(serve="http://host:8000") as (tracer, edit):
                 ...     model.model.layers[16].output[0][:] = 0  # doctest: +SKIP
+
+            Named, so a request can choose::
+
+                >>> with model.edit(name="probe") as (tracer, edit):  # doctest: +SKIP
+                ...     score = model.model.layers[16].output[0][-1].norm().save()
+                >>> with model.edit(name="steer") as (tracer, edit2):  # doctest: +SKIP
+                ...     model.model.layers[8].output[0][:] += v
+                >>> outputs = model.generate(prompts, max_tokens=5, edits=["probe"])  # doctest: +SKIP
+                >>> outputs[0].saves["score"]     # the probe ran; the steer did not
         """
         from .registration import RegisteringTracer
 
@@ -648,7 +720,45 @@ class VLLM(Remotable):
                 "caller shares — there is no copy to edit instead. Drop "
                 "inplace=False, or trace the requests you want to change."
             )
-        return RegisteringTracer(self, backend=backend, serve=serve, api_key=api_key)
+        if name is not None and not isinstance(name, str):
+            raise TypeError(f"edit name must be a string, got {type(name).__name__}")
+        return RegisteringTracer(
+            self, backend=backend, serve=serve, api_key=api_key, name=name
+        )
+
+    @staticmethod
+    def _edit_names(edits: Any) -> list[str] | None:
+        """Normalize an ``edits=`` argument: ``None`` means every edit; else a list of names."""
+        if edits is None:
+            return None
+        if isinstance(edits, str):
+            raise TypeError(
+                f"edits= takes a list of edit names, not a string; write edits=[{edits!r}]"
+            )
+        names = list(edits)
+        for name in names:
+            if not isinstance(name, str):
+                raise TypeError(f"edit names are strings, got {type(name).__name__}: {name!r}")
+        return names
+
+    def _check_edit_names(self, edits: list[str] | None) -> None:
+        """Refuse a name nothing is installed under, when this process holds the engine.
+
+        The worker makes the same check for every request (a served engine's
+        edits are installed over HTTP, which this process cannot see), but here
+        the mistake can be reported at the call rather than as the request's
+        deferred error.
+        """
+        if edits is None or getattr(self, "_serving", False):
+            return
+        installed = {edit.name for edit in self._installed_edits if edit.name is not None}
+        unknown = [name for name in edits if name not in installed]
+        if unknown:
+            raise ValueError(
+                f"edits={edits!r} names {unknown!r}, but no edit is installed under "
+                f"that name (installed: {sorted(installed)!r}). Install it with "
+                "model.edit(name=...), or drop it from the list."
+            )
 
     def clear_edits(self) -> None:
         """Clear every edit still installed on the engine.
@@ -727,7 +837,13 @@ class VLLM(Remotable):
 
         kwargs = self._sampling_kwargs(kwargs)
         lora_request = kwargs.pop("lora_request", None)
+        # Which installed edits these requests run; see `edit`. Rides the same
+        # field a trace's block does, so the worker reads it the same way.
+        edits = self._edit_names(kwargs.pop("edits", None))
+        self._check_edit_names(edits)
         params = SamplingParams(**kwargs)
+        if edits is not None:
+            params.extra_args = {**(params.extra_args or {}), "nnsight_edits": edits}
 
         prompts = inputs[0] if len(inputs) == 1 else list(inputs)
         if self._async_engine:
@@ -865,9 +981,9 @@ class VLLM(Remotable):
 
         "Did not set them" is what the invoke recorded in `_batch`, not "still
         equals vLLM's default". The two are not the same: ``temperature=1.0`` and
-        ``max_tokens=16`` *are* the defaults, so an invoke asking for either used
-        to have it overwritten by the trace-level setting while a neighbouring
-        ``temperature=0.99`` was honoured.
+        ``max_tokens=16`` *are* the defaults, so inferring it from the value would
+        let the trace-level setting overwrite an invoke that asked for one of them
+        while honouring a neighbouring ``temperature=0.99``.
 
         Returns:
             The workers that were attached, in request order.
@@ -887,6 +1003,18 @@ class VLLM(Remotable):
                     "one request — give every invoke a prompt, or remove the empty invoke."
                 )
 
+        # `edits=` on the trace: the installed edits every invoke runs unless it
+        # named its own. Not a SamplingParams field, so it is taken out before
+        # the check below and rides `extra_args` beside the block.
+        kwargs = dict(kwargs)
+        trace_edits = self._edit_names(kwargs.pop("edits", None))
+        # Not on an nnsight-serve server: its edits arrive over HTTP, unseen by
+        # this list, and the worker checks every request anyway.
+        if not getattr(self, "_serving", False):
+            self._check_edit_names(trace_edits)
+            for param in params:
+                self._check_edit_names(getattr(param, "nnsight_edits", None))
+
         default = SamplingParams()
         for attr in kwargs:
             if not hasattr(default, attr):
@@ -898,6 +1026,10 @@ class VLLM(Remotable):
 
         for mediator, param in zip(attached, params):
             param.extra_args = {"nnsight_mediator": dumps(mediator)}
+            named = getattr(param, "nnsight_named", frozenset())
+            edits = getattr(param, "nnsight_edits", None) if "edits" in named else trace_edits
+            if edits is not None:
+                param.extra_args["nnsight_edits"] = edits
             # A prefix-cached token is served from the KV cache without a forward
             # pass, so no hook fires for it and the intervention silently sees a
             # short activation — the trace reads only the tokens that were
@@ -909,7 +1041,6 @@ class VLLM(Remotable):
             # consulted this way and the read is whole anyway.
             if hasattr(param, "skip_reading_prefix_cache"):
                 param.skip_reading_prefix_cache = True
-            named = getattr(param, "nnsight_named", frozenset())
             for attr, value in kwargs.items():
                 if attr not in named:
                     setattr(param, attr, value)

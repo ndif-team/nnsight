@@ -23,7 +23,11 @@ clean answer, that activation was sufficient to flip the model.
 
 In nnsight you do this with two `tracer.invoke(...)` calls in one `trace()`. Because
 both invokes touch the same module on the same forward, use a `tracer.barrier(n)` to
-synchronize the value hand-off — see `docs/usage/barrier.md`.
+synchronize the value hand-off — see `docs/usage/barrier.md`. On `VLLM` there is
+no barrier and no cross-invoke hand-off: save the clean activations in one trace and
+patch them in the next, index rows as `hs[POS]` (no batch axis), and write both
+elements of the layer's `(hidden, residual)` output — see
+[Passing values between invokes](../models/vllm.md#passing-values-between-invokes).
 
 Tutorial mirror: https://nnsight.net/notebooks/tutorials/activation_patching/
 
@@ -132,21 +136,91 @@ for layer, p in results.items():
 layer  0: P(Paris)=0.064
 layer  1: P(Paris)=0.057
 layer  2: P(Paris)=0.051
+layer  3: P(Paris)=0.044
 layer  4: P(Paris)=0.040
+layer  5: P(Paris)=0.034
 layer  6: P(Paris)=0.023
+layer  7: P(Paris)=0.021
 layer  8: P(Paris)=0.012
+layer  9: P(Paris)=0.005
 layer 10: P(Paris)=0.004
+layer 11: P(Paris)=0.003
 ```
 
-The city information at the subject token is read out in the **early** layers —
-patching there flips the prediction, patching late layers does almost nothing.
+Read this as a curve about **reach**, not about where the fact lives. Patching
+`block.output` at layer L overwrites everything the model computed at those
+positions up to and including L, so both ends of the sweep are fixed by the
+architecture rather than by the prompt: patch the embeddings and you reproduce the
+clean run exactly, and patch the last block and a non-final position has no path
+left to the final position's logits. A monotone decay between those two ends is
+the null result for a whole-span residual sweep, not a finding.
+
+Two measurements make that concrete on this prompt pair. Patching the five *suffix*
+tokens — `' is'`, `' in'`, `' the'`, `' city'`, `' of'`, which are identical in both
+prompts and carry no subject content — produces the mirror-image curve, from
+`P(Paris)=0.004` at layer 0 up to the full clean `0.070` at layer 11. And a
+random donor of matched norm at the subject positions moves the logit difference by
+up to `+3.6` at layer 3, further than the real effect at layers 8–11. Sweep the
+layers to see depth; use the map below to localize.
+
+### Layer × position map
+
+Patching one (layer, position) cell at a time separates the two things the sweep
+conflates. Cache the clean run once and batch a whole layer's positions into one
+forward pass:
+
+```python
+import nnsight
+
+with model.trace(clean):
+    clean_resid = nnsight.save([block.output.detach() for block in model.transformer.h])
+
+corrupt_ids = model.tokenizer(corrupt).input_ids
+tokens = [model.tokenizer.decode([i]) for i in corrupt_ids]
+
+grid = []
+for layer in range(0, 12, 2):
+    with model.trace() as tracer:
+        row = nnsight.save([])
+        for pos in range(len(corrupt_ids)):
+            with tracer.invoke(corrupt):
+                model.transformer.h[layer].output[:, pos, :] = clean_resid[layer][:, pos, :]
+                row.append(model.output.logits[0, -1].softmax(-1)[paris].detach())
+    grid.append([float(x) for x in row])
+
+print(f"{'position':<12}" + "".join(f"L{l:<6}" for l in range(0, 12, 2)))
+for pos, token in enumerate(tokens):
+    print(f"{token!r:<12}" + "".join(f"{grid[i][pos]:.3f}  " for i in range(len(grid))))
+```
+
+```
+position    L0     L2     L4     L6     L8     L10
+'The'       0.003  0.003  0.003  0.003  0.003  0.003
+' Col'      0.002  0.003  0.004  0.003  0.003  0.003
+'os'        0.007  0.020  0.011  0.005  0.005  0.003
+'se'        0.002  0.002  0.005  0.006  0.005  0.004
+'um'        0.006  0.007  0.008  0.007  0.005  0.003
+' is'       0.003  0.003  0.003  0.003  0.003  0.003
+' in'       0.003  0.003  0.003  0.004  0.003  0.003
+' the'      0.003  0.003  0.003  0.003  0.003  0.003
+' city'     0.004  0.005  0.004  0.005  0.003  0.003
+' of'       0.003  0.003  0.004  0.006  0.017  0.052
+```
+
+Against the corrupt baseline of `0.003`, two sites separate out: the subject pieces
+`'os'` and `'um'` matter at layers 0–4 and stop mattering by layer 8, and the final
+`' of'` position does nothing until layer 8 and then carries the answer. The suffix
+positions are flat everywhere, which is what the sweep alone could not show.
 
 ### Patch the last position instead
 
 `SUBJECT = slice(-1, None)` (or `[:, -1, :]`) answers "is the *final* prediction
-sensitive to this layer?" On GPT-2 this barely moves the answer until the last
-layer — the fact is retrieved at the subject token, not the final one. Position
-choice changes the question you're asking.
+sensitive to this layer?" On this pair it gives
+`0.003 0.003 0.003 0.003 0.004 0.004 0.006 0.007 0.017 0.036 0.052 0.070`: flat
+through layer 7, then rising to the full clean probability. Read together with the
+subject sweep above, the pair says the answer is present at the subject early and
+at the final position late — the same two sites the map resolves. Position choice
+changes the question you are asking.
 
 ### Patch attention output / MLP output instead of residual
 
@@ -202,7 +276,11 @@ swap the prompts and invoke order.
 - Within one invoke, modules must be accessed in forward-pass order, or you hit
   `OutOfOrderError`. You cannot capture `h[5]` after `h[10]` in the same invoke.
 - Clean and corrupt prompts of **different token lengths** can't share a position
-  slice. Match lengths, or patch a common suffix / the last position.
+  slice. Match lengths, or patch a common suffix / the last position. Every invoke
+  in a batched trace sees its activations padded to the batch's longest prompt, so
+  an absolute index like `slice(1, 5)` means something different depending on what
+  else is in the batch; `[:, -1, :]` survives left padding, an absolute index does
+  not. See `docs/usage/invoke-and-batching.md`.
 - Block outputs are plain tensors in current `transformers`; attention outputs are
   tuples. Adjust `[0]` indexing accordingly. See `docs/usage/access-and-modify.md`.
 - Patching mutates the running tensor. `.clone().save()` first if you also want the

@@ -25,8 +25,8 @@ def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
 
     A name each block saved for itself is NOT merged, however many requests
     shipped it: those are separate values, not copies of one, and merging them
-    kept only the last — which is how three prompts came back holding one
-    prompt's activation. The caller returns those as a list instead.
+    would keep only the last, leaving three prompts holding one prompt's
+    activation. The caller returns those as a list instead.
 
     Returns the merged shared values by name (the caller re-marks them saved:
     the merge builds new containers the save-gate hasn't seen).

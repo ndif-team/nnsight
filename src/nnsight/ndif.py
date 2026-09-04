@@ -246,12 +246,14 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
 
 
 def ndif_status(raw: bool = False) -> Union[dict, NdifStatus]:
-    """Deprecated alias for `status`."""
+    """Deprecated: use `status`."""
     import warnings
 
+    from . import NNsightDeprecationWarning
+
     warnings.warn(
-        "ndif_status() is deprecated; use nnsight.status().",
-        DeprecationWarning,
+        "nnsight.ndif_status() is deprecated; use nnsight.status() instead.",
+        NNsightDeprecationWarning,
         stacklevel=2,
     )
     return status(raw)

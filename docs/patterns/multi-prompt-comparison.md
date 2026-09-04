@@ -1,6 +1,6 @@
 ---
 title: Multi-Prompt Comparison
-one_liner: Run multiple prompts in one trace using `tracer.invoke(...)` and empty invokes for batch-wide ops; use `tracer.barrier(n)` when invokes share a value.
+one_liner: Run multiple prompts in one trace using `tracer.invoke(...)`, with empty invokes for batch-wide ops and `tracer.barrier(n)` when one invoke hands a value to another.
 tags: [pattern, interpretability, batching, comparison]
 related: [docs/usage/invoke-and-batching.md, docs/usage/barrier.md, docs/patterns/activation-patching.md, docs/patterns/ablation.md]
 sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/barrier.py, src/nnsight/intervention/batching.py]
@@ -20,8 +20,8 @@ Why one trace beats many:
 - **Shared interventions.** An empty (`tracer.invoke()`) invoke runs on the
   *combined batch* of all input invokes — one place for an intervention that applies
   to every prompt.
-- **Cross-invoke value sharing.** A value read in one invoke can be used in a later
-  invoke (with a barrier when both touch the same module).
+- **Cross-invoke value sharing.** A value read in one invoke can be used in another,
+  with a barrier when the consumer writes it.
 - **One remote round-trip.** With `remote=True`, all invokes ship as one job.
 
 Each `tracer.invoke(...)` block is a **worker** (a greenlet), and they resume in the
@@ -32,7 +32,7 @@ order the model reaches what each asked for. See `docs/usage/invoke-and-batching
 - Side-by-side baseline vs ablated / patched / steered.
 - Mean-difference / contrast-set computations (positive vs negative prompts).
 - Sweeps over a small set of prompts that share interventions.
-- Anywhere you used to write `for p in prompts: with model.trace(p): ...`.
+- Any sweep otherwise written as `for p in prompts: with model.trace(p): ...`.
 
 ## Canonical pattern
 
@@ -62,7 +62,9 @@ No barrier is needed — the two invokes do not share a variable.
 ## Empty invokes for batch-wide operations
 
 `tracer.invoke()` with no arguments is an **empty invoke**: a worker that sees the
-*whole batch* of all preceding input invokes, with no row scoping.
+*whole batch* every input invoke contributes, with no row scoping. The batch is
+assembled before any worker starts, so an empty invoke written first sees the rows
+of the invokes below it just the same.
 
 ```python
 with model.trace() as tracer:
@@ -78,34 +80,40 @@ with model.trace() as tracer:
 a.shape (1, 50257)   b.shape (2, 50257)   full.shape (3, 50257)
 ```
 
-An empty invoke reuses the batched state from the preceding input invokes — no extra
-input prep or batching — so it works on the base `NNsight` too (one input invoke +
-as many empty invokes as you like).
+An empty invoke reuses the batch the input invokes built — no extra input prep, no
+call into the model's batching methods — so it works on the base `NNsight` too (one
+input invoke plus as many empty invokes as you like).
 
 ## When you need a barrier
 
-If one invoke hands a value to another and both touch the same module, use
-`tracer.barrier(n)` so the reader waits for the writer. `barrier(n)` returns a
-callable; every participating block calls it, and the last to arrive releases them
-all — everything above the barrier has happened before anything below it.
+An invoke can read a name a sibling bound once it has parked at a location the model
+reaches after the binding; a consumer that *writes* the value has not parked at all
+when it reads it, because the assignment evaluates its right-hand side first. Order
+those with `tracer.barrier(n)`. Every participating block calls it, and the last to
+arrive releases them all, so everything above the barrier has happened before
+anything below it. The full rule is in `docs/usage/invoke-and-batching.md`.
 
 ```python
 with model.trace() as tracer:
     barrier = tracer.barrier(2)
-    with tracer.invoke("Madison Square Garden is in"):
+    with tracer.invoke("Madison Square Garden is in the city of"):
         embeds = model.transformer.wte.output          # read source embeddings
         barrier()
         source_tok = model.lm_head.output[:, -1, :].argmax(-1).save()
-    with tracer.invoke("_ _ _ _ _"):
+    with tracer.invoke("_ _ _ _ _ _ _ _"):
         barrier()
         model.transformer.wte.output = embeds          # ...swap them into this run
         recv_tok = model.lm_head.output[:, -1, :].argmax(-1).save()
+
+# both decode to ' New'
 ```
 
 The receiver, fed the source's embeddings, reproduces the source's prediction.
-`barrier(n)` must be reached by exactly `n` blocks — fewer and it never releases (the
-blocks left waiting report it when the run ends rather than hanging). See
-`docs/usage/barrier.md` and [activation-patching](activation-patching.md).
+`barrier(n)` must be reached by exactly `n` blocks. Fewer and the round never
+releases, which surfaces as a `ValueError` when the run ends rather than a hang;
+more and it releases early, and the block it let through raises `NameError` on the
+value it was waiting for. See `docs/usage/barrier.md` and
+[activation-patching](activation-patching.md).
 
 ## Variations
 
@@ -116,13 +124,13 @@ import nnsight
 
 prompts = ["The cat sat on the", "A dog ran on the", "The bird flew on the"]
 with model.trace() as tracer:
-    outs = nnsight.save([])
+    outs = nnsight.save({})
     for p in prompts:
         with tracer.invoke(p):
-            outs.append(model.lm_head.output[:, -1, :])
+            outs[p] = model.lm_head.output[:, -1, :]
 
-for p, lg in zip(prompts, outs):
-    print(p, "->", repr(model.tokenizer.decode(lg.argmax(-1)[0])))
+for p in prompts:
+    print(p, "->", repr(model.tokenizer.decode(outs[p].argmax(-1)[0])))
 ```
 
 ```
@@ -130,6 +138,11 @@ The cat sat on the -> ' floor'
 A dog ran on the -> ' ground'
 The bird flew on the -> ' ground'
 ```
+
+Key the results by whatever the loop varies rather than appending to a list. Values
+appended from several invokes come back in the order the model reached them, so
+zipping the list against `prompts` misattributes every row as soon as the invokes
+stop reading the same module.
 
 ### Mean / difference of activations (a steering direction)
 
@@ -181,23 +194,19 @@ with model.trace() as tracer:
         logits = model.lm_head.output[:, -1, :].save() # [2, vocab]
 ```
 
-## Interpretation tips
-
-- **Pre-batching vs invokes** are equivalent for *plain* runs. Use invokes when each
-  prompt needs its own intervention or you want side-by-side logits in one trace.
-- **Empty invokes hit the whole batch** — their interventions affect every prompt at
-  once, which is what you want for fair comparisons.
-- **Save inside the trace.** A value without `.save()` is gone once the block exits.
-
 ## Gotchas
 
 - **Multiple input invokes need a batching model.** `TransformersModel` batches; the
   base `NNsight` does not — use one input invoke + empty invokes, or pre-batch.
 - **Read modules in forward order within one invoke.** To read in a different order,
   use another (empty) invoke — a separate worker gets its own pass.
-- **Cross-invoke values on the *same* module need a barrier**, and a read must park
-  *past* the write's location first (reading a not-yet-bound name raises
-  `NameError`). See `docs/usage/barrier.md`.
+- **A cross-invoke read must park past the binder first**, and a consumer that
+  writes cannot park at all — give that one a barrier. Reading a name the producer
+  has not bound yet raises `NameError`. See `docs/usage/barrier.md`.
+- **Prompts of different lengths are padded to the batch's longest.** An absolute
+  position index therefore means a different token depending on what else is in the
+  batch; `[:, -1]` is the one that holds. See
+  `docs/usage/invoke-and-batching.md`.
 - **`tracer.barrier(n)` needs exactly `n` callers** — do not count a
   non-participating invoke.
 - **A GPT-2 block's `.output` is a plain tensor**; overwrite the whole tensor

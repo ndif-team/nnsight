@@ -5,7 +5,10 @@ name: Tests
 
 on:
   push:
-    branches: ["main"]
+    # Development happens on the release branch, so it has to be listed here or
+    # nothing tests it: a `pull_request` run only ever tests the PR head, never
+    # the merge that lands it, and never a commit pushed straight to the branch.
+    branches: ["main", "0.8"]
   pull_request:
 
 permissions:
@@ -15,13 +18,25 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    strategy:
+      # Both ends of the advertised range. `pyproject.toml` claims 3.10 through
+      # 3.14, and a single 3.12 job cannot see a break that only the newest one
+      # has: #698 was exactly that -- PEP 649 gives every `def` an extra
+      # `__annotate__` symtable child on 3.14, which silently disabled the
+      # payload scope filter, and the two tests that covered it were failing on
+      # 3.14 while CI stayed green. 3.11 and 3.13 are left out rather than
+      # guessed at; add them once someone has run the suite there.
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       # Many tests pull small models from the HuggingFace Hub on first run; cache
       # them so reruns don't re-download. Keyed by the test files so it refreshes
@@ -30,18 +45,34 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-${{ hashFiles('tests/**/*.py') }}
-          restore-keys: hf-${{ runner.os }}-
+          key: hf-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('tests/**/*.py') }}
+          restore-keys: hf-${{ runner.os }}-py${{ matrix.python-version }}-
 
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install ".[dev]"
 
+      # The any-to-any test's checkpoint has an audio modality, and its
+      # pipeline requires librosa at construction even for a text/image-only
+      # call. librosa needs numba, which trails new Python releases, so it
+      # can't sit in the dev extra without breaking the newest matrix leg;
+      # install it where numba exists and let the test importorskip elsewhere.
+      - name: Install audio extras
+        if: matrix.python-version == '3.12'
+        run: pip install librosa
+
       # CPU only (the runner has no GPU); skip the vLLM suite, which needs a GPU
       # and the vllm extra.
+      #
+      # `tests/tp` is no longer ignored. Its GPU tests skip themselves on a
+      # runner with no cards (`pytestmark = skipif(device_count() < 2)`), and
+      # what is left is `test_cpu_gloo.py`, which shards a tiny model across two
+      # CPU ranks over gloo in a few seconds. Ignoring the whole directory is why
+      # transformers 5.16 could move its tensor-parallel plan off the modules and
+      # leave nnsight's TP path silently inert with CI green.
       - name: Run tests
         env:
           CUDA_VISIBLE_DEVICES: ""
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
-        run: pytest tests/ -q --ignore=tests/vllm --ignore=tests/tp
+        run: pytest tests/ -q --ignore=tests/vllm

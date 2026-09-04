@@ -148,6 +148,31 @@ class TestSkip:
             with Tracer(): ran.append(1)  # noqa: E701
         assert ran == []
 
+    def test_try_as_the_first_statement_is_refused(self):
+        # CPython gives the `try` keyword's line an instruction no exception-table
+        # entry covers, so the skip raise delivered there unwinds the frame outright
+        # — past `__exit__` and past this `pytest.raises` — and the block silently
+        # never runs. Refusing the shape is what keeps that from happening.
+        ran = []
+        with pytest.raises(ValueError, match="cannot start with `try:`"):
+            with Tracer():
+                try:
+                    ran.append(1)
+                except Exception:
+                    pass
+        assert ran == []
+
+    def test_try_below_another_statement_runs(self):
+        # Only the first statement is the hook's cue, so a `try` anywhere else is
+        # ordinary code — and it catches what it is written to catch.
+        with Tracer():
+            caught = save(None)
+            try:
+                raise KeyError("inner")
+            except KeyError as error:
+                caught = save(str(error))
+        assert caught == "'inner'"
+
     def test_header_spanning_lines_binds_its_target(self):
         # A `with` header written over several lines reaches its own closing line
         # before the body — the skip has to wait for the body, or the block runs

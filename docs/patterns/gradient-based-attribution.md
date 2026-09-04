@@ -128,17 +128,22 @@ to get wrong:
     the first sample sits on a singularity and the integral does not converge.
     Measured on GPT-2 layer 6, `sum(IG)` against a target of `+6.29`:
     `N=64 -> -237`, `N=128 -> -77`, `N=256 -> +1107`, `N=512 -> -64`. More steps
-    make it worse. Start the path at `alpha ~= 0.05` (0.36% completeness error) or
-    use a mean / corrupted-run baseline instead of zero.
+    make it worse. Start the path at `alpha = 0.05` instead — 1.30% completeness
+    error at `N=64`, 0.36% at `N=128`, 0.09% at `N=256` — or use a mean /
+    corrupted-run baseline. A path that starts above zero covers only
+    `[alpha_start, 1]`, so scale the accumulated attribution by
+    `(1 - alpha_start)`; without that factor completeness is off by exactly that
+    much.
 
 Here the scaled activation *is* a leaf you construct, so it needs
 `requires_grad_(True)`:
 
 ```python
-N_STEPS = 16
+ALPHA_START = 0.05              # not 0 — see the warning above
+N_STEPS = 128
 ig_accum = None
 for step in range(N_STEPS):
-    alpha = (step + 0.5) / N_STEPS
+    alpha = ALPHA_START + (1 - ALPHA_START) * (step + 0.5) / N_STEPS
     with model.trace(prompt):
         embeds = model.transformer.wte.output
         embeds_full = embeds.save()
@@ -151,9 +156,13 @@ for step in range(N_STEPS):
     contribution = embeds_full * g
     ig_accum = contribution if ig_accum is None else ig_accum + contribution
 
-ig = ig_accum / N_STEPS         # [B, S, hidden]
-saliency = ig.sum(dim=-1)       # [B, S]
+ig = (1 - ALPHA_START) * ig_accum / N_STEPS   # path length x mean gradient
+saliency = ig.sum(dim=-1)                     # [B, S]
 ```
+
+`(1 - ALPHA_START)` is the length of the path being integrated. Drop it and every
+attribution is inflated by `1 / (1 - ALPHA_START)`, which the completeness check
+below will report as a constant relative error.
 
 **Always check completeness.** IG's defining axiom is that the attributions sum to
 the change in the metric across the path. If they don't, the result is an artifact —
@@ -161,10 +170,10 @@ this is the only thing that distinguishes a converged run from the divergent one
 above, and it costs three lines:
 
 ```python
-def F_at(alpha):
+def F_at(alpha):                       # scale whatever the IG loop scaled
     with model.trace(prompt):
-        act = model.transformer.h[LAYER].output
-        model.transformer.h[LAYER].output = act * alpha
+        embeds = model.transformer.wte.output
+        model.transformer.wte.output = embeds * alpha
         value = model.lm_head.output[:, -1, target].save()
     return value          # `return` *inside* the block is a SyntaxError -- the
                           # body is recompiled at module level, not as a function
@@ -174,11 +183,15 @@ target_delta = F_at(1.0).item() - F_at(ALPHA_START).item()
 print(f"completeness: {total:.4f} vs {target_delta:.4f}")   # want these to match
 ```
 
+`F_at` has to scale the same activation the loop scaled, at the same module — a
+completeness check against a different module measures nothing.
+
 **Batch the steps.** The alpha steps don't interact, so put several in one batch and
 let `metric.sum().backward()` give you per-row gradients — 14x faster per step than
 one trace per alpha on GPT-2, for a few hundred MiB:
 
 ```python
+alphas = ALPHA_START + (1 - ALPHA_START) * (torch.arange(N_STEPS) + 0.5) / N_STEPS
 chunk = alphas[s : s + 16]                       # 16 is a reasonable knee
 with model.trace([prompt] * len(chunk)):
     act = model.transformer.h[LAYER].output      # rows identical

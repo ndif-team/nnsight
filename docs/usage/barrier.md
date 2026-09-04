@@ -1,6 +1,6 @@
 ---
 title: Barrier
-one_liner: Cross-invoke synchronization point for handing values across invokes that touch the same module.
+one_liner: Cross-invoke synchronization point for handing a value from one invoke to another.
 tags: [usage, batching, synchronization]
 related: [docs/usage/invoke-and-batching.md, docs/usage/access-and-modify.md, docs/usage/trace.md]
 sources: [src/nnsight/intervention/barrier.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/interleaver.py]
@@ -19,17 +19,24 @@ and neither block can see the other's progress.
 calls it; each waits, and the last to arrive releases them all. So everything
 written **above** a barrier has happened before anything written **below** one.
 
-Reach for it whenever **two (or more) invokes hand a value across the same
-module**.
+## When to use
 
-## When to use / when not to use
+A block can only read a name another block bound once it has parked at a location
+the model reaches after the binding — the rule is in
+[invoke-and-batching.md](invoke-and-batching.md#cross-invoke-value-sharing). A
+barrier is what you use when it cannot get there:
 
-- Use whenever a later invoke reads a value an earlier invoke produced. This holds
-  even when the two invokes touch *different* modules: `module.output[...] = donor`
-  evaluates `donor` before the worker parks, so the name has to be bound by then
-  regardless of module order, and without a barrier it isn't
-  (see [gotchas/cross-invoke.md](../gotchas/cross-invoke.md)).
-- Don't use as a substitute for `tracer.stop()` or `module.skip()`.
+- **The consumer writes.** `module.output[...] = donor` evaluates `donor` before
+  the attribute access parks the worker, so the write itself never buys the
+  consumer a park, whichever module it writes to.
+- **The consumer has to act at or before the producer's location.** The embedding
+  transfer below is the extreme case: `wte` is the first module, so there is
+  nothing earlier to park on.
+
+A read-only consumer that *can* park past the producer needs no barrier. Reach for
+one anyway whenever the block writes: park-past depends on where two lines sit
+relative to each other, and inserting a line above the read turns it into a
+`NameError`.
 
 ## Canonical pattern (embedding transfer)
 
@@ -56,11 +63,12 @@ prompt's embeddings — it produces the same continuation.
 
 ## Why a barrier is required here
 
-Both invokes touch `transformer.wte.output`. Without a barrier the second invoke's
-worker would try to swap in `embeddings` before the first worker had read it —
-`NameError`, because the name isn't bound yet. The barrier pins the ordering: the
-first invoke parks at its `barrier()` with `embeddings` already read, the second
-runs up to *its* `barrier()`, and the last one through releases both.
+`wte` is the first module the model reaches, so the receiving invoke has nowhere
+earlier to park: its first statement is the swap, and the swap reads `embeddings`
+before it parks at all. Without the barrier that read raises `NameError`, because
+the donor worker has not run yet. The barrier pins the ordering instead: the first
+invoke parks at its `barrier()` with `embeddings` already read, the second runs up
+to *its* `barrier()`, and the last one through releases both.
 
 ## More than two participants
 
@@ -143,8 +151,10 @@ Every invoke calls the barrier in every round, including rounds for sites it
 does not touch — a round only releases once all `n` participants arrive.
 
 **The failure to avoid** is hoisting the reads. If `source_b` reads `h[8]`
-*before* the first round, the model is driven past `h[5]` before `base` has
-written there, and the write raises `OutOfOrderError`:
+*before* the first round, the model is driven past `h[5]` before `base` can write
+there. `base` is then parked on a location the model has passed, never arrives at
+round one, and the run ends with `ValueError: A barrier was never reached by every
+block it waits for; check the count it was created with`:
 
 ```python
     with tracer.invoke(source_a):
@@ -162,27 +172,40 @@ still at site *i*.
 
 ## Gotchas
 
-- **`n` must equal the number of invokes that call `barrier()`.** If fewer arrive,
-  it never releases and the run ends with
-  `ValueError: A barrier was never reached by every block it waits for; check the
-  count it was created with`.
+- **`n` must equal the number of blocks that call `barrier()`.** Count too high and
+  the round never releases; the run does not hang, it ends with `ValueError: A
+  barrier was never reached by every block it waits for; check the count it was
+  created with`. That is also what you get when a block skips its `barrier()` on a
+  branch, or when an earlier mistake stops it from reaching the call at all.
+- **Counting too low is the dangerous direction.** `tracer.barrier(2)` called by
+  three blocks releases on the second arrival, before the producer has run, and the
+  consumer it let through reports `NameError: name 'donor' is not defined` — an
+  error that names a variable and points nowhere near the barrier. If a barriered
+  handoff raises `NameError`, recount the callers.
 - **The return value is called, not entered.** `barrier = tracer.barrier(n)` then
   `barrier()` — it is not a context manager.
 - **A barrier nobody calls is inert** — creating `tracer.barrier(n)` and never
   calling it is harmless.
-- **A barrier is per-trace.** Create it inside the `with model.trace()` block.
-- **An early `return` that skips a `barrier()` in one invoke hangs that round** —
-  every participant must reach it.
+- **Create the barrier inside the `with model.trace()` block.** The name lives in
+  the trace body and does not survive it. A `Barrier(n)` constructed by hand can be
+  passed into several traces, but one left holding waiters from a trace that raised
+  carries them into its next round.
 - **Not available on vLLM.** Each invoke there is a separate engine request,
-  scheduled independently, so the blocks never run against one forward — a barrier
-  could not release. `tracer.barrier(n)` raises `NotImplementedError` rather than
-  hanging.
+  scheduled independently, so the blocks never run against one forward and a
+  barrier could not release; `tracer.barrier(n)` raises `NotImplementedError`.
+  Hand values across with two traces instead, where a saved value ships with the
+  next block — see
+  [Passing values between invokes](../models/vllm.md#passing-values-between-invokes).
 - **Reading a later site too early breaks an earlier one.** With several sites,
   put each source's read *after* the rounds for every site before it; requesting
   a location is what advances the model. See above.
+- **A barrier inside `tracer.iter[...]` synchronizes each step**, not the whole
+  generation: every participant calls it once per iteration, and the handoff
+  repeats for every generated token.
 
 ## Related
 
-- [invoke-and-batching.md](invoke-and-batching.md)
+- [invoke-and-batching.md](invoke-and-batching.md) — the cross-invoke rule this
+  page synchronizes.
 - [access-and-modify.md](access-and-modify.md)
 - [trace.md](trace.md)

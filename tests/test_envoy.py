@@ -4,6 +4,8 @@ import torch
 import nnsight
 import torch.nn as nn
 
+from nnsight import NNsightDeprecationWarning
+
 from nnsight.intervention.envoy import Envoy, traceable
 
 
@@ -502,20 +504,20 @@ class TestDeprecatedIterAliases:
     def test_model_iter_warns_and_returns_iterations(self, envoy):
         from nnsight.intervention.iterator import Iterations
 
-        with pytest.warns(DeprecationWarning, match="model.iter"):
+        with pytest.warns(NNsightDeprecationWarning, match="model.iter"):
             iterations = envoy.iter
         assert isinstance(iterations, Iterations)
 
     def test_model_all_warns_and_returns_iterations(self, envoy):
         from nnsight.intervention.iterator import Iterations
 
-        with pytest.warns(DeprecationWarning, match=r"model\.all\(\)"):
+        with pytest.warns(NNsightDeprecationWarning, match=r"model\.all\(\)"):
             iterations = envoy.all()
         assert isinstance(iterations, Iterations)
 
     def test_all_warns_once(self, envoy):
         # all() builds the range directly, so only model.all() warns (not model.iter).
-        with pytest.warns(DeprecationWarning) as record:
+        with pytest.warns(NNsightDeprecationWarning) as record:
             envoy.all()
         assert sum("deprecated" in str(w.message) for w in record) == 1
 

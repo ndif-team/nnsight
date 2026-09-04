@@ -3,7 +3,7 @@ title: save() Called Outside a Trace
 one_liner: "ValueError: save() was called outside a trace — .save() / nnsight.save(x) only marks a value inside a `with model.trace(...):` block."
 tags: [error, setup, save]
 related: [docs/errors/cannot-access-outside-interleaving.md, docs/usage/save.md, docs/usage/trace.md]
-sources: [src/nnsight/tracing/tracer.py:161, src/nnsight/tracing/tracer.py:174]
+sources: [src/nnsight/tracing/tracer.py]
 ---
 
 # save() Called Outside a Trace
@@ -19,15 +19,11 @@ running.
 
 ## Cause
 
-`save` (`src/nnsight/tracing/tracer.py:161`) marks a value by identity to be
-returned once the outermost trace exits. That only means something inside a trace —
-a saved value is what the `with model.trace(...):` block hands back. Calling it with
-no trace running would mark into a saved set that is cleared before anything reads
-it, so instead of a silent no-op it is now an explicit error
-(`src/nnsight/tracing/tracer.py:174`, guarded on the per-thread trace depth being 0).
-
-> This is a behavior change from older nnsight, where `save()` outside a trace was
-> a silent no-op.
+`save` (`src/nnsight/tracing/tracer.py`) marks a value by identity to be returned
+once the outermost trace exits. That only means something inside a trace — a saved
+value is what the `with model.trace(...):` block hands back. Calling it with no
+trace running would mark into a saved set that is cleared before anything reads
+it, so the guard (on the per-thread trace depth being 0) raises instead.
 
 ## Fix
 
@@ -55,6 +51,23 @@ with model.trace("Hello"):
     doubled = (model.transformer.h[0].output * 2).save()   # save the product...
     # NOT:  x.save() * 2  — that returns x, and only x is saved
 ```
+
+## Marking is by identity, not by name
+
+`save` records `id(value)` and the block returns every local bound to a marked
+object. For distinct tensors that is exactly what you want. For a value Python
+interns — a small int, `True`, `None`, a short string — any *other* local in that
+block holding the same object comes back too:
+
+```python
+with model.trace("Hello"):
+    kept = nnsight.save(1)
+    unrelated = 1          # the same interned object; also bound after the block
+```
+
+Harmless, but worth recognizing when a name you never saved is defined after the
+block. It also means a `.save()` whose result you never bind has no local to come
+back under, so it does not appear in the results at all.
 
 ## Note for internal callers
 

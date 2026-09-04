@@ -1,8 +1,8 @@
 """A descriptor for a value the interleaver serves during a trace.
 
 An `eproperty` turns a plain attribute — ``model.h[0].output``,
-``tracer.result``, a source op's ``.input`` — into a hook into the run: reading it
-parks the worker until the model reaches that location and returns the value there;
+``tracer.result``, a source op's ``.input`` — into a handoff point in the run: reading
+it parks the worker until the model reaches that location and returns the value there;
 writing it swaps the worker's value in. The location is ``"{obj.path}.{key}"`` (or
 just ``key`` when the host has no ``path``, as for ``tracer.result``).
 
@@ -31,6 +31,28 @@ served and returns what the user reads, so an identity view is just
 
     with model.trace(prompt):
         model.attn.heads[:, 5] = 0                  # zero head 5; transform swaps it back
+
+Both callbacks work in the shape of the **location**, which is not always a bare
+tensor. ``key="output"`` on a tuple-returning module serves — and must be handed
+back — the whole tuple. ``key="input"`` always serves the raw ``(args, kwargs)``
+pair, the same value ``.inputs`` gives you, so the example above written against
+``c_proj``'s input destructures on the way in and repacks on the way out::
+
+    @eproperty(key="input")
+    def heads(self, value):
+        (x,), _ = value
+        ...
+
+    @heads.transform
+    def heads(self, value):
+        ...
+        return ((flat,), {})
+
+One failure mode is worth knowing before you meet it: an `eproperty` is a
+``property``, and a ``property`` getter that raises `AttributeError` falls through
+to ``__getattr__``. A preprocess that raises one — a typo, a wrong unpack — is
+swallowed and resurfaces as ``'Heads' object (nor its module) has attribute
+'heads'``, blaming the attribute rather than the line inside it.
 """
 
 from __future__ import annotations
@@ -69,7 +91,7 @@ class IEnvoy(Protocol):
 
 
 class eproperty(property):
-    """A hookable value on an interleaving host (Envoy, SourceEnvoy, tracer, ...).
+    """A served value on an interleaving host (Envoy, SourceEnvoy, tracer, ...).
 
     Define one by decorating a stub with ``@eproperty`` (or ``@eproperty(key=...)``);
     the stub is the `preprocess`. The host only needs a ``path`` attribute (and
@@ -149,7 +171,7 @@ class eproperty(property):
 
         The counterpart to a worker reading it: hands ``value`` to the interleaver at
         this location so a worker parked there is resumed with it. Used for values
-        the model produces outside a module hook — e.g. a driver feeding
+        the model produces outside any module — e.g. a driver feeding
         ``tracer.result``.
         """
         return obj.interleaver.handle(self._location(obj), value)

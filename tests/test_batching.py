@@ -235,6 +235,37 @@ class TestMultiInvokeSkip:
         assert mapping["k"].shape == (5, 3)
 
 
+class TestWholeTensorWrites:
+    """An invoke's rows are spliced back into the combined batch. A whole-tensor
+    write in a multi-invoke trace has to keep the row count it was served — the
+    splice is a plain cat, so what a wrong-height write does downstream is the
+    model's business, not checked here."""
+
+    @torch.no_grad()
+    def test_the_right_row_count_lands(self):
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.trace() as tracer:
+            with tracer.invoke(torch.randn(2, 8)):
+                envoy.fc1.output = torch.ones(2, 8)
+                a = envoy.fc1.output.save()
+            with tracer.invoke(torch.randn(3, 8)):
+                b = envoy.fc1.output.save()
+        assert a.shape == (2, 8) and bool((a == 1).all())
+        assert b.shape == (3, 8) and bool((b != 1).any())
+
+    @torch.no_grad()
+    def test_a_lone_invoke_may_change_its_rows(self):
+        # Nothing to splice into: one invoke *is* the batch, so a write is the
+        # whole value and may reshape it, leading dim included.
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.trace(torch.randn(2, 8)):
+            envoy.fc1.output = torch.ones(5, 8)
+            out = envoy.output.save()
+        assert out.shape == (5, 8)
+
+
 class TestCacheAcrossInvokes:
     """A cache belongs to the invoke it was opened in, so it records that invoke's
     own rows of the batch — narrowed the same way the invoke's reads are, not the

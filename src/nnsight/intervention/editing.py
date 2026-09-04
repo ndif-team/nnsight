@@ -2,8 +2,16 @@
 
 A normal trace runs the model once and forgets your interventions. *Editing*
 lets you record a block of interventions once and have it replayed automatically
-on every future trace of that envoy — no need to repeat it each time. Think of an
-edit as a permanent patch to the model's behavior.
+on every future trace of that envoy — no need to repeat it each time.
+
+The edit lives on the envoy, not in the module. Two boundaries follow from that,
+and both are silent. An edit stored on a child envoy is not replayed by a trace
+rooted at the parent, because
+[`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave] takes the run's
+mediators from the traced envoy's own ``_edits``; the parent's ``clear_edits``
+does not reach it either. And an edit only applies to work that goes through the
+interleaver: calling the wrapped ``torch.nn.Module`` directly runs the model as it
+was.
 
 By default [`Envoy.edit`][nnsight.intervention.envoy.Envoy.edit] leaves the original envoy clean and returns an
 edited copy, so you opt into the edited behavior through the copy that

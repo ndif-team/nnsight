@@ -1,3 +1,20 @@
+"""Traversal helpers for the arbitrary values a model hands us.
+
+Interventions deal in whatever a ``forward`` happens to return: a tensor, a tuple
+of them, a dataclass output holding a list of tuples. Every layer of nnsight ends
+up needing the same two things from such a value — visit each tensor in it, or
+rebuild it with each tensor replaced — without knowing its shape in advance. That
+is `apply`. Beside it live `to_import_path` and `from_import_path`, which name a
+class by where it can be imported from — the form a type takes when it has to
+cross a serialization boundary.
+
+The rule `apply` follows is that container nesting is free and object nesting is
+not: lists, tuples, dicts, sets and slices are traversed without limit and rebuilt
+by their own type (so a namedtuple stays a namedtuple), while stepping into a
+generic object spends one of ``n`` levels, because an arbitrary object graph has
+no bottom.
+"""
+
 from __future__ import annotations
 
 import importlib

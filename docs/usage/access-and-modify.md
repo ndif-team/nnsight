@@ -36,14 +36,19 @@ import torch
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 with model.trace("Hello world"):
-    hidden = model.transformer.h[-1].output.save()   # read
-
-    model.transformer.h[0].output[:] = 0             # in-place modify
-
     model.transformer.wte.output = torch.zeros_like(  # replacement
         model.transformer.wte.output
     )
+    model.transformer.h[0].output[:] = 0             # in-place modify
+
+    hidden = model.transformer.h[-1].output.save()   # read
+
+assert tuple(hidden.shape) == (1, 2, 768)
 ```
+
+The three lines are in that order because the embedding runs before block 0, which runs
+before block 11. Reading the last block first and then writing an earlier one raises
+`OutOfOrderError` — see [Forward-pass-order rule](#forward-pass-order-rule).
 
 ## In-place vs replacement
 
@@ -57,11 +62,38 @@ model.transformer.h[0].output[:] = 0
 model.transformer.h[0].output = my_new_tensor
 ```
 
-Both are verified: after `output[:] = 0` a later read of the same output returns all-zeros; after `wte.output = wte.output * 0` a later read of `wte.output` is all-zeros.
+Both take effect and they are not interchangeable. In-place mutates storage the forward pass
+already holds, so anything else aliasing that tensor sees the change; replacement hands the
+model a different object and leaves the original alone.
+
+One consequence catches people writing gradients: **a replacement that has no connection to
+the value it replaced cuts the graph.** `output = torch.zeros_like(output)` produces a tensor
+autograd has never seen, so the graph is cut at that point — with two different consequences.
+If every path is severed (you replaced a whole block's `.output`), a `.grad` read on anything
+captured upstream has nothing to wait for and fails with an object id for a location:
+
+```
+OutOfOrderError: '139932764543792.grad.i0' was requested but the model already ran past it
+```
+
+If other paths bypass the replaced module (an MLP or attention `.output` — the residual
+stream and sibling branches survive), upstream `.grad` reads **succeed** and silently return
+a gradient missing that module's path. Measured on gpt2: replacing `h[3].mlp.output` with a
+detached copy of the very same values leaves the forward pass bit-identical, yet moves the
+layer-0 gradient's norm from 125,659 to 130,349 — a 45% difference in L2, with no warning.
+
+`output[:] = 0` writes through the existing tensor and keeps the graph (the gradient is then
+zero, which is usually what you wanted). So is any replacement derived from the old value —
+`output = output * 0`, `output = output + steering`. Build the new value out of the old one,
+or write in place.
 
 ## Tuple outputs
 
 Some modules return a tuple. In the HuggingFace LLMs, the **attention module** returns `(attn_out, ...)`. (In current `transformers`, GPT-2 transformer *blocks* return a plain tensor — `model.transformer.h[0].output` is a tensor, not a tuple — but attention still returns a tuple. Check with `isinstance(module.output, tuple)` when unsure.)
+
+On GPT-2 that tuple is length 2 and its second element is `None` unless the model was loaded
+asking for attention weights — so it is a slot, not a value you can read. The recipes below
+carry it along without looking at it, which is what you want either way.
 
 ```python
 with model.trace("Hello world"):
@@ -89,6 +121,18 @@ with model.trace("Hello world"):
     # Set: repacks into the full (args, kwargs) for the model
     model.transformer.h[1].input = model.transformer.h[1].input * 0
 ```
+
+`.inputs` is assignable too, and it is the only way to edit anything past the first argument
+— you hand back the whole pair:
+
+```python
+with model.trace("Hello world"):
+    args, kwargs = model.transformer.h[3].inputs
+    model.transformer.h[3].inputs = ((args[0] * 0, *args[1:]), kwargs)
+    logits = model.output.logits.save()
+```
+
+That is exactly what `.input = value` does for you when the value is the first argument.
 
 ## Cloning before modification
 
@@ -120,14 +164,14 @@ To access modules out of order, use separate invokes — see `docs/usage/invoke-
 ```python
 with model.trace("The Eiffel Tower is in the city of"):
     hidden = model.transformer.h[-1].output
-    # Calling the envoy runs .forward() directly (no hooks), so this
+    # Calling the envoy runs the module with this trace stood down, so it
     # applies lm_head out of order WITHOUT re-triggering interleaving.
     logits = model.lm_head(model.transformer.ln_f(hidden))
     tok = logits[0, -1].argmax(dim=-1).save()
 # model.tokenizer.decode(tok) -> ' Paris'
 ```
 
-While interleaving, `Envoy.__call__` runs the module normally but stands the trace down, so nothing the call touches — the module or its submodules — serves a value or spends an occurrence. Pass `hook=True` to let the trace watch it too (its submodules become observable) — used for a module attached to the tree that isn't part of the real forward pass (an adapter/LoRA/SAE applied in an edit). See `Envoy.__call__`.
+While interleaving, `Envoy.__call__` runs the module normally but stands *this trace* down, so nothing the call touches — the module or its submodules — serves a value or spends an occurrence. The module's own PyTorch hooks still fire: `hook=` names whether nnsight watches the call, not whether the module runs its hooks. A `forward_hook` you registered on `ln_f` yourself fires twice in the block above — once in the real forward, once for the ad-hoc call. Pass `hook=True` to let the trace watch it too (its submodules become observable) — used for a module attached to the tree that isn't part of the real forward pass (an adapter/LoRA/SAE applied in an edit). See `Envoy.__call__`.
 
 ## Overloaded names
 
@@ -142,7 +186,8 @@ If a module's class has a submodule named `input`, `output`, `inputs`, etc. (e.g
 
 - Within an invoke, access modules in forward-pass order or hit `OutOfOrderError`. See `docs/errors/out-of-order-error.md`.
 - For tuple-returning modules, `module.output[0] = x` is a `__setitem__` on a tuple and fails. Use `module.output[0][:] = x` (in-place on the first element) or rebuild the tuple and assign to `module.output`.
-- Reading `.output` returns the real runtime tensor — `print`, `.shape`, `.mean()` all work; there is no proxy to unwrap.
+- Reading `.output` returns the real runtime tensor — `print`, `.shape`, `.mean()`, `.item()` all work; there is no proxy to unwrap.
+- Replacing an activation with a tensor built from scratch (`torch.zeros_like(...)`) severs autograd there: replace a whole block's output and upstream `.grad` reads fail loudly; replace a bypassed submodule's output (MLP, attention) and they succeed with silently partial gradients. Derive the replacement from the old value, or write in place.
 - Outside interleaving, `.output` raises `ValueError: Cannot access ... outside of interleaving`. Use `model.scan(...)` for shapes without execution.
 
 ## Related

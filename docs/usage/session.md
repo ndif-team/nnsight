@@ -1,3 +1,11 @@
+---
+title: Session
+one_liner: `model.session()` wraps several traces in one scope so values pass between them without `.save()`.
+tags: [usage, session, multi-trace]
+related: [docs/usage/trace.md, docs/usage/save.md, docs/usage/invoke-and-batching.md]
+sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/tracer.py]
+---
+
 # Session — share values across traces
 
 A **session** is a scope around several traces. A value read in one trace is
@@ -57,8 +65,24 @@ saved and returned.
 
 `.save()` inside a session marks a value to survive **the session**. A value that
 is never saved is usable in later traces but does not reach your code once the
-session exits — and calling `save()` with no session/trace active raises (see
-[save.md](save.md)).
+session exits: touching `h0` after the block above raises `UnboundLocalError:
+cannot access local variable 'h0' where it is not associated with a value`. The
+same two traces written without a session give `NameError` instead, at the second
+trace rather than after it. Calling `save()` with no session or trace active
+raises as well (see [save.md](save.md)).
+
+A value bound inside an **invoke** carries just as far as one bound in a plain
+trace:
+
+```python
+with model.session():
+    with model.trace() as tracer:
+        with tracer.invoke(P):
+            h = model.transformer.h[0].output
+    with model.trace(P):
+        diff = (model.transformer.h[0].output - h).abs().sum().save()
+# diff == 0.0
+```
 
 ## Remote sessions
 

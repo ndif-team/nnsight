@@ -140,16 +140,43 @@ class HuggingFaceModel(Remotable):
         checkpoint that cannot be split would otherwise load a full copy onto
         every rank and look like it worked.
 
+        ``_load`` is where the weights are, so with the default
+        ``dispatch=False`` the constructor returns and the refusal arrives at
+        ``.dispatch()``; ``_load_meta`` builds from the config alone and has
+        nothing to refuse yet.
+
         A subclass that builds the model some other way -- ``TransformersModel``
         goes through ``transformers.pipeline`` -- has to call this itself, since
         it does not reach the base's ``_load``. Reading the raw ``kwargs`` rather
         than a split-out subset is deliberate: ``distributed_config`` travels
         differently on each path, and a check that silently sees nothing is worse
         than no check.
-        """
-        from .tp import check_tp_request, requested_tp_size
 
-        tp_size = requested_tp_size(kwargs.get("distributed_config"))
+        A bare ``tp_plan="auto"`` counts as a request too: it names no degree of
+        its own -- transformers shards over whatever ranks the launcher provided
+        -- so the world size is the degree being asked for. A *custom* plan (a
+        dict of patterns) overrides the checkpoint's published plan, so the
+        published plan's limit says nothing about it; it passes unchecked.
+        """
+        from .tp import (
+            check_tp_request,
+            requested_expert_parallel,
+            requested_tp_size,
+        )
+
+        distributed = kwargs.get("distributed_config")
+        tp_size = requested_tp_size(distributed)
+        if tp_size is None and kwargs.get("tp_plan") == "auto":
+            import os
+
+            import torch.distributed as dist
+
+            world = (
+                dist.get_world_size()
+                if dist.is_available() and dist.is_initialized()
+                else int(os.environ.get("WORLD_SIZE", "1"))
+            )
+            tp_size = world if world > 1 else None
         if tp_size is None:
             # The ordinary path: no degree asked for, so no config to read.
             return
@@ -157,7 +184,9 @@ class HuggingFaceModel(Remotable):
         from transformers import AutoConfig
 
         check_tp_request(
-            AutoConfig.from_pretrained(repo_id, revision=self.revision), tp_size
+            AutoConfig.from_pretrained(repo_id, revision=self.revision),
+            tp_size,
+            requested_expert_parallel(distributed)
         )
 
     def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
@@ -273,10 +302,11 @@ class HuggingFaceModel(Remotable):
 
         Memoized because several of the questions a server asks before placing a
         model are all answered from this one object — its size, how many ways it
-        shards, what to show in a status — and each used to fetch it again. A
-        config is immutable for a pinned revision, and for an unpinned one the
-        answer is "whatever the branch said when this process first asked", which
-        is already true of every other read on this path.
+        shards, what to show in a status — so answering them one at a time costs
+        one Hub round-trip each. A config is immutable for a pinned revision, and
+        for an unpinned one the answer is "whatever the branch said when this
+        process first asked", which is already true of every other read on this
+        path.
 
         Returns ``None`` when the repo has no readable config.
 

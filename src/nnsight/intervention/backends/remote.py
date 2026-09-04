@@ -24,7 +24,7 @@ import json
 import sys
 import time
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional, Union
 
 from ...schema.config import CONFIG
 from ...schema.response import RESULT, ResponseModel, Status
@@ -150,6 +150,19 @@ class RemoteBackend(Backend):
         if tracer is not None and tracer.info is not None and tracer.info.frame is not None:
             push(tracer.info.frame, result)
 
+    @staticmethod
+    def parse(message: Union[str, bytes]) -> ResponseModel:
+        """Build a [`ResponseModel`][nnsight.schema.response.ResponseModel] from one websocket frame.
+
+        A status update arrives as JSON in a text frame. A COMPLETED response
+        may instead arrive as a binary frame — ``torch.save`` bytes whose
+        ``data`` is the result blob itself, sent when the server hands the
+        result back on the socket rather than staging it for download.
+        """
+        if isinstance(message, (bytes, bytearray)):
+            return ResponseModel.unpickle(bytes(message))
+        return ResponseModel.model_validate_json(message)
+
     def note(self, response: ResponseModel) -> bool:
         """Render a status update, raise on ERROR, and report whether it's final.
 
@@ -165,18 +178,26 @@ class RemoteBackend(Backend):
     def handle(self, response: ResponseModel) -> Optional[RESULT]:
         """Process a single status update, returning the result on COMPLETED.
 
-        Returns None for intermediate statuses. On COMPLETED the server sends a
-        presigned url on ``data``; download and load it into the result dict.
+        Returns None for intermediate statuses. On COMPLETED ``data`` is either
+        the result blob itself — the server sent it back on the response — or a
+        presigned url to download it from. Which one depends on the result's
+        size against the server's limit, so both have to be handled.
         """
         return self.download_result(response.data) if self.note(response) else None
 
     def download_result(self, url: Optional[str]) -> Optional[RESULT]:
-        """Stream and deserialize the result blob from a presigned url.
+        """Deserialize the result, downloading it first if it is not already here.
 
-        Downloads in chunks behind a tqdm progress bar (shown when remote logging
-        is enabled), then decompresses under the same flag the request was
-        compressed with and loads it with torch.load.
+        ``url`` is whatever COMPLETED carried: a presigned url to fetch, or the
+        result blob itself when the server sent it back on the response rather
+        than staging it. A url is downloaded in chunks behind a tqdm progress bar
+        (shown when remote logging is enabled); either way the bytes go to
+        [`finalize`][nnsight.intervention.backends.remote.RemoteBackend.finalize], which decompresses under the same flag the request
+        was compressed with and loads it with torch.load.
         """
+        if isinstance(url, (bytes, bytearray)):
+            return self.finalize(bytes(url))
+
         if not url:
             return None
 
@@ -209,14 +230,15 @@ class RemoteBackend(Backend):
     def finalize(self, content: bytes) -> RESULT:
         """Decompress (if the request was compressed) and load a result blob.
 
-        The shared tail of the sync and async downloads: everything after the bytes
-        are in hand.
+        The shared tail of every route the bytes can arrive by — downloaded from
+        a presigned url, or handed over on the response itself: everything after
+        the bytes are in hand.
         """
         import io
 
         import torch
 
-        self._log(f"result: {len(content):,} bytes downloaded")
+        self._log(f"result: {len(content):,} bytes")
         if self.compress:
             import zstandard as zstd
 
@@ -357,7 +379,7 @@ class RemoteBackend(Backend):
                 except websocket.WebSocketTimeoutException:
                     self.display.refresh()
                     continue
-                response = ResponseModel.model_validate_json(message)
+                response = self.parse(message)
                 result = self.handle(response)
                 if response.status == Status.COMPLETED:
                     return result
@@ -466,11 +488,20 @@ class AsyncRemoteBackend(RemoteBackend):
     async def receive(self) -> ResponseModel:
         """Await the next status update off the websocket (blocking recv in a thread)."""
         message = await asyncio.to_thread(self.connection.recv)
-        return ResponseModel.model_validate_json(message)
+        return self.parse(message)
 
     async def download(self, url: Optional[str]) -> Optional[RESULT]:
         """Async [`download_result`][nnsight.intervention.backends.remote.RemoteBackend.download_result]: stream the blob with an async client, then
-        hand it to the parent's shared decompress/load."""
+        hand it to the parent's shared decompress/load.
+
+        ``url`` is whatever COMPLETED carried: a presigned url to fetch, or the
+        result blob itself when the server sent it back on the response. Both
+        `resolve` and `stream` reach the result through here rather than through
+        `handle`, so the bytes case is answered here too.
+        """
+        if isinstance(url, (bytes, bytearray)):
+            return self.finalize(bytes(url))
+
         if not url:
             return None
 

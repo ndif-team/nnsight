@@ -84,11 +84,19 @@ class ParallelEnvoy(Envoy):
         into, outof = f"{self.path}.input", f"{self.path}.output"
 
         if fragments.fragmented(into):
-            args, kwargs = fragments.fragment(into, (args, kwargs))
+            # `split`, not the way back from a gather: the caller's tensor is
+            # whole because they are holding it, not because anything assembled
+            # it — and this call may be nested inside that location's own open
+            # handoff, whose record must stay untouched.
+            args, kwargs = fragments.split(into, (args, kwargs))
 
         result = super().__call__(*args, hook=hook, **kwargs)
 
         if fragments.fragmented(outof):
-            result = fragments.whole(outof, result)
+            # `whole` hands back ``(whole, undo)``. The undo exists to carry an
+            # edit back into the model's own forward; an ad-hoc call has no
+            # forward to return to — the whole *is* the return value — so it is
+            # dropped rather than applied.
+            result, _ = fragments.whole(outof, result)
 
         return result

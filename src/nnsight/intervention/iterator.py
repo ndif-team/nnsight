@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Iterator
 
 from greenlet import getcurrent
 
+from .. import NNsightDeprecationWarning
 from ..tracing.tracer import Tracer, push_result
 from ..tracing.util import Scope
 from .interleaver import OutOfOrderError
@@ -68,6 +69,15 @@ class Iterations(Tracer):
     than an error (see
     [`check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators]),
     keeping the values from every step that did run.
+
+    An end the user named — ``tracer.iter[:10]``, ``iter[2]``, ``iter[[0, 2, 4]]``
+    — that the run cannot supply ends the same way: cut short, with the same
+    warning. The loop is the user's own ``for`` statement and the worker is
+    parked inside its body, so the only way out is to unwind it — values saved
+    inside the loop are kept, and whatever the block does after the loop does
+    not run. The warning says so, and names what pins a generation to the
+    loop's count (``min_new_tokens=`` on transformers, ``min_tokens=`` /
+    ``ignore_eos=True`` on vLLM) for when the shortfall was not meant.
 
     A ``with tracer.iter[...]:`` block does the same thing and is deprecated; the
     loop moves inside `execute`, which re-runs the block per step. Prefer the
@@ -117,6 +127,7 @@ class Iterations(Tracer):
         (``stop is None``) keeps handing out steps indefinitely — the model
         stopping is what ends the loop, via a dangling final request. Whatever
         ``iteration`` was before the loop is restored on exit, so loops can nest.
+
         """
         # The loop body runs inside the worker greenlet, which carries a weakref
         # to its own mediator (set in Mediator.start).
@@ -146,13 +157,26 @@ class Iterations(Tracer):
         [`OutOfOrderError`][nnsight.intervention.interleaver.OutOfOrderError] into it once the
         run finishes — caught here, so the reached steps' saved values are kept.
         """
-        warnings.warn(
-            "`with tracer.iter[...]:` is deprecated; use "
-            "`for step in tracer.iter[...]:` instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         frame = self.info.frame
+        # `warn_explicit` against the captured `with` line, not `warn(stacklevel=N)`:
+        # `execute` is reached from the outer tracer's `__exit__` by way of a
+        # backend, so no fixed number of frames up is the user's — and a warning
+        # pointing into nnsight names no block to rewrite. A nested block runs in
+        # a `Scope`, which reaches the module's names only through `__missing__`;
+        # `warn_explicit` reads `module`/`registry` as plain dicts, and a `module`
+        # of None makes it drop the warning outright, so unwrap to the real globals.
+        glbls = frame.f_globals
+        if isinstance(glbls, Scope):
+            glbls = glbls.glbls
+        warnings.warn_explicit(
+            "The `with tracer.iter[...]:` / `with tracer.all():` block form is "
+            "deprecated; use `for step in tracer.iter[...]:` instead.",
+            NNsightDeprecationWarning,
+            frame.f_code.co_filename,
+            self.node.lineno,
+            module=glbls.get("__name__", frame.f_code.co_filename),
+            registry=glbls.setdefault("__warningregistry__", {}),
+        )
         mediator: Mediator = getcurrent().mediator()
         previous = mediator.iteration
 
