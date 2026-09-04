@@ -83,8 +83,8 @@ import torch
 
 def attention_source_call(attention, family):
     names = {
-        "gpt2": ("attention_interface_0",),
-        "pythia": ("attention_interface_0", "unknown_0"),
+        "gpt2": ("attention_interface_2", "attention_interface_0"),
+        "pythia": ("attention_interface_2", "attention_interface_0", "unknown_0"),
     }
     if family not in names:
         raise ValueError(f"Unsupported AtP* model family: {family}")
