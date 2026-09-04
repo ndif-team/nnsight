@@ -39,6 +39,7 @@ Multiple prompts, multiple invokes, attribution in one batch.
 
 - [multi-prompt-comparison](multi-prompt-comparison.md) — Multiple `tracer.invoke(...)` in one trace, empty invokes for batch-wide ops, and `tracer.barrier(n)` for cross-invoke sharing.
 - [attribution-patching](attribution-patching.md) — Linear approximation of activation patching from corrupt-run gradients times clean-vs-corrupt activation differences.
+- [atp-star](atp-star.md) — Tested building blocks for Q/K correction, GradDrop, and exact verification of attribution-patching rankings.
 
 ## Gradients
 

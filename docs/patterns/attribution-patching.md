@@ -2,7 +2,7 @@
 title: Attribution Patching
 one_liner: Linear approximation of activation patching - one clean forward, one corrupt forward+backward, then `(act_clean - act_corrupt) * grad_corrupt` per component.
 tags: [pattern, interpretability, gradients, attribution, patching]
-related: [docs/usage/backward-and-grad.md, docs/patterns/activation-patching.md, docs/patterns/gradient-based-attribution.md]
+related: [docs/usage/backward-and-grad.md, docs/patterns/activation-patching.md, docs/patterns/gradient-based-attribution.md, docs/patterns/atp-star.md]
 sources: [src/nnsight/intervention/backward.py, src/nnsight/intervention/envoy.py]
 ---
 
@@ -184,6 +184,7 @@ See `docs/usage/session.md`.
 ## Related
 
 - [activation-patching](activation-patching.md) — the exact (slower) operation this approximates.
+- [atp-star](atp-star.md) — Q/K and residual-cancellation corrections for reducing false negatives.
 - [gradient-based-attribution](gradient-based-attribution.md)
 - `docs/usage/backward-and-grad.md`
 - https://nnsight.net/notebooks/tutorials/attribution_patching/
