@@ -129,6 +129,13 @@ with model.trace() as tracer:
             g_b = b.grad.norm().save()
 ```
 
+Each invoke still gets its own gradient: the loss inside an invoke is built from that
+invoke's rows, so the backward only reaches those rows.
+
+If you do not need the gradients together, give each backward pass its own
+`model.trace()`. That frees the graph between passes and costs less memory than
+retaining it.
+
 ---
 
 ## No gradients inside `model.generate()`
