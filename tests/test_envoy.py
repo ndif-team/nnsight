@@ -337,6 +337,28 @@ class TestRename:
     # Aliases bind with `object.__setattr__`, so before these checks anything
     # already under the name was overwritten in silence.
 
+    def test_alias_shadowing_envoy_state_raises(self, module):
+        # `path`, `interleaver` and the rest are set in `__init__`, so they are
+        # instance attributes rather than class ones — the class-namespace scan
+        # never saw them, and an alias overwrote them in silence.
+        for state in ("path", "interleaver", "_module"):
+            with pytest.raises(ValueError, match="would shadow"):
+                Envoy(module, rename={"head": state})
+
+    def test_alias_shadowing_a_module_attribute_raises(self, module):
+        # An alias lands in the envoy's `__dict__`, which wins over the
+        # `__getattr__` fallthrough — so it hides the wrapped model's own name
+        # with nothing said. `eval` is `nn.Module`'s; `training` is its state.
+        for owned in ("eval", "training", "parameters"):
+            with pytest.raises(ValueError, match="would shadow"):
+                Envoy(module, rename={"head": owned})
+
+    def test_a_name_the_module_does_not_have_is_fine(self, module):
+        # The check is the module's own surface, not a blocklist: a name it
+        # never answered to is still a usable alias.
+        envoy = Envoy(module, rename={"head": "readout"})
+        assert envoy.readout.path == "model.head"
+
     def test_alias_shadowing_a_sibling_child_raises(self, module):
         # `head` and `embed` both exist; aliasing one to the other's name would
         # leave the original in the tree but unreachable by name, so an

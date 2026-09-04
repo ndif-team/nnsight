@@ -122,9 +122,10 @@ You can also index a renamed `ModuleList` entry by its alias string:
   there is no post-hoc alias API.
 - **An alias that would shadow something raises at construction.** Aliases bind
   as plain attributes, so a name that is already taken — an `Envoy` attribute
-  (`output`, `input`, `trace`, ...), a sibling module, or an alias an earlier
-  key already claimed — would leave the original in the tree but unreachable by
-  name. That is reported when the model is built rather than surfacing later as
+  (`output`, `input`, `trace`, ...), a sibling module, an alias an earlier key
+  already claimed, or a name on the **wrapped model** (`config`, `weight`,
+  `eval`, and every other `nn.Module` attribute) — would leave the original
+  reachable only through the tree, not by name. That is reported when the model is built rather than surfacing later as
   an intervention landing on the wrong module:
 
   ```
