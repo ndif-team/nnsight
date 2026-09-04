@@ -10,6 +10,7 @@ encoder models, plus the pipeline's own input validation being inherited.
 import pytest
 import torch
 
+from nnsight.intervention.envoy import Envoy
 from nnsight.modeling.transformers import TransformersModel
 
 MASKED_LM = "hf-internal-testing/tiny-random-BertForMaskedLM"
@@ -151,3 +152,52 @@ class TestFeatureExtraction:
             with tracer.invoke("a longer piece of input text"):
                 b = embedder.output.last_hidden_state.save()
         assert a.shape[0] == 1 and b.shape[0] == 1
+
+
+class TestAttentionsOutputSubmodule:
+    """BERT names a submodule `output`, on both the attention block and the layer.
+
+    nnsight serves a value of that name on every module, so the submodule is
+    mounted as `.E_output` and `.output` keeps its usual meaning. Moving the
+    envoy rather than the served value is what lets the envoy stay a plain
+    `Envoy`: overriding the descriptor per instance meant a synthesized subclass
+    belonging to no module, which cloudpickle could not pickle by reference, so
+    no encoder could be traced remotely.
+    """
+
+    @pytest.fixture
+    def attention(self, bert):
+        return bert.bert.encoder.layer[0].attention
+
+    def test_the_envoy_is_not_a_synthesized_class(self, attention):
+        import cloudpickle
+
+        assert type(attention) is Envoy
+        assert cloudpickle.loads(cloudpickle.dumps(type(attention))) is Envoy
+
+    def test_a_remote_trace_serializes(self, bert):
+        with bert.trace("The Eiffel Tower is in [MASK].", remote="local"):
+            logits = bert.output.logits.save()
+        assert logits.shape[0] == 1
+
+    def test_the_submodule_moved_but_kept_its_path(self, bert, attention):
+        assert isinstance(attention.E_output, Envoy)
+        assert attention.E_output.path.endswith("encoder.layer.0.attention.output")
+        assert (attention.E_output.path, attention.E_output) in bert.named_modules()
+
+    def test_the_two_names_reach_different_values(self, bert, attention):
+        with bert.trace("The Eiffel Tower is in [MASK]."):
+            submodule = attention.E_output.output.save()
+            block = attention.output.save()
+        # The block returns what its `output` submodule produced, wrapped in the
+        # tuple its caller unpacks, so one is the other's first element.
+        assert torch.equal(submodule, block[0])
+
+    def test_the_setter_reaches_the_block(self, bert, attention):
+        with bert.trace("The Eiffel Tower is in [MASK]."):
+            base = bert.output.logits.save()
+        with bert.trace("The Eiffel Tower is in [MASK]."):
+            served = attention.output
+            attention.output = (torch.zeros_like(served[0]), *served[1:])
+            zeroed = bert.output.logits.save()
+        assert not torch.equal(base, zeroed)

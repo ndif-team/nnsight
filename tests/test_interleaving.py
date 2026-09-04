@@ -7,6 +7,7 @@ from greenlet import getcurrent
 
 from nnsight.intervention.barrier import Barrier
 from nnsight.intervention.envoy import Envoy
+from nnsight.intervention.eproperty import eproperty
 from nnsight.intervention.interleaver import (
     Event,
     Interleaver,
@@ -953,38 +954,85 @@ class TestOverloadedMount:
     @pytest.fixture
     def collide(self):
         torch.manual_seed(0)
-        with pytest.warns(UserWarning, match="shadows"):
+        with pytest.warns(UserWarning, match="already serves"):
             return Envoy(Collide())
 
-    def test_submodule_keeps_the_name(self, collide):
-        assert isinstance(collide.block.output, Envoy)
-        assert collide.block.output.path == "model.block.output"
+    def test_the_served_value_keeps_the_name(self, collide):
+        x = torch.randn(2, 8)
+        ref = collide._module(x)
+        with collide.trace(x):
+            block_out = collide.block.output.save()
+        assert torch.allclose(block_out, ref)
 
-    def test_submodule_is_navigable(self, collide):
-        # weight lives on the real submodule, reachable through the shadowed name
-        assert collide.block.output.weight.shape == (8, 8)
+    def test_the_submodule_moves(self, collide):
+        assert isinstance(collide.block.E_output, Envoy)
+        assert collide.block.E_output.path == "model.block.output"
+        # weight lives on the real submodule, reachable through the moved name
+        assert collide.block.E_output.weight.shape == (8, 8)
+
+    def test_the_submodule_keeps_its_path(self, collide):
+        assert ("model.block.output", collide.block.E_output) in collide.named_modules()
+        assert collide.get("block.E_output") is collide.block.E_output
+
+    def test_a_rename_uses_the_attribute(self):
+        torch.manual_seed(0)
+        with pytest.warns(UserWarning, match="already serves"):
+            renamed = Envoy(Collide(), rename={"block.E_output": "inner"})
+        assert renamed.inner is renamed.block.E_output
+
+    def test_a_rename_onto_a_served_value_raises(self):
+        # `rename` is written against the attribute, so a moved submodule is
+        # renamed as `block.E_output`. The plain name is the served value, and
+        # reading one outside a trace raises, which is what surfaces here.
+        torch.manual_seed(0)
+        with pytest.raises(ValueError, match="outside of interleaving"):
+            with pytest.warns(UserWarning, match="already serves"):
+                Envoy(Collide(), rename={"block.output": "inner"})
 
     def test_no_duplicate_children(self, collide):
         names = [c.path.rsplit(".", 1)[-1] for c in collide.block._children]
         assert sorted(names) == ["attn", "output"]
 
-    def test_nnsight_proxy_relocated(self, collide):
+    def test_the_repr_shows_the_attribute(self, collide):
+        # It is recorded as an alias, so the repr's own alias/name labelling
+        # picks it up with no special case.
+        assert collide.block._aliases["E_output"] == "output"
+        assert "(E_output/output):" in repr(collide.block)
+
+    def test_a_rename_cannot_claim_the_moved_name(self):
+        torch.manual_seed(0)
+        with pytest.raises(ValueError, match="already bound here from 'output'"):
+            with pytest.warns(UserWarning, match="already serves"):
+                # resolves on `block`, the envoy that moved a child aside
+                Envoy(Collide(), rename={"attn": "E_output"})
+
+    def test_both_values_are_reachable(self, collide):
         x = torch.randn(2, 8)
         ref = collide._module(x)
         with collide.trace(x):
-            # the submodule's own output (== the block output here)
-            sub = collide.block.output.output.save()
-            # and the block's forward output via the relocated nns_output
-            block_out = collide.block.nns_output.save()
+            # the submodule's own output, which the block then returns
+            sub = collide.block.E_output.output.save()
+            block_out = collide.block.output.save()
         assert torch.allclose(sub, ref)
         assert torch.allclose(block_out, ref)
 
-    def test_nns_setter_still_intervenes(self, collide):
+    def test_the_setter_still_intervenes(self, collide):
         x = torch.randn(2, 8)
         with collide.trace(x):
-            collide.block.nns_output = torch.zeros(2, 8)
+            collide.block.output = torch.zeros(2, 8)
             out = collide.output.save()
         assert (out == 0).all()
+
+    def test_the_envoy_class_pickles(self, collide):
+        # Why the submodule moves rather than the served value: overriding the
+        # descriptor per instance meant a synthesized subclass belonging to no
+        # module, so cloudpickle fell back to pickling it by value and choked on
+        # the descriptor inside. Remote execution was unreachable for every
+        # BERT-style model.
+        import cloudpickle
+
+        assert type(collide.block) is Envoy
+        assert cloudpickle.loads(cloudpickle.dumps(type(collide.block))) is Envoy
 
 
 class TestSession:

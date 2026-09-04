@@ -45,6 +45,7 @@ after a later one has already run raises
 from __future__ import annotations
 
 import functools
+import inspect
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
@@ -166,10 +167,26 @@ class Envoy:
         # Children exist now, so multi-component alias paths (e.g. "h.0") resolve.
         self._bind_aliases()
 
+    #: Prefix for a submodule mounted under a name nnsight already serves.
+    OVERLOAD_PREFIX = "E_"
+
     def _wrap_envoy(self, name: str, module: torch.nn.Module) -> Envoy:
         # Mirror a module already on self._module as an envoy child. __dict__.get
         # (not getattr) so this is safe to call from __getattr__.
-        existing = self.__dict__.get(name)
+        #
+        # A submodule may be named after a value nnsight serves: every BERT-style
+        # encoder has an `output` module. `.output` is the module's forward output
+        # on every other module in the tree, so the submodule is what moves, to
+        # `E_output`, keeping its own path. Moving the envoy is what avoids
+        # overriding the descriptor per instance, which took a subclass
+        # synthesized for that envoy; it belonged to no module, so it could not be
+        # pickled, so such a model could not run remotely.
+        attribute = name
+        if not name.startswith("_") and inspect.isdatadescriptor(
+            getattr(Envoy, name, None)
+        ):
+            attribute = f"{self.OVERLOAD_PREFIX}{name}"
+        existing = self.__dict__.get(attribute)
         if isinstance(existing, Envoy):
             self._children.remove(existing)
         child_path = f"{self.path}.{name}"
@@ -179,8 +196,8 @@ class Envoy:
         # it once, so the module has one location and either spelling reads it.
         shared = self.interleaver.envoys.get(id(module))
         if shared is not None and shared is not self:
-            self._aliases[name] = shared.path
-            object.__setattr__(self, name, shared)
+            self._aliases[attribute] = shared.path
+            object.__setattr__(self, attribute, shared)
             return shared
         envoy = self._resolve_envoy_class(module, child_path)(
             module,
@@ -190,47 +207,17 @@ class Envoy:
             envoys=self._envoys,
         )
         self._children.append(envoy)
-        # A submodule whose name shadows an Envoy attribute (e.g. BERT's `output`)
-        # would otherwise be masked by that attribute — or trip its setter on the
-        # object.__setattr__ below. Give the submodule the name and relocate the
-        # nnsight attribute to `nns_<name>`.
-        if not name.startswith("_") and hasattr(Envoy, name):
-            self._mount_overloaded(name, envoy)
-        else:
-            object.__setattr__(self, name, envoy)
-        return envoy
-
-    def _mount_overloaded(self, name: str, envoy: Envoy) -> None:
-        # Keep `name` for the submodule and move nnsight's attribute to `nns_name`.
-        # The override lives on a per-instance subclass so only this envoy is
-        # affected; all its siblings and the shared Envoy class are untouched.
-        warnings.warn(
-            f"Module '{self.path}' has a submodule named '{name}', which shadows "
-            f"Envoy's '{name}'. The submodule keeps '.{name}'; nnsight's '{name}' "
-            f"is available as '.nns_{name}' on this module."
-        )
-
-        cls = type(self)
-        if not cls.__name__.endswith("__Overloaded"):
-            cls = type(f"{cls.__name__}__Overloaded", (cls,), {})
-            object.__setattr__(self, "__class__", cls)
-
-        original = getattr(Envoy, name)
-        setattr(cls, f"nns_{name}", original)
-
-        # A property is a data descriptor (it wins over the instance dict), so a
-        # plain stored child would still be masked — override `name` on the
-        # subclass to hand back the stored child, keeping the original setter so
-        # `envoy.name = value` still writes the intervention (for output/input).
-        if isinstance(original, property):
-            setattr(
-                cls,
-                name,
-                property(lambda self, _n=name: self.__dict__[_n], original.fset, original.fdel),
+        if attribute != name:
+            # Record it the way `rename` records its own, so the repr labels the
+            # child `E_output/output` and an alias cannot later claim the name.
+            self._aliases[attribute] = name
+            warnings.warn(
+                f"Module '{self.path}' has a submodule named '{name}', which "
+                f"nnsight already serves on every module. The submodule is "
+                f"'.{attribute}' here; '.{name}' stays the module's output."
             )
-        # A method is not a data descriptor, so the stored child already wins;
-        # nothing more to override.
-        self.__dict__[name] = envoy
+        object.__setattr__(self, attribute, envoy)
+        return envoy
 
     def _bind_aliases(self) -> None:
         """Bind each ``rename`` alias as an attribute pointing at the same Envoy.

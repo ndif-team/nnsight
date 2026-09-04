@@ -175,7 +175,17 @@ While interleaving, `Envoy.__call__` runs the module normally but stands *this t
 
 ## Overloaded names
 
-If a module's class has a submodule named `input`, `output`, `inputs`, etc. (e.g. BERT's `output`), the submodule keeps that name and nnsight's property moves to `.nns_output` (with a warning). See `Envoy._mount_overloaded`.
+Some models have a submodule named `output` or `input`: every BERT-style encoder gives its attention block an `output` module. The submodule moves to `.E_output`, with a warning, so `.output` reads the module's forward output here as it does everywhere else:
+
+```python
+attention = model.encoder.layer[0].attention
+
+with model.trace("Hello World"):
+    whole_block = attention.output.save()        # the attention block's output
+    inner = attention.E_output.output.save()     # the submodule, and its own output
+```
+
+The submodule keeps its real path, so `named_modules()` still lists it as `...attention.output`. Everything that reaches it by name goes through the attribute, so `get("...attention.E_output")` and `rename={"...attention.E_output": ...}` use the new name.
 
 ## Module skipping / source access
 

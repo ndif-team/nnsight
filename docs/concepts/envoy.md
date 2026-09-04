@@ -214,7 +214,9 @@ envoy, and `_aliases` on the aliasing parent records where it points.
 
 ## Overloaded submodule names
 
-If a submodule's name shadows an `Envoy` attribute (e.g. BERT's `output`), the submodule keeps the name and nnsight's attribute moves to `nns_<name>` (a per-instance subclass), with a warning (`_mount_overloaded`, `envoy.py`).
+A submodule may be named after a value nnsight serves: every BERT-style encoder has an `output` module. The submodule mounts as `E_<name>` and `.output` keeps its usual meaning, with a warning (`_mount_name`, `envoy.py`). The envoy that moved keeps its own path, so `named_modules()` still reports `...attention.output`, and the repr labels it `E_output/output`, the same `alias/name` form a `rename` uses. Attribute access is the only spelling that moved, and `get()` and `rename` go through it, so both are written against `E_output`. The plain name reaches the served value, which raises outside a trace, so a `rename` written against it fails at construction.
+
+nnsight used to do the opposite, keeping the name for the submodule and overriding the descriptor on a subclass synthesized per envoy. That class belonged to no module, so cloudpickle pickled it by value and choked on the descriptor inside, and no BERT-style model could run remotely.
 
 ## Gotchas
 
