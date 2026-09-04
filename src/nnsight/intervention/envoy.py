@@ -244,6 +244,19 @@ class Envoy:
         leading dot is a no-op — path components are matched by name (an empty
         first component is skipped, mirroring `nnsight.util.fetch_attr`).
 
+        A key that does not resolve here is skipped, not an error: one ``rename``
+        is meant to be reusable across architectures that spell the same module
+        differently (``{"attn": "att", "self_attn": "att"}``), and on any given
+        envoy only one of those spellings exists.
+
+        An alias that would *displace* something is an error, because there is
+        no spelling of it that works. Three things can be underneath: another
+        alias from an earlier key, a name on the envoy (a child, its own state,
+        or an `Envoy` attribute like ``output`` or ``trace``), or a name on the
+        wrapped module — an alias lands in ``__dict__`` and so wins over the
+        ``__getattr__`` fallthrough, silently shadowing the model's own
+        ``config``, ``weight``, ``eval`` and the rest.
+
         Aliases are ordinary attributes referencing the *same* child object (not
         copies, and not added to `_children`), so ``__getattr__`` needs no
         alias branch, iteration doesn't double-count, and re-pointing the tree on
@@ -260,6 +273,42 @@ class Envoy:
             if not isinstance(target, Envoy):
                 continue
             for alias in [aliases] if isinstance(aliases, str) else aliases:
+                # Already pointing at this very envoy: nothing is displaced.
+                # Covers a key aliased to its own name (``{"attn": "attn"}``,
+                # which a cross-architecture dict pairs with
+                # ``{"self_attn": "attn"}``) and two keys reaching one module
+                # through tied weights.
+                if self.__dict__.get(alias) is target:
+                    continue
+
+                # What the name would displace, in the order lookup would find
+                # it. `hasattr` is right for the module and wrong for the envoy:
+                # an eproperty's `__get__` raises outside interleaving, so the
+                # envoy's own classes are scanned by namespace instead.
+                bound = self._aliases.get(alias)
+                if bound is not None:
+                    displaced = f"the alias already bound here from {bound!r}"
+                elif alias in self.__dict__:
+                    displaced = "a child module or attribute of that name"
+                elif any(alias in vars(klass) for klass in type(self).__mro__):
+                    displaced = f"the `{type(self).__name__}.{alias}` attribute"
+                elif hasattr(self._module, alias):
+                    # The same test `__getattr__` gates its fallthrough on, so
+                    # this is the shadowing surface exactly: every name it finds
+                    # is one `envoy.<name>` answers to today.
+                    displaced = "an attribute of the wrapped module"
+                else:
+                    displaced = None
+
+                if displaced is not None:
+                    raise ValueError(
+                        f"`rename` alias {alias!r} for {path!r} would shadow "
+                        f"{displaced} on `{self.path}`. Aliases are bound as plain "
+                        f"attributes, so this would make the original unreachable "
+                        f"by name while leaving it in the tree. Pick a different "
+                        f"alias."
+                    )
+
                 object.__setattr__(self, alias, target)
                 self._aliases[alias] = path
 
