@@ -252,11 +252,18 @@ class DiffusionModel(HuggingFaceModel):
         requested = automodel if automodel is not None else self.automodel
         if requested is not None:
             chosen = self._pipeline_class(requested)
-            # `DiffusionPipeline` itself is a subclass of `DiffusionPipeline`, so
-            # this has to test what was *asked for* rather than what
-            # `_pipeline_class` defaulted to, or the declared class is replaced by
-            # the abstract base and the pipeline comes out with no components.
-            if isinstance(chosen, type) and issubclass(chosen, diffusers.DiffusionPipeline):
+            # Only a *concrete* pipeline can assemble anything here. Two things
+            # cannot: an `AutoPipelineFor*`, which picks its class at load and
+            # refuses direct construction, and `DiffusionPipeline` itself, which
+            # is a subclass of itself but has no components of its own — building
+            # from it filters every component out and yields a pipeline with no
+            # `.components` at all. Both fall back to the declared class, which is
+            # what the caller would have got anyway.
+            if (
+                isinstance(chosen, type)
+                and issubclass(chosen, diffusers.DiffusionPipeline)
+                and chosen is not diffusers.DiffusionPipeline
+            ):
                 pipeline_cls = chosen
 
         expected = set(inspect.signature(pipeline_cls.__init__).parameters) - {"self"}

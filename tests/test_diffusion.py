@@ -4,10 +4,14 @@ Covers the lazy meta build, the envoy tree over the pipeline's module components
 the two run modes (both run the whole pipeline; ``trace`` defaults to one denoising
 step, ``generate`` to the pipeline's default), running a single component directly
 (``model.unet.trace(...)``), reading and modifying activations, ``seed=``
-reproducibility, and multi-prompt batching via ``DiffusionBatcher``
-(classifier-free-guidance doubling and ``num_images_per_prompt``).
+reproducibility, multi-prompt batching via ``DiffusionBatcher``
+(classifier-free-guidance doubling and ``num_images_per_prompt``), and
+``automodel=`` — the diffusers class the weights load through, which is what
+reaches a task other than the one the repo declares.
 """
 
+
+from types import SimpleNamespace
 
 import nnsight
 import pytest
@@ -48,6 +52,57 @@ def _grey():
     from PIL import Image
 
     return Image.new("RGB", (64, 64), (127, 127, 127))
+
+
+def _mask():
+    """A mask for the inpainting pipelines: a white square marks what to repaint."""
+    from PIL import Image
+
+    mask = Image.new("L", (64, 64), 0)
+    mask.paste(255, (16, 16, 48, 48))
+    return mask
+
+
+# Each `AutoPipelineFor*` that reaches a task on this repo's architecture
+# (stable-diffusion), the concrete class it picks, and the extra inputs that task
+# takes — built per call, since the pipelines consume the image. The fourth Auto
+# class, `AutoPipelineForText2Audio`, has no entry for this architecture and is
+# covered by `TestText2Audio`.
+AUTO_TASKS = [
+    ("AutoPipelineForText2Image", "StableDiffusionPipeline", dict),
+    (
+        "AutoPipelineForImage2Image",
+        "StableDiffusionImg2ImgPipeline",
+        lambda: dict(image=_grey(), strength=0.6),
+    ),
+    (
+        "AutoPipelineForInpainting",
+        "StableDiffusionInpaintPipeline",
+        lambda: dict(image=_grey(), mask_image=_mask()),
+    ),
+]
+AUTO_IDS = ["text2image", "image2image", "inpainting"]
+
+
+@pytest.fixture(scope="module", params=AUTO_TASKS, ids=AUTO_IDS)
+def auto(request):
+    """A lazily-built model loaded through one `AutoPipelineFor*`.
+
+    What the meta build produced is captured here, before any test dispatches it,
+    so the assertions about it don't depend on which test runs first.
+    """
+    import diffusers
+
+    name, concrete, inputs = request.param
+    model = DiffusionModel(REPO, automodel=getattr(diffusers, name), safety_checker=None)
+    return SimpleNamespace(
+        model=model,
+        name=name,
+        concrete=concrete,
+        inputs=inputs,
+        meta_class=type(model.pipeline).__name__,
+        meta_components=set(model.pipeline.components),
+    )
 
 
 def denoiser_inputs(model, batch=1):
@@ -180,35 +235,235 @@ class TestAutomodel:
         )
         assert type(model.pipeline).__name__ == "StableDiffusionImg2ImgPipeline"
 
-    def test_an_auto_class_resolves_per_architecture(self):
-        # `AutoPipelineForImage2Image` refuses to be constructed directly and
-        # picks its class at load, so the meta build falls back to the declared
-        # one. Both hold the same components, so the envoy tree stays valid.
+    def test_automodel_stays_out_of_the_load_kwargs(self):
+        # It's a keyword-only argument of __init__, so it never joins the kwargs
+        # replayed into `from_pretrained` on dispatch — where diffusers would
+        # reject it as an unexpected component name.
         from diffusers import AutoPipelineForImage2Image
 
         model = DiffusionModel(REPO, automodel=AutoPipelineForImage2Image,
                                safety_checker=None)
+        assert "automodel" not in model.kwargs
+        assert model.automodel is AutoPipelineForImage2Image
+
+    # `DiffusionPipeline` is a subclass of itself, so a guard that only asks
+    # "was an automodel requested, and is it a pipeline?" lets the abstract base
+    # through, and building from it filters every component out. Naming the
+    # default explicitly is what a caller writes when threading a class through a
+    # variable, so it has to mean the same as not naming one.
+    def test_naming_the_default_class_explicitly_is_the_default(self):
+        # `automodel=DiffusionPipeline` says exactly what `automodel=None` means,
+        # and is what a caller passing a class through a variable ends up with.
+        from diffusers import DiffusionPipeline
+
+        model = DiffusionModel(REPO, automodel=DiffusionPipeline, safety_checker=None)
         assert type(model.pipeline).__name__ == "StableDiffusionPipeline"
 
-        with model.trace(PROMPT, image=_grey(), strength=0.5, **KWARGS):
-            denoised = model.unet.output[0].save()
+    def test_the_default_class_explicitly_still_works_on_dispatch(self):
+        # The same argument on the eager path: `_load` calls `from_pretrained` on
+        # it, which is what the default does anyway, so this one is unaffected.
+        from diffusers import DiffusionPipeline
 
+        model = DiffusionModel(REPO, automodel=DiffusionPipeline, dispatch=True,
+                               safety_checker=None)
+        assert type(model.pipeline).__name__ == "StableDiffusionPipeline"
+
+
+class TestAutoPipelines:
+    """The `AutoPipelineFor*` classes, which pick a concrete class per architecture.
+
+    Three of the four reach a real task on this repo's weights (text-to-image,
+    image-to-image, inpainting); `AutoPipelineForText2Audio` has no entry for this
+    architecture and is covered by `TestText2Audio`. None of them can be
+    constructed directly, so the meta build falls back to the class the repo
+    declares — which is only safe while that class holds the same components, so
+    that is pinned here too.
+    """
+
+    @pytest.mark.parametrize("name", [task[0] for task in AUTO_TASKS], ids=AUTO_IDS)
+    def test_the_meta_build_falls_back_to_the_declared_class(self, name):
+        import diffusers
+
+        model = DiffusionModel(REPO, automodel=getattr(diffusers, name),
+                               safety_checker=None)
+        assert type(model.pipeline).__name__ == "StableDiffusionPipeline"
+        # The envoy tree is built from the components, so it has to be whole.
+        for component in ("unet", "vae", "text_encoder"):
+            assert hasattr(model, component)
+
+    @torch.no_grad()
+    def test_dispatch_loads_the_task_class(self, auto):
+        with auto.model.trace(PROMPT, **auto.inputs(), **KWARGS):
+            denoised = auto.model.unet.output[0].save()
+        assert auto.meta_class == "StableDiffusionPipeline"
+        assert type(auto.model.pipeline).__name__ == auto.concrete
+        assert denoised.shape[0] == 2  # classifier-free guidance doubles the batch
+
+    @torch.no_grad()
+    def test_the_task_class_holds_the_same_components(self, auto):
+        # The envoy tree is built once, off the meta pipeline, and re-pointed at
+        # the dispatched one. A task class that took a different set of components
+        # would leave envoys pointing at meta modules the real run never calls.
+        auto.model.dispatch()
+        assert set(auto.model.pipeline.components) == auto.meta_components
+
+    @torch.no_grad()
+    def test_an_intervention_changes_the_task_output(self, auto):
+        with auto.model.trace(PROMPT, **auto.inputs(), **KWARGS):
+            base = auto.model.output.save()
+        with auto.model.trace(PROMPT, **auto.inputs(), **KWARGS):
+            auto.model.unet.output[0][:] = 0
+            zeroed = auto.model.output.save()
+        assert not numpy.allclose(base.images[0], zeroed.images[0])
+
+    @torch.no_grad()
+    @pytest.mark.parametrize("repo,denoiser", ARCHITECTURES, ids=["flux", "sd3", "sdxl"])
+    def test_image_to_image_picks_the_class_for_each_architecture(self, repo, denoiser):
+        # The point of an Auto class over a concrete one: the same line reaches the
+        # image-to-image task on Flux, SD3 and SDXL, whose task classes differ.
+        from diffusers import AutoPipelineForImage2Image
+
+        model = DiffusionModel(repo, automodel=AutoPipelineForImage2Image)
+        components = set(model.pipeline.components)
+        with model.trace(PROMPT, image=_grey(), strength=0.6, **KWARGS):
+            denoised = getattr(model, denoiser).output[0].save()
+        assert type(model.pipeline).__name__.endswith("Img2ImgPipeline")
+        assert set(model.pipeline.components) == components
+        assert isinstance(denoised, torch.Tensor)
+
+
+class TestText2Audio:
+    """`AutoPipelineForText2Audio`, the fourth Auto class and the odd one.
+
+    There is no end-to-end test. The only tiny text-to-audio checkpoint on the Hub
+    (`dn6/dummy-audioldm2`, 8MB) does not load in this environment — its T5
+    tokenizer is a sentencepiece model that transformers 5 routes to a tiktoken
+    reader that rejects it — and AudioLDM2 itself calls
+    `GPT2Model._update_model_kwargs_for_generation`, removed in transformers 5, so
+    the pipeline does not run under plain diffusers either. Loaded by hand from a
+    patched copy it does reach nnsight intact: the tree carries the pipeline's
+    `unet` (an `AudioLDM2UNet2DConditionModel`), which traces and takes an
+    intervention. Its lazy path is unreachable for a separate reason — CLAP's
+    encoder calls `.item()` in its constructor, which a meta tensor refuses — so an
+    audio pipeline needs `dispatch=True` whatever `automodel=` says.
+
+    What holds without a checkpoint is below.
+    """
+
+    def test_it_has_no_entry_for_an_image_architecture(self):
+        # The refusal can only arrive at dispatch: the lazy build never consults
+        # the mapping, it falls back to the class the repo declares.
+        from diffusers import AutoPipelineForText2Audio
+
+        model = DiffusionModel(REPO, automodel=AutoPipelineForText2Audio,
+                               safety_checker=None)
+        assert type(model.pipeline).__name__ == "StableDiffusionPipeline"
+        with pytest.raises(ValueError, match="can't find a pipeline"):
+            model.dispatch()
+
+    def test_it_can_only_ever_pick_the_class_the_repo_declares(self):
+        # Where the image mappings hold a different class per task, every
+        # text-to-audio architecture has exactly one pipeline. So this Auto class
+        # resolves to the declared class and never changes the task — which makes
+        # the meta build's fallback to that class exactly right rather than merely
+        # component-compatible.
+        from diffusers.pipelines.auto_pipeline import (
+            AUTO_TEXT2AUDIO_PIPELINES_MAPPING,
+            _get_task_class,
+        )
+
+        for pipeline_cls in AUTO_TEXT2AUDIO_PIPELINES_MAPPING.values():
+            assert (
+                _get_task_class(AUTO_TEXT2AUDIO_PIPELINES_MAPPING, pipeline_cls.__name__)
+                is pipeline_cls
+            )
+
+
+class TestAutomodelErrors:
+    """What a name or class that can't load looks like, and when it is raised.
+
+    The lazy build sees only what it can construct, so anything the *loader* has to
+    judge — an Auto class with no entry, a class that isn't a pipeline at all —
+    surfaces at dispatch rather than at construction.
+    """
+
+    def test_a_name_that_is_not_in_diffusers(self):
+        with pytest.raises(AttributeError, match="NoSuchPipeline"):
+            DiffusionModel(REPO, automodel="NoSuchPipeline")
+
+    def test_a_class_needing_components_the_repo_has_not_got(self):
+        # Asked for a concrete class, the meta build assembles *that* class from
+        # the repo's declared components, so a mismatch is caught while building.
+        with pytest.raises(TypeError, match="text_encoder_2"):
+            DiffusionModel(REPO, automodel="StableDiffusionXLPipeline")
+
+    def test_a_class_that_is_not_a_pipeline_survives_the_meta_build(self):
+        # The meta guard only asks whether the class can assemble a pipeline, and
+        # ignores it when it can't — so a non-pipeline is not refused, it is
+        # deferred to `from_pretrained`, where the message is about a missing
+        # config file rather than about `automodel=`.
+        model = DiffusionModel(REPO, automodel="UNet2DConditionModel")
+        assert type(model.pipeline).__name__ == "StableDiffusionPipeline"
+        with pytest.raises(OSError):
+            model.dispatch()
+
+
+class TestAutomodelInteractions:
+    """`automodel=` against the rest of DiffusionModel: renaming, single-component
+    traces, batched invokes and the remote round trip."""
+
+    @torch.no_grad()
+    def test_rename_reaches_the_task_pipeline_s_denoiser(self):
+        from diffusers import AutoPipelineForImage2Image
+
+        model = DiffusionModel(REPO, automodel=AutoPipelineForImage2Image,
+                               rename={"unet": "denoiser"}, safety_checker=None)
+        with model.trace(PROMPT, image=_grey(), strength=0.6, **KWARGS):
+            denoised = model.denoiser.output[0].save()
         assert type(model.pipeline).__name__ == "StableDiffusionImg2ImgPipeline"
-        assert denoised.shape[0] == 2   # classifier-free guidance doubles the batch
+        assert isinstance(denoised, torch.Tensor) and denoised.ndim == 4
 
-    def test_an_intervention_reaches_an_image_to_image_run(self):
+    @torch.no_grad()
+    def test_a_single_component_trace_after_an_auto_load(self):
+        # The denoiser is the same module whichever task class holds it, so
+        # tracing that envoy on its own is unaffected by the class swap.
         from diffusers import AutoPipelineForImage2Image
 
         model = DiffusionModel(REPO, automodel=AutoPipelineForImage2Image,
                                dispatch=True, safety_checker=None)
+        sample, timestep, enc = denoiser_inputs(model)
+        with model.unet.trace(sample, timestep, encoder_hidden_states=enc):
+            out = model.unet.output.save()
+        assert out.sample.shape == sample.shape
 
-        with model.trace(PROMPT, image=_grey(), strength=0.5, **KWARGS):
-            base = model.output.save()
-        with model.trace(PROMPT, image=_grey(), strength=0.5, **KWARGS):
-            model.unet.output[0][:] = 0
-            zeroed = model.output.save()
+    @torch.no_grad()
+    def test_batched_invokes_narrow_the_denoiser(self):
+        # DiffusionBatcher's guidance-doubled layout is the denoiser's, not the
+        # pipeline's, so it holds for an image-to-image run too — with one edit
+        # confined to its own invoke's rows.
+        from diffusers import AutoPipelineForImage2Image
 
-        assert not numpy.allclose(base.images[0], zeroed.images[0])
+        model = DiffusionModel(REPO, automodel=AutoPipelineForImage2Image,
+                               dispatch=True, safety_checker=None)
+        with model.trace(image=_grey(), strength=0.6, **KWARGS) as tracer:
+            with tracer.invoke("a cat"):
+                model.unet.output[0][:] = 0
+            with tracer.invoke("a dog"):
+                dog = model.unet.output[0].save()
+        assert dog.shape[0] == 2
+        assert bool((dog != 0).any())
+
+    @torch.no_grad()
+    def test_the_trace_round_trips_through_serialization(self):
+        # `automodel` lands in __getstate__'s state, so it has to be picklable —
+        # a diffusers class is, being module-level.
+        from diffusers import AutoPipelineForImage2Image
+
+        model = DiffusionModel(REPO, automodel=AutoPipelineForImage2Image,
+                               dispatch=True, safety_checker=None)
+        with model.trace(PROMPT, image=_grey(), strength=0.6, remote="local", **KWARGS):
+            denoised = model.unet.output[0].save()
+        assert isinstance(denoised, torch.Tensor) and denoised.shape[0] == 2
 
 
 class TestSeed:
