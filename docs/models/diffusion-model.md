@@ -9,6 +9,41 @@ sources: [src/nnsight/modeling/diffusion.py, src/nnsight/modeling/huggingface.py
 # DiffusionModel
 
 
+## Asking the same weights for a different task
+
+`DiffusionModel(repo_id)` builds whatever class the repo's `model_index.json`
+declares. For every Stable Diffusion repo that is the text-to-image pipeline, so
+`image=` has nowhere to go even though the weights serve image-to-image perfectly
+well.
+
+`automodel=` names the class to load through instead:
+
+```python
+from diffusers import AutoPipelineForImage2Image
+from nnsight.modeling.diffusion import DiffusionModel
+
+model = DiffusionModel("stable-diffusion-v1-5/stable-diffusion-v1-5",
+                       automodel=AutoPipelineForImage2Image)
+
+with model.trace("a photo of a cat", image=source, strength=0.5,
+                 num_inference_steps=20):
+    latents = model.unet.output[0].save()
+    result = model.output.save()
+```
+
+`AutoPipelineForImage2Image` picks the right class for the architecture, so the
+same line works for Flux, Kandinsky, SD3 and the rest. Its siblings are
+`AutoPipelineForText2Image`, `AutoPipelineForInpainting` and
+`AutoPipelineForText2Audio`. A concrete class works too, either as the class or
+as a name in `diffusers`:
+
+```python
+DiffusionModel(repo, automodel="StableDiffusionImg2ImgPipeline")
+```
+
+Everything else is unchanged: components are envoys, interventions fire per
+denoising step, and `model.output` is the pipeline's output object.
+
 ## What this is for
 
 `nnsight.DiffusionModel` wraps any `diffusers.DiffusionPipeline` so you can trace and intervene on its sub-modules — UNet (Stable Diffusion), transformer (Flux, DiT, SD3), VAE, text encoder — with the same NNsight API as other models. It supports:
