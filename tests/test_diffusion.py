@@ -15,6 +15,8 @@ import torch
 
 pytest.importorskip("diffusers")
 
+import numpy
+
 from nnsight.modeling.diffusion import DiffusionModel, _resolve_component_class
 
 REPO = "hf-internal-testing/tiny-stable-diffusion-torch"
@@ -39,6 +41,13 @@ def sd():
 def arch(request):
     repo, denoiser = request.param
     return DiffusionModel(repo), denoiser
+
+
+def _grey():
+    """A plain input image, for the image-to-image pipelines."""
+    from PIL import Image
+
+    return Image.new("RGB", (64, 64), (127, 127, 127))
 
 
 def denoiser_inputs(model, batch=1):
@@ -140,6 +149,66 @@ class TestInterventions:
             sd.unet.output[0][:] = 0
             zeroed = sd.output.save()
         assert not np.allclose(baseline.images, zeroed.images)
+
+
+class TestAutomodel:
+    """`automodel=` chooses the diffusers class the weights are loaded through.
+
+    `DiffusionPipeline.from_pretrained` builds whatever class the repo's
+    `model_index.json` declares, which is the text-to-image one for every Stable
+    Diffusion repo whatever the caller meant to do. The same weights serve other
+    tasks through a different class, so naming one is how you reach them.
+    """
+
+    def test_the_default_is_the_declared_class(self):
+        model = DiffusionModel(REPO, dispatch=True, safety_checker=None)
+        assert type(model.pipeline).__name__ == "StableDiffusionPipeline"
+
+    def test_a_concrete_class(self):
+        from diffusers import StableDiffusionImg2ImgPipeline
+
+        model = DiffusionModel(
+            REPO, automodel=StableDiffusionImg2ImgPipeline, dispatch=True,
+            safety_checker=None,
+        )
+        assert isinstance(model.pipeline, StableDiffusionImg2ImgPipeline)
+
+    def test_a_class_named_as_a_string(self):
+        model = DiffusionModel(
+            REPO, automodel="StableDiffusionImg2ImgPipeline", dispatch=True,
+            safety_checker=None,
+        )
+        assert type(model.pipeline).__name__ == "StableDiffusionImg2ImgPipeline"
+
+    def test_an_auto_class_resolves_per_architecture(self):
+        # `AutoPipelineForImage2Image` refuses to be constructed directly and
+        # picks its class at load, so the meta build falls back to the declared
+        # one. Both hold the same components, so the envoy tree stays valid.
+        from diffusers import AutoPipelineForImage2Image
+
+        model = DiffusionModel(REPO, automodel=AutoPipelineForImage2Image,
+                               safety_checker=None)
+        assert type(model.pipeline).__name__ == "StableDiffusionPipeline"
+
+        with model.trace(PROMPT, image=_grey(), strength=0.5, **KWARGS):
+            denoised = model.unet.output[0].save()
+
+        assert type(model.pipeline).__name__ == "StableDiffusionImg2ImgPipeline"
+        assert denoised.shape[0] == 2   # classifier-free guidance doubles the batch
+
+    def test_an_intervention_reaches_an_image_to_image_run(self):
+        from diffusers import AutoPipelineForImage2Image
+
+        model = DiffusionModel(REPO, automodel=AutoPipelineForImage2Image,
+                               dispatch=True, safety_checker=None)
+
+        with model.trace(PROMPT, image=_grey(), strength=0.5, **KWARGS):
+            base = model.output.save()
+        with model.trace(PROMPT, image=_grey(), strength=0.5, **KWARGS):
+            model.unet.output[0][:] = 0
+            zeroed = model.output.save()
+
+        assert not numpy.allclose(base.images[0], zeroed.images[0])
 
 
 class TestSeed:

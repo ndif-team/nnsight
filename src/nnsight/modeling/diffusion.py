@@ -209,13 +209,30 @@ class DiffusionModel(HuggingFaceModel):
 
     pipeline: Optional["DiffusionPipeline"]
 
-    def __init__(self, repo_id: Any, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self, repo_id: Any, *args: Any, automodel: Any = None, **kwargs: Any
+    ) -> None:
         self.pipeline = None
+        #: The diffusers class to load with, as a class or a name in ``diffusers``.
+        #: ``DiffusionPipeline`` (the default) builds whatever class the repo's
+        #: ``model_index.json`` declares, which is the text-to-image one for every
+        #: Stable Diffusion repo whatever you meant to do with the weights. Naming
+        #: another asks the same weights for a different task.
+        self.automodel = automodel
         super().__init__(repo_id, *args, **kwargs)
+
+    def _pipeline_class(self, automodel: Any = None) -> Any:
+        """The diffusers class to load with, defaulting to ``DiffusionPipeline``."""
+        import diffusers
+
+        chosen = automodel if automodel is not None else self.automodel
+        if chosen is None:
+            return diffusers.DiffusionPipeline
+        return getattr(diffusers, chosen) if isinstance(chosen, str) else chosen
 
     # -- loading -------------------------------------------------------------
 
-    def _meta_pipeline(self, repo_id: str) -> "DiffusionPipeline":
+    def _meta_pipeline(self, repo_id: str, automodel: Any = None) -> "DiffusionPipeline":
         # Build the pipeline component-by-component so no weights are loaded:
         # module components come from their config on meta (see MetaDevice),
         # everything else (schedulers, tokenizers, processors) loads normally.
@@ -225,6 +242,23 @@ class DiffusionModel(HuggingFaceModel):
             repo_id, revision=self.revision
         )
         pipeline_cls = getattr(diffusers, config["_class_name"])
+
+        # An `AutoPipelineFor*` picks its class per architecture at load and
+        # refuses to be constructed directly, so it cannot assemble anything
+        # here; a concrete class can. Either way the meta pipeline only has to
+        # hold the same *components* as the real one, since that is what the
+        # envoy tree is built from — the task variants of one architecture share
+        # them, so falling back to the declared class stays correct.
+        requested = automodel if automodel is not None else self.automodel
+        if requested is not None:
+            chosen = self._pipeline_class(requested)
+            # `DiffusionPipeline` itself is a subclass of `DiffusionPipeline`, so
+            # this has to test what was *asked for* rather than what
+            # `_pipeline_class` defaulted to, or the declared class is replaced by
+            # the abstract base and the pipeline comes out with no components.
+            if isinstance(chosen, type) and issubclass(chosen, diffusers.DiffusionPipeline):
+                pipeline_cls = chosen
+
         expected = set(inspect.signature(pipeline_cls.__init__).parameters) - {"self"}
 
         components: dict[str, Any] = {}
@@ -267,14 +301,21 @@ class DiffusionModel(HuggingFaceModel):
         with MetaDevice.real():
             return klass.from_pretrained(repo_id, subfolder=name, revision=self.revision)
 
-    def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        self.pipeline = self._meta_pipeline(repo_id)
+    def _load_meta(
+        self, repo_id: str, *args: Any, automodel: Any = None, **kwargs: Any
+    ) -> torch.nn.Module:
+        self.pipeline = self._meta_pipeline(repo_id, automodel)
         return _PipelineModule(self.pipeline)
 
-    def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        from diffusers import DiffusionPipeline
-
-        self.pipeline = DiffusionPipeline.from_pretrained(
+    def _load(
+        self, repo_id: str, *args: Any, automodel: Any = None, **kwargs: Any
+    ) -> torch.nn.Module:
+        # `from_pretrained` is one classmethod shared by every pipeline class: on
+        # the base it reads the repo's declared class, on a concrete one it builds
+        # that class, and on an `AutoPipelineFor*` it picks the right class for
+        # the architecture. Loading through whichever was asked for is the whole
+        # of task selection.
+        self.pipeline = self._pipeline_class(automodel).from_pretrained(
             repo_id, revision=self.revision, **kwargs
         )
         return _PipelineModule(self.pipeline)
