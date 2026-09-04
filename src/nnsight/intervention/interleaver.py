@@ -560,6 +560,11 @@ class Interleaver:
                 # e.g. accelerate's partial(new_forward, module) for device_map —
                 # unwrap to avoid reference cycle through partial.args
                 original_forward = instance_forward.func
+                introspection_signature = (
+                    inspect.signature(module._old_forward)
+                    if hasattr(module, "_old_forward")
+                    else inspect.signature(instance_forward)
+                )
             else:
                 original_forward = instance_forward
 
@@ -597,6 +602,9 @@ class Interleaver:
                 if source_accessor is not None:
                     return source_accessor(m, *args, **kwargs)
                 return m.__nnsight_forward__(m, *args, **kwargs)
+
+            if isinstance(instance_forward, partial):
+                nnsight_forward.__signature__ = introspection_signature
 
             module.forward = nnsight_forward
 
