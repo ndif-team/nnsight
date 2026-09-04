@@ -47,19 +47,19 @@ def arch(request):
     return DiffusionModel(repo), denoiser
 
 
-def _grey():
+def _grey(colour=(127, 127, 127)):
     """A plain input image, for the image-to-image pipelines."""
     from PIL import Image
 
-    return Image.new("RGB", (64, 64), (127, 127, 127))
+    return Image.new("RGB", (64, 64), colour)
 
 
-def _mask():
+def _mask(box=(16, 16, 48, 48)):
     """A mask for the inpainting pipelines: a white square marks what to repaint."""
     from PIL import Image
 
     mask = Image.new("L", (64, 64), 0)
-    mask.paste(255, (16, 16, 48, 48))
+    mask.paste(255, box)
     return mask
 
 
@@ -330,6 +330,54 @@ class TestAutoPipelines:
         assert type(model.pipeline).__name__.endswith("Img2ImgPipeline")
         assert set(model.pipeline.components) == components
         assert isinstance(denoised, torch.Tensor)
+
+
+class TestTheTaskInputsReachTheModel:
+    """The image and the mask change the result.
+
+    Everything else about these pipelines can pass while the task input is
+    ignored: the class name is right, the denoiser carries both guidance rows, the
+    components match, and an intervention still changes the output, because the
+    intervention is what changed it. These are the assertions that fail if
+    `image=` or `mask_image=` never reaches the model.
+
+    The seed is pinned around each run so the input is the only thing that
+    differs. The margins are small because the checkpoint is tiny and randomly
+    initialised, and two denoising steps is not much; the point is that they are
+    not zero.
+    """
+
+    @torch.no_grad()
+    def test_image_to_image_depends_on_the_image(self):
+        from diffusers import AutoPipelineForImage2Image
+
+        model = DiffusionModel(REPO, automodel=AutoPipelineForImage2Image,
+                               dispatch=True, safety_checker=None)
+
+        results = []
+        for colour in ((0, 0, 0), (255, 255, 255)):
+            torch.manual_seed(0)
+            with model.trace(PROMPT, image=_grey(colour), strength=0.6, **KWARGS):
+                out = model.output.save()
+            results.append(numpy.asarray(out.images[0]))
+
+        assert not numpy.allclose(*results)
+
+    @torch.no_grad()
+    def test_inpainting_depends_on_the_mask(self):
+        from diffusers import AutoPipelineForInpainting
+
+        model = DiffusionModel(REPO, automodel=AutoPipelineForInpainting,
+                               dispatch=True, safety_checker=None)
+
+        results = []
+        for box in ((0, 0, 32, 32), (32, 32, 64, 64)):
+            torch.manual_seed(0)
+            with model.trace(PROMPT, image=_grey(), mask_image=_mask(box), **KWARGS):
+                out = model.output.save()
+            results.append(numpy.asarray(out.images[0]))
+
+        assert not numpy.allclose(*results)
 
 
 class TestText2Audio:
