@@ -119,7 +119,7 @@ class Envoy:
             Every location the interleaver reads (``{path}.output``, ``{path}.skip``)
             is derived from it.
         interleaver: The [`Interleaver`][nnsight.intervention.interleaver.Interleaver]
-            shared across the whole tree; it installs the hooks and routes values.
+            shared across the whole tree; it installs the controllers and routes values.
         _module: The wrapped `torch.nn.Module`.
         _edits: Default interventions registered by [`edit`][nnsight.intervention.envoy.Envoy.edit], replayed on every
             trace (a list of [`Mediator`][nnsight.intervention.interleaver.Mediator]).
@@ -139,8 +139,9 @@ class Envoy:
         self.interleaver = interleaver if interleaver is not None else Interleaver()
         # This tree's envoy for the module, so a later path to it aliases this one.
         self.interleaver.envoys[id(module)] = self
-        # instrument installs the input/output hooks and the source/skip controller
-        # (registering this interleaver on the module) — see Interleaver.instrument.
+        # instrument installs the module's controller — the input/output handoffs and
+        # the source/skip gate — registering this interleaver on the module.
+        # (See Interleaver.instrument.)
         self.interleaver.instrument(self)
 
         # Default interventions registered via .edit(), replayed on every trace.
@@ -243,6 +244,19 @@ class Envoy:
         leading dot is a no-op — path components are matched by name (an empty
         first component is skipped, mirroring `nnsight.util.fetch_attr`).
 
+        A key that does not resolve here is skipped, not an error: one ``rename``
+        is meant to be reusable across architectures that spell the same module
+        differently (``{"attn": "att", "self_attn": "att"}``), and on any given
+        envoy only one of those spellings exists.
+
+        An alias that would *displace* something is an error, because there is
+        no spelling of it that works. Three things can be underneath: another
+        alias from an earlier key, a name on the envoy (a child, its own state,
+        or an `Envoy` attribute like ``output`` or ``trace``), or a name on the
+        wrapped module — an alias lands in ``__dict__`` and so wins over the
+        ``__getattr__`` fallthrough, silently shadowing the model's own
+        ``config``, ``weight``, ``eval`` and the rest.
+
         Aliases are ordinary attributes referencing the *same* child object (not
         copies, and not added to `_children`), so ``__getattr__`` needs no
         alias branch, iteration doesn't double-count, and re-pointing the tree on
@@ -259,6 +273,42 @@ class Envoy:
             if not isinstance(target, Envoy):
                 continue
             for alias in [aliases] if isinstance(aliases, str) else aliases:
+                # Already pointing at this very envoy: nothing is displaced.
+                # Covers a key aliased to its own name (``{"attn": "attn"}``,
+                # which a cross-architecture dict pairs with
+                # ``{"self_attn": "attn"}``) and two keys reaching one module
+                # through tied weights.
+                if self.__dict__.get(alias) is target:
+                    continue
+
+                # What the name would displace, in the order lookup would find
+                # it. `hasattr` is right for the module and wrong for the envoy:
+                # an eproperty's `__get__` raises outside interleaving, so the
+                # envoy's own classes are scanned by namespace instead.
+                bound = self._aliases.get(alias)
+                if bound is not None:
+                    displaced = f"the alias already bound here from {bound!r}"
+                elif alias in self.__dict__:
+                    displaced = "a child module or attribute of that name"
+                elif any(alias in vars(klass) for klass in type(self).__mro__):
+                    displaced = f"the `{type(self).__name__}.{alias}` attribute"
+                elif hasattr(self._module, alias):
+                    # The same test `__getattr__` gates its fallthrough on, so
+                    # this is the shadowing surface exactly: every name it finds
+                    # is one `envoy.<name>` answers to today.
+                    displaced = "an attribute of the wrapped module"
+                else:
+                    displaced = None
+
+                if displaced is not None:
+                    raise ValueError(
+                        f"`rename` alias {alias!r} for {path!r} would shadow "
+                        f"{displaced} on `{self.path}`. Aliases are bound as plain "
+                        f"attributes, so this would make the original unreachable "
+                        f"by name while leaving it in the tree. Pick a different "
+                        f"alias."
+                    )
+
                 object.__setattr__(self, alias, target)
                 self._aliases[alias] = path
 
@@ -312,12 +362,12 @@ class Envoy:
     def _update(self, module: torch.nn.Module) -> None:
         # Re-point an existing envoy tree at a new module of the same structure
         # (e.g. swapping meta weights for real ones). instrument() removes this
-        # path's old hooks before re-adding, and we recurse over children by
+        # path's old controller before re-adding, and we recurse over children by
         # name (as in __init__), so modules shared across paths line up.
         self.interleaver.envoys.pop(id(self._module), None)
         self._module = module
         self.interleaver.envoys[id(module)] = self
-        # instrument re-installs the hooks and the source/skip controller on the new
+        # instrument re-installs the controller and the source/skip gate on the new
         # module (its own forward; the previous module's controller doesn't carry
         # over) — see Interleaver.instrument.
         self.interleaver.instrument(self)
@@ -326,7 +376,7 @@ class Envoy:
             name = child.path.rsplit(".", 1)[-1]
             # A child that isn't a submodule of the new module — e.g. a standalone
             # module added to the tree (TransformersModel's `generator`) — has nothing
-            # to re-point at, so leave it as-is (it keeps its own module and hooks).
+            # to re-point at, so leave it as-is (it keeps its own module and controller).
             if name in children:
                 child._update(children[name])
 
@@ -355,6 +405,17 @@ class Envoy:
 
         Args:
             *args: Arguments to pass to the tracer
+            fn: What the trace runs, defaulting to the module's ``"__call__"``.
+                Either a method name on this envoy or a bound callable. A subclass
+                that drives the model through its own method points at it here —
+                which is also how a plain [`NNsight`][nnsight.modeling.base.NNsight]
+                subclass runs a driver that passes values through an attached
+                standalone child. The [`traceable`][nnsight.intervention.envoy.traceable]
+                decorator sets it, so ``model.generate(...)`` is
+                ``trace(..., fn=self.generate)``.
+            backend: What running the captured block means, defaulting to local
+                execution. Set by ``remote=`` on the model classes that support it;
+                see [`Backend`][nnsight.tracing.backend.Backend].
             tracer_cls: Tracer class to construct instead of the default
                 [`InterleavingTracer`][nnsight.intervention.tracer.InterleavingTracer] — an
                 extension point for a custom tracer.
@@ -418,9 +479,7 @@ class Envoy:
         return EditingTracer(self, inplace=inplace, backend=backend)
 
     def clear_edits(self) -> None:
-        """
-        Clear all edits for this Envoy.
-        """
+        """Drop every edit stored on this envoy, restoring its unedited behavior."""
         self._edits = []
 
     def session(self, backend: Any = None, tracer_cls: type[Tracer] | None = None) -> Tracer:
@@ -506,10 +565,7 @@ class Envoy:
         return value
 
     @property
-    @deprecated(
-        "model.iter is deprecated and will be removed in a future version. "
-        "Use tracer.iter instead."
-    )
+    @deprecated("model.iter is deprecated; use tracer.iter instead.")
     def iter(self):
         """Deprecated: use ``tracer.iter``.
 
@@ -519,10 +575,7 @@ class Envoy:
 
         return Iterations()
 
-    @deprecated(
-        "model.all() is deprecated and will be removed in a future version. "
-        "Use tracer.all() instead."
-    )
+    @deprecated("model.all() is deprecated; use tracer.all() instead.")
     def all(self):
         """Deprecated: use ``tracer.all()``."""
         from .iterator import Iterations
@@ -568,7 +621,7 @@ class Envoy:
             >>> model = TransformersModel("openai-community/gpt2", dispatch=True)
             >>> print(model.transformer.h[0].attn.source)   # list the operations
             >>> with model.trace("Hello World"):
-            ...     attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
+            ...     attn = model.transformer.h[0].attn.source.attention_interface_1.output.save()
 
         Returns:
             A [`Source`][nnsight.intervention.source.Source] exposing operation-level access.
@@ -578,6 +631,7 @@ class Envoy:
         # property, so it wins over the __getattr__ module fallthrough. Building
         # it permanently source-instruments the module (inert outside a trace).
         return Source(self, self.path, install_source(self))  # raises SourceNotAvailable
+
 
     def to(self, device: torch.device) -> Envoy:
         """Move the wrapped module to ``device`` (in place).
@@ -748,9 +802,10 @@ class Envoy:
                 logits = model.lm_head(model.transformer.ln_f(hidden))
 
         While interleaving the module is called the ordinary way, with this
-        trace stood down for the duration. Its own hooks still fire — a runtime
-        that keeps collectives in them (transformers tensor parallelism) needs
-        them to — while nnsight serves nothing and spends no occurrence, for this
+        trace stood down for the duration. Its own hooks and wrappers still fire
+        — a runtime that keeps collectives around the forward (transformers
+        tensor parallelism wraps ``module.forward`` with them) needs them to —
+        while nnsight serves nothing and spends no occurrence, for this
         module *or anything under it*. That keeps the call from switching into
         the very worker greenlet making it, and leaves the module's real place in
         the forward pass untouched: calling a whole layer ad hoc does not consume
@@ -974,7 +1029,7 @@ class Envoy:
             child_lines.append(f"({alias}): " + _addindent(repr(getattr(self, alias)), 2))
 
         # eproperties given a description surface as their own lines, so special
-        # hookable values (e.g. a model's .logits) show up in the tree; the plain
+        # served values (e.g. a model's .logits) show up in the tree; the plain
         # .input/.output views carry no description and stay hidden.
         eproperty_lines = []
         seen = set()

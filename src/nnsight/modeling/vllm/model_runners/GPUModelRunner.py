@@ -109,8 +109,14 @@ class Request:
         return {name: mediator.lcls[name] for name in saved if name in mediator.lcls}
 
     def deferred(self) -> Optional[dict]:
-        """The trace's deferred error, captured for the client, or None."""
-        return self.error if self.mediator is None else getattr(self.mediator, "nnsight_error", None)
+        """The request's deferred error, captured for the client, or None.
+
+        The request's own error first — a block that failed to deserialize, or an
+        ``edits=`` name nothing is installed under — then the traced block's.
+        """
+        if self.error is not None:
+            return self.error
+        return None if self.mediator is None else getattr(self.mediator, "nnsight_error", None)
 
 
 class Requests:
@@ -129,11 +135,16 @@ class Requests:
             still wanted.
         templates: Registration id -> the deserialized block each request's copy
             is built from, so the source is compiled once rather than per request.
+        names: Registration id -> the name it was installed under, or ``None``.
+            A request that names the edits it wants (``extra_args["nnsight_edits"]``)
+            gets copies of those and of every unnamed one; a request that names
+            none gets copies of them all.
     """
 
     def __init__(self) -> None:
         self.requests: dict[str, Request] = {}
         self.templates: dict[str, Any] = {}
+        self.names: dict[str, str | None] = {}
         # Workers whose request is out of the batch (preempted), and the
         # interleaver's counts when that was last noted, so the visits they sit
         # out are subtracted from their own count (see `scope`).
@@ -142,13 +153,21 @@ class Requests:
         # Rows in this step's batch, for `unflatten`.
         self.nrows = 0
 
-    def register(self, registration_id: str, payload: bytes, persistent_objects: dict) -> None:
+    def register(
+        self,
+        registration_id: str,
+        payload: bytes,
+        persistent_objects: dict,
+        name: str | None = None,
+    ) -> None:
         """Take a block the engine should run for every request from now on."""
         self.templates[registration_id] = loads(payload, persistent_objects=persistent_objects)
+        self.names[registration_id] = name
 
     def unregister(self, registration_id: str) -> None:
         """Stop running a block and forget anything it has not handed back."""
         self.templates.pop(registration_id, None)
+        self.names.pop(registration_id, None)
         for request in self.requests.values():
             request.copies.pop(registration_id, None)
             request.harvested.pop(registration_id, None)
@@ -174,11 +193,31 @@ class Requests:
             if data.req_id in self.requests:
                 continue
             request = self.requests[data.req_id] = Request(data.req_id)
+            extra_args = getattr(data.sampling_params, "extra_args", None) or {}
+            # Which installed blocks this request runs: all of them, unless it
+            # named the ones it wants — then those, plus every block installed
+            # without a name. A name nothing is installed under is the request's
+            # error rather than a silent no-op, surfaced at collect like any other.
+            wanted = extra_args.get("nnsight_edits")
+            if wanted is not None:
+                installed = {name for name in self.names.values() if name is not None}
+                unknown = [name for name in wanted if name not in installed]
+                if unknown:
+                    request.error = capture_exception(
+                        ValueError(
+                            f"edits={list(wanted)!r} names {unknown!r}, but no edit "
+                            f"is installed under that name (installed: "
+                            f"{sorted(installed)!r}). Install it with "
+                            "model.edit(name=...), or drop it from the list."
+                        )
+                    )
             for registration_id, template in self.templates.items():
+                name = self.names.get(registration_id)
+                if wanted is not None and name is not None and name not in wanted:
+                    continue
                 copy = Mediator(template.code, template.glbls, dict(template.lcls))
                 copy.presaved = set(template.presaved)
                 request.copies[registration_id] = copy
-            extra_args = getattr(data.sampling_params, "extra_args", None) or {}
             if "nnsight_mediator" not in extra_args:
                 continue
             try:
@@ -411,11 +450,15 @@ class Requests:
 
         A worker still [`alive`][nnsight.intervention.interleaver.Mediator.alive] at the end was waiting on a location the model
         never reached — the interleaver's [`check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators], but for a
-        single request as it retires here rather than after a whole local run. Two
-        cases, both unwound by throwing into the worker (so its ``finally`` blocks run):
-        a plain read past the model's point is a real [`OutOfOrderError`][nnsight.intervention.interleaver.OutOfOrderError] kept as
-        the request's deferred error so it reaches the client; a ``tracer.iter`` loop
-        that outran generation is expected, so it only warns.
+        single request as it retires here rather than after a whole local run. Which
+        of those a parked worker is, and what it should be told, is
+        [`dangling_unwind`][nnsight.intervention.interleaver.dangling_unwind]'s to
+        decide, so a trace behaves the same on this engine as it does locally: a read
+        past the model's point is an error, and a ``tracer.iter`` loop the request
+        could not supply — bounded and open alike — is cut short with a warning,
+        keeping the values from the steps that ran. Surfacing differs, since the
+        client is in another process: an error becomes the request's deferred error
+        and is raised there.
 
         Runs on the workers' own thread, where the greenlet can be resumed — the throw
         is skipped where that thread differs (e.g. Ray's collect), leaving the worker
@@ -429,43 +472,37 @@ class Requests:
         from greenlet import error as greenlet_error
 
         from ....intervention.errors import capture_exception
-        from ....intervention.interleaver import Event, OutOfOrderError
+        from ....intervention.interleaver import OutOfOrderError, dangling_unwind
 
         if mediator is None or not mediator.alive:
             return
 
-        # `requester` is printed into the error, where Pending renders as
-        # "{location}.i{n}" — the occurrence is what explains an iter loop that
-        # asked for more steps than the request generated. A worker whose
-        # request is over but which is parked nowhere already erred: the
-        # interleaver deferred its exception and cleared its pending, and that
+        # A worker whose request is over but which is parked nowhere already erred:
+        # the interleaver deferred its exception and cleared its pending, and that
         # error — not a dangling read — is what its request goes home with.
         requester = mediator.pending
         if requester is None:
             return
-        if requester.event is Event.BARRIER:
-            error: BaseException = ValueError(
-                "A barrier was never reached by every block it waits for; "
-                "check the count it was created with"
-            )
-            over_iterated = False
-        elif (
+
+        error, expected = dangling_unwind(mediator)
+        if (
             taps
+            # A barrier unwinds with a ValueError and names no module location.
+            and isinstance(error, OutOfOrderError)
             and requester.provider not in taps
             and requester.provider.rsplit(".", 1)[-1] in ("input", "output", "skip")
         ):
-            error = OutOfOrderError(
-                f"'{requester.provider}' is not a tap on this engine, so a replayed "
-                "CUDA graph never reaches it. Declare it at construction — "
-                "VLLM(..., taps=[...]) — or trace an engine built with "
-                "enforce_eager=True, which serves every location."
+            # Outside the taps nothing is reached however many steps ran, so the
+            # loop's shape is beside the point: this is the whole reason.
+            error, expected = (
+                OutOfOrderError(
+                    f"'{requester.provider}' is not a tap on this engine, so a replayed "
+                    "CUDA graph never reaches it. Declare it at construction — "
+                    "VLLM(..., taps=[...]) — or trace an engine built with "
+                    "enforce_eager=True, which serves every location."
+                ),
+                None,
             )
-            over_iterated = False
-        else:
-            error = OutOfOrderError(
-                f"'{requester}' was requested but the model already ran past it"
-            )
-            over_iterated = mediator.iteration != 0
 
         try:
             mediator.worker.throw(error)
@@ -474,11 +511,10 @@ class Requests:
         except BaseException as thrown:
             if quiet:
                 return
-            if over_iterated:
-                warnings.warn(
-                    f"'{requester}' was never reached: the model ran fewer iterations "
-                    "than the loop requested. Values from reached iterations are kept."
-                )
+            # `thrown is error` only when the block let the unwind through; anything
+            # a `finally` raised on the way out is the request's error instead.
+            if expected is not None and thrown is error:
+                warnings.warn(expected)
             else:
                 mediator.nnsight_error = capture_exception(thrown)
 
@@ -816,16 +852,18 @@ class NNsightGPUModelRunner(GPUModelRunner):
     # Worker-side RPC entry points (called by name via collective_rpc)
     # ------------------------------------------------------------------
 
-    def nnsight_register(self, registration_id: str, payload: bytes) -> None:
+    def nnsight_register(
+        self, registration_id: str, payload: bytes, name: str | None = None
+    ) -> None:
         """Keep a block and run it for every request from now on.
 
         See [`nnsight.modeling.vllm.registration`][nnsight.modeling.vllm.registration].
         Runs on all ranks, so every rank builds the same per-request copies and
         their reads stay in lockstep — which is what a sharded model's gathers
-        need.
+        need. ``name`` is what requests may address it by (``edits=[...]``).
         """
         self.nnsight_requests.register(
-            registration_id, payload, self.nnsight_persistent_objects
+            registration_id, payload, self.nnsight_persistent_objects, name=name
         )
 
     def nnsight_clear_registered(self, registration_id: str) -> None:

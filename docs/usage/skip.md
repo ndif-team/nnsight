@@ -66,9 +66,10 @@ with model.trace(x):
 
 ## Match the module's real output
 
-The replacement must match what the module would normally return. Read the shape
-first if unsure — a GPT-2 block's `.output` is a plain tensor `(batch, seq,
-hidden)` in current transformers (not a tuple), so skip it with a tensor:
+The replacement stands in for what the module would have returned, so it has to
+match that value in **structure, shape, dtype and device**. Read the shape first
+if unsure — a GPT-2 block's `.output` is a plain tensor `(batch, seq, hidden)` in
+current transformers (not a tuple), so skip it with a tensor:
 
 ```python
 from nnsight.modeling.transformers import TransformersModel
@@ -82,6 +83,20 @@ with gpt2.trace("Hello world"):
 
 A module that returns a tuple (some attention submodules do) needs a tuple
 replacement of the same shape.
+
+A mismatch is caught by the model, not by nnsight, so it arrives as a raw torch
+error from inside the next module's forward with no mention of `skip`:
+
+| Replacement | What surfaces |
+|---|---|
+| `x.double()` | `RuntimeError: expected scalar type Double but found Float` |
+| `x.half()` | `RuntimeError: expected scalar type Half but found Float` |
+| `x.cpu()` | `RuntimeError: Expected all tensors to be on the same device, but got weight is on cuda:0, different from other tensors on cpu` |
+| `(x,)` around a tensor output | `TypeError: layer_norm(): argument 'input' (position 1) must be Tensor, not tuple` |
+| `x[:, :3, :]` | `RuntimeError: shape '[-1, 10, 768]' is invalid for input of size 2304` |
+
+When a traced model errors inside a forward you did not intervene on, the skip
+above it is the first place to look.
 
 ## Persistent skip via `model.edit`
 
@@ -107,12 +122,14 @@ replacement fills its own rows and they're concatenated back into the batch. See
 
 ## Gotchas
 
-- **Replacement shape/type must match the module's real output.** A mismatch causes
-  downstream errors in the model's forward.
+- **Replacement structure, shape, dtype and device must match the module's real
+  output.** A mismatch surfaces as a bare torch error from inside the model's
+  forward, naming neither `skip` nor the module you skipped.
 - **You can't read a skipped module's inner submodules or source ops** — they never
   execute, so requesting their `.output` is out of order (`OutOfOrderError`).
 - **`skip` only works inside an active trace.**
-- **Skips respect forward-pass order** like any access within one invoke.
+- **Skips respect forward-pass order** like any access within one invoke — a skip
+  requested after the model has run that module raises `OutOfOrderError`.
 - **A skip is one-shot per module call.** Across generation steps, each step needs
   its own skip — use `tracer.iter[...]` or a persistent edit for every-step
   behavior.

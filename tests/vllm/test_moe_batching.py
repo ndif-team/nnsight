@@ -256,9 +256,13 @@ class TestFragmentPolicy:
     """Which MoE values count as pieces, and what a write-back is divided by.
 
     Runs without GPUs: the decision in `_is_piece` and the divisor in
-    `VLLMFragments.fragment` are pure functions of the module's parallel config,
+    `VLLMFragments.split` are pure functions of the module's parallel config,
     so a stub with that config pins them. The end-to-end tests above check the
     numbers these decisions produce; these check the decisions.
+
+    Skipped on vLLM >= 0.27, legitimately: the stub subclasses the pre-0.27
+    ``FusedMoE`` class, which 0.27 removed — `TestModularMoEPolicy` pins the
+    same decisions against 0.27's config shape and runs everywhere.
     """
 
     @staticmethod
@@ -324,7 +328,7 @@ class TestFragmentPolicy:
 
         fragments = VLLMFragments()
         fragments.rules["m.output"] = (self._stub(tp=tp, ep=ep), "output")
-        sharded = fragments.fragment("m.output", torch.full((2, 4), 6.0))
+        sharded = fragments.split("m.output", torch.full((2, 4), 6.0))
 
         assert torch.allclose(sharded, torch.full((2, 4), 6.0 / (tp * ep)))
 
@@ -471,6 +475,25 @@ class TestModularMoEPolicy:
         # group either way.
         assert _moe_group_size(self._stub(tp=2, ep=1)) == 2
         assert _moe_group_size(self._stub(tp=1, ep=4)) == 4
+
+    @pytest.mark.parametrize("tp, ep", [(2, 1), (1, 2), (2, 4)])
+    def test_write_back_divides_by_the_group_size(self, tp, ep):
+        # The block all-reduces over tp*ep ranks right after, so an equal share
+        # is what sums back to the whole exactly once. The twin of
+        # `TestFragmentPolicy`'s check, on the config shape 0.27 actually has.
+        from unittest import mock
+
+        from nnsight.modeling.vllm import fragments as fragments_module
+
+        stub = self._stub(tp=tp, ep=ep, skip_final_all_reduce=True)
+        fragments = fragments_module.VLLMFragments()
+        fragments.rules["m.output"] = (stub, "output")
+        with mock.patch.object(
+            fragments_module, "_moe_layer", return_value=type(stub)
+        ):
+            sharded = fragments.split("m.output", torch.full((2, 4), 6.0))
+
+        assert torch.allclose(sharded, torch.full((2, 4), 6.0 / (tp * ep)))
 
 
 class TestDCPGroupGather:

@@ -308,7 +308,6 @@ class TestAsyncEngine:
 
         async_loop.run_until_complete(run())
 
-
 class TestAsyncClearEdits:
     """Clearing installed edits on an engine whose workers can only be awaited."""
 

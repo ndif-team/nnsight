@@ -22,7 +22,7 @@ runtime.
 tree, and again from `Envoy._update` when meta weights are swapped for real ones. It
 lets the runtime's `Fragments` record what the module's values are at the handoff,
 then calls `install_controller(envoy)` (`source.py`), which installs one controller
-as the module's `forward` (`_make_controller`):
+as the module's `forward` (`make_controller`):
 
 ```python
 def controller(*args, **kwargs):
@@ -58,9 +58,9 @@ Otherwise the controller calls the body and returns: one frame and one check per
 module call, no dict lookups, no per-worker loop. A vLLM step that carries no
 nnsight request costs the model exactly that.
 
-### `_State` — per-module, shared across interleavers
+### `State` — per-module, shared across interleavers
 
-`_State` lives at `module.__dict__["__nnsight__"]` and holds:
+`State` lives at `module.__dict__["__nnsight__"]` and holds:
 
 - `routes` — `(weakref(interleaver), path, locations)` for each interleaver that
   instrumented this module, at most one entry per interleaver. `active()` walks it
@@ -101,8 +101,8 @@ the controllers surface — nothing extra is installed on the module.
 
 ## Key files / classes
 
-- `src/nnsight/intervention/source.py` — `install_controller`, `_make_controller`,
-  `_State` (`routes`, `active`), `install_source`, `_run_op`.
+- `src/nnsight/intervention/source.py` — `install_controller`, `make_controller`,
+  `State` (`routes`, `active`), `install_source`, `run_op`.
 - `src/nnsight/intervention/interleaver.py` — `Interleaver.instrument` (fragments
   first, then the controller), `Interleaver.handle` (what the controller calls).
 - `src/nnsight/intervention/envoy.py` — `Envoy.__init__` / `_update` call

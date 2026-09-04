@@ -63,7 +63,7 @@ class InterleavingTracer(Tracer):
     * `stop` — halt the model run early.
 
     Attributes:
-        envoy: The [`Envoy`][nnsight.intervention.envoy.Envoy] whose interleaver and hooks this trace runs on.
+        envoy: The [`Envoy`][nnsight.intervention.envoy.Envoy] whose interleaver and controllers this trace runs on.
         fn: The callable to run interleaved, or its name on the module. A name
             is left unresolved until [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave] binds it against the
             live module (e.g. after a lazy dispatch swaps in real weights).
@@ -249,9 +249,9 @@ class InterleavingTracer(Tracer):
 
             with model.trace() as tracer:
                 with tracer.invoke("the cat"):
-                    a = model.transformer.h[0].output[0].save()
+                    a = model.transformer.h[0].output.save()
                 with tracer.invoke("a much longer prompt here"):
-                    b = model.transformer.h[0].output[0].save()
+                    b = model.transformer.h[0].output.save()
 
         An empty ``tracer.invoke()`` sees the whole batch (no row scoping).
         """
@@ -328,7 +328,7 @@ class InterleavingTracer(Tracer):
 
         When a worker raises, [`Mediator.switch`][nnsight.intervention.interleaver.Mediator.switch] stashes the intervention-only
         traceback on the exception as ``__intervention_tb__`` before the model and
-        hook frames pile on top during unwinding. Prefer that stashed trace, fall
+        model frames pile on top during unwinding. Prefer that stashed trace, fall
         back to the live one, and filter nnsight's own frames out so the user sees
         just their own code.
         """
@@ -351,9 +351,12 @@ class ScanningTracer(InterleavingTracer):
     [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave] moves the inputs onto that same device so shapes
     propagate consistently.
 
-    The values read inside a scan are fake tensors, valid only within the block.
-    Read their metadata (``.shape``, ``.dtype``) there; a fake tensor saved out of
-    the scan cannot be used once the fake mode has exited.
+    The values read inside a scan are fake tensors: they carry metadata and never
+    hold data. Read ``.shape`` / ``.dtype`` and save *those*. A fake tensor saved
+    out of the block keeps working — ``.sum()``, ``.mean() + 1``, ``.cpu()`` all
+    hand back more fake tensors — so nothing tells you it is empty until something
+    asks for a real number (``float(...)``, ``.numpy()``, or an op mixing it with a
+    real tensor), which is usually far from where it came from.
     """
 
     def execute(self, code: CodeType) -> None:

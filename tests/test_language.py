@@ -247,9 +247,10 @@ class TestGeneration:
     @torch.no_grad()
     def test_generator_output_matches_result(self, gpt2):
         # The deprecated model.generator.output reads the same ids tracer.result does.
-        with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
-            through_generator = gpt2.generator.output.save()
-            returned = tracer.result.save()
+        with pytest.warns(nnsight.NNsightDeprecationWarning):
+            with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
+                through_generator = gpt2.generator.output.save()
+                returned = tracer.result.save()
         assert torch.equal(through_generator, returned)
 
     @torch.no_grad()
@@ -453,7 +454,7 @@ class TestIteration:
             via_for = nnsight.save([])
             for _ in tracer.iter[:3]:
                 via_for.append(gpt2.transformer.h[0].output[0])
-        with pytest.deprecated_call():
+        with pytest.warns(nnsight.NNsightDeprecationWarning):
             with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
                 via_with = nnsight.save([])
                 with tracer.iter[:3]:
@@ -465,7 +466,7 @@ class TestIteration:
     def test_with_form_open_ended_runs_to_the_last_step(self, gpt2):
         # `tracer.iter[:]` re-runs until the model stops, the same as the for form:
         # the over-run step is thrown into and caught, keeping the reached steps.
-        with pytest.deprecated_call():
+        with pytest.warns(nnsight.NNsightDeprecationWarning):
             with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
                 captured = nnsight.save([])
                 with tracer.iter[:]:
@@ -474,7 +475,7 @@ class TestIteration:
 
     @torch.no_grad()
     def test_with_form_single_step(self, gpt2):
-        with pytest.deprecated_call():
+        with pytest.warns(nnsight.NNsightDeprecationWarning):
             with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
                 box = nnsight.save({})
                 with tracer.iter[1]:
@@ -486,7 +487,7 @@ class TestIteration:
         import warnings
 
         with warnings.catch_warnings():
-            warnings.simplefilter("error", DeprecationWarning)
+            warnings.simplefilter("error", nnsight.NNsightDeprecationWarning)
             with gpt2.generate(PROMPT, max_new_tokens=2, do_sample=False) as tracer:
                 for _ in tracer.iter[:2]:
                     gpt2.transformer.h[0].output[0].save()

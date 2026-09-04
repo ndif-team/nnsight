@@ -30,17 +30,41 @@ except PackageNotFoundError:
     __version__ = "0.8.0"
 
 
+class NNsightDeprecationWarning(FutureWarning):
+    """The category every nnsight deprecation is warned under.
+
+    A ``FutureWarning``, not a ``DeprecationWarning``: Python's default filters
+    are ``default::DeprecationWarning:__main__`` followed by
+    ``ignore::DeprecationWarning``, so a deprecated call reached from anywhere but
+    the top level of the running script — a package, a helper module, a library
+    wrapping nnsight — warns to nobody. ``FutureWarning`` is the category the
+    language reserves for deprecations addressed to a library's *users* rather
+    than to its developers, and no default filter hides it, so the warning shows
+    in a script, in an imported module and in a notebook alike.
+
+    Its own class so a caller can silence nnsight's deprecations and nothing
+    else::
+
+        warnings.filterwarnings("ignore", category=nnsight.NNsightDeprecationWarning)
+
+    nnsight registers no filters of its own: a library that mutates the global
+    filter list overrides the ``-W`` flags and ``PYTHONWARNINGS`` its user chose.
+    """
+
+
 def deprecated(message: str):
-    """Decorator: emit a ``DeprecationWarning`` when the wrapped callable is used.
+    """Decorator: emit an `NNsightDeprecationWarning` when the wrapped callable is used.
 
     Defined before the submodule imports below so they can decorate methods with
     ``@deprecated("...")`` (e.g. the ``model.iter`` / ``model.all()`` aliases).
+    ``message`` reads ``"<what is deprecated> is deprecated; use <what to write
+    instead> instead."`` — every nnsight deprecation names its replacement.
     """
 
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            warnings.warn(message, DeprecationWarning, stacklevel=2)
+            warnings.warn(message, NNsightDeprecationWarning, stacklevel=2)
             return func(*args, **kwargs)
 
         return wrapper

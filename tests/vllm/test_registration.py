@@ -274,3 +274,89 @@ class TestResult:
 
         assert first.request_id != second.request_id
         assert first.prompt != second.prompt
+
+
+class TestNamedEdits:
+    """``model.edit(name=...)`` and the ``edits=[...]`` request argument.
+
+    A request that names the edits it wants runs those and every unnamed edit;
+    a request that names none runs them all; an unknown name is an error.
+    """
+
+    def _install(self, model):
+        with model.edit() as (tracer, unnamed):
+            plain = model.transformer.h[2].output[-1].norm().save()
+        with model.edit(name="a") as (tracer, a):
+            value_a = model.transformer.h[3].output[-1].norm().save()
+        with model.edit(name="b") as (tracer, b):
+            value_b = model.transformer.h[4].output[-1].norm().save()
+        return unnamed, a, b
+
+    @torch.no_grad()
+    def test_generate_selects_named_edits(self, vllm_gpt2_uncached, ET_prompt):
+        model = vllm_gpt2_uncached
+        unnamed, a, b = self._install(model)
+        try:
+            assert a.name == "a" and unnamed.name is None
+            every = model.generate([ET_prompt], max_tokens=1, temperature=0.0)[0]
+            assert set(every.saves) >= {"plain", "value_a", "value_b"}
+
+            only_a = model.generate([ET_prompt], max_tokens=1, temperature=0.0, edits=["a"])[0]
+            assert "value_a" in only_a.saves and "plain" in only_a.saves
+            assert "value_b" not in only_a.saves
+
+            none = model.generate([ET_prompt], max_tokens=1, temperature=0.0, edits=[])[0]
+            assert "plain" in none.saves
+            assert "value_a" not in none.saves and "value_b" not in none.saves
+        finally:
+            model.clear_edits()
+
+    @torch.no_grad()
+    def test_trace_and_invoke_select(self, vllm_gpt2_uncached, ET_prompt, MSG_prompt):
+        model = vllm_gpt2_uncached
+        self._install(model)
+        try:
+            with model.trace(max_tokens=1, temperature=0.0, edits=["a"]) as tracer:
+                with tracer.invoke(ET_prompt):
+                    first = tracer.result.save()
+                with tracer.invoke(MSG_prompt, edits=["b"]):      # the invoke's own wins
+                    second = tracer.result.save()
+            assert "value_a" in first.saves and "value_b" not in first.saves
+            assert "value_b" in second.saves and "value_a" not in second.saves
+            assert "plain" in first.saves and "plain" in second.saves
+        finally:
+            model.clear_edits()
+
+    @torch.no_grad()
+    def test_unknown_name_is_refused(self, vllm_gpt2_uncached, ET_prompt):
+        model = vllm_gpt2_uncached
+        self._install(model)
+        try:
+            with pytest.raises(ValueError, match="no edit is installed under that name"):
+                model.generate([ET_prompt], max_tokens=1, edits=["nope"])
+            with pytest.raises(ValueError, match="no edit is installed under that name"):
+                with model.trace(ET_prompt, max_tokens=1, edits=["nope"]) as tracer:
+                    result = tracer.result.save()
+        finally:
+            model.clear_edits()
+
+    @torch.no_grad()
+    def test_a_string_is_not_a_list(self, vllm_gpt2_uncached, ET_prompt):
+        model = vllm_gpt2_uncached
+        with pytest.raises(TypeError, match="list of edit names"):
+            model.generate([ET_prompt], max_tokens=1, edits="a")
+
+    @torch.no_grad()
+    def test_names_are_tags(self, vllm_gpt2_uncached, ET_prompt):
+        """Two edits under one name both run when it is asked for."""
+        model = vllm_gpt2_uncached
+        with model.edit(name="pair") as (tracer, one):
+            first_norm = model.transformer.h[1].output[-1].norm().save()
+        with model.edit(name="pair") as (tracer, two):
+            second_norm = model.transformer.h[2].output[-1].norm().save()
+        try:
+            output = model.generate([ET_prompt], max_tokens=1, edits=["pair"])[0]
+            assert "first_norm" in output.saves and "second_norm" in output.saves
+            assert repr(one).startswith("<Registration 'pair'")
+        finally:
+            model.clear_edits()

@@ -419,7 +419,7 @@ class Mediator:
         the worker parks again (returning its new event tuple) or finishes
         (returning ``None``). If the worker raises, its traceback is stashed on
         the exception as ``__intervention_tb__`` — a clean, intervention-only
-        trace captured before the re-raise unwinds the model/hook stack on top —
+        trace captured before the re-raise unwinds the model's own stack on top —
         and the exception propagates, halting the run.
 
         Re-point the worker's parent at whoever is switching in *now*, so both its
@@ -427,7 +427,7 @@ class Mediator:
         greenlet auto-returns to its parent) — go back here rather than to a fixed
         greenlet. This keeps the chain correct when a worker is served from inside
         another worker's greenlet, e.g. an ``Envoy.__call__(hook=True)`` adapter
-        run whose submodule hooks serve a second worker mid-call.
+        run whose submodule controllers serve a second worker mid-call.
         """
         self.worker.parent = getcurrent()
         try:
@@ -435,7 +435,7 @@ class Mediator:
         except BaseException as exception:
             # The worker raised. Its traceback right now holds only the
             # intervention frames; stash it before the re-raise unwinds the
-            # model/hook stack on top, so the top can restore a clean trace.
+            # model stack on top, so the top can restore a clean trace.
             # The exception still propagates, stopping execution immediately.
             if not hasattr(exception, "__intervention_tb__"):
                 exception.__intervention_tb__ = exception.__traceback__
@@ -513,13 +513,72 @@ class Mediator:
         return value
 
 
+def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]:
+    """How a worker still parked when its run is over should be ended.
+
+    Returns the error to throw into the worker — the throw unwinds it, running its
+    ``finally`` blocks, and points the traceback at the line that was waiting — and
+    the warning to emit *instead of* surfacing that error, or ``None`` when the
+    error stands. Two drivers ask, and they differ only in what surfacing means:
+    [`Interleaver.check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators]
+    raises the error, and vLLM's ``Requests.finish_dangling`` carries it home as the
+    request's deferred error. The policy is one copy here because two copies of it
+    can disagree, and a block that is an error locally and a warning on the engine
+    is a block whose meaning depends on where it runs.
+
+    Two cases:
+
+    * **Out of order** — a plain request (``iteration == 0``) for a location the
+      model already ran past, or never called. A real error.
+    * **A loop that outran the run** — ``tracer.iter[...]`` asked for a step the
+      run did not make. An open ``tracer.iter[:]`` / ``tracer.all()`` has no end of
+      its own, so outrunning the model is how it finishes; a bounded loop cut short
+      by an EOS or a stop string ends the same way. That one warns: values from the
+      steps that were reached are already saved, and the statements after the loop
+      do not run.
+
+    Call this *before* the throw: unwinding the worker's loop restores both the pin
+    and the loop's shape it reads.
+    """
+    requester = mediator.pending
+    if requester.event is Event.BARRIER:
+        # Fewer blocks reached the barrier than it was built for, so it was never
+        # going to release.
+        return (
+            ValueError(
+                "A barrier was never reached by every block it waits for; "
+                "check the count it was created with"
+            ),
+            None,
+        )
+    if mediator.iteration == 0:
+        return (
+            OutOfOrderError(
+                f"'{requester}' was requested but the model already ran past it"
+            ),
+            None,
+        )
+    return (
+        OutOfOrderError(
+            f"'{requester}' was requested but the model already ran past it"
+        ),
+        f"'{requester}' was never reached: the loop asked for a step the run "
+        f"did not make, so it was cut short — values saved inside the loop "
+        f"are kept, and the statements after it did not run. An open "
+        f"`tracer.iter[:]` / `tracer.all()` loop ends this way by design. To "
+        f"hold a generation to a bounded loop's count, pass `min_new_tokens=` "
+        f"on transformers or `min_tokens=` / `ignore_eos=True` on vLLM; put "
+        f"what follows the loop in a separate `tracer.invoke()`.",
+    )
+
+
 class Interleaver:
-    """Drives the model side of interleaving: model hooks in, workers served.
+    """Drives the model side of interleaving: model handoffs in, workers served.
 
     An interleaver owns the module controllers that turn a model's forward pass
     into a stream of `handle` calls, and the list of [`Mediator`][nnsight.intervention.interleaver.Mediator] workers
     those calls feed. One interleaver is shared across an [`Envoy`][nnsight.intervention.envoy.Envoy] tree, so
-    every module's hooks report into the same set of workers.
+    every module's controller reports into the same set of workers.
 
     Lifecycle of a run (see [`Envoy.interleave`][nnsight.intervention.envoy.Envoy.interleave]):
 
@@ -639,7 +698,7 @@ class Interleaver:
         ]
 
     def __enter__(self) -> Interleaver:
-        """Begin interleaving: arm the hooks and start each not-yet-started worker.
+        """Begin interleaving: arm the controllers and start each not-yet-started worker.
 
         Only a worker with no greenlet yet (``worker is None``) is started; one that
         already has a worker is left as is — parked mid-run on a re-entered interleaver.
@@ -727,10 +786,9 @@ class Interleaver:
         # worker will be served on *this* occurrence or a selected cache records
         # it. Every rank derives this from the same provider routes, keeping their
         # collectives matched.
-        gathering = False
+        undo = None
         if self.fragments is not None and self.fragments.enabled and self.fragments.fragmented(provider) and (observers or self._ready(provider)):
-            gathering = True
-            value = self.fragments.whole(provider, value)
+            value, undo = self.fragments.whole(provider, value)
 
         # Serving one worker can release another into parking here (a barrier),
         # so keep serving until nobody is parked on this visit.
@@ -767,61 +825,34 @@ class Interleaver:
         # Back to the piece the model's own forward expects, carrying whatever the
         # workers left behind — so an edit to the assembled tensor reaches the
         # model rather than being dropped with the gather.
-        if gathering:
-            value = self.fragments.fragment(provider, value)
+        if undo is not None:
+            value = undo(value)
         return value
 
     def check_dangling_mediators(self) -> None:
         """Surface any worker still parked after the run.
 
         Called once the model has finished. A worker that is still [`alive`][nnsight.intervention.interleaver.Mediator.alive]
-        was waiting for a location the model never reached. There are two cases:
-
-        * **Out of order** — a plain request (``iteration == 0``) for a location
-          the model already ran past, or never called. This is a real error, so
-          throw [`OutOfOrderError`][nnsight.intervention.interleaver.OutOfOrderError] into the worker, making the traceback
-          point at the line that was waiting.
-        * **Iterated past the end** — a worker inside a ``tracer.iter`` loop
-          (``iteration != 0``) asked for a step the model never ran, e.g. ``for
-          step in tracer.iter[:]`` continuing past the last generated token. That
-          is expected, not an error: throw into the worker anyway (to unwind it —
-          running its ``finally`` blocks — so it's cleaned up), but catch the
-          error and warn instead of raising. Values from steps that *were* reached
-          have already been saved.
+        was waiting for a location the model never reached.
+        [`dangling_unwind`][nnsight.intervention.interleaver.dangling_unwind] decides
+        what that means — an out-of-order read, which stands as an error, or a
+        ``tracer.iter`` loop that outran the run, bounded and open alike, which
+        warns — and this is the local half of it: what stands is raised, out of
+        the worker's own frame, and what is expected is warned about.
         """
         for mediator in self.mediators:
             if not mediator.alive:
                 continue
-            # Printed, so it renders as "{location}.i{n}" — which occurrence was
-            # waited for is the part that explains an iter loop that outran the run.
-            requester = mediator.pending
-            if requester.event is Event.BARRIER:
-                # Waiting on blocks that never all arrived — fewer of them reached
-                # the barrier than it was built for, so it was never going to
-                # release. Point at the line that waited.
-                mediator.worker.throw(
-                    ValueError(
-                        "A barrier was never reached by every block it waits for; "
-                        "check the count it was created with"
-                    )
-                )
-                continue
-            # Read the pin before the throw: unwinding the worker's iter loop
-            # restores it.
-            iterating = mediator.iteration != 0
+            error, expected = dangling_unwind(mediator)
             try:
-                mediator.worker.throw(
-                    OutOfOrderError(f"'{requester}' was requested but the model already ran past it")
-                )
-            except OutOfOrderError:
-                if not iterating:
+                mediator.worker.throw(error)
+            except BaseException as thrown:
+                # `thrown is error` only when the block let the unwind through: a
+                # `finally` that raises something of its own is that error, not a
+                # loop that outran the run, and stands however the loop was written.
+                if expected is None or thrown is not error:
                     raise
-                # Inside an iteration loop that outran the model — unwound; warn.
-                warnings.warn(
-                    f"'{requester}' was never reached: the model ran fewer "
-                    f"iterations than the loop requested. Values from reached "
-                    f"iterations are kept."
-                )
+                warnings.warn(expected)
 
     def cancel(self) -> None:
         """Drop all mediators and the batcher so the next run starts clean.

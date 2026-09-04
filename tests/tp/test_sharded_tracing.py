@@ -3,7 +3,7 @@
 A model loaded with ``distributed_config=DistributedConfig(tp_size=N)`` has its
 linears split across ranks, so the value at a column-parallel *output* or a
 row-parallel *input* is only that rank's slice.
-[`TPInterleaver`][nnsight.modeling.tp.fragments.TPInterleaver] gathers those
+[`TPFragments`][nnsight.modeling.tp.fragments.TPFragments] gathers those
 before a worker sees them and re-splits whatever the worker leaves, so a trace is
 written exactly as it would be against one GPU.
 
@@ -134,12 +134,20 @@ VALUES = [
     "baseline_logits",
     "partial_edit_logits",
     "cached_gate_out",
+    "partial_backward_grad",   # backward through a row-parallel output
+    "source_colwise_gathered",   # tp.gather on an op inside a sharded module
+    "manual_gathered_heads",   # tp.gather on a value between two shards
+    "manual_ablated_logits",   # ... edited and tp.shard-ed back
     "generated",
     "batched_first",
     "batched_edited_logits",
     "generated_steps",
     "adhoc_colwise",
     "adhoc_rowwise",
+    "adhoc_hooked",   # hook=True must not skip the bracket
+    "adhoc_nested",   # an ad-hoc call inside its own open handoff
+    "skip_read_back",   # a .skip replacement is not gathered
+    "skip_logits",
     "adhoc_lens",
 ]
 

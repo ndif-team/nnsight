@@ -243,7 +243,7 @@ def code_reduce(source: str, globals: dict, locals: dict, function: bool = False
 
     ``function`` says ``source`` is a single ``def`` / ``lambda`` rather than a
     traced block, which changes what counts as "referenced" — see
-    [`_function_referenced_names`][nnsight.intervention.serialization._function_referenced_names].
+    ``_function_referenced_names`` (private: no reference page publishes it).
     """
     names = _function_referenced_names(source) if function else _referenced_names(source)
     used_globals, used_locals = {}, {}

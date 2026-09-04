@@ -170,10 +170,15 @@ class DiffusionModel(HuggingFaceModel):
 
     Both `trace` and `generate` run the whole pipeline, with
     interventions firing on every component the denoising loop invokes;
-    ``model.output`` (and ``tracer.result``) is the pipeline's output object. They
-    differ only in the default step count: `trace` defaults to a single
-    denoising step (a fast one-step pass), `generate` uses the pipeline's own
-    default. To run one component's forward on its own, trace that envoy directly —
+    ``model.output`` (and ``tracer.result``) is the pipeline's output object.
+
+    A traced run defaults to ``num_inference_steps=1`` — a fast one-step pass for
+    inspecting or editing activations — and ``with model.generate(...):`` is a
+    traced run, so it takes that default too; only a bare ``model.generate(...)``
+    call outside a trace uses the pipeline's own default. The same call means one
+    denoising step inside a ``with`` and fifty outside it, so pass
+    ``num_inference_steps=`` whenever the image itself matters. To run one
+    component's forward on its own, trace that envoy directly —
     ``with model.unet.trace(sample, timestep, encoder_hidden_states=...):``.
 
     On dispatch a real pipeline is built with real weights. The lazy meta build
@@ -186,11 +191,12 @@ class DiffusionModel(HuggingFaceModel):
 
     Args:
         repo_id: A ``diffusers`` pipeline repo id (or local path) to load.
-        rename: Optional mapping to expose components under different envoy names
-            (e.g. ``{"unet": "denoiser"}``).
-        dispatch: If ``True``, load real weights immediately; otherwise build
-            lazily on the meta device and dispatch on the first run.
-        **kwargs: Forwarded to ``DiffusionPipeline.from_pretrained`` on dispatch.
+        *args: Forwarded to the mixin chain.
+        **kwargs: Forwarded to the mixin chain and, on dispatch, to
+            ``DiffusionPipeline.from_pretrained``. ``rename=`` exposes components
+            under different envoy names (e.g. ``{"unet": "denoiser"}``);
+            ``dispatch=True`` loads real weights immediately instead of building
+            lazily on the meta device.
 
     Examples:
         >>> from nnsight.modeling.diffusion import DiffusionModel
@@ -278,9 +284,10 @@ class DiffusionModel(HuggingFaceModel):
     def trace(self, *inputs: Any, **kwargs: Any):
         """Trace the whole pipeline, defaulting to a single denoising step.
 
-        Like `generate` but with ``num_inference_steps=1`` unless overridden —
-        a fast one-step pass for inspecting or editing activations. ``model.output``
-        is the pipeline's output object.
+        ``num_inference_steps=1`` unless overridden — a fast one-step pass for
+        inspecting or editing activations. ``model.output`` is the pipeline's
+        output object. ``with model.generate(...):`` routes here as well, so a
+        traced generation takes the one-step default too.
 
         Examples:
             >>> with model.trace("a photo of a cat"):
@@ -297,7 +304,10 @@ class DiffusionModel(HuggingFaceModel):
         ``with model.generate(...):`` traces the whole pipeline, so the block's
         interventions run against every component the denoising loop invokes (use
         ``tracer.iter`` to target a particular inference step); calling it directly
-        just runs the pipeline. The return value is the pipeline's own output
+        just runs the pipeline. A traced run goes through `trace`, so it
+        defaults to one denoising step where a direct call takes the pipeline's own
+        default — name ``num_inference_steps`` to fix the count either way. The
+        return value is the pipeline's own output
         object — read the images off its ``.images`` (or off ``model.output`` /
         ``tracer.result`` inside a trace).
 

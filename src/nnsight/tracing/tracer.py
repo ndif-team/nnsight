@@ -57,6 +57,13 @@ class WithBlockNotFoundError(Exception):
     """The tracer call isn't used as a ``with`` block, so there's nothing to trace."""
 
 
+# The statements a block can't start with (see `skip_context`). `except*` parses
+# to its own node from 3.11; on 3.10 `ast.Try` is the only shape there is.
+TRY_STATEMENTS = tuple(
+    node for node in (ast.Try, getattr(ast, "TryStar", None)) if node is not None
+)
+
+
 def skip_context(tracer: Tracer) -> None:
     """Arm the trace function that skips the block body so the backend runs it.
 
@@ -74,6 +81,9 @@ def skip_context(tracer: Tracer) -> None:
     line to come along: a ``with`` header written over several lines reaches its
     own closing line before the body, and raising there would skip the block
     before the ``as`` target is bound.
+
+    Where the raise lands has to be somewhere the ``with`` can catch it, which
+    rules out a body whose first statement is a ``try`` — refuse that shape too.
     """
     node = tracer.node
     body = node.body[0].lineno
@@ -81,6 +91,19 @@ def skip_context(tracer: Tracer) -> None:
         raise ValueError(
             "The body of a traced `with` must start on its own line; nnsight runs "
             "the body itself, and can only intercept it at the start of a line."
+        )
+    if isinstance(node.body[0], TRY_STATEMENTS):
+        # CPython carries the `try` keyword's line on an instruction that no
+        # exception-table entry covers, so a raise delivered there unwinds the
+        # whole frame — past this `with`'s `__exit__` and past any handler around
+        # it, uncatchable — rather than reaching the backend. There is no earlier
+        # line event to fire on once the header is done, so name the shape and
+        # the way out instead of letting the trace disappear.
+        raise ValueError(
+            "A traced `with` block cannot start with `try:`; nnsight intercepts "
+            "the body at its first line, and a `try` there is the one statement "
+            "Python gives it no way back out of. Put any statement above the "
+            "`try`, or move the `try` outside the block."
         )
 
     def skip(frame: FrameType, event: str, arg: Any) -> Any:

@@ -138,5 +138,5 @@ class TestExports:
 
     def test_ndif_status_deprecated(self, monkeypatch):
         monkeypatch.setattr(nnsight.CONFIG.API, "HOST", "http://localhost:1")
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(nnsight.NNsightDeprecationWarning):
             nnsight.ndif_status()

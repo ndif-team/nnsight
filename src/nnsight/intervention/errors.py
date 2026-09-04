@@ -6,6 +6,10 @@ hook, so the driver can end just that worker's request. The error still has to
 reach the client that wrote the intervention — which may be another process — so
 it is reduced to a plain, picklable dict in the worker and re-raised at the client.
 
+What the client catches is a ``RuntimeError`` whose message *starts* with the
+original type name and message, so a caller that needs to tell one refusal from
+another matches on the text rather than on the class.
+
 A ``tracer.stop()`` raises [`EarlyStopException`][nnsight.intervention.interleaver.EarlyStopException],
 which travels the same path but is control flow, not an error: it is marked and
 never re-raised.

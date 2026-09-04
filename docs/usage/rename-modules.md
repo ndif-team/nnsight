@@ -115,10 +115,26 @@ You can also index a renamed `ModuleList` entry by its alias string:
 
 - **Aliases bind on every envoy where the key resolves** — a single-component key
   (`{"mlp": "my_mlp"}`) renames the `mlp` on *every* block, not just the first.
+- **A key that names nothing is skipped, not an error.** That is what lets one
+  `rename` cover architectures that spell a module differently:
+  `{"attn": "att", "self_attn": "att"}` binds whichever of the two exists.
 - **Pass `rename=` at construction.** Aliases are bound during `Envoy.__init__`;
   there is no post-hoc alias API.
-- **Avoid alias names that collide with Envoy attributes** (`output`, `input`,
-  `trace`, ...). They will shadow or be shadowed by those attributes.
+- **An alias that would shadow something raises at construction.** Aliases bind
+  as plain attributes, so a name that is already taken — an `Envoy` attribute
+  (`output`, `input`, `trace`, ...), a sibling module, an alias an earlier key
+  already claimed, or a name on the **wrapped model** (`config`, `weight`,
+  `eval`, and every other `nn.Module` attribute) — would leave the original
+  reachable only through the tree, not by name. That is reported when the model is built rather than surfacing later as
+  an intervention landing on the wrong module:
+
+  ```
+  ValueError: `rename` alias 'embed' for 'head' would shadow a child module of
+  that name on `model`. ...
+  ```
+
+  Aliasing a key to its own name (`{"attn": "attn"}`) is a no-op, not a
+  collision, so it stays usable alongside the cross-architecture pattern above.
 - **A dotted key mounts on the root; a leading-dot key mounts where it resolves.**
   Pick the form that matches where you want to reach the alias.
 
