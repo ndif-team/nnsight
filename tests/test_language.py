@@ -819,6 +819,55 @@ class TestPeft:
             out = model.transformer.h[0].attn.output[0].save()
         assert out.shape[-1] == 768
 
+    def test_load_adapter_before_dispatch(self, lora_adapter):
+        # The post-hoc form of `peft=`: on a meta model only the adapter's
+        # config is grafted (safetensors cannot load onto meta — issue #555),
+        # and the weights arrive with the base's at dispatch.
+        model = TransformersModel("gpt2", task="text-generation")
+        assert not _has_lora(model)
+
+        model.load_adapter(lora_adapter)
+        assert model.dispatched is False
+        assert _has_lora(model)
+        assert all(p.device.type == "meta" for p in model._module.parameters())
+        assert model._remoteable_get_env() == {"peft": lora_adapter}
+
+        with torch.no_grad(), model.trace(PROMPT):  # first trace dispatches
+            out = model.transformer.h[0].attn.output[0].save()
+        assert model.dispatched is True
+        assert _has_lora(model)
+        assert out.shape[-1] == 768
+        assert torch.isfinite(out).all()
+
+    def test_load_adapter_before_dispatch_removed_again(self, lora_adapter):
+        model = TransformersModel("gpt2", task="text-generation")
+        model.load_adapter(lora_adapter)
+        model.load_adapter(None)
+        assert model.peft is None and not _has_lora(model)
+        assert model._remoteable_get_env() == {}
+
+    @torch.no_grad()
+    def test_load_adapter_after_dispatch(self, lora_adapter):
+        model = TransformersModel("gpt2", task="text-generation", dispatch=True)
+        model.load_adapter(lora_adapter)
+        assert _has_lora(model)
+        with model.trace(PROMPT):
+            out = model.transformer.h[0].attn.output[0].save()
+        assert out.shape[-1] == 768
+
+        model.load_adapter(None)
+        assert model.peft is None and not _has_lora(model)
+        with model.trace(PROMPT):
+            out = model.transformer.h[0].attn.output[0].save()
+        assert out.shape[-1] == 768
+
+    def test_load_adapter_shadows_the_module_method(self, lora_adapter):
+        # Reached by fallthrough, transformers' own load_adapter would mutate
+        # the module structure without the envoy tree noticing (and fail
+        # outright on meta). Ours must win the name.
+        model = TransformersModel("gpt2", task="text-generation")
+        assert type(model).load_adapter is TransformersModel.load_adapter
+
 
 def _hidden(block_output):
     """A gpt2 block's output is a tuple (string path) or a bare tensor (raw

@@ -657,9 +657,49 @@ class TransformersModel(HuggingFaceModel):
     def _remoteable_set_env(self, env: Optional[dict]) -> None:
         """Apply a per-request environment on the server side.
 
-        Swaps the PEFT adapter to match ``env["peft"]``, rewrapping the loaded
-        module only when the requested adapter differs from the current one so a
-        repeat request pays nothing:
+        Only the PEFT adapter travels — the base model is identified by the
+        model key. See `_swap_adapter` for the transitions.
+        """
+        self._swap_adapter(env.get("peft") if env else None)
+
+    def _rebind(self, module: torch.nn.Module) -> None:
+        """Rebuild the Envoy tree around ``module`` in place.
+
+        An adapter wrap/unwrap changes the module structure (adapter modules
+        appear or disappear), so re-init rather than `_update`, reusing this
+        envoy's interleaver and rename spec. Drop the previous tree's
+        child-envoy attributes first — the new structure has different
+        top-level children, and __init__ resets _children without clearing the
+        stale attributes those children left.
+        """
+        # Standalone children (whose module isn't part of the HF tree, e.g. the
+        # generator) survive the swap: Envoy.__init__ builds _children only from
+        # `module.named_children()`, so carry them across the re-init by name.
+        submodules = set(self._module.modules())
+        standalone = {
+            name: value
+            for name, value in self.__dict__.items()
+            if isinstance(value, Envoy)
+            and value is not self
+            and value._module not in submodules
+        }
+        for name, value in list(self.__dict__.items()):
+            if isinstance(value, Envoy) and value is not self:
+                del self.__dict__[name]
+        Envoy.__init__(
+            self, module, path=self.path, interleaver=self.interleaver, rename=self._rename
+        )
+        for name, child in standalone.items():
+            self.__dict__[name] = child
+            self._children.append(child)
+        if self.pipeline is not None:
+            self.pipeline.model = module
+
+    def _swap_adapter(self, requested: Optional[str]) -> None:
+        """Swap the loaded module's PEFT adapter to ``requested``.
+
+        Rewraps only when the requested adapter differs from the current one, so
+        a repeat request pays nothing:
 
             current  requested  action
             -------  ---------  ------
@@ -669,42 +709,11 @@ class TransformersModel(HuggingFaceModel):
             X        Y          unload X, load Y
             X        None       unload X
         """
-        requested = env.get("peft") if env else None
         if requested == self.peft:
             return
 
-        # Rebuild the Envoy tree around the new module in place: a wrap/unwrap
-        # changes the module structure (adapter modules appear or disappear), so
-        # re-init rather than _update, reusing this envoy's interleaver and rename
-        # spec. Drop the previous tree's child-envoy attributes first — the new
-        # structure has different top-level children, and __init__ resets
-        # _children without clearing the stale attributes those children left.
-        def rebind(module: torch.nn.Module) -> None:
-            # Standalone children (whose module isn't part of the HF tree, e.g. the
-            # generator) survive the swap: Envoy.__init__ builds _children only from
-            # `module.named_children()`, so carry them across the re-init by name.
-            submodules = set(self._module.modules())
-            standalone = {
-                name: value
-                for name, value in self.__dict__.items()
-                if isinstance(value, Envoy)
-                and value is not self
-                and value._module not in submodules
-            }
-            for name, value in list(self.__dict__.items()):
-                if isinstance(value, Envoy) and value is not self:
-                    del self.__dict__[name]
-            Envoy.__init__(
-                self, module, path=self.path, interleaver=self.interleaver, rename=self._rename
-            )
-            for name, child in standalone.items():
-                self.__dict__[name] = child
-                self._children.append(child)
-            if self.pipeline is not None:
-                self.pipeline.model = module
-
         if self.peft is not None:
-            rebind(self._module.unload())
+            self._rebind(self._module.unload())
             # The module is the base checkpoint from here; keep `self.peft` honest
             # so a refused load below leaves this envoy self-consistent.
             self.peft = None
@@ -720,9 +729,48 @@ class TransformersModel(HuggingFaceModel):
             # over one loaded base is exactly the workload where every organism
             # silently collapsing to the base checkpoint looks like a real result.
             _refuse_noop_peft(requested, caught)
-            rebind(adapted)
+            self._rebind(adapted)
 
         self.peft = requested
+
+    def load_adapter(self, peft_id: Optional[str]) -> None:
+        """Attach a PEFT adapter — the post-hoc form of the ``peft=`` kwarg.
+
+        Call again with a different id to swap adapters, or with ``None`` to
+        remove the current one (see `_swap_adapter` for the transitions).
+
+        Works before dispatch: only the adapter's config is grafted onto the
+        meta module, so the tree gains the adapter's modules — and remote
+        module paths match — without loading any weights (safetensors cannot
+        load onto the meta device). The adapter's real weights arrive with the
+        base's at dispatch. That deferral means a wrong adapter id fails here
+        (the config is read now), but an adapter that doesn't match the base
+        is refused only at dispatch, where the weights meet.
+
+        This shadows ``PreTrainedModel.load_adapter``, which the envoy would
+        otherwise reach by fallthrough — that one fails on a meta model and
+        changes the module structure without the envoy tree noticing. An
+        adapter attached here also travels with remote requests
+        (`_remoteable_get_env`).
+
+        Args:
+            peft_id: The adapter's repo id or local path, or ``None`` to
+                remove the current adapter.
+        """
+        if self.dispatched:
+            self._swap_adapter(peft_id)
+            return
+        if peft_id == self.peft:
+            return
+        from .mixins.meta import MetaDevice
+
+        self.peft = peft_id
+        # Rebuild the meta skeleton exactly as construction would have built it
+        # with this adapter: `_load_meta` reads `self.peft` and grafts the
+        # adapter's architecture from its config alone.
+        with MetaDevice():
+            module = self._load_meta(*self.args, **self.kwargs)
+        self._rebind(module)
 
     def __getstate__(self) -> dict:
         state = super().__getstate__()
