@@ -28,7 +28,7 @@ The worker/model event protocol is `VALUE` / `SWAP` / `SKIP` / `BARRIER` (the `E
 
 ### `generate` vs `pipe`
 
-`model.generate(...)` now generates through the **model** and returns **token ids** (read `tracer.result`), greedy by default. `model.pipe(...)` runs the whole task **pipeline** and returns its records (decoded text, labels, ...) — that is what the old `generate` returned. `model.trace(...)` runs one forward; `model.scan(...)` runs one forward under fake tensors for shape inference.
+`model.generate(...)` now generates through the **model** and returns **token ids** (read `tracer.result`), decoding with the checkpoint's own `generation_config` (which many instruct checkpoints set to sample). `model.pipe(...)` runs the whole task **pipeline** and returns its records (decoded text, labels, ...) — that is what the old `generate` returned. `model.trace(...)` runs one forward; `model.scan(...)` runs one forward under fake tensors for shape inference.
 
 ### `eproperty` reintroduced
 

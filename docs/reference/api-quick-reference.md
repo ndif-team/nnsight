@@ -32,7 +32,7 @@ Each returns a tracer usable as `with model.<method>(...) as tracer:`. Give a ru
 | Method | On | Runs | Returns (`tracer.result`) |
 |--------|-----|------|--------------------------|
 | `model.trace(*inputs, **kw)` | all | One forward pass. | The forward's return value (e.g. a `CausalLMOutput`). |
-| `model.generate(*inputs, max_new_tokens=N, **kw)` | `TransformersModel`, `DiffusionModel` | Generation through the **model** (greedy by default). | **Token ids** `[batch, seq]` (Transformers); pipeline output (Diffusers). |
+| `model.generate(*inputs, max_new_tokens=N, **kw)` | `TransformersModel`, `DiffusionModel` | Generation through the **model**, decoding with the checkpoint's own `generation_config` (which may sample — pass `do_sample=False` for greedy). | **Token ids** `[batch, seq]` (Transformers); pipeline output (Diffusers). |
 | `model.pipe(*inputs, **kw)` | `TransformersModel` | The whole task **pipeline** (preprocess + forward + postprocess). | Its **records** — decoded text, labels, etc. |
 | `model.scan(*inputs, **kw)` | all | One forward under fake tensors — shapes/dtypes only, no weights, no dispatch. | (Read shapes inside the block; fake tensors are invalid after it.) |
 | `model.edit(*, inplace=False)` | all | Captures interventions as **defaults** replayed on every future trace. | `as (tracer, edited)` when `inplace=False`; `as tracer` when `inplace=True`. |

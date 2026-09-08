@@ -1,6 +1,6 @@
 ---
 title: Generate
-one_liner: Multi-token generation through the model; returns token ids (`tracer.result`). Greedy by default.
+one_liner: Multi-token generation through the model; returns token ids (`tracer.result`). Decoding follows the checkpoint's `generation_config`.
 tags: [usage, tracing, generation]
 related: [docs/usage/trace.md, docs/usage/pipe.md, docs/usage/iter-all-next.md, docs/gotchas/iteration.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/modeling/transformers.py, src/nnsight/intervention/tracer.py]
@@ -12,7 +12,7 @@ sources: [src/nnsight/modeling/transformers.py, src/nnsight/intervention/tracer.
 
 `model.generate(input, max_new_tokens=N, ...)` traces multi-token autoregressive generation. It runs the model's own `generate` (each new token is one forward pass) and returns the **generated token ids** — read them off `tracer.result`. Interventions in the block run against every forward the decode loop makes; use `tracer.iter` to target a particular step.
 
-Generate goes **through the model**, not the task's pipeline. It takes the same inputs a forward does (text, token ids, a tensor, or an encoding) and uses the checkpoint's own generation settings — so it is **greedy by default** (it does not apply the `task_specific_params` sampling a pipeline would). To get the pipeline's decoded records instead, use `model.pipe(...)` — see `docs/usage/pipe.md`.
+Generate goes **through the model**, not the task's pipeline. It takes the same inputs a forward does (text, token ids, a tensor, or an encoding) and decodes with the checkpoint's own **`generation_config`** — not the `task_specific_params` a pipeline would apply. That config is the checkpoint's to set: gpt2 leaves it greedy, and many instruct checkpoints put `do_sample=True` in it, so **generate samples on those unless you say otherwise**. Pass `do_sample=False` when you need determinism. To get the pipeline's decoded records instead, use `model.pipe(...)` — see `docs/usage/pipe.md`.
 
 ## When to use / when not to use
 
@@ -36,9 +36,9 @@ print(model.tokenizer.decode(ids[0]))     # The Eiffel Tower is in the city of P
 
 The result is a `[batch, seq]` tensor of ids — the whole prompt plus completion.
 
-## Greedy by default
+## Decoding follows the checkpoint's `generation_config`
 
-Generating through the model uses the checkpoint's settings, not the pipeline's `task_specific_params` (which for gpt2 ask for `do_sample=True`). So two generates match:
+Generating through the model uses the checkpoint's settings, not the pipeline's `task_specific_params` (which for gpt2 ask for `do_sample=True`). gpt2's own config is greedy, so two generates match:
 
 ```python
 with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as t:
@@ -46,6 +46,13 @@ with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as t
 with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as t:
     b = t.result.save()
 # torch.equal(a, b) -> True
+```
+
+A checkpoint whose `generation_config` sets `do_sample=True` samples instead — `gemma-3-1b-it`, `Llama-3.1-8B-Instruct` and `Qwen3-4B-Instruct` all ship it, with a `temperature` and `top_p` beside it. The same two generates then come back different, and a logit lens or a probe reading the run disagrees with the tokens it produced. Check `model.generation_config.do_sample`, and pass `do_sample=False` for a deterministic run:
+
+```python
+with model.generate("The Eiffel Tower is in the city of", max_new_tokens=12, do_sample=False) as tracer:
+    ids = tracer.result.save()
 ```
 
 Ask for sampling explicitly if you want it: `model.generate(..., do_sample=True, top_k=50)`. Sampled generation is reproducible from a plain `torch.manual_seed(n)` immediately before the call — inside a trace or outside one:
@@ -135,7 +142,7 @@ The padding is still there in the result, so decode with
 | Runs | one forward (`__call__`) | the model's `generate` | the whole task pipeline |
 | Iterations | 1 | one per new token | pipeline-defined |
 | Result | model output | **token ids** | pipeline **records** (text/labels) |
-| Sampling | n/a | greedy unless asked | pipeline's `task_specific_params` apply |
+| Sampling | n/a | the checkpoint's `generation_config` (may sample) | pipeline's `task_specific_params` apply |
 
 ## Remote generation
 
