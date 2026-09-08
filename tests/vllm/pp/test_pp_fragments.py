@@ -1,7 +1,7 @@
 """Fragments (within-stage TP gather) riding the PP interleaver.
 
 Rank 0 owns ``model.h.0``, whose output is marked fragmented by a fake
-Fragments (whole = piece * 2, fragment = whole / 2: the arithmetic of an
+Fragments (whole = piece * 2, undone by / 2: the arithmetic of an
 all-reduce over two identical partials, with no real collective). Rank 1 owns
 ``model.h.1``, unfragmented. Both ranks run the same block reading both
 outputs.
@@ -39,11 +39,8 @@ def run(rank: int, world: int, rdv: str) -> None:
         def fragmented(self, location: str) -> bool:
             return location == FRAGMENTED
 
-        def whole(self, location: str, value: torch.Tensor) -> torch.Tensor:
-            return value * 2
-
-        def fragment(self, location: str, whole: torch.Tensor) -> torch.Tensor:
-            return whole / 2
+        def whole(self, location: str, value: torch.Tensor):
+            return value * 2, lambda edited: edited / 2
 
     module_map = PPModuleMap(world)
     module_map.set_derived_owners({"h.0": 0, "h.1": 1})
