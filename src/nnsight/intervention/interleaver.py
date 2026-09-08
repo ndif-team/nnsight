@@ -115,6 +115,14 @@ class OutOfOrderError(Exception):
     """
 
 
+# Location the driver serves once per generation step, per worker. An
+# open-ended ``tracer.iter[:]`` whose step body never parks reads this between
+# steps, so the loop advances at the model's pace instead of spinning the
+# thread; when generation ends, the read is left dangling and the standard
+# dangling-worker unwind ends the loop.
+STEP_GATE = "__nnsight_step__"
+
+
 class Mediator:
     """Runs one block of intervention code as a greenlet, in step with the model.
 
@@ -216,6 +224,9 @@ class Mediator:
         # The interleaver's counts when this worker started; its own occurrence
         # of a location is the interleaver's count minus this.
         self.counts_at_start: dict[str, int] = {}
+        # How many times this worker has parked, for the life of the worker. A
+        # loop reads it around a step body to learn whether the body parked.
+        self.parks = 0
         # Caches created by this worker's `tracer.cache()`. They observe every
         # location this run reaches (post-intervention); see Interleaver.handle.
         self.caches: list = []
@@ -320,12 +331,22 @@ class Mediator:
         sequentially.
         """
         mediator = cls.current(location)
+        # A distributed run may own only part of the model: give the interleaver a
+        # look at the raw event before the worker parks on it. Serving here (a
+        # remote-owned read answered with a lazy handle, a remote-owned write
+        # absorbed) keeps the worker off a location no local handoff will ever
+        # reach. A mediator started bare (no interleaver) has no one to consult.
+        if mediator.interleaver is not None:
+            intercepted = mediator.interleaver.intercept(mediator, event, location, rest)
+            if intercepted is not None:
+                return intercepted[0]
         worker = getcurrent()
         iteration = (
             mediator.iteration
             if mediator.iteration is not None
             else mediator.occurrence(location)
         )
+        mediator.parks += 1
         return worker.parent.switch(Pending(event, location, iteration, *rest))
 
     def occurrence(self, location: str) -> int:
@@ -401,6 +422,7 @@ class Mediator:
         self.interleaver = interleaver
         self.iteration = 0
         self.counts_at_start = dict(interleaver.counts) if interleaver is not None else {}
+        self.parks = 0
         self.caches = []
         self.transform = None
         self.worker = greenlet(run=self._run)
@@ -518,8 +540,8 @@ def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]
 
     Returns the error to throw into the worker — the throw unwinds it, running its
     ``finally`` blocks, and points the traceback at the line that was waiting — and
-    the warning to emit *instead of* surfacing that error, or ``None`` when the
-    error stands. Two drivers ask, and they differ only in what surfacing means:
+    the warning to emit *instead of* surfacing that error: ``None`` when the
+    error stands, an empty string when the unwind needs no message. Two drivers ask, and they differ only in what surfacing means:
     [`Interleaver.check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators]
     raises the error, and vLLM's ``Requests.finish_dangling`` carries it home as the
     request's deferred error. The policy is one copy here because two copies of it
@@ -541,6 +563,10 @@ def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]
     and the loop's shape it reads.
     """
     requester = mediator.pending
+    if requester.provider == STEP_GATE:
+        # An open-ended loop parked for a step the run never made: the loop's
+        # exit. Unwound with no message; reached steps kept their values.
+        return OutOfOrderError("generation ended before the loop's next step"), ""
     if requester.event is Event.BARRIER:
         # Fewer blocks reached the barrier than it was built for, so it was never
         # going to release.
@@ -612,11 +638,23 @@ class Interleaver:
             afterwards.
     """
 
-    def __init__(self, fragments: Optional["Fragments"] = None) -> None:
+    def __init__(
+        self,
+        fragments: Optional["Fragments"] = None,
+        step_gate_at_root: bool = True,
+    ) -> None:
         # The workers this run serves. Local tracing appends to it before the run
         # is entered, and `__enter__` indexes it; a driver that swaps the list
         # while a run is in progress calls `reindex` itself afterwards.
         self.mediators: list[Mediator] = []
+        # The first instrumented envoy's path: one completed forward of that
+        # module is one generation step, so its output handoff serves the step
+        # gate (see STEP_GATE). A driver that owns the step boundary itself (the
+        # vLLM runner, whose forward may replay as a captured graph with no
+        # handoffs) passes ``step_gate_at_root=False`` and serves the gate at its
+        # own boundary instead.
+        self.root: Optional[str] = None
+        self.step_gate_at_root = step_gate_at_root
         # The envoy wrapping each module of this tree, by module id, so a module
         # reachable by two paths gets one envoy (the first path) and an alias.
         # Weak: the tree's parent links own the envoys; this only looks them up.
@@ -760,8 +798,38 @@ class Interleaver:
         # visible.
         if self.fragments is not None:
             self.fragments.instrument(envoy)
+        # The tree instruments top-down, so the first path seen is the root's.
+        if self.root is None:
+            self.root = envoy.path
 
         install_controller(envoy)
+
+    def intercept(
+        self, mediator: Mediator, event: Event, location: str, rest: tuple
+    ) -> tuple | None:
+        """Look at a worker's event before it parks; optionally serve it in place.
+
+        Called from :meth:`Mediator.event` on the worker greenlet, with the raw
+        (untagged) ``location``. Returning ``None`` lets the worker park normally.
+        Returning a 1-tuple ``(value,)`` serves the event immediately: the worker
+        gets ``value`` back without parking and keeps running. The tuple wrapper is
+        what lets an intercept serve ``None`` itself (an absorbed write).
+
+        The base interleaver owns every location, so it never intercepts. A
+        distributed interleaver overrides this to answer reads of locations owned
+        by another rank (with a lazy handle resolved later) and to absorb writes to
+        them (the owning rank performs the same write locally).
+        """
+        return None
+
+    def publish(self, provider: str, value: Any, served: list) -> None:
+        """Record the value at ``provider`` as the workers served this visit saw it.
+
+        Called from `handle` after the workers parked on this visit have been
+        served and before a fragment is re-split for the model, with ``served`` as
+        ``(mediator, occurrence)`` pairs. The base keeps nothing; a distributed
+        interleaver overrides this to hold the value for its peers' pulls.
+        """
 
     def handle(self, provider: str, value: Any) -> Any:
         """Route ``value`` to this provider's consumers; return it, edited if any
@@ -772,7 +840,20 @@ class Interleaver:
         it has been served — so a worker that arrives here *during* the visit
         (released from a barrier by one that was served) asks for this occurrence
         and is served in it too, whichever order the workers were written in.
+
+        The root module's output handoff closes a generation step, so it also
+        serves the step gate when this interleaver owns the step boundary.
         """
+        value = self._handle(provider, value)
+        if (
+            self.step_gate_at_root
+            and self.root is not None
+            and provider == f"{self.root}.output"
+        ):
+            self._handle(STEP_GATE, None)
+        return value
+
+    def _handle(self, provider: str, value: Any) -> Any:
         occurrence = self.counts.get(provider, 0)
         observers = (
             self.observers.get(provider, ())
@@ -792,9 +873,9 @@ class Interleaver:
 
         # Serving one worker can release another into parking here (a barrier),
         # so keep serving until nobody is parked on this visit.
-        served = False
+        served: list[tuple[Mediator, int]] = []
         while ready := self._ready(provider):
-            served = True
+            served.extend((mediator, mediator.pending.iteration) for mediator in ready)
             for mediator in ready:
                 try:
                     value = mediator.handle(provider, value)
@@ -815,12 +896,17 @@ class Interleaver:
             value = self.batcher.assemble_skip(value)
 
         for mediator, cache, selected in observers:
-            served = (
+            rows = (
                 value
                 if self.batcher is None
                 else self.batcher.narrow(value, mediator.batch_group)
             )
-            cache.observe_selected(selected, served)
+            cache.observe_selected(selected, rows)
+
+        # The value as the workers saw it, before any re-split, for a
+        # distributed interleaver's peers.
+        if served:
+            self.publish(provider, value, served)
 
         # Back to the piece the model's own forward expects, carrying whatever the
         # workers left behind — so an edit to the assembled tensor reaches the
@@ -852,7 +938,8 @@ class Interleaver:
                 # loop that outran the run, and stands however the loop was written.
                 if expected is None or thrown is not error:
                     raise
-                warnings.warn(expected)
+                if expected:
+                    warnings.warn(expected)
 
     def cancel(self) -> None:
         """Drop all mediators and the batcher so the next run starts clean.
