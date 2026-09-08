@@ -18,9 +18,77 @@ from vllm.v1.worker.gpu_worker import Worker
 
 from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
 
+#: The full meta-device model a pipeline-parallel worker builds before its real
+#: distributed groups exist, for the runner to take in ``load_model``. One
+#: worker per process, so one slot.
+PP_META_MODEL: Any = None
+
 
 class NNsightGPUWorker(Worker):
     """A vLLM GPU worker whose model runner interleaves interventions."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Under PP this rank's module tree holds PPMissingLayer stubs for other
+        # stages' layers, and stubs have no children. A full meta-device copy of
+        # the architecture, built before the real distributed groups exist,
+        # provides both the modules the architecture builds only on some ranks
+        # and the children to graft onto each stub's envoy (see the runner's
+        # load_model).
+        global PP_META_MODEL
+        if self.parallel_config.pipeline_parallel_size > 1:
+            PP_META_MODEL = self._create_pp_meta_model()
+
+    def _create_pp_meta_model(self) -> Any:
+        """Build the full vLLM model on the meta device with PP=1, TP=1.
+
+        Bootstraps a temporary single-rank distributed env (no real groups
+        exist yet), constructs the model without weights, then tears the env
+        down so ``init_device`` can set up the real groups.
+        """
+        import copy
+        import socket
+
+        from vllm.distributed import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+            init_distributed_environment,
+            initialize_model_parallel,
+        )
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+        from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        init_distributed_environment(1, 0, f"tcp://127.0.0.1:{port}", 0, backend="gloo")
+        initialize_model_parallel(
+            tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+        )
+
+        # The engine's own config, narrowed to one rank and the meta device:
+        # every loading option the user gave (trust_remote_code, revision,
+        # hf_overrides, quantization, ...) applies to the meta build exactly
+        # as it applied to the real one.
+        vllm_config = copy.deepcopy(self.vllm_config)
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.parallel_config.world_size = 1
+        vllm_config.load_config.device = "meta"
+
+        loader = DummyModelLoader(vllm_config.load_config)
+        loader.load_weights = lambda *a, **kw: None
+        model = loader.load_model(vllm_config, vllm_config.model_config)
+
+        # The rope cache keyed under the bootstrap env must not leak into the
+        # real one.
+        _ROPE_DICT.clear()
+
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+        return model
 
     def init_device(self) -> None:
         super().init_device()
