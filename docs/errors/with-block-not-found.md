@@ -10,13 +10,28 @@ sources: [src/nnsight/tracing/tracer.py]
 
 ## Symptom
 
+One of three messages, depending on what nnsight could recover at the call site:
+
 ```
-nnsight.tracing.tracer.WithBlockNotFoundError
+WithBlockNotFoundError: nnsight has no source for <stdin>, so it cannot read the
+body of the `with` block at line 3. …
 ```
 
-The exception carries **no message** — the class docstring is the
-explanation: "The tracer call isn't used as a `with` block, so there's nothing to
-trace."
+```
+WithBlockNotFoundError: nnsight found no `with` statement at run.py:12, the line
+the trace was entered from, which reads `t.__enter__()`. Either the tracer wasn't
+used as a `with` block … or the source nnsight read for this file is stale …
+```
+
+```
+WithBlockNotFoundError: nnsight found no `with` statement at <ipython-input-3>:4,
+the line the trace was entered from. nnsight compiles the block's own body to run
+it …
+```
+
+The first means there was no source to read at all; the second that the file is on
+disk but has no `with` at that line; the third that source was recovered but its
+line numbers don't line up with the code being run.
 
 ## Cause
 

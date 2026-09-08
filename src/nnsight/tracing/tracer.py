@@ -29,6 +29,7 @@ from __future__ import annotations
 import ast
 import builtins
 import linecache
+import os
 import sys
 import threading
 from types import CodeType, FrameType, TracebackType
@@ -54,7 +55,57 @@ class ExitTracingException(Exception):
 
 
 class WithBlockNotFoundError(Exception):
-    """The tracer call isn't used as a ``with`` block, so there's nothing to trace."""
+    """No ``with`` block was found at the call site, so there's nothing to trace.
+
+    Either the tracer wasn't used as a ``with`` block, or the source it was
+    written in couldn't be read back as one; `_not_found_message` tells the
+    two apart for the user.
+    """
+
+
+def _not_found_message(filename: str, lineno: int) -> str:
+    """Say why no ``with`` was found at ``filename``:``lineno``, and what to do.
+
+    Several unrelated causes land on the same raise — a trace typed into stdin, an
+    ``exec``'d string, a cell magic that rewrites the cell, a file edited mid-run,
+    a tracer entered by hand — and the way out differs for each, so branch on what
+    the raise site knows: whether there is any source at all, and whether it came
+    from a file still on disk.
+    """
+    source = Tracer.source(filename).splitlines()
+    reads = ""
+    if 1 <= lineno <= len(source):
+        reads = f", which reads `{source[lineno - 1].strip()}`"
+
+    if not source:
+        return (
+            f"nnsight has no source for {filename}, so it cannot read the body of the "
+            f"`with` block at line {lineno}. It compiles the block's own source to run "
+            "it, so a trace has to live somewhere that source can be read back from: a "
+            "file on disk, a notebook cell, or `python -c`. Piping a script in on stdin "
+            "(`python < script.py`) leaves none — run the file by name instead — and "
+            "code built at runtime has to register itself in `linecache`."
+        )
+
+    if os.path.isfile(filename):
+        return (
+            f"nnsight found no `with` statement at {filename}:{lineno}, the line the "
+            f"trace was entered from{reads}. Either the tracer wasn't used as a `with` "
+            "block — nnsight compiles the block's own body to run it, so there is "
+            "nothing to capture — or the source nnsight read for this file is stale: it "
+            "reads each file once and never re-checks it, so an edit that moved this "
+            "line mid-run leaves it looking at the old text, and the process has to be "
+            "restarted."
+        )
+
+    return (
+        f"nnsight found no `with` statement at {filename}:{lineno}, the line the trace "
+        f"was entered from{reads}. nnsight compiles the block's own body to run it, so "
+        "the trace has to be written as `with model.trace(...):` in source whose line "
+        "numbers match the code being run — a cell magic that rewrites the cell "
+        "(`%%time`), or generated source out of step with its `linecache` entry, breaks "
+        "that match."
+    )
 
 
 # The statements a block can't start with (see `skip_context`). `except*` parses
@@ -352,7 +403,9 @@ class Tracer:
 
         node, compiled = BLOCKS[key]
         if node is None:
-            raise WithBlockNotFoundError()
+            raise WithBlockNotFoundError(
+                _not_found_message(code.co_filename, frame.f_lineno)
+            )
         self.node = node
         self.info = Tracer.Info(frame, compiled)
 
@@ -425,11 +478,13 @@ class Tracer:
         it stands alone, parses that, and shifts the line numbers back to the file
         so tracebacks and the skip hook still point at the real source.
 
-        Getting the bound wrong is safe: collecting *too much* just parses a few
-        trailing statements past the block (``body[0]`` is still the ``with``);
-        collecting too little makes the slice unparseable, which returns ``None``
-        and lets [`parse`][nnsight.tracing.tracer.Tracer.parse] fall back to the whole file. It never returns a wrong
-        node.
+        Getting the bound wrong is mostly safe: collecting *too much* just parses a
+        few trailing statements past the block (``body[0]`` is still the ``with``),
+        and collecting too little usually makes the slice unparseable, which returns
+        ``None`` and lets [`parse`][nnsight.tracing.tracer.Tracer.parse] fall back to the whole file. Only a bound that
+        cuts the body at a line the block could have ended on gives a wrong node
+        that still parses — which is why lines Python doesn't indent, comments and
+        blanks, can't be allowed to end it.
         """
         lines = source.splitlines(keepends=True)
         if not 1 <= lineno <= len(lines):
@@ -440,9 +495,13 @@ class Tracer:
         depth = _bracket_depth(first)
         for line in lines[lineno:]:
             stripped = line.lstrip()
-            # A non-blank line dedented back to the header's column, with no bracket
+            # A line of code dedented back to the header's column, with no bracket
             # still open, is the next statement — the block ended on the line before.
-            if depth <= 0 and stripped and len(line) - len(stripped) <= indent:
+            # Blanks and comments carry no indentation as far as Python is concerned
+            # (a commented-out line at column 0 sits happily inside an indented
+            # block), so they can't be read as the end of one.
+            statement = stripped and not stripped.startswith("#")
+            if depth <= 0 and statement and len(line) - len(stripped) <= indent:
                 break
             collected.append(line)
             depth += _bracket_depth(line)
