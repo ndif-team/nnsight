@@ -189,6 +189,11 @@ and expects it to stay; another library that reassigns `module.forward`, or wrap
 the module in a way that bypasses its `forward`, silently removes it, and the next
 trace reports a location the model "already ran past".
 
+nnsight warns as soon as it notices — the next time an envoy tree is built or
+re-pointed over that module (`"<path>: `forward` was replaced after nnsight wrapped
+this module"`) — but nothing calls it in between, so the warning can arrive well
+after the assignment, or not before the trace that fails.
+
 The tell is that `.input`/`.output` of some modules break while others still work,
 and that it started after running code from another instrumentation library in the
 same process. Re-instrumenting means clearing nnsight's own state key as well as

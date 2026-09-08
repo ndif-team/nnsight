@@ -22,10 +22,10 @@ runtime.
 tree, and again from `Envoy._update` when meta weights are swapped for real ones. It
 lets the runtime's `Fragments` record what the module's values are at the handoff,
 then calls `install_controller(envoy)` (`source.py`), which installs one controller
-as the module's `forward` (`make_controller`):
+as the module's `forward` (a `Controller`, whose `__call__` is):
 
 ```python
-def controller(*args, **kwargs):
+def __call__(self, *args, **kwargs):
     interleaver, path, locations = state.active()     # the trace reaching this module now
     if interleaver is None:                           # no trace, or no workers
         return body(module, *args, **kwargs)
@@ -41,7 +41,15 @@ module's input (`(args, kwargs)`) or its output, in place or by replacement. The
 controller is stored in the module's instance `__dict__` under `forward`, so
 `nn.Module.__call__` finds it ahead of the class's `forward`; it holds the module by
 weakref (the module owns it) and keeps the original's signature with
-`functools.wraps`, which `generate()` introspects.
+`functools.update_wrapper`, which `generate()` introspects.
+
+It is an object rather than a closure so that copying a module can rebind it:
+`Controller.__deepcopy__` looks the copied module up in `deepcopy`'s memo (the copy
+is registered there before its `__dict__` is copied) and binds to it, and
+`__reduce__` pickles it as the module and its `State`. A function is atomic to both,
+so a closure came through a copy still pointing at the module it was built for —
+the copy computed with the original's weights, silently and outside any trace — and
+a wrapped module could not be pickled at all.
 
 Being the forward rather than a hook keeps the module on PyTorch's fast call path.
 It also means the controller runs *inside* whatever hooks the runtime itself
@@ -49,6 +57,25 @@ registers: under transformers tensor parallelism the collectives live in those
 hooks, so the controller sees a row-parallel output as this rank's partial sum and
 a column-parallel one as a shard — which is what `TPFragments` describes and makes
 whole when a worker is waiting ([tensor-parallel.md](../models/tensor-parallel.md)).
+
+### The body
+
+`install_controller` takes the body from the module's own `forward` if it has one
+(`module_body`), not from its class. The controller claims the *instance* slot, so
+a forward already there — `self.forward = self._fast` picked in `__init__`, a
+monkeypatched layer, `torch.compile`'s `OptimizedModule` — is one it would
+otherwise destroy for the rest of the process. Such a forward is already bound, so
+it is wrapped to take (and ignore) the module the controller passes.
+
+Two wrappers are not bodies: accelerate's device-alignment wrapper, which
+`run_body` re-applies from `_hf_hook`, and transformers' tensor-parallel wrapper,
+which `_keep_tp_forward` rebuilds *around* the controller — running either as the
+body would apply its transforms twice.
+
+The traffic goes the other way too: anything that assigns `module.forward` *after*
+nnsight wrapped it takes the controller's slot and silently disables every handoff
+that module makes. The next `install_controller` on it warns
+([out-of-order-error.md](../errors/out-of-order-error.md)).
 
 ### Pass-through when idle
 
@@ -69,10 +96,15 @@ nnsight request costs the model exactly that.
   own, while a server's persistent interleaver stays and serves request after
   request.
 - `body` — the *unbound* original forward or, once sourced, the instrumented one.
+- `original` — what `body` was before instrumentation, which is what a copy or a
+  pickle of the module carries (`__getstate__`): the instrumented body is built at
+  run time, so pickle cannot name it and its `Compiled` holds a code object pickle
+  cannot write at all. A copy re-instruments the first time it is sourced.
 - `sourced` — whether `body` is the instrumented forward.
 
 Weak references and an unbound `body` keep the state from pinning the module it
-lives on.
+lives on. `__getstate__` drops the routes as well: their weakrefs are unpicklable,
+and a copy belongs to whatever wraps it next, not to the traces the original is in.
 
 ### The skip gate
 
@@ -101,8 +133,8 @@ the controllers surface — nothing extra is installed on the module.
 
 ## Key files / classes
 
-- `src/nnsight/intervention/source.py` — `install_controller`, `make_controller`,
-  `State` (`routes`, `active`), `install_source`, `run_op`.
+- `src/nnsight/intervention/source.py` — `install_controller`, `Controller`,
+  `module_body`, `State` (`routes`, `active`), `install_source`, `run_op`.
 - `src/nnsight/intervention/interleaver.py` — `Interleaver.instrument` (fragments
   first, then the controller), `Interleaver.handle` (what the controller calls).
 - `src/nnsight/intervention/envoy.py` — `Envoy.__init__` / `_update` call

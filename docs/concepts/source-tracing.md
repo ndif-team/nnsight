@@ -97,11 +97,11 @@ The result (`Compiled`) carries the op labels, their line numbers, and the deden
 
 ## The per-module controller and `State`
 
-Installation is **lazy and permanent**. The first time a module is sourced *or* skipped, `install_controller` replaces its `forward` with a `controller` closure (`make_controller`) and stores a `State` on `module.__dict__["__nnsight__"]`.
+Installation is **lazy and permanent**. The first time a module is sourced *or* skipped, `install_controller` replaces its `forward` with a `Controller` and stores a `State` on `module.__dict__["__nnsight__"]`.
 
 `State` holds:
 
-- `body`: the (unbound) forward to run — the original, or the source-instrumented one once `.source` is used.
+- `body`: the (unbound) forward to run — the module's own, or the source-instrumented one once `.source` is used. It comes from the instance's `forward` when there is one (a monkeypatch, `torch.compile`'s), since the controller takes that slot; `original` keeps it as it was before instrumentation, which is what a copy or a pickle of the module carries.
 - `routes`: one entry per interleaver that instrumented this module — a weakref to it, the path it addresses the module by, and the three location strings (`.input`, `.skip`, `.output`) built once rather than per call. `active()` walks the list and returns the first route whose interleaver is interleaving *and* has workers, so a run with no intervention in it (a vLLM step nobody is tracing) skips the handoffs entirely.
 - `sourced` / `compiled`: whether `body` is the instrumented forward, and its `Compiled`.
 
