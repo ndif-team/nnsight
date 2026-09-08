@@ -4,19 +4,24 @@ Under TP a linear layer's value at any one rank is only that rank's shard. The
 port gathers those shards before a worker sees the value and re-shards whatever
 the worker leaves before vLLM's own forward carries on. These tests pin that down
 by running the identical trace on an unsharded reference (``vllm_qwen_ref``, one
-rank) and on the sharded engine (``vllm_qwen_tp``) and comparing.
+rank) and on the sharded engine (``vllm_qwen_tp``) and comparing **element-wise**:
+the whole a worker sees is the tensor the single-rank run produced, not a
+permutation of its values.
 
-Two sharding styles behave differently and are tested accordingly:
+Element-wise is the point. Row-parallel layers (``o_proj``, ``down_proj``) split
+the contraction and all-reduce their output, so their whole is already laid out
+like the single-rank run's. Column-parallel layers here are *fused* (``qkv_proj``
+packs Q/K/V, ``gate_up_proj`` packs gate/up) and each rank holds a slice of every
+packed part, so the ranks' concatenation is ``[q0 k0 v0 | q1 k1 v1]`` — all the
+same values, grouped differently. `VLLMFragments` un-interleaves that back to
+``[q | k | v]`` on the way in and re-interleaves on the way out, so a recipe that
+slices by head or by ``chunk(2, -1)`` means the same thing at every ``tp_size``.
+Comparing a column-parallel read as a per-row multiset passes on either layout,
+which is exactly why these tests do not.
 
-* Row-parallel layers (``o_proj``, ``down_proj``) split the contraction and
-  all-reduce their output, so the whole a worker sees is laid out exactly as the
-  single-rank run's — values compare element-wise and a positional edit is the
-  same logical edit on both.
-* Column-parallel layers here are *fused* (``qkv_proj`` packs Q/K/V,
-  ``gate_up_proj`` packs gate/up), and each rank holds a slice of every packed
-  part. Gathering concatenates the slices in rank order, so the whole holds all
-  the same values as the single-rank run but grouped differently. It is checked
-  as a per-row multiset rather than element-wise.
+`TestFusedLayout` checks the reordering arithmetic on its own, including the
+grouped-query case where there are fewer KV heads than ranks and vLLM replicates
+K and V across a group — which no checkpoint small enough to run here reaches.
 
 The whole module is skipped unless the machine has >=2 GPUs.
 """
@@ -25,6 +30,8 @@ import pytest
 import torch
 
 pytest.importorskip("vllm")
+
+from nnsight.modeling.vllm import fragments
 
 LAYER = 5
 COLUMN_PARALLEL = ["self_attn.qkv_proj", "mlp.gate_up_proj"]
@@ -67,6 +74,18 @@ def _zero_all(model, path, prompt):
     return logits
 
 
+def _mlp_out_with_up_zeroed(model, prompt):
+    """The MLP's output once the upper half of its fused ``gate_up`` is zeroed."""
+    with model.trace(prompt, temperature=0.0, top_p=1):
+        gate_up = _submodule(model, "mlp.gate_up_proj")
+        out = gate_up.output
+        value = out[0].clone()
+        value[:, value.shape[-1] // 2 :] = 0
+        gate_up.output = (value, *out[1:])
+        mlp_out = _submodule(model, "mlp").output.clone().save()
+    return mlp_out
+
+
 def _min_row_cosine(a, b):
     """The least cosine similarity between corresponding rows of ``a`` and ``b``.
 
@@ -95,20 +114,18 @@ class TestShardedRead:
 
     @pytest.mark.parametrize("path", COLUMN_PARALLEL)
     @torch.no_grad()
-    def test_column_parallel_gathers_every_value(
+    def test_column_parallel_matches_reference(
         self, vllm_qwen_ref, vllm_qwen_tp, path, ET_prompt
     ):
         ref_hs, ref_logits = _read(vllm_qwen_ref, path, ET_prompt)
         tp_hs, tp_logits = _read(vllm_qwen_tp, path, ET_prompt)
 
-        # Full width, and every value present — the fused packing means the
-        # columns are grouped by rank, so compare the per-row sorted values.
+        # Column-by-column, not as a multiset: both layers are fused, and a
+        # gather left in rank order holds every value this reference holds while
+        # putting Q where K belongs.
         assert tp_hs.shape == ref_hs.shape
         assert tp_logits.argmax(dim=-1).item() == ref_logits.argmax(dim=-1).item()
-
-        ref_sorted = ref_hs.sort(dim=-1).values
-        tp_sorted = tp_hs.sort(dim=-1).values
-        assert _min_row_cosine(tp_sorted, ref_sorted) > 0.99
+        assert _min_row_cosine(tp_hs, ref_hs) > 0.99
 
     @pytest.mark.parametrize("path", ROW_PARALLEL)
     @torch.no_grad()
@@ -222,6 +239,21 @@ class TestShardedEdit:
 
         assert tp_logits.argmax(dim=-1).item() == ref_logits.argmax(dim=-1).item()
 
+    @torch.no_grad()
+    def test_half_edit_means_the_same_half(
+        self, vllm_qwen_ref, vllm_qwen_tp, ET_prompt
+    ):
+        # `gate_up_proj` packs `[gate | up]` and the activation is
+        # `silu(gate) * up`, so zeroing the upper half of the gathered value
+        # zeroes the MLP outright — but only if that half really is `up`. In
+        # rank order it is rank 1's gate *and* up, and the MLP goes on producing
+        # something. This is the edit that `_zero_all` cannot catch.
+        ref_out = _mlp_out_with_up_zeroed(vllm_qwen_ref, ET_prompt)
+        tp_out = _mlp_out_with_up_zeroed(vllm_qwen_tp, ET_prompt)
+
+        assert ref_out.abs().max().item() == 0.0, "reference: does down_proj bias?"
+        assert tp_out.abs().max().item() == 0.0
+
 
 class TestAdHocCall:
     """An ad-hoc call on a sharded module takes and returns whole tensors.
@@ -286,12 +318,10 @@ class TestAdHocCall:
             module = _submodule(vllm_qwen_ref, path)
             ref = module(module.input)[0].save()
 
-        # Full width and every value present; the fused packing groups columns
-        # by rank, so compare per-row sorted values (as TestShardedRead does).
+        # And the reassembled whole is the single-rank layer's own output,
+        # column for column (as TestShardedRead checks for a traced read).
         assert adhoc.shape == ref.shape
-        assert _min_row_cosine(
-            adhoc.sort(dim=-1).values, ref.sort(dim=-1).values
-        ) > 0.99
+        assert _min_row_cosine(adhoc, ref) > 0.99
 
 
 class TestEveryRankWindsUp:
@@ -333,3 +363,82 @@ class TestEveryRankWindsUp:
             assert counts == [0] * len(counts), f"workers left behind: {counts}"
         finally:
             edit.clear()
+
+
+def _fused_reference(widths, replicas, tp_size):
+    """A single-rank ``[q | k | v]``, and the all-gather vLLM builds out of it.
+
+    ``widths`` are one rank's, so a projection replicated across ``replicas``
+    adjacent ranks is only ``tp_size // replicas`` shards wide in the whole.
+    Which shard a rank holds is vLLM's own ``tp_rank // num_kv_head_replicas``.
+    """
+    sizes = [width * (tp_size // every) for width, every in zip(widths, replicas)]
+    whole = torch.arange(3 * sum(sizes), dtype=torch.float32).reshape(3, -1)
+
+    blocks, offset = [], 0
+    for size in sizes:
+        blocks.append(whole[:, offset : offset + size])
+        offset += size
+
+    shards = [
+        block[:, (rank // every) * width : (rank // every) * width + width]
+        for rank in range(tp_size)
+        for block, width, every in zip(blocks, widths, replicas)
+    ]
+    return whole, torch.cat(shards, dim=-1)
+
+
+LAYOUTS = [
+    ([1024, 256, 256], [1, 1, 1], 2),      # Llama-3.2-1B qkv: 32 q / 8 kv heads
+    ([4096, 4096], [1, 1], 2),             # its gate_up
+    ([448, 64, 64], [1, 1, 1], 2),         # Qwen2.5-0.5B qkv: 14 q / 2 kv heads
+    ([128, 64, 64], [1, 2, 2], 4),         # 8 q / 2 kv at tp=4: K and V doubled
+    ([512, 128, 128], [1, 8, 8], 8),       # multi-query: one KV head on 8 ranks
+    ([64, 128, 32, 32], [1, 1, 1, 1], 4),  # a four-way merged column
+]
+
+
+class TestFusedLayout:
+    """The reordering on its own, without an engine.
+
+    Its hard case is grouped-query attention with fewer KV heads than ranks:
+    vLLM replicates K and V across a group of adjacent ranks, so the gather
+    carries each of them once per rank in the group and a plain un-interleave
+    would hand back a tensor several KV heads too wide. No checkpoint small
+    enough for these fixtures reaches it — Qwen2.5-0.5B has 14 query heads and
+    so cannot shard past 2 — hence the arithmetic is checked against a model of
+    vLLM's own shard assignment instead.
+    """
+
+    @pytest.mark.parametrize("widths, replicas, tp_size", LAYOUTS)
+    def test_unfuse_undoes_the_gather(self, widths, replicas, tp_size):
+        whole, gathered = _fused_reference(widths, replicas, tp_size)
+
+        assert torch.equal(
+            fragments._unfuse(gathered, widths, replicas, tp_size), whole
+        )
+
+    @pytest.mark.parametrize("widths, replicas, tp_size", LAYOUTS)
+    def test_fuse_gives_each_rank_back_its_own_piece(self, widths, replicas, tp_size):
+        whole, gathered = _fused_reference(widths, replicas, tp_size)
+        per_rank = sum(widths)
+
+        for rank in range(tp_size):
+            assert torch.equal(
+                fragments._fuse(whole, widths, replicas, tp_size, rank),
+                gathered[:, rank * per_rank : (rank + 1) * per_rank],
+            )
+
+    def test_a_fused_layer_nnsight_does_not_know_warns(self):
+        # The module-level `importorskip("vllm")` answers with this very
+        # directory when vLLM is not installed, so ask for the module the
+        # dispatch actually needs.
+        pytest.importorskip("vllm.model_executor.layers.linear")
+
+        # The two fused layers vLLM ships are not a closed set — a QKV with an
+        # indexer packs five — and one left in rank order has to say so.
+        class Packed:
+            output_partition_sizes = [64, 64]
+
+        with pytest.warns(UserWarning, match="rank order"):
+            assert fragments._fused_sub_shards(Packed()) is None
