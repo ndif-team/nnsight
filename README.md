@@ -46,11 +46,11 @@ from nnsight import TransformersModel
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 with model.trace("The Eiffel Tower is in the city of"):
-    # read a hidden state (a [batch, seq, hidden] tensor)
-    hidden = model.transformer.h[6].output.save()
-
     # edit a layer's output in place — the model computes on the edited value
     model.transformer.h[0].output[:] = 0
+
+    # read a hidden state further down (a [batch, seq, hidden] tensor)
+    hidden = model.transformer.h[6].output.save()
 
     # keep the final logits
     logits = model.output.logits.save()
