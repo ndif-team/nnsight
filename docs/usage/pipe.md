@@ -59,7 +59,7 @@ with model.pipe("The Eiffel Tower is in the city of", max_new_tokens=3, do_sampl
 |---|---|---|
 | Runs | the model's `generate` | the whole task pipeline |
 | Returns | token ids (tensor) | pipeline records (text/labels/...) |
-| Default sampling | greedy | pipeline's `task_specific_params` (may sample) |
+| Default sampling | the checkpoint's `generation_config` (may sample) | that plus the pipeline's `task_specific_params` (may sample) |
 | Input | text, ids, tensor, encoding | what the task pipeline accepts (text, chat, images) |
 
 ## Per-step interventions and early exit

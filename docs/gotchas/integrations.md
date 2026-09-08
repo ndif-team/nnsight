@@ -94,7 +94,7 @@ model.transformer.h[0].adapter = MyAdapter().to(model.device)
 
 with model.edit() as (tracer, edited):
     acts = edited.transformer.h[0].output
-    edited.transformer.h[0].output[:] = edited.transformer.h[0].adapter(acts, hook=True)
+    edited.transformer.h[0].output = edited.transformer.h[0].adapter(acts, hook=True)
 
 with edited.trace("Hello world"):
     inner = edited.transformer.h[0].adapter.inner.output.save()   # observable
@@ -103,6 +103,7 @@ with edited.trace("Hello world"):
 To apply it on *every* generation step, put the passthrough under an `iter` loop in an `inplace=True` edit (see the `Envoy.__call__` docstring).
 
 ### Mitigation
+- **Route the attachment as a replacement** (`output = aux(...)`), not an in-place write (`output[:] = aux(...)`): the in-place form writes the attachment's result into the tensor that is its own input, and the backward through it then raises `RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation`. See [docs/usage/edit.md](../usage/edit.md).
 - `OutOfOrderError`/missed-value mentioning a path of a module you called manually → you likely forgot `hook=True`. Modules the model itself calls (blocks, attn, mlp) are hooked automatically.
 
 ---
