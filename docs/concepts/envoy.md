@@ -27,6 +27,7 @@ sources: [src/nnsight/intervention/envoy.py, src/nnsight/modeling/base.py]
 - Wrap any PyTorch model with `nnsight.NNsight(my_module)` and trace it directly.
 - Subclass `NNsight`/`Envoy` when you need model-specific loading, input prep, or new served values (see [Extension surface](#extension-surface)).
 - Don't replace `Envoy._module`'s `forward` by hand — reassign the module through the envoy so `instrument` re-runs and children are rebuilt.
+- **Mutate the tree through the envoy, not the wrapped module.** `model.layers = nn.ModuleList(...)` and `model.block.mlp = new_mlp` rebuild the envoys and re-instrument. Assigning on `model._module` instead is not tracked: `model.block.mlp` goes on addressing the module it replaced, which the forward pass no longer runs, so reading it raises `OutOfOrderError`.
 
 ## Canonical pattern
 
@@ -154,7 +155,7 @@ Add any `nn.Module` as an attribute; it's auto-wrapped as a child envoy. Apply i
 model.transformer.h[0].adapter = MyAdapter()
 with model.edit() as (tracer, edited):
     acts = edited.transformer.h[0].output
-    edited.transformer.h[0].output[:] = edited.transformer.h[0].adapter(acts, hook=True)
+    edited.transformer.h[0].output = edited.transformer.h[0].adapter(acts, hook=True)
 
 with edited.trace(prompt):
     inner = edited.transformer.h[0].adapter.inner.output.save()   # now observable
@@ -163,10 +164,10 @@ with edited.trace(prompt):
 ### 3. Custom served values via `eproperty`
 
 A new served value is an `eproperty` on the model/runtime class, served from the
-driver side with its `.provide`. Because child envoys are always built as the base
-`Envoy`, the descriptor goes on the model subclass (or the tracer), not an arbitrary
-submodule. This is exactly how the vLLM wrapper adds `.logits` and `.samples`
-(`modeling/vllm/vllm.py`):
+driver side with its `.provide`. The descriptor goes on the class the envoy is
+built as: the model subclass (or the tracer) by default, or — for a chosen
+submodule — the `Envoy` subclass `envoys=` names for it. This is exactly how the
+vLLM wrapper adds `.logits` and `.samples` (`modeling/vllm/vllm.py`):
 
 ```python
 class VLLM(Remotable):
@@ -207,6 +208,12 @@ envoy, at the first path, and the later name is bound as an alias to it, the way
 `torch.nn.Module.named_modules()` lists a shared module once. So the module has
 one location (`model...self_attn.q_proj.output`), every spelling reaches the same
 envoy, and `_aliases` on the aliasing parent records where it points.
+
+The container entry still counts: `layers[2]` and iteration walk every entry the
+wrapped `ModuleList` holds — including one whose module an earlier entry already
+brought in, and including a container rebuilt from blocks the tree already wraps
+(`model.transformer.h = nn.ModuleList(list(model.transformer._module.h)[:4])`).
+Each such entry names the one envoy at the module's first path.
 
 ## Module renaming (aliases)
 

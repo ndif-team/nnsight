@@ -124,7 +124,11 @@ class Envoy:
         _module: The wrapped `torch.nn.Module`.
         _edits: Default interventions registered by [`edit`][nnsight.intervention.envoy.Envoy.edit], replayed on every
             trace (a list of [`Mediator`][nnsight.intervention.interleaver.Mediator]).
-        _children: The direct child envoys, in module order.
+        _children: The child envoys this envoy owns, in module order — one per
+            module, so a module the tree already wraps elsewhere is not in it.
+        _child_map: Every entry of the wrapped module's ``_modules``, by name and
+            in module order, so an entry sharing its module with another keeps its
+            own name. What indexing, iteration and the repr walk.
     """
 
     def __init__(
@@ -160,9 +164,14 @@ class Envoy:
         self._envoys = envoys
 
         self._children: list[Envoy] = []
+        self._child_map: dict[str, Envoy] = {}
 
-        for name, child in module.named_children():
-            self._add_envoy(name, child)
+        # `_modules`, not `named_children()`: the latter deduplicates by module
+        # identity, so a ModuleList holding one module twice — or rebuilt from
+        # blocks this tree already wraps — would lose entries torch still indexes.
+        for name, child in list(module._modules.items()):
+            if child is not None:
+                self._add_envoy(name, child)
 
         # Children exist now, so multi-component alias paths (e.g. "h.0") resolve.
         self._bind_aliases()
@@ -187,37 +196,70 @@ class Envoy:
         ):
             attribute = f"{self.OVERLOAD_PREFIX}{name}"
         existing = self.__dict__.get(attribute)
+        index = None
         if isinstance(existing, Envoy):
-            self._children.remove(existing)
+            # Replace at the replaced child's own index: appending instead would
+            # shift every child after it, so `_children[i]` would name a different
+            # module than `i` does on the wrapped module.
+            if existing in self._children:
+                index = self._children.index(existing)
+            # The replaced module keeps its registration otherwise, so a later
+            # path to it would serve the replacement's values.
+            if self.interleaver.envoys.get(id(existing._module)) is existing:
+                del self.interleaver.envoys[id(existing._module)]
         child_path = f"{self.path}.{name}"
         # A module the tree already holds under another path (a layer that a
         # wrapper keeps a second reference to, tied weights) gets no second envoy:
         # this name is an alias of the first, as torch's own named_modules lists
         # it once, so the module has one location and either spelling reads it.
+        # `_child_map` still records the name, so the entry keeps its index.
         shared = self.interleaver.envoys.get(id(module))
-        if shared is not None and shared is not self:
-            self._aliases[attribute] = shared.path
-            object.__setattr__(self, attribute, shared)
-            return shared
-        envoy = self._resolve_envoy_class(module, child_path)(
-            module,
-            path=child_path,
-            interleaver=self.interleaver,
-            rename=self._rename,
-            envoys=self._envoys,
-        )
-        self._children.append(envoy)
-        if attribute != name:
-            # Record it the way `rename` records its own, so the repr labels the
-            # child `E_output/output` and an alias cannot later claim the name.
-            self._aliases[attribute] = name
-            warnings.warn(
-                f"Module '{self.path}' has a submodule named '{name}', which "
-                f"nnsight already serves on every module. The submodule is "
-                f"'.{attribute}' here; '.{name}' stays the module's output."
+        if shared is not None:
+            envoy = shared
+            if shared is not self:
+                self._aliases[attribute] = shared.path
+            if index is not None:
+                del self._children[index]
+        else:
+            envoy = self._resolve_envoy_class(module, child_path)(
+                module,
+                path=child_path,
+                interleaver=self.interleaver,
+                rename=self._rename,
+                envoys=self._envoys,
             )
+            if index is None:
+                self._children.append(envoy)
+            else:
+                self._children[index] = envoy
+            if attribute != name:
+                # Record it the way `rename` records its own, so the repr labels the
+                # child `E_output/output` and an alias cannot later claim the name.
+                self._aliases[attribute] = name
+                warnings.warn(
+                    f"Module '{self.path}' has a submodule named '{name}', which "
+                    f"nnsight already serves on every module. The submodule is "
+                    f"'.{attribute}' here; '.{name}' stays the module's output."
+                )
+        # A name the module itself holds is an entry of the tree; one reached any
+        # other way (a property like transformers' `base_model`) is just a spelling.
+        if self._module._modules.get(name) is module:
+            self._child_map[name] = envoy
         object.__setattr__(self, attribute, envoy)
         return envoy
+
+    def _named_children(self) -> list[tuple[str, Envoy]]:
+        # (name, child) for everything under this envoy: the wrapped module's own
+        # entries in module order, then children attached outside it
+        # (TransformersModel's `generator`), which have no entry to be ordered by.
+        named = list(self._child_map.items())
+        bound = {id(child) for child in self._child_map.values()}
+        named.extend(
+            (child.path.rsplit(".", 1)[-1], child)
+            for child in self._children
+            if id(child) not in bound
+        )
+        return named
 
     def _bind_aliases(self) -> None:
         """Bind each ``rename`` alias as an attribute pointing at the same Envoy.
@@ -358,13 +400,12 @@ class Envoy:
         # module (its own forward; the previous module's controller doesn't carry
         # over) — see Interleaver.instrument.
         self.interleaver.instrument(self)
-        children = dict(module.named_children())
-        for child in self._children:
-            name = child.path.rsplit(".", 1)[-1]
+        children = module._modules
+        for name, child in self._named_children():
             # A child that isn't a submodule of the new module — e.g. a standalone
             # module added to the tree (TransformersModel's `generator`) — has nothing
             # to re-point at, so leave it as-is (it keeps its own module and controller).
-            if name in children:
+            if children.get(name) is not None:
                 child._update(children[name])
 
     def trace(
@@ -807,7 +848,7 @@ class Envoy:
             model.transformer.h[0].adapter = MyAdapter()
             with model.edit() as (tracer, edited):
                 acts = edited.transformer.h[0].output
-                edited.transformer.h[0].output[:] = \
+                edited.transformer.h[0].output = \
                     edited.transformer.h[0].adapter(acts, hook=True)
             with edited.trace(prompt):
                 inner = edited.transformer.h[0].adapter.inner.output.save()
@@ -819,7 +860,7 @@ class Envoy:
             with model.edit(inplace=True) as tracer:
                 for _ in tracer.iter[:]:
                     acts = model.transformer.h[0].output
-                    model.transformer.h[0].output[:] = \
+                    model.transformer.h[0].output = \
                         model.transformer.h[0].adapter(acts, hook=True)
 
         Args:
@@ -882,19 +923,29 @@ class Envoy:
                 for layer in model.model.layers:
                     print(layer.path)
         """
-        return iter(self._children)
+        return iter([child for _, child in self._named_children()])
 
     def __getitem__(self, key: Any) -> Envoy:
         """Index into direct child envoys, e.g. for a `ModuleList`.
 
+        An int or str key resolves **by name**, the way the wrapped module
+        indexes it — ``layers[2]`` is the module `layers` holds at ``"2"``, even
+        when an earlier entry is a module the tree already wraps elsewhere and so
+        has no envoy of its own here.
+
         Args:
-            key: Any index the underlying child list accepts (an int, or a slice).
+            key: An index the wrapped module accepts (an int, or a str), or a
+                slice over this envoy's children in module order.
 
         Returns:
             Envoy: The child envoy at ``key`` (e.g. ``model.layers[0]`` for the
             first block of a ``ModuleList``).
         """
-        return self._children[key]
+        if isinstance(key, slice):
+            return [child for _, child in self._named_children()][key]
+        if isinstance(key, int) and key < 0:
+            key += len(self)
+        return getattr(self, str(key))
 
     def __len__(self) -> int:
         """The number of entries in the wrapped module (e.g. a ``ModuleList``'s length)."""
@@ -941,12 +992,23 @@ class Envoy:
             A list of [`Envoy`][nnsight.intervention.envoy.Envoy] (or ``(path, Envoy)`` tuples when ``names``).
         """
         # Flatten the envoy tree (children first, then self), optionally filtered
-        # by include_fn and paired with each envoy's path when names=True.
+        # by include_fn and paired with each envoy's path when names=True. An envoy
+        # two paths reach is listed once, at the first, as `named_modules()` lists
+        # a shared module once — and `seen` is what keeps a self-referential
+        # spelling (transformers' `base_model` on a base model) from recursing.
         result: list[Any] = []
-        for child in self._children:
-            result.extend(child.modules(include_fn=include_fn, names=names))
-        if include_fn is None or include_fn(self):
-            result.append((self.path, self) if names else self)
+        seen: set[int] = set()
+
+        def walk(envoy: Envoy) -> None:
+            if id(envoy) in seen:
+                return
+            seen.add(id(envoy))
+            for _, child in envoy._named_children():
+                walk(child)
+            if include_fn is None or include_fn(envoy):
+                result.append((envoy.path, envoy) if names else envoy)
+
+        walk(self)
         return result
 
     def named_modules(
@@ -967,7 +1029,7 @@ class Envoy:
         return self._module._get_name()
 
     def _repr_modulelist(self) -> str:
-        reprs = [repr(child) for child in self._children]
+        reprs = [repr(child) for child in self]
 
         start_end = [[0, 0]]
         blocks = [reprs[0]]
@@ -989,7 +1051,7 @@ class Envoy:
         return self._name() + "(\n  " + "\n  ".join(lines) + "\n)"
 
     def __repr__(self) -> str:
-        if self._children and isinstance(self._module, torch.nn.ModuleList):
+        if self._child_map and isinstance(self._module, torch.nn.ModuleList):
             return self._repr_modulelist()
 
         extra_lines = []
@@ -1008,11 +1070,13 @@ class Envoy:
                 direct.setdefault(path, []).append(alias)
 
         child_lines = []
-        for child in self._children:
-            name = child.path.rsplit(".", 1)[-1]
+        for name, child in self._named_children():
             label = "/".join([*direct.get(name, []), name])
             child_lines.append(f"({label}): " + _addindent(repr(child), 2))
         for alias in mounts:
+            # A mount that is also an entry of the module has a line already.
+            if alias in self._child_map:
+                continue
             child_lines.append(f"({alias}): " + _addindent(repr(getattr(self, alias)), 2))
 
         # eproperties given a description surface as their own lines, so special
