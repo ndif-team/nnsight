@@ -134,7 +134,7 @@ print(ids.shape)                          # torch.Size([1, 13])  (10 prompt + 3 
 print(model.tokenizer.decode(ids[0]))     # "The Eiffel Tower is in the city of Paris, and"
 ```
 
-`generate` goes through the model with the checkpoint's own settings — **greedy by default** (no `do_sample`), unlike `pipe`, which folds in the checkpoint's `task_specific_params`. Ask for sampling explicitly with `do_sample=True`, `temperature=`, etc. Read the ids off `tracer.result` (preferred). `**kwargs` are forwarded to the model's `generate`, e.g. `max_new_tokens`, `num_return_sequences`, `generation_config=`.
+`generate` goes through the model and decodes with the checkpoint's own **`generation_config`** — not the `task_specific_params` `pipe` folds in. That config is the checkpoint's to set: gpt2 leaves it greedy, while many instruct checkpoints ship `do_sample=True` in it (`gemma-3-1b-it`, `Llama-3.1-8B-Instruct`, `Qwen3-4B-Instruct-2507` all do), so **generate samples on those unless you say otherwise**. Check `model.generation_config.do_sample`, and pass `do_sample=False` when you need determinism. Read the ids off `tracer.result` (preferred). `**kwargs` are forwarded to the model's `generate`, e.g. `max_new_tokens`, `num_return_sequences`, `generation_config=`.
 
 Called directly (no `with`), it just generates and returns the ids:
 
@@ -366,7 +366,7 @@ Aliases are honored in `tracer.cache()` keys too (`tests/test_language.py`).
 
 ## Gotchas
 
-- **`generate` vs `pipe`.** `generate` returns token ids and is greedy by default; `pipe` returns decoded records and folds in the checkpoint's sampling `task_specific_params`.
+- **`generate` vs `pipe`.** `generate` returns token ids and decodes with the checkpoint's `generation_config`, which may sample — pass `do_sample=False` for a deterministic run; `pipe` returns decoded records and folds in the checkpoint's sampling `task_specific_params`.
 - **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` raises if there's no active trace.
 - **`scan` needs `dispatch=False` to be cheap** but works either way; it never loads weights.
 - **Opaque inputs can't be batched.** A multimodal encoding (with `pixel_values`) or a raw float tensor must be a lone invoke — batching several raises `NotImplementedError`.
