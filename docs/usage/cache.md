@@ -63,6 +63,17 @@ with model.trace("The Eiffel Tower is in") as tracer:
     ])
 ```
 
+A path string is the **whole** path, spelled the way the cache's keys are
+(`"model.lm_head"`, not `"lm_head"`), and is resolved against the envoy tree when
+the cache is created: one that names no module raises there rather than
+returning an empty cache. Only envoys and paths are accepted — a glob
+(`"model.transformer.h.*"`), a regex, or a predicate matches nothing and raises
+too. To select modules by pattern, filter them yourself and pass the envoys:
+
+```python
+mlps = [envoy for envoy in model.modules() if envoy.path.endswith(".mlp")]
+```
+
 ### Include inputs
 
 ```python

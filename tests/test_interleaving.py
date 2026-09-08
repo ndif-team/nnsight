@@ -1,4 +1,6 @@
 
+import re
+
 import pytest
 import torch
 import nnsight
@@ -752,6 +754,52 @@ class TestCache:
             cache = tracer.cache(modules=[envoy.l2])
         assert cache.keys() == ["model.l2"]
         assert "model.l1" not in cache
+
+    # -- modules= is resolved against the tree -----------------------------
+
+    def test_subset_by_path_string(self, envoy, x):
+        with envoy.trace(x) as tracer:
+            cache = tracer.cache(modules=["model.l2"])
+        assert cache.keys() == ["model.l2"]
+
+    def test_a_lone_path_string_is_one_target(self, envoy, x):
+        # Not a list: iterating the string would take it a character at a time.
+        with envoy.trace(x) as tracer:
+            cache = tracer.cache(modules="model.l2")
+        assert cache.keys() == ["model.l2"]
+
+    def test_alias_target_resolves_to_the_real_path(self, model, x):
+        renamed = Envoy(model, rename={"l1": "first"})
+        with renamed.trace(x) as tracer:
+            cache = tracer.cache(modules=["model.first"])
+        assert cache.keys() == ["model.l1"]
+
+    @pytest.mark.parametrize(
+        "path", ["model.ln", "model.l1.lin", "model.l*", r".*\.l1$", "model.l1.weight"]
+    )
+    def test_a_path_naming_no_module_raises(self, envoy, x, path):
+        # Targets used to be taken as given, so a typo (or a glob, or a regex)
+        # subscribed to a location nothing provides: an empty cache, no error.
+        with pytest.raises(AttributeError):
+            with envoy.trace(x) as tracer:
+                tracer.cache(modules=[path])
+
+    def test_a_path_missing_the_model_name_suggests_the_whole_one(self, envoy, x):
+        with pytest.raises(AttributeError, match="did you mean 'model.l1'"):
+            with envoy.trace(x) as tracer:
+                tracer.cache(modules=["l1"])
+
+    def test_a_served_value_is_not_a_module(self, envoy, x):
+        with pytest.raises(AttributeError, match="not a module"):
+            with envoy.trace(x) as tracer:
+                tracer.cache(modules=["model.l1.output"])
+
+    @pytest.mark.parametrize("target", [re.compile("l1"), lambda envoy: True])
+    def test_a_target_that_is_neither_envoy_nor_path_says_so(self, envoy, x, target):
+        # `modules=<callable>` raised "'function' object is not iterable".
+        with pytest.raises(TypeError, match="cache modules="):
+            with envoy.trace(x) as tracer:
+                tracer.cache(modules=target)
 
     def test_navigation_matches_path(self, envoy, x):
         with envoy.trace(x) as tracer:
