@@ -9,6 +9,7 @@ from nnsight.intervention.barrier import Barrier
 from nnsight.intervention.envoy import Envoy
 from nnsight.intervention.eproperty import eproperty
 from nnsight.intervention.interleaver import (
+    EarlyStopException,
     Event,
     Interleaver,
     Mediator,
@@ -221,6 +222,24 @@ class TestInterleaver:
             pass
         with pytest.warns(UserWarning, match="from the block"):
             il.cancel()
+
+    def test_early_stop_finishes_the_visit_before_it_raises(self):
+        # A stop halts what follows the location, not the location itself: the
+        # visit is still counted and the workers parked alongside are still served.
+        il = Interleaver()
+        store = {}
+        il.mediators.append(
+            make_mediator(
+                "Mediator.value('loc')\n" "raise EarlyStopException()",
+                EarlyStopException=EarlyStopException,
+            )
+        )
+        il.mediators.append(requester(store))
+        with il:
+            with pytest.raises(EarlyStopException):
+                il.handle("loc", 7)
+        assert store["got"] == 7
+        assert il.counts["loc"] == 1
 
     def test_parked_set_is_rebuilt_each_run(self):
         # A prior run's wait count must not leak into the next run.

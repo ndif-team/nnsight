@@ -433,6 +433,38 @@ class TestEarlyStop:
             tracer.stop()
         assert first_layer.shape[-1] == 768
 
+    @torch.no_grad()
+    def test_the_module_stopped_at_is_still_cached(self, gpt2):
+        # The stop ends what follows the location it fires at, not that location:
+        # layer 5 has run, and the cache observing it records it.
+        with gpt2.trace(PROMPT) as tracer:
+            cache = tracer.cache(
+                modules=[gpt2.transformer.h[4], gpt2.transformer.h[5]]
+            ).save()
+            gpt2.transformer.h[5].output
+            tracer.stop()
+        assert "model.transformer.h.5" in cache.keys()
+
+    @torch.no_grad()
+    def test_a_stop_in_one_invoke_serves_its_siblings_that_step(self, gpt2):
+        # One batched forward, so the stop ends the run for both invokes — but the
+        # step it fires on completes, and the sibling parked on the same visit is
+        # served in it.
+        with pytest.warns(UserWarning, match="never reached"):
+            with gpt2.generate(max_new_tokens=8, do_sample=False) as tracer:
+                with tracer.invoke(PROMPT):
+                    stopping = nnsight.save([])
+                    for _ in tracer.all():
+                        stopping.append(gpt2.lm_head.output[0, -1].argmax(dim=-1))
+                        if len(stopping) == 3:
+                            tracer.stop()
+                with tracer.invoke(PROMPT):
+                    sibling = nnsight.save([])
+                    for _ in tracer.all():
+                        sibling.append(gpt2.lm_head.output[0, -1].argmax(dim=-1))
+        assert len(stopping) == 3
+        assert len(sibling) == 3
+
 
 class TestIteration:
     @torch.no_grad()

@@ -772,6 +772,15 @@ class Interleaver:
         it has been served — so a worker that arrives here *during* the visit
         (released from a barrier by one that was served) asks for this occurrence
         and is served in it too, whichever order the workers were written in.
+
+        An [`EarlyStopException`][nnsight.intervention.interleaver.EarlyStopException]
+        from a worker is held back and re-raised on the way out, once the visit is
+        finished, so a ``tracer.stop()`` halts what follows the location it fires
+        at rather than the location itself: it is still counted, still assembled,
+        still recorded by the caches observing it, and the other workers parked on
+        it — a sibling invoke of the same batched run — are still served. Any other
+        exception propagates immediately, unless ``defer_exceptions`` is set, in
+        which case it is recorded on its own worker and the run continues.
         """
         occurrence = self.counts.get(provider, 0)
         observers = (
@@ -793,15 +802,24 @@ class Interleaver:
         # Serving one worker can release another into parking here (a barrier),
         # so keep serving until nobody is parked on this visit.
         served = False
+        stopped = None
         while ready := self._ready(provider):
             served = True
             for mediator in ready:
                 try:
                     value = mediator.handle(provider, value)
                 except Exception as exception:
-                    if not self.defer_exceptions:
+                    if self.defer_exceptions:
+                        mediator.exception = exception
+                    elif isinstance(exception, EarlyStopException):
+                        # An early stop is control flow, not an error: the worker
+                        # asked to halt what comes *after* this location, not to
+                        # abandon it. Hold the stop until the visit is finished —
+                        # counted, assembled, cached, and served to the workers
+                        # parked here alongside — and raise it at the end.
+                        stopped = exception
+                    else:
                         raise
-                    mediator.exception = exception
                     mediator.pending = None
         if served:
             self._reindex_parked()
@@ -827,6 +845,9 @@ class Interleaver:
         # model rather than being dropped with the gather.
         if undo is not None:
             value = undo(value)
+        # The visit is complete; now let the stop unwind the model's forward.
+        if stopped is not None:
+            raise stopped
         return value
 
     def check_dangling_mediators(self) -> None:

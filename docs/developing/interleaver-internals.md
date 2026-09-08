@@ -242,9 +242,14 @@ the read.
 ## `tracer.stop()` and early exit
 
 `InterleavingTracer.stop` raises `EarlyStopException` from inside the worker; it
-propagates through `switch` and unwinds the model's forward. `Interleaver.__exit__`
-swallows it. If a worker stops before the model even starts (during `__enter__`'s
-`start`), `Envoy.interleave` catches it directly.
+propagates through `switch` into `Interleaver.handle`, which treats it as control
+flow rather than an error: it holds the exception, clears that worker's `pending`,
+finishes the visit (count, `assemble_skip`, the observing caches, the other workers
+parked here, the fragment `undo`) and re-raises it on the way out, unwinding the
+model's forward from a completed visit. So the location a stop fires at is served
+and recorded, and only what follows it is lost. `Interleaver.__exit__` swallows it.
+If a worker stops before the model even starts (during `__enter__`'s `start`),
+`Envoy.interleave` catches it directly.
 
 ## Key files / classes
 
