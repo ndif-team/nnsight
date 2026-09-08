@@ -110,7 +110,10 @@ once and cached in `SOURCES`. It handles three contexts:
    `<string>`, so the literal source is recovered from `sys.orig_argv` (gated on
    the exact `<string>` filename).
 3. Anything else with no source (e.g. a raw `exec` string, `<stdin>`) yields an
-   empty string, which fails the parse and raises `WithBlockNotFoundError`.
+   empty string, which fails the parse and raises `WithBlockNotFoundError`. Its
+   message is built by `_not_found_message` (`tracer.py`), which branches on
+   whether any source was recovered and whether the filename is a file still on
+   disk, since the way out differs for each.
 
 > **Running examples:** `with model.trace(...):` reads its own source to capture
 > the block, so it does **not** work from `python -c "..."`-style one-liners that
@@ -123,10 +126,13 @@ once and cached in `SOURCES`. It handles three contexts:
 `ast.AsyncWith` node that starts on `lineno`. It first tries `_parse_block`
 (`tracer.py`), which slices just the block out by indentation and bracket
 depth, dedents it to column 0, parses that, and shifts line numbers back. Getting
-the slice bound wrong is safe: too much just parses trailing statements (the
+the slice bound wrong is mostly safe: too much just parses trailing statements (the
 `with` is still `body[0]`); too little makes the slice unparseable and falls back
-to parsing the whole file. `parse` returns `None` if there's no `with` at that line
-(the site isn't a trace block).
+to parsing the whole file. The exception is a bound that cuts the body where the
+block could plausibly have ended — the slice still parses, as a `with` missing part
+of its body — which is why blank lines and comments, whose indentation Python
+ignores, never end the slice. `parse` returns `None` if there's no `with` at that
+line (the site isn't a trace block).
 
 ### Build + compile
 

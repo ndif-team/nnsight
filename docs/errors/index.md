@@ -43,7 +43,7 @@ unsupported.
 | `ValueError` | ``trace() needs an input, or at least one `with tracer.invoke(...)` block`` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
 | `ValueError` | ``Cannot invoke while the model is already running.`` | [invoke-during-execution.md](invoke-during-execution.md) |
 | `NotImplementedError` | ``<ModelClass> does not support batching multiple invokes`` | [batching-not-implemented.md](batching-not-implemented.md) |
-| `WithBlockNotFoundError` | *(no message)* | [with-block-not-found.md](with-block-not-found.md) |
+| `WithBlockNotFoundError` | ``nnsight found no `with` statement at <file>:<line>, the line the trace was entered from. …`` | [with-block-not-found.md](with-block-not-found.md) |
 
 ## Tracing / capture errors
 
@@ -52,7 +52,9 @@ Raised while capturing the `with` block's source.
 | Exception | Message | Source / fix |
 |---|---|---|
 | `ValueError` | ``The body of a traced `with` must start on its own line; nnsight runs the body itself, and can only intercept it at the start of a line.`` | `src/nnsight/tracing/tracer.py:76`. Move the body off the `with` line: never write `with model.trace(x): out = ...`; put `out = ...` on the next, indented line. |
-| `WithBlockNotFoundError` | *(no message)* | `src/nnsight/tracing/tracer.py:306`. The tracer wasn't used as a `with` block. See [with-block-not-found.md](with-block-not-found.md). |
+| `WithBlockNotFoundError` | ``nnsight has no source for <file>, so it cannot read the body of the `with` block at line <line>. …`` | `src/nnsight/tracing/tracer.py`. There is no source to read the block from: a script piped in on stdin, or an `exec`'d string not registered in `linecache`. Run the file by name. See [with-block-not-found.md](with-block-not-found.md). |
+| `WithBlockNotFoundError` | ``nnsight found no `with` statement at <file>:<line>, the line the trace was entered from … Either the tracer wasn't used as a `with` block … or the source nnsight read for this file is stale`` | `src/nnsight/tracing/tracer.py`. The file is on disk but has no `with` at that line: the source was read before an edit moved it (restart the process), or the tracer was entered without a `with` block. |
+| `WithBlockNotFoundError` | ``nnsight found no `with` statement at <file>:<line>, the line the trace was entered from … nnsight compiles the block's own body to run it`` | `src/nnsight/tracing/tracer.py`. Source was recovered but its line numbers don't match the running code — a cell magic that rewrites the cell (`%%time`), or generated source out of step with its `linecache` entry. |
 
 ## Coordination errors
 

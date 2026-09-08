@@ -39,7 +39,7 @@ worth reading: those failures raise nothing, so nothing routes you to a page.
 | ``ValueError: A traced `with` block cannot start with `try:` …`` | [A trace body that starts with try:](#a-trace-body-that-starts-with-try) |
 | ``ValueError: The body of a traced `with` must start on its own line …`` | [A body on the with line](#a-body-on-the-with-line) |
 | `ValueError: A barrier was never reached by every block it waits for …` | [docs/usage/barrier.md](../usage/barrier.md) |
-| `WithBlockNotFoundError` with no message | [with-block-not-found.md](with-block-not-found.md) |
+| ``WithBlockNotFoundError: nnsight found no `with` statement at …`` / ``no source for …`` | [with-block-not-found.md](with-block-not-found.md) |
 | `SyntaxError: 'return' outside function` | [return inside a trace body](#return-inside-a-trace-body) |
 | `NotImplementedError: <Class> does not support batching multiple invokes` | [batching-not-implemented.md](batching-not-implemented.md) |
 | `AttributeError: module 'nnsight' has no attribute 'list' / 'apply' / 'session' / …` | [docs/reference/version-history.md](../reference/version-history.md) |

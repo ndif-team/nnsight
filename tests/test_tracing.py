@@ -12,7 +12,13 @@ import pytest
 
 import nnsight
 from nnsight.tracing.backend import Backend
-from nnsight.tracing.tracer import ExitTracingException, Tracer, save
+from nnsight.tracing.tracer import (
+    ExitTracingException,
+    Tracer,
+    WithBlockNotFoundError,
+    _not_found_message,
+    save,
+)
 
 
 class _RecordingBackend(Backend):
@@ -101,6 +107,27 @@ class TestParseBlock:
         node = self._with(src, 4)
         assert node.lineno == 4
         assert node.body[0].lineno == 5
+
+    def test_column_zero_comment_does_not_end_the_block(self):
+        # Python ignores a comment's indentation, so an editor leaves commented-out
+        # code at column 0 inside an indented block. Stopping there would still
+        # parse — as a `with` that has quietly lost the rest of its body.
+        src = (
+            "def f():\n"
+            "    with ctx:\n"
+            "        x = 1\n"
+            "# print(x)\n"
+            "        y = 2\n"
+            "    return y\n"
+        )
+        node = self._with(src, 2)
+        assert [s.lineno for s in node.body] == [3, 5]
+
+    def test_column_zero_comment_after_the_block_still_ends_it(self):
+        # The comment is collected, but the statement after it is still the end.
+        src = "with ctx:\n    x = 1\n# done\ny = 2\n"
+        node = self._with(src, 1)
+        assert [s.lineno for s in node.body] == [2]
 
     def test_parse_falls_back_to_whole_file(self, monkeypatch):
         # When the slice can't isolate the block, parse() still finds it by parsing
@@ -229,6 +256,16 @@ class TestSkip:
             ran.append("real")
         assert ran == ["real"]
 
+    def test_comment_at_column_zero_keeps_the_rest_of_the_body(self):
+        # The body is compiled from the block's own source, so a slice that ended
+        # at the comment would drop `second` — silently, since what is left still
+        # parses as a `with`.
+        with Tracer():
+            first = save(1)
+# a commented-out line, at column 0 where an editor leaves it
+            second = save(2)
+        assert (first, second) == (1, 2)
+
     def test_read_then_reassign_escapes(self):
         base = 10
         with Tracer():
@@ -250,6 +287,57 @@ class TestSkip:
             assert error.__context__ is None
         else:
             pytest.fail("expected ValueError to propagate")
+
+
+class TestNotFoundMessage:
+    """Unrelated causes reach one raise — source that can't be read, source that
+    has moved, a call that isn't a `with` — so the message has to tell them apart."""
+
+    def test_no_source_at_all(self):
+        message = _not_found_message("<stdin>", 3)
+        assert "no source for <stdin>" in message
+        assert "python < script.py" in message
+
+    def test_real_file_reports_stale_source(self, tmp_path):
+        from nnsight.tracing.globals import SOURCES
+
+        module = tmp_path / "traced.py"
+        module.write_text("value = 1\n")
+        try:
+            message = _not_found_message(str(module), 1)
+        finally:
+            SOURCES.pop(str(module), None)
+        assert f"{module}:1" in message
+        assert "stale" in message
+        assert "`value = 1`" in message  # the line it actually looked at
+
+    def test_readable_source_that_is_not_a_file(self):
+        from nnsight.tracing.globals import SOURCES
+
+        name = "<generated-block>"
+        source = "x = 1\n"
+        linecache.cache[name] = (
+            len(source),
+            None,
+            source.splitlines(keepends=True),
+            name,
+        )
+        try:
+            message = _not_found_message(name, 1)
+        finally:
+            linecache.cache.pop(name, None)
+            SOURCES.pop(name, None)
+        assert f"{name}:1" in message
+        assert "linecache" in message
+
+    def test_the_raise_carries_the_message(self):
+        def capture_here():
+            # capture()'s frame is this function's caller — the line below.
+            Tracer().capture()
+
+        with pytest.raises(WithBlockNotFoundError) as error:
+            capture_here()
+        assert "test_tracing.py" in str(error.value)
 
 
 class TestInfo:
