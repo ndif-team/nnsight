@@ -935,8 +935,48 @@ class TestPreloadedModule:
         model = TransformersModel(hf_gpt2, task="text-generation", tokenizer=tok)
         assert model.tokenizer is tok
 
+    def test_question_answering_module_asks_for_a_task(self):
+        # transformers 5 has no question-answering pipeline, so there is no task to
+        # infer for a *ForQuestionAnswering module: the user has to be told to pass
+        # one, rather than getting a KeyError out of the pipeline factory.
+        from transformers import TapasForQuestionAnswering
+
+        module = TapasForQuestionAnswering.from_pretrained(
+            "hf-internal-testing/tiny-random-TapasForQuestionAnswering"
+        )
+        with pytest.raises(ValueError, match="pass task="):
+            TransformersModel(module)
+
     def test_bare_module_wraps_raw(self):
         # A non-HF module through the base HuggingFaceModel is wrapped directly.
         model = HuggingFaceModel(nn.Linear(8, 8))
         assert model.dispatched is True
         assert isinstance(model._module, nn.Linear)
+
+
+class TestMetaAudio:
+    """The lazy meta build (``dispatch=False``, the default) has to work for audio
+    tasks too. The model is pre-built there, so a feature extractor sourced as a
+    repo-id string sends the audio pipeline looking for a CTC decoder under a model
+    name it derives from the model argument — a module, so the name is None and the
+    lookup fetches `huggingface.co/None/...`."""
+
+    @pytest.mark.parametrize(
+        "repo,task",
+        [
+            (
+                "hf-internal-testing/tiny-random-Wav2Vec2ForSequenceClassification",
+                "audio-classification",
+            ),
+            (
+                "hf-internal-testing/tiny-random-WhisperForConditionalGeneration",
+                "automatic-speech-recognition",
+            ),
+        ],
+    )
+    def test_audio_model_builds_on_meta(self, repo, task):
+        model = TransformersModel(repo, task=task)
+        assert model.dispatched is False
+        assert all(p.device.type == "meta" for p in model._module.parameters())
+        # The feature extractor is a real object, loaded off the repo id.
+        assert model.feature_extractor is not None
