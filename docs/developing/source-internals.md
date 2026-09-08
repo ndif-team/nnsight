@@ -95,7 +95,10 @@ tracebacks through an instrumented forward point into the real file.
 function, rebuilds the decorators around the result, and binds `__nnsight_op__` and
 `__nnsight_bind__` into its globals. Closure cells are matched **by name**, not by
 position — the shell can order `co_freevars` differently from the original. A bound
-method is rebuilt from its function and re-bound to the same instance.
+method is rebuilt from its function and re-bound to the same instance, and a
+callable *instance* is taken through its `__call__`, which is where its Python
+source is — a diffusers attention processor is a plain object, so asking the
+instance for a code object would say there was none.
 
 ## Peeling decorators
 

@@ -38,9 +38,9 @@ its closure intact (`compile_source`), so the call that actually runs is
 the operation to drill into.
 
 Installation is permanent. When an envoy is built its module's ``forward`` is
-replaced by a `make_controller` closure over a single per-module `State` (see
-`STATE`): it hands off ``.input``, gates on ``.skip``, runs the *body* — the
-original forward, or the source-instrumented one once ``.source`` is used — and
+replaced by a `Controller` over a single per-module `State` (see `STATE`): it
+hands off ``.input``, gates on ``.skip``, runs the *body* — the module's own
+forward, or the source-instrumented one once ``.source`` is used — and
 hands off ``.output``. The controller is inert outside a trace, so later runs
 work regardless of request order, and source and skip compose on one wrapper. A
 module wrapped by several envoys routes to whichever interleaver is running
@@ -53,9 +53,11 @@ An [`Envoy`][nnsight.intervention.envoy.Envoy] exposes operations as ``envoy.sou
 from __future__ import annotations
 
 import ast
+import copy
 import functools
 import inspect
 import textwrap
+import warnings
 import weakref
 from types import CellType, CodeType, FunctionType
 from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple
@@ -126,18 +128,42 @@ class State:
     weakref (a finished local wrapper's interleaver drops out on its own; a
     server's persistent interleaver stays, so the same module serves request after
     request), and [`body`][nnsight.intervention.source.State.body] is the *unbound* forward
-    (a plain function taking ``self``) rather than a bound method that would pin it.
+    (a plain function taking ``self``) rather than a bound method that would pin it —
+    which a module carrying its own instance-level forward is the one exception to
+    (`module_body`): what it holds is already bound to that module, and only garbage
+    collection frees it.
     """
 
-    __slots__ = ("routes", "body", "sourced", "compiled")
+    __slots__ = ("routes", "body", "original", "sourced", "compiled")
 
     def __init__(self, body: Callable) -> None:
         #: (weakref to interleaver, the path it addresses this module by, and the
         #: three locations the handoff uses -- built once, not per call)
         self.routes: list[tuple[Any, str, tuple[str, str, str]]] = []
         self.body = body  #: unbound forward to run when not skipped
+        self.original = body  #: what body was before instrumentation (see `__getstate__`)
         self.sourced = False  #: whether body is the source-instrumented forward
         self.compiled: Compiled | None = None  #: the instrumented forward's `Compiled`, once sourced
+
+    def __getstate__(self) -> tuple[None, dict]:
+        """What a copy or a pickle of this module carries: the body as it was
+        before instrumentation, and no routes.
+
+        The registry is weakrefs, which pickle refuses outright ("cannot pickle
+        'weakref.ReferenceType' object" was the whole reason a wrapped module could
+        never be pickled again), and a copy belongs to whatever wraps it next, not
+        to the traces the original is in. The instrumented body goes with them: it
+        and its `Compiled` are built at run time — a function pickle can't name and
+        a code object it can't write at all — and `install_source` rebuilds them
+        from ``original`` the next time the copy is sourced.
+        """
+        return None, {
+            "routes": [],
+            "body": self.original,
+            "original": self.original,
+            "sourced": False,
+            "compiled": None,
+        }
 
     def register(self, interleaver: Any, path: str) -> None:
         """Record that ``interleaver`` reaches this module at ``path``."""
@@ -339,7 +365,10 @@ def compiled(func: Callable) -> Compiled:
     """Cached `compile_source`, keyed by ``func``'s code object."""
     key = getattr(func, "__code__", None)
     if key is None:
-        raise SourceNotAvailable("callable has no Python source (builtin or C function)")
+        raise SourceNotAvailable(
+            "callable has no Python source (a builtin or C function, or an object "
+            "whose `__call__` is one)"
+        )
     if key not in FORWARD_CACHE:
         FORWARD_CACHE[key] = compile_source(func)
     return FORWARD_CACHE[key]
@@ -424,7 +453,15 @@ def instrument(fn: Callable, op: Callable) -> tuple[Callable, Compiled]:
     the function's closure cells, matched by name (the shell can order them
     differently), so a wrapper keeps reaching what it closed over. A bound method
     is rebuilt from its function and re-bound to the same instance.
+
+    A callable *instance* is instrumented through its ``__call__``, which is where
+    its Python source is: a diffusers attention processor is a plain object, and
+    asking the instance for a code object said there was no source to read.
     """
+    if not (inspect.isfunction(fn) or inspect.ismethod(fn)) and isinstance(
+        getattr(type(fn), "__call__", None), FunctionType
+    ):
+        fn = fn.__call__  # a bound method, which the receiver path below handles
     receiver = fn.__self__ if inspect.ismethod(fn) else None
     inner, chain = decorator_chain(fn.__func__ if receiver is not None else fn)
     result = compiled(inner)
@@ -533,8 +570,8 @@ def _as_fragment(interleaver: Any, location: str, value: Any) -> Any:
     return value
 
 
-def make_controller(module: Any, state: "State") -> Callable:
-    """Build the forward installed on an instrumented module: the module's handoff.
+class Controller:
+    """The forward installed on an instrumented module: the module's handoff.
 
     This is where a module's ``.input``, ``.skip`` and ``.output`` reach the
     interleaver -- the same three handles [`run_op`][nnsight.intervention.source.run_op] emits for an operation,
@@ -542,20 +579,30 @@ def make_controller(module: Any, state: "State") -> Callable:
     PyTorch's fast call path, and it runs inside the module's own hooks, so a
     runtime that keeps collectives in them sees the pre-collective value here --
     which is what its [`Fragments`][nnsight.intervention.fragments.Fragments] describes.
-    ``body`` is the (unbound) original forward or, once sourced, the instrumented
-    one, and a ``.skip`` bypasses it entirely (and, if sourced, all its ops).
+    ``State.body`` is the (unbound) original forward or, once sourced, the
+    instrumented one, and a ``.skip`` bypasses it entirely (and, if sourced, all
+    its ops).
+
+    An object rather than a closure so that copying a module can rebind it: a
+    function is atomic to `copy` and to `pickle`, so a closure came through
+    `copy.deepcopy` still pointing at the module it was built for -- the copy
+    computed with the original's weights, silently and outside any trace.
 
     Holds the module by weakref: the module owns this controller (as its
-    ``forward``), so a strong back-reference would cycle. ``functools.wraps``
-    preserves the forward's signature, which ``generate()`` introspects to decide
-    whether to pass ``attention_mask``/``position_ids``.
+    ``forward``), so a strong back-reference would cycle.
+    ``functools.update_wrapper`` preserves the forward's signature, which
+    ``generate()`` introspects to decide whether to pass
+    ``attention_mask``/``position_ids``.
     """
-    module_ref = weakref.ref(module)
-    original = type(module).forward  # unbound; used only for signature metadata
 
-    @functools.wraps(original)
-    def controller(*args: Any, **kwargs: Any) -> Any:
-        module = module_ref()
+    def __init__(self, module: Any, state: "State") -> None:
+        functools.update_wrapper(self, type(module).forward)  # signature metadata only
+        self.module_ref = weakref.ref(module)
+        self.state = state
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        state = self.state
+        module = self.module_ref()
         interleaver, _, locations = state.active()
         if interleaver is None:
             return run_body(state, module, args, kwargs)
@@ -567,7 +614,65 @@ def make_controller(module: Any, state: "State") -> Callable:
         # A skipped module's output is the replacement the worker supplied.
         return handle(locations[2], _as_fragment(interleaver, locations[2], output))
 
-    return controller
+    def __deepcopy__(self, memo: dict) -> "Controller":
+        """Rebind to the copied module, so the copy runs on its own weights.
+
+        Copying a module registers the copy in ``memo`` before it copies the
+        ``__dict__`` this controller lives in, so by the time this runs the copy is
+        already there to bind to; deep-copying the module here is what finds it.
+        """
+        return Controller(copy.deepcopy(self.module_ref(), memo), copy.deepcopy(self.state, memo))
+
+    def __reduce__(self) -> tuple:
+        """Pickle as the module and its state, rebuilt on the far side.
+
+        The weakref is what pickle chokes on, and it is only a way to reach the
+        module -- which is already memoized by the time its ``__dict__`` is
+        written, so naming it here costs nothing.
+        """
+        return Controller, (self.module_ref(), self.state)
+
+
+def _framework_forward(module: Any) -> bool:
+    """Whether the instance ``forward`` is one nnsight puts back around the
+    controller rather than a body to run under it.
+
+    Two libraries claim the same slot the controller does, and nnsight reinstates
+    both: accelerate's device-alignment wrapper, which `run_body` re-applies from
+    ``_hf_hook``, and transformers' tensor-parallel wrapper, which
+    ``_keep_tp_forward`` (`nnsight.modeling.tp.fragments`) rebuilds *around* the
+    controller. Running either as the body would apply its transforms twice, and
+    neither is a user replacing ``forward``.
+    """
+    if "_hf_hook" in module.__dict__:
+        return True
+    forward = module.__dict__.get("forward")
+    return ".install_forward.<locals>." in getattr(forward, "__qualname__", "")
+
+
+def module_body(module: Any) -> Callable:
+    """The body the controller runs: the module's own ``forward`` if it has one,
+    otherwise its class's.
+
+    The controller takes the *instance* slot, so a forward already sitting there is
+    one it would otherwise destroy — ``self.forward = self._fast`` picked in
+    ``__init__``, a monkeypatched layer, ``torch.compile``'s ``OptimizedModule`` —
+    which left the module raising ``NotImplementedError``, or quietly running a
+    different implementation, for the rest of the process.
+
+    An instance forward is already bound, so it is wrapped to take (and ignore) the
+    module the controller passes; where it is a method of this module its function
+    is kept instead, which does the same without pinning the module the state lives
+    on.
+    """
+    forward = module.__dict__.get("forward")
+    if forward is None or _framework_forward(module):
+        # Unbound: a bound method would pin the module, and the module holds the
+        # state that holds this — a cycle.
+        return type(module).forward
+    if inspect.ismethod(forward) and forward.__self__ is module:
+        return forward.__func__
+    return lambda _module, *args, **kwargs: forward(*args, **kwargs)
 
 
 def install_controller(envoy: "Envoy") -> State:
@@ -576,16 +681,24 @@ def install_controller(envoy: "Envoy") -> State:
 
     Installed directly into the module's ``__dict__`` (shadowing the class method
     for ``__call__``) and left there permanently — inert outside a trace. The body
-    defaults to the original forward; [`install_source`][nnsight.intervention.source.install_source] upgrades it.
+    is whatever the module's forward was (`module_body`);
+    [`install_source`][nnsight.intervention.source.install_source] upgrades it.
     """
     module = envoy._module
     state = module.__dict__.get(STATE)
     if state is None:
-        # Store the *unbound* forward (a bound method would pin the module, and the
-        # module holds this state — a cycle); the controller supplies the module.
-        state = State(type(module).forward)
+        state = State(module_body(module))
         module.__dict__[STATE] = state
-        module.__dict__["forward"] = make_controller(module, state)
+        module.__dict__["forward"] = Controller(module, state)
+    elif not isinstance(module.__dict__.get("forward"), Controller) and not _framework_forward(module):
+        # Something took the slot after we installed: every handoff this module
+        # makes is gone, with nothing raising until a trace reports a location the
+        # model "already ran past" (docs/errors/out-of-order-error.md).
+        warnings.warn(
+            f"'{envoy.path}': `forward` was replaced after nnsight wrapped this module, "
+            "which disables its interventions. Wrap the model after whatever reassigns "
+            "`forward`, or re-instrument it (see docs/errors/out-of-order-error.md)."
+        )
     # Register this envoy's interleaver (weakly) under its path, so several envoys
     # can share the module and each routes to its own trace.
     state.register(envoy.interleaver, envoy.path)
@@ -600,10 +713,10 @@ def install_source(envoy: "Envoy") -> Compiled:
     """
     state = install_controller(envoy)
     if not state.sourced:
-        # The class's forward: unbound (the controller passes the module), and a
-        # bound method would pin it.
+        # The body as installed — the forward that actually runs, which is not
+        # always the class's — and unbound, since the controller passes the module.
         state.body, state.compiled = instrument(
-            type(envoy._module).forward, make_op(lambda: state.active()[:2])
+            state.original, make_op(lambda: state.active()[:2])
         )
         state.sourced = True
     return state.compiled

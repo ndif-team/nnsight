@@ -1,4 +1,8 @@
 
+import copy
+import pickle
+import warnings
+
 import pytest
 import torch
 import nnsight
@@ -6,7 +10,7 @@ import torch.nn as nn
 
 from nnsight.intervention.envoy import Envoy
 from nnsight.intervention.interleaver import OutOfOrderError
-from nnsight.intervention.source import STATE, SourceNotAvailable
+from nnsight.intervention.source import STATE, Controller, SourceNotAvailable
 
 
 class MLP(nn.Module):
@@ -601,6 +605,19 @@ class TestSkip:
                 envoy.inner.source.torch_relu_0.output
 
 
+class PickedForward(nn.Module):
+    """Research-code pattern: the implementation is chosen in ``__init__`` and lives
+    on the instance — in the slot the controller takes."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(8, 8)
+        self.forward = self._fast
+
+    def _fast(self, x):
+        return self.fc(x)
+
+
 class TestInstall:
     def test_forward_installed_permanently(self, x):
         model = MLP()
@@ -658,6 +675,125 @@ class TestInstall:
         assert torch.allclose(captured["fc1_out"], model.fc1(x))
         assert torch.allclose(captured["relu"], torch.relu(model.fc1(x)))
 
+    def test_deepcopy_computes_with_the_copy(self, x):
+        # The controller came through deepcopy unchanged and dereferenced the
+        # original module, so the copy computed with the original's weights.
+        model = MLP()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            envoy.source.torch_relu_0.output
+        copied = copy.deepcopy(model)
+        with torch.no_grad():
+            for parameter in copied.parameters():
+                parameter.fill_(9.0)
+        assert not torch.allclose(copied(x), model(x))
+        assert torch.allclose(model(x), MLP.forward(model, x))
+
+    def test_deepcopy_traces_on_its_own(self, x):
+        model = MLP()
+        Envoy(model)
+        copied = copy.deepcopy(model)
+        envoy = Envoy(copied)
+        with envoy.trace(x):
+            relu = nnsight.save(envoy.source.torch_relu_0.output)
+            envoy.fc2.output = torch.zeros(2, 8)
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(relu, torch.relu(copied.fc1(x)))
+        assert torch.allclose(out, torch.zeros(2, 8))
+
+    def test_pickle_round_trip(self, x):
+        # The weakly-held interleavers made a wrapped module unpicklable
+        # ("cannot pickle 'weakref.ReferenceType' object").
+        model = MLP()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            envoy.source.torch_relu_0.output
+        restored = pickle.loads(pickle.dumps(model))
+        assert torch.allclose(restored(x), model(x))
+        # The instrumented body doesn't survive the trip; it is rebuilt on demand.
+        assert restored.__dict__[STATE].sourced is False
+        envoy = Envoy(restored)
+        with envoy.trace(x):
+            relu = nnsight.save(envoy.source.torch_relu_0.output)
+        assert torch.allclose(relu, torch.relu(restored.fc1(x)))
+
+    def test_instance_forward_is_the_body(self, x):
+        # A patched instance `forward` sits in the slot the controller takes; it
+        # used to be discarded, silently, in and out of traces.
+        model = MLP()
+        model.fc1.forward = lambda inp: torch.full((inp.shape[0], 8), 3.0)
+        expected = model(x)
+        envoy = Envoy(model)
+        assert torch.allclose(model(x), expected)
+        with envoy.trace(x):
+            fc1 = nnsight.save(envoy.fc1.output)
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(fc1, torch.full((2, 8), 3.0))
+        assert torch.allclose(out, expected)
+
+    def test_instance_method_forward_is_the_body(self, x):
+        model = PickedForward()
+        expected = model(x)
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(out, expected)
+        assert torch.allclose(model(x), expected)
+
+    def test_compiled_module_still_runs(self, x):
+        # torch.compile's OptimizedModule keeps its forward on the instance too.
+        compiled = torch.compile(MLP(), backend="eager")
+        expected = compiled(x)
+        envoy = Envoy(compiled)
+        assert torch.allclose(compiled(x), expected)
+        with envoy.trace(x):
+            fc1 = nnsight.save(envoy._orig_mod.fc1.output)
+        assert fc1.shape == (2, 8)
+
+    def test_accelerate_hook_is_not_the_body(self, x):
+        # accelerate installs device alignment by replacing `forward` in the slot
+        # the controller takes, and `run_body` re-applies it from `_hf_hook` —
+        # taking that wrapper as the body would run the alignment twice.
+        from accelerate.hooks import ModelHook, add_hook_to_module
+
+        calls = []
+
+        class Counting(ModelHook):
+            def pre_forward(self, module, *args, **kwargs):
+                calls.append("pre")
+                return args, kwargs
+
+            def post_forward(self, module, output):
+                calls.append("post")
+                return output
+
+        model = MLP()
+        add_hook_to_module(model, Counting())
+        expected = model(x)
+        calls.clear()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            relu = nnsight.save(envoy.source.torch_relu_0.output)
+            out = nnsight.save(envoy.output)
+        assert calls == ["pre", "post"]
+        assert torch.allclose(out, expected)
+        assert torch.allclose(relu, torch.relu(model.fc1(x)))
+
+    def test_replacing_forward_after_wrapping_warns(self, x):
+        model = MLP()
+        Envoy(model)
+        model.fc1.forward = lambda inp: inp
+        with pytest.warns(UserWarning, match="replaced after nnsight wrapped"):
+            Envoy(model)
+
+    def test_controller_is_not_warned_about(self, x):
+        model = MLP()
+        Envoy(model)
+        assert isinstance(model.__dict__["forward"], Controller)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            Envoy(model)
+
 
 # ---------------------------------------------------------------------------
 # Recursive / nested source: drilling into a called function
@@ -708,6 +844,25 @@ class Methoded(nn.Module):
 
     def forward(self, x):
         return self.compute(x)
+
+
+class Processor:
+    """A callable instance, as a diffusers attention processor is: the instance has
+    no code of its own, its ``__call__`` does."""
+
+    def __call__(self, x):
+        return torch.relu(x)
+
+
+class CallsInstance(nn.Module):
+    """forward calls a callable instance (an attention processor's shape)."""
+
+    def __init__(self):
+        super().__init__()
+        self.processor = Processor()
+
+    def forward(self, x):
+        return self.processor(x)
 
 
 class TestRecursive:
@@ -790,6 +945,18 @@ class TestRecursive:
         with envoy.trace(x):
             inner = nnsight.save(envoy.source.relu_wrapped_0.source.torch_relu_0.output)
         assert torch.allclose(inner, torch.relu(x))
+
+    def test_drill_into_callable_instance(self, x):
+        # A callable object has no `__code__`; its `__call__` does, and that is the
+        # code that runs — every diffusers attention processor is one.
+        model = CallsInstance()
+        envoy = Envoy(model)
+        with envoy.trace(x):
+            inner = nnsight.save(envoy.source.self_processor_0.source.torch_relu_0.output)
+            envoy.source.self_processor_0.source.torch_relu_0.output = torch.zeros(2, 8)
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(inner, torch.relu(x))
+        assert torch.allclose(out, torch.zeros(2, 8))
 
     def test_assignment_op_cannot_be_drilled(self, x):
         envoy = Envoy(Calls())
