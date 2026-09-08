@@ -200,6 +200,15 @@ def scenario_concurrent(model, args):
     }
 
 
+def scenario_release(model, args):
+    """A trace, then every rank's count of tracked requests."""
+    with model.trace(args.prompt, temperature=0.0, max_tokens=2) as tracer:
+        for _ in tracer.iter[:2]:
+            late = model.model.layers[LATE].output[0].save()
+    counts = model.vllm_entrypoint.llm_engine.collective_rpc("nnsight_request_count")
+    return {"counts": [int(count) for count in counts]}
+
+
 SCENARIOS = {
     "logits": scenario_logits,
     "hidden": scenario_hidden,
@@ -209,6 +218,7 @@ SCENARIOS = {
     "multigen": scenario_multigen,
     "multigen_forced": scenario_multigen_forced,
     "concurrent": scenario_concurrent,
+    "release": scenario_release,
 }
 
 
