@@ -197,7 +197,12 @@ the next run.
 mediators; that is `cancel`'s job.
 
 `cancel` releases each worker's greenlet, empties `mediators` and drops the
-`batcher`, so the next run starts clean. The controllers stay installed.
+`batcher`, so the next run starts clean. The controllers stay installed. A worker
+still `alive` — parked because the model's forward raised before reaching its
+location — is thrown a `GreenletExit` first: dropping the reference does not end a
+greenlet, and a parked one holds its frame, the block's scope and through it the
+model. An exception out of the block's own `finally` warns rather than raising, so
+it cannot hide the error that ended the run.
 
 ### check_dangling_mediators
 

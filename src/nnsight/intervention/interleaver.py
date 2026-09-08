@@ -43,7 +43,7 @@ import warnings
 import weakref
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
 
-from greenlet import getcurrent, greenlet
+from greenlet import GreenletExit, getcurrent, greenlet
 
 from ..tracing.util import Scope
 
@@ -857,6 +857,16 @@ class Interleaver:
     def cancel(self) -> None:
         """Drop all mediators and the batcher so the next run starts clean.
 
+        A worker still [`alive`][nnsight.intervention.interleaver.Mediator.alive] —
+        parked mid-intervention because the model's forward raised before it
+        reached the location — is unwound first. Dropping the reference does not
+        end a greenlet: a parked one keeps its frame, the frame keeps the block's
+        scope, and the scope keeps the model, so a run that errors would hold the
+        weights forever. The throw runs the block's ``finally`` blocks on the way
+        out; an exception raised there only warns, because cancel runs in the
+        driver's ``finally`` with the error that ended the run already in flight,
+        and that error is the one worth surfacing.
+
         Each mediator's worker greenlet is released too, so a stored edit mediator
         replayed on a later trace is seen as never-started (``worker is None``) and
         restarts fresh rather than being skipped for still holding its finished
@@ -864,6 +874,16 @@ class Interleaver:
         [`check_dangling_mediators`][nnsight.intervention.interleaver.Interleaver.check_dangling_mediators]), handled by the driver after a run.
         """
         for mediator in self.mediators:
+            if mediator.alive:
+                try:
+                    mediator.worker.throw(GreenletExit)
+                except BaseException as thrown:
+                    warnings.warn(
+                        f"An intervention block raised {thrown!r} while it was "
+                        f"being unwound at the end of the run. It is reported "
+                        f"here rather than raised, so that it cannot hide the "
+                        f"error that ended the run."
+                    )
             mediator.worker = None
         self.mediators = []
         self.batcher = None

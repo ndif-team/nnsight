@@ -29,6 +29,22 @@ class TwoLayer(nn.Module):
         return self.b(self.a(x))
 
 
+class Boom(nn.Module):
+    """Raises where a real forward would raise: after `a`, before `b`."""
+
+    def forward(self, x):
+        raise RuntimeError("boom")
+
+
+class RaisesMidway(TwoLayer):
+    def __init__(self):
+        super().__init__()
+        self.boom = Boom()
+
+    def forward(self, x):
+        return self.b(self.boom(self.a(x)))
+
+
 def _x():
     return torch.randn(2, 8)
 
@@ -133,6 +149,39 @@ class TestExceptionCleanup:
             return ref
 
         assert run()() is None
+
+    def test_module_freed_when_the_model_raises_mid_forward(self):
+        # The worker is still parked on `b.output` when the forward raises, and a
+        # parked greenlet is not freed by dropping the reference to it: it keeps
+        # its frame, which keeps the block's scope, which keeps the model. Not
+        # even a gc pass reaches it — a suspended greenlet's frames are invisible
+        # to the collector — so this is the one leak that needs an explicit unwind.
+        def run():
+            model = Envoy(RaisesMidway())
+            ref = weakref.ref(model._module)
+            try:
+                with model.trace(_x()):
+                    nnsight.save(model.a.output)  # served
+                    nnsight.save(model.b.output)  # still parked here
+            except RuntimeError:
+                pass
+            return ref
+
+        assert run()() is None
+
+    def test_erroring_traces_do_not_accumulate(self):
+        # The leak is cumulative: one held model per errored trace.
+        def run():
+            refs = []
+            for _ in range(5):
+                model = Envoy(RaisesMidway())
+                refs.append(weakref.ref(model._module))
+                with pytest.raises(RuntimeError):
+                    with model.trace(_x()):
+                        nnsight.save(model.b.output)
+            return refs
+
+        assert all(ref() is None for ref in run())
 
     def test_tracer_freed_when_trace_body_raises(self):
         def run():

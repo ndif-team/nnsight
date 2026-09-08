@@ -188,6 +188,40 @@ class TestInterleaver:
         il.cancel()
         assert il.mediators == []
 
+    def test_cancel_unwinds_a_still_parked_worker(self):
+        # Dropping the reference doesn't end a greenlet: a worker left parked by a
+        # run that errored keeps its frame, and the frame keeps the model.
+        il = Interleaver()
+        store = {}
+        med = make_mediator(
+            "try:\n"
+            "    Mediator.value('never-reached')\n"
+            "finally:\n"
+            "    store['unwound'] = True",
+            store=store,
+        )
+        il.mediators.append(med)
+        with il:
+            assert med.alive
+        il.cancel()
+        assert store["unwound"]
+
+    def test_cancel_warns_rather_than_raises_out_of_an_unwind(self):
+        # cancel runs in the driver's `finally`, with the error that ended the run
+        # already in flight; a block's own `finally` must not displace it.
+        il = Interleaver()
+        med = make_mediator(
+            "try:\n"
+            "    Mediator.value('never-reached')\n"
+            "finally:\n"
+            "    raise RuntimeError('from the block')"
+        )
+        il.mediators.append(med)
+        with il:
+            pass
+        with pytest.warns(UserWarning, match="from the block"):
+            il.cancel()
+
     def test_parked_set_is_rebuilt_each_run(self):
         # A prior run's wait count must not leak into the next run.
         il = Interleaver()
