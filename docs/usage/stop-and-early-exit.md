@@ -61,6 +61,51 @@ threshold, a token you were waiting for.
 loop's own bound never has to hold — an open `tracer.all()` is the natural form
 here.
 
+## The location you stop at still happens
+
+A stop ends what comes *after* the location the worker is parked on, not that
+location itself. That module has already run by the time the stop is raised, so
+the visit is finished before the forward unwinds: the value is served, any edit
+you made to it lands, and a cache observing it records it.
+
+```python
+with model.trace("Hello world") as tracer:
+    cache = tracer.cache(modules=[model.transformer.h[5]]).save()
+    model.transformer.h[5].output
+    tracer.stop()
+
+print(list(cache.keys()))   # ['model.transformer.h.5']
+```
+
+Layer 5 is there; layers 6 and up never ran, so they are not.
+
+## A stop in one invoke ends the whole batch
+
+Invokes are rows of one shared forward pass, so a `stop()` in any one of them
+ends the run for all of them — there is no way to keep going for the other rows.
+The step it fires on does finish, though: an invoke parked on the same visit is
+served in it, so every invoke records that step.
+
+```python
+with model.generate(max_new_tokens=8, do_sample=False) as tracer:
+    with tracer.invoke("The capital of France is"):
+        picks = nnsight.save([])
+        for _ in tracer.all():
+            picks.append(model.lm_head.output[0, -1].argmax(dim=-1))
+            if len(picks) == 3:
+                tracer.stop()
+    with tracer.invoke("The capital of Spain is"):
+        others = nnsight.save([])
+        for _ in tracer.all():
+            others.append(model.lm_head.output[0, -1].argmax(dim=-1))
+# len(picks) == len(others) == 3
+```
+
+The second invoke's loop was cut short by the first invoke's stop rather than by
+a bound of its own, so it warns that it asked for a step the run did not make,
+like any loop the run outruns ([iter-all-next.md](iter-all-next.md)). If the
+invokes need to stop independently, run them as separate traces.
+
 ## The run's result is gone after a stop
 
 A stop cuts the run off before it returns anything, so there is no result to
@@ -117,6 +162,10 @@ with model.trace("Hello world") as tracer:
   side effects.
 - **Anything depending on a later module won't be populated.** Requesting a module
   the run never reached (because you stopped before it) raises `OutOfOrderError`.
+  The module you stopped *at* is not one of those — it ran, and is cached.
+- **A stop in one invoke ends the batch.** One forward pass serves every invoke, so
+  the others stop where it did; their `tracer.all()` loops warn about the steps the
+  run did not make.
 - **`EarlyStopException` is not an error.** Don't wrap the trace in
   `try/except EarlyStopException` expecting to catch user errors — the interleaver
   already swallows it.

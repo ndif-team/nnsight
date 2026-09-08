@@ -197,7 +197,12 @@ the next run.
 mediators; that is `cancel`'s job.
 
 `cancel` releases each worker's greenlet, empties `mediators` and drops the
-`batcher`, so the next run starts clean. The controllers stay installed.
+`batcher`, so the next run starts clean. The controllers stay installed. A worker
+still `alive` — parked because the model's forward raised before reaching its
+location — is thrown a `GreenletExit` first: dropping the reference does not end a
+greenlet, and a parked one holds its frame, the block's scope and through it the
+model. An exception out of the block's own `finally` warns rather than raising, so
+it cannot hide the error that ended the run.
 
 ### check_dangling_mediators
 
@@ -237,9 +242,14 @@ the read.
 ## `tracer.stop()` and early exit
 
 `InterleavingTracer.stop` raises `EarlyStopException` from inside the worker; it
-propagates through `switch` and unwinds the model's forward. `Interleaver.__exit__`
-swallows it. If a worker stops before the model even starts (during `__enter__`'s
-`start`), `Envoy.interleave` catches it directly.
+propagates through `switch` into `Interleaver.handle`, which treats it as control
+flow rather than an error: it holds the exception, clears that worker's `pending`,
+finishes the visit (count, `assemble_skip`, the observing caches, the other workers
+parked here, the fragment `undo`) and re-raises it on the way out, unwinding the
+model's forward from a completed visit. So the location a stop fires at is served
+and recorded, and only what follows it is lost. `Interleaver.__exit__` swallows it.
+If a worker stops before the model even starts (during `__enter__`'s `start`),
+`Envoy.interleave` catches it directly.
 
 ## Key files / classes
 
