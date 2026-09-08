@@ -956,6 +956,27 @@ class TransformersModel(HuggingFaceModel):
                     "chunked input on its own."
                 )
             items.extend(rows)
+            # The batch is one forward call, so its keywords are the batch's, not an
+            # invoke's: an invoke that passes a different value doesn't get its own,
+            # it overwrites what the batch had. Silent otherwise — a per-invoke
+            # `attention_mask` replaces the collated one for every row.
+            for key, value in forward_kwargs.items():
+                if key not in forward:
+                    continue
+                try:
+                    agrees = forward[key] is value or bool(forward[key] == value)
+                except Exception:  # noqa: BLE001 — a tensor compares elementwise
+                    agrees = False
+                if not agrees:
+                    warnings.warn(
+                        f"Invokes disagree on the forward keyword {key!r}: a batch is "
+                        "one forward call, so what reaches the model is batch-wide — "
+                        "the last invoke to pass it decides it for every row "
+                        "(tokenizer keywords are unaffected; those apply per invoke). "
+                        "Anything that has to differ per row belongs in the invoke's "
+                        "input — a dict of input_ids/attention_mask, say — rather "
+                        "than in its keywords."
+                    )
             forward.update(forward_kwargs)
 
         encoding = self._collate(items)

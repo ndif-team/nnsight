@@ -12,7 +12,8 @@ sources: [src/nnsight/intervention/batching.py, src/nnsight/intervention/tracer.
 
 A `with model.trace() as tracer:` block may contain several `with
 tracer.invoke(x):` blocks. Their inputs are combined into a single batched forward,
-and each block's interventions see only *its* rows of every activation. This doc
+and each block's interventions see its own rows of every activation the batcher can
+read the rows of — which is decided by the leading dim, see `narrow` below. This doc
 walks the `Batcher` (one per trace), the `batch_group` row ranges, and the
 `narrow`/`widen`/`gather_skip`/`assemble_skip` operations the interleaver drives.
 
@@ -67,15 +68,23 @@ batched tensor in it down to the group's rows, delegating each tensor to
 ```python
 def _narrow_tensor(self, tensor, group):
     start, size = group
-    if tensor.shape[0] == self.total:      # only actually-batched tensors
-        return tensor.narrow(0, start, size)
+    rows = tensor.shape[0] if tensor.ndim else 0
+    k = rows // self.total if rows and rows % self.total == 0 else 0
+    if k:                                  # k rows of tensor per row of batch
+        return tensor.narrow(0, start * k, size * k)
+    self.unscoped[id(tensor)] = (tensor, tensor._version, ..., rows)
     return tensor
 ```
 
-A tensor is treated as batched only when its leading dim equals `total` (the
-combined batch size), so a tensor whose dim 0 is sequence length or hidden size
-passes through untouched. `narrow` returns `value` unchanged when not batching or
-for a groupless (empty) invoke. It is called from `Mediator.handle` for every
+A tensor is treated as batched when its leading dim is `total` (the combined batch
+size) or a whole multiple of it. The multiple is the token-flattened case — a
+transformers MoE block reshapes `(batch, seq, hidden)` to `(batch*seq, hidden)`
+before its router, so every invoke's rows are still contiguous and in order, `k =
+shape[0] // total` of them per row of batch. A leading dim that is neither (a
+sequence length, a hidden size, a patch count) passes through untouched; a leading
+dim that is a multiple by coincidence is sliced, which is the cost of deciding this
+from the shape alone. `narrow` returns `value` unchanged when not batching or for a
+groupless (empty) invoke. It is called from `Mediator.handle` for every
 `Event.VALUE` (`interleaver.py`).
 
 The slice is stamped `_nnsight_batch = True`. A `.backward()` gradient hook uses
@@ -91,14 +100,33 @@ type — and hands each batched tensor pair to `_widen_tensor`, the per-tensor m
 a layout subclass overrides:
 
 ```python
-pre  = full.narrow(0, 0, start)
-post = full.narrow(0, start + size, self.total - start - size)
+pre  = full.narrow(0, 0, start * k)
+post = full.narrow(0, (start + size) * k, rows - (start + size) * k)
 return torch.cat([pre, edited, post], dim=0)
 ```
 
 `cat` (rather than in-place assignment) keeps autograd correct for leaf/view
 tensors and avoids aliasing when `edited` is itself a narrowed view of `full`.
-Called from `Mediator.handle` for every `Event.SWAP` (`interleaver.py`).
+Called from `Mediator.handle` for every `Event.SWAP` (`interleaver.py`). `k` is
+`_narrow_tensor`'s: when there is none — the leading dim is neither `total` nor a
+multiple of it — there are no rows this invoke owns, so `full` is returned
+unchanged and the dropped replacement warns.
+
+### Writes to a value that couldn't be scoped
+
+A value no row rule matched is served to every invoke whole, so a write to it acts
+on the whole batch. A replacement is caught in `_widen_tensor` above. An **in-place**
+edit never comes back through the batcher at all, so `_narrow_tensor` records what
+it served whole — the tensor, torch's `_version` counter, and the location the
+worker asking for it was parked on — and `_report_unscoped`, called at the top of
+`narrow`/`widen`, warns for anything whose version has moved since. The report is
+therefore one batcher call late (the next value served to any worker, which in a
+batched run is the next module either invoke reads), and the record is cleared each
+time, so at most one visit's values are held.
+
+Reads are deliberately not reported: a shape alone doesn't distinguish a value that
+isn't batched from one batched on an axis the batcher can't read, and the great
+majority are the former.
 
 **A replacement has to keep the group's row count.** `_widen_tensor` does not
 check it: a `cat` of the wrong height succeeds — it just builds a batch that is
@@ -167,7 +195,7 @@ See `docs/developing/vllm-integration.md` for the vLLM specifics.
 
 - `src/nnsight/intervention/batching.py` — `Batcher` (per-trace batching state):
   `add`, `batching`, `assemble`, `narrow`/`_narrow_tensor`, `widen`/`_widen_tensor`,
-  `gather_skip`, `assemble_skip`; plus `SkipParts` and `concat`.
+  `gather_skip`, `assemble_skip`, `_report_unscoped`; plus `SkipParts` and `concat`.
 - `src/nnsight/intervention/envoy.py` — `_batch_size`, `_batch`, `_batcher_class`.
 - `src/nnsight/intervention/tracer.py` — `InterleavingTracer.execute` (builds the
   batcher, adds the direct-input worker); `Invoker.execute` (adds an invoke worker).
