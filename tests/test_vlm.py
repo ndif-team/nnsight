@@ -248,6 +248,23 @@ class TestVisionLanguageModel:
     def test_task_is_image_text_to_text(self, vlm):
         assert vlm.task == "image-text-to-text"
 
+    @torch.no_grad()
+    @pytest.mark.parametrize("as_dict", [True, False], ids=["dict", "BatchFeature"])
+    def test_prebuilt_encoding_positional(self, vlm, as_dict):
+        # Regression for #711: a processor encoding passed positionally was taken
+        # for `text` and sent through the processor a second time, which fails a
+        # different way on each transformers version. The class now leaves input
+        # assembly to TransformersModel, which knows an encoding when it sees one.
+        enc = _encoding(vlm)
+        payload = dict(enc) if as_dict else enc
+        with vlm.generate(payload, max_new_tokens=3, do_sample=False) as tracer:
+            out = tracer.result.save()
+        with vlm.generate(
+            text=_prompt(vlm), images=_image(), max_new_tokens=3, do_sample=False
+        ) as tracer:
+            ref = tracer.result.save()
+        assert torch.equal(out, ref)
+
 
 class TestProcessorInputs:
     """``trace``/``scan`` accept processor-style input (a prompt plus ``images=``),

@@ -4,8 +4,9 @@
 model and returns token ids. A vision-language model is the same story with images
 alongside the text, so prefer ``TransformersModel(repo_id,
 task="image-text-to-text")`` directly. [`VisionLanguageModel`][nnsight.modeling.vlm.VisionLanguageModel] is kept for
-backwards compatibility — it pins the task and runs the processor over the prompt
-*and* images before the model's own ``generate`` — and warns on construction.
+backwards compatibility — all it does is pin the task and warn on construction;
+input handling (a prompt with ``images=``, or a processor encoding you built
+yourself) is the base class's.
 
 .. code-block:: python
 
@@ -51,27 +52,3 @@ class VisionLanguageModel(LanguageModel):
         # super's setdefault so it wins over LanguageModel's text-generation task).
         kwargs.setdefault("task", "image-text-to-text")
         super().__init__(*args, **kwargs)
-
-    def _batch_generate(self, invokes: list) -> tuple:
-        """Assemble a prompt and its images into model inputs, via the processor.
-
-        Generating goes through the model, which takes ``input_ids``/``pixel_values``
-        — not the raw prompt and images — so run the processor here (a pipeline would
-        do it internally, but the model can't). The prompt is positional or ``text=``,
-        the images ``images=``; anything else in the invoke is a generate kwarg.
-
-        An invoke that already carries a built encoding (no ``text``/``images`` to
-        process) is assembled like a forward's input instead.
-        """
-        if len(invokes) > 1:
-            raise NotImplementedError(
-                "Batching multimodal generate inputs isn't supported; use one invoke."
-            )
-        (inputs, kwargs), = invokes
-        kwargs = dict(kwargs)
-        text = inputs[0] if inputs else kwargs.pop("text", None)
-        images = kwargs.pop("images", None)
-        if text is None and images is None:
-            return self._batch_forward(invokes)  # a prebuilt encoding
-        encoding = self.processor(text=text, images=images, return_tensors="pt")
-        return tuple(), {**dict(encoding), **kwargs}
