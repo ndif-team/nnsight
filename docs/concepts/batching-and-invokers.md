@@ -10,7 +10,7 @@ sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.
 
 ## What this is for
 
-`tracer.invoke(...)` batches several inputs into one forward pass while running different intervention code on each. Each invoke becomes one `Mediator` (one greenlet worker) with a `batch_group = [start, size]`, so its interventions see only its own rows of every activation.
+`tracer.invoke(...)` batches several inputs into one forward pass while running different intervention code on each. Each invoke becomes one `Mediator` (one greenlet worker) with a `batch_group = [start, size]`, so its interventions see its own rows of every activation the batcher can scope — one whose leading dimension is the combined batch size, or a whole multiple of it. A value shaped any other way is served to every invoke whole, and a write to it warns.
 
 An **empty** invoke (`tracer.invoke()`, no args) has `batch_group = None` and sees the **whole** combined batch — useful for shared logic over all rows.
 
@@ -73,8 +73,16 @@ ValueError: Cannot invoke while the model is already running.
 
 When a hook fires and `Interleaver.handle` serves a worker:
 
-- **read**: `Batcher.narrow(value, group)` slices every batched tensor (leading dim `== total`) down to `[start, start+size)`. Non-batched tensors and empty invokes pass through.
-- **write**: `Batcher.widen(full, group, edited)` splices the edited rows back into the full batch (via `cat`, keeping autograd correct). The replacement has to keep the group's row count — the splice takes it as given, so one of the wrong height builds a batch that is no longer the model's, and the mismatch surfaces in some later module or not at all.
+- **read**: `Batcher.narrow(value, group)` slices every scoped tensor down to the group's rows. A tensor is scoped when its leading dim is `total` (one row per row of batch, narrowed to `[start, start + size)`) or a whole multiple of it — `k = shape[0] // total` rows per row of batch, narrowed to `[start*k, size*k)`, which is the layout a model that folds tokens into the batch axis produces (`(batch*seq, hidden)` ahead of an MoE router). Anything else, and every empty invoke, passes through whole.
+- **write**: `Batcher.widen(full, group, edited)` splices the edited rows back into the full batch (via `cat`, keeping autograd correct), under the same row rule. The replacement has to keep the group's row count — the splice takes it as given, so one of the wrong height builds a batch that is no longer the model's, and the mismatch surfaces in some later module or not at all. A replacement for a tensor no row rule scoped has nowhere to go and is dropped with a warning; an in-place edit to one never reaches `widen` at all, so the batcher remembers what it served whole and notices, at the next narrow or widen, that torch's version counter moved:
+
+```
+UserWarning: An in-place edit to `model.visual.merger.output` applies to every
+invoke: its leading dimension (256) is neither the batch size (2) nor a multiple
+of it, so nnsight served the whole batch rather than this invoke's rows.
+```
+
+A read of such a value does not warn: a value that is not batched at all — a causal mask, rotary `cos`/`sin` — is indistinguishable by shape from one batched on an axis the batcher cannot read, and most are the former.
 
 `Batcher.batching` is `True` only with **2+ input invokes**. A lone invoke *is* the whole batch, so `narrow`/`widen` are no-ops — single-input traces pay no slicing overhead, and a lone invoke's write may change the leading dim and widen the run.
 
@@ -140,7 +148,7 @@ A barrier fewer blocks reach than it was built for never releases; `check_dangli
 ## Gotchas
 
 - **`_batch_size`/`_batch` required for 2+ input invokes.** Base `NNsight` raises `NotImplementedError` on `_batch` with multiple invokes; use `TransformersModel`, implement them, or restructure as one input invoke + empty invokes.
-- **A tensor is "batched" only if its leading dim equals the combined batch size.** `narrow`/`widen` leave others alone — a shape coincidence could in principle mislead them.
+- **A tensor is scoped to an invoke only if its leading dim is the combined batch size or a whole multiple of it.** `narrow`/`widen` leave the rest alone. The multiple is what makes a flattened `(batch*seq, ...)` activation scopable, and it is a rule about shape, not provenance: a leading dim that is a multiple by coincidence — four experts against two invokes — is sliced as if it were rows, which is the accepted cost of covering the flattened case. A write to a tensor no rule scoped warns, naming the location, the leading dim and the batch size; a read does not.
 - **Custom batch layouts subclass `Batcher`** and override `narrow`/`widen`/`assemble`. vLLM's `VLLMBatcher` (`modeling/vllm/batching.py`) maps rows onto a flat token axis.
 - **A trace whose only invoke is empty has no rows to run.** On `TransformersModel` the tokenizer raises `IndexError: list index out of range`; on base `NNsight` the forward raises `TypeError` for its missing argument. Give the trace an input invoke or a direct input.
 
