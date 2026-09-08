@@ -32,6 +32,28 @@ checkpoint does not change that. Under `HF_HUB_OFFLINE=1` the first form raises
 offline mode`, so pass `task=` on an air-gapped machine or a cluster node with no
 outbound network.
 
+transformers 5 has no `summarization`, `translation`, `text2text-generation`,
+`question-answering` or `image-to-text` pipeline, so a seq2seq checkpoint (T5, BART)
+has no task of its own left: `text-generation` is the only route, and from a repo id
+that route resolves through `AutoModelForCausalLM` and builds the decoder-only class
+(`BartForCausalLM` — no encoder) without saying so. Load the model yourself and hand
+nnsight the module:
+
+```python
+from transformers import AutoTokenizer, BartForConditionalGeneration
+
+repo = "facebook/bart-base"
+model = TransformersModel(
+    BartForConditionalGeneration.from_pretrained(repo),
+    tokenizer=AutoTokenizer.from_pretrained(repo),
+)
+```
+
+A seq2seq run through `text-generation` also has `pipe` echo the prompt back rather
+than return the completion (transformers' behaviour), so an intervention measured
+through those records reads as a no-op — measure through `generate` /
+`tracer.result` instead.
+
 ### Constructor
 
 ```python

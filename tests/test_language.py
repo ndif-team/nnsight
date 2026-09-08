@@ -263,6 +263,29 @@ class TestGeneration:
         )
 
     @torch.no_grad()
+    def test_beam_search_matches_transformers(self, gpt2):
+        # nnsight injects its own streamer to give per-step token access, and
+        # transformers refuses any streamer under beam search — so beam search
+        # only runs at all if the streamer stays out of it.
+        kwargs = dict(max_new_tokens=3, num_beams=3, do_sample=False)
+        with gpt2.generate(PROMPT, **kwargs) as tracer:
+            hidden = gpt2.transformer.h[-1].output.save()
+            ids = tracer.result.save()
+        encoding = gpt2.tokenizer(PROMPT, return_tensors="pt").to(gpt2._module.device)
+        assert torch.equal(ids, gpt2._module.generate(**encoding, **kwargs))
+        # The beams are the rows a read inside the block sees.
+        assert hidden.shape[0] == 3
+
+    @torch.no_grad()
+    def test_beams_from_the_generation_config_count_too(self, gpt2, monkeypatch):
+        # A checkpoint can ask for beam search in its own generation_config, with
+        # no num_beams in the call.
+        monkeypatch.setattr(gpt2._module.generation_config, "num_beams", 3)
+        with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
+            ids = tracer.result.save()
+        assert ids.shape == (1, 12)
+
+    @torch.no_grad()
     def test_save_hidden_states_and_input(self, gpt2):
         with gpt2.trace(PROMPT):
             hs_in = gpt2.transformer.h[-1].input.save()

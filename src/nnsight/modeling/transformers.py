@@ -116,7 +116,6 @@ _ARCH_TASK = {
     "ForMaskedLM": "fill-mask",
     "ForSequenceClassification": "text-classification",
     "ForTokenClassification": "token-classification",
-    "ForQuestionAnswering": "question-answering",
     "ForImageClassification": "image-classification",
     "ForImageTextToText": "image-text-to-text",
 }
@@ -365,11 +364,24 @@ class TransformersModel(HuggingFaceModel):
         # loads are sourced — passing a stray tokenizer source to a processor-based
         # (multimodal) pipeline, for instance, makes it reject the string.
         needed = self._loaded_preprocessors()
-        return {
+        sources = {
             attr: getattr(self, attr) or self.repo_id
             for attr in _PREPROCESSORS
             if getattr(self, attr) is not None or attr in needed
         }
+        # The audio pipelines look for a CTC decoder when the feature extractor
+        # comes in as a repo id, under a model name they derive from the model
+        # argument -- which is None when the model is pre-built (the meta path),
+        # so they fetch `huggingface.co/None/...` and die. Hand them the object
+        # instead; a feature extractor is a JSON config, no weights, so building
+        # it costs nothing on the path that exists to avoid loading weights.
+        if isinstance(sources.get("feature_extractor"), str):
+            from transformers import AutoFeatureExtractor
+
+            sources["feature_extractor"] = AutoFeatureExtractor.from_pretrained(
+                sources["feature_extractor"], revision=self.revision
+            )
+        return sources
 
     def _loaded_preprocessors(self) -> set:
         # Which of tokenizer/image_processor/feature_extractor/processor the task's
@@ -597,12 +609,22 @@ class TransformersModel(HuggingFaceModel):
         Args:
             *inputs: What to generate from — the same forms `trace` takes.
             **kwargs: Passed to the model's ``generate``, e.g. ``max_new_tokens``.
-                ``streamer`` defaults to this model's; pass it to override.
+                ``streamer`` defaults to this model's (except under beam search,
+                which transformers refuses a streamer for); pass it to override.
 
         Returns:
             The generated token ids, as a ``[batch, seq]`` tensor.
         """
-        kwargs.setdefault("streamer", self.generator.streamer._module)
+        # transformers refuses any streamer under beam search, and this one is
+        # nnsight's, not the caller's -- so only inject it when the run is
+        # single-beam. The beams can come from a passed generation_config or from
+        # the checkpoint's own, where unset reads as None rather than 1.
+        config = kwargs.get("generation_config") or getattr(
+            self.pipeline.model, "generation_config", None
+        )
+        num_beams = kwargs.get("num_beams") or getattr(config, "num_beams", None) or 1
+        if num_beams == 1:
+            kwargs.setdefault("streamer", self.generator.streamer._module)
         output = self.pipeline.model.generate(*inputs, **kwargs)
         # Pass the output through the generator module so a worker parked on
         # `model.generator.output` receives it (and can edit it). hook=True fires the
