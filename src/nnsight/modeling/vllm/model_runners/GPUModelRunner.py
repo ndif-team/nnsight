@@ -25,20 +25,36 @@ saves and errors are snapshotted onto the mediator on the worker thread
 
 from __future__ import annotations
 
-import re
-
+import os
 import pickle
+import re
 import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from vllm.distributed.parallel_state import get_pp_group
+
+if os.environ.get("NNSIGHT_PP_DEBUG_STACKS") == "1":
+    # kill -USR1 <worker pid> dumps every thread's stack to stderr. Debug aid
+    # for wedged workers on machines where ptrace (py-spy/gdb) is blocked.
+    import faulthandler
+    import signal
+
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+
+if os.environ.get("NNSIGHT_PP_DEBUG_NOGC") == "1":
+    # Diagnostic: run the worker with the cyclic garbage collector off, to
+    # test whether a wedge involves a collection.
+    import gc
+
+    gc.disable()
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from ....intervention.interleaver import Mediator
+from ....intervention.interleaver import STEP_GATE, Mediator
 from ....intervention.serialization import loads
 from ....tracing.tracer import _local, _saves, inc
 from ..batching import VLLMBatcher
+from ..collect import strip_saves
 from ..fragments import VLLMFragments
 from ..interleaver import VLLMInterleaver
 
@@ -217,11 +233,15 @@ class Requests:
                     continue
                 copy = Mediator(template.code, template.glbls, dict(template.lcls))
                 copy.presaved = set(template.presaved)
+                # The request this worker rides, read by the PP interleaver to
+                # scope cross-stage pulls and publishes to this request.
+                copy.pp_req_id = data.req_id
                 request.copies[registration_id] = copy
             if "nnsight_mediator" not in extra_args:
                 continue
             try:
                 request.mediator = loads(extra_args["nnsight_mediator"], persistent_objects=persistent_objects)
+                request.mediator.pp_req_id = data.req_id
             except Exception as exception:
                 request.error = capture_exception(exception)
 
@@ -485,6 +505,15 @@ class Requests:
             return
 
         error, expected = dangling_unwind(mediator)
+        # A park on a cross-stage pull names the pulled value, phrased by its
+        # provider rather than the wire encoding.
+        from ..lazy_remote_tensor import PULL_LOCATION_PREFIX, decode_pull_location
+
+        if isinstance(error, OutOfOrderError) and requester.provider.startswith(PULL_LOCATION_PREFIX):
+            provider = decode_pull_location(requester.provider)[2]
+            error = OutOfOrderError(str(error).replace(requester.provider, provider))
+            if expected:
+                expected = expected.replace(requester.provider, provider)
         if (
             taps
             # A barrier unwinds with a ValueError and names no module location.
@@ -514,7 +543,8 @@ class Requests:
             # `thrown is error` only when the block let the unwind through; anything
             # a `finally` raised on the way out is the request's error instead.
             if expected is not None and thrown is error:
-                warnings.warn(expected)
+                if expected:
+                    warnings.warn(expected)
             else:
                 mediator.nnsight_error = capture_exception(thrown)
 
@@ -539,13 +569,38 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # The taps the client declared, if the engine replays CUDA graphs; they
         # ride the engine config so every worker process sees the same set.
         taps = self.vllm_config.additional_config.get("nnsight_taps", ())
+        # Pipeline parallelism: this rank holds only its stage's layers, so the
+        # envoy tree is built over a PP-aware interleaver that answers reads of
+        # other stages' modules with lazy handles and pulls their values over a
+        # dedicated gloo group (see pp_interleaver.py). Built BEFORE the envoy
+        # tree so instrumentation registers on it. The runner serves the step
+        # gate at its own boundary, once per engine step (see execute_model).
+        self.nnsight_pp = get_pp_group().world_size > 1
+        # The full meta-device tree the worker built before the real groups
+        # existed (see GPUWorker), taken once here.
+        from ..workers import GPUWorker as worker_module
+
+        meta_model = worker_module.PP_META_MODEL if self.nnsight_pp else None
+        worker_module.PP_META_MODEL = None
+        interleaver = (
+            self._build_pp_interleaver(taps, meta_model)
+            if self.nnsight_pp
+            else VLLMInterleaver(
+                taps, fragments=VLLMFragments(), step_gate_at_root=False
+            )
+        )
         # `get_model`, not `self.model`: under CUDA graphs vLLM has wrapped the
         # module in its graph runner, and the tree is built over the module.
-        self.nnsight_model: VLLM = VLLM(
-            self.get_model(),
-            interleaver=VLLMInterleaver(taps, fragments=VLLMFragments()),
-        )
+        self.nnsight_model: VLLM = VLLM(self.get_model(), interleaver=interleaver)
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
+
+        # Under PP, graft the meta model's children onto each PPMissingLayer
+        # stub's envoy: sub-stub paths (``model.layers.5.attn`` on a non-owning
+        # rank) then resolve at request deserialization and answer with lazies
+        # like any other remote-owned location. The meta tree was built by the
+        # worker before the real groups existed (see GPUWorker).
+        if meta_model is not None:
+            self._graft_pp_missing_envoys(meta_model)
 
         interleaver = self.nnsight_model.interleaver
         # No envoy: the spans come from the scheduler rather than from an invoke,
@@ -562,6 +617,173 @@ class NNsightGPUModelRunner(GPUModelRunner):
         self.nnsight_persistent_objects = (
             self.nnsight_model._remoteable_persistent_objects()
         )
+
+    def _build_pp_interleaver(self, taps: Any = (), meta_model: Any = None) -> Any:
+        """Assemble the PP machinery for this rank: ownership, listener, interleaver.
+
+        Runs after ``super().load_model`` (the module tree and PP groups exist)
+        and before the envoy tree is built (the tree instruments the returned
+        interleaver). The pull traffic uses its own gloo group, separate from
+        vLLM's PP groups so the listener thread's recv never conflicts with
+        vLLM's own communication. ``new_group`` is collective (every rank must
+        call it identically), so groups are created for every TP column and
+        this rank keeps its own.
+        """
+        import atexit
+        import threading
+
+        import torch.distributed as dist
+
+        from ..pp import PPModuleMap
+        from ..pp_interleaver import PPInterleaver
+        from ..pp_listener import PPListener
+
+        pp_group = get_pp_group()
+        pp_world_size = pp_group.world_size
+
+        # Any module the architecture builds only on some ranks (vLLM gates
+        # e.g. ``logits_processor`` behind ``is_last_rank``) gets a stub here,
+        # before the envoy walk, so the paths a request serialized against the
+        # client's full meta tree names all resolve on this rank.
+        from ..pp import stub_rank_gated_modules
+
+        if meta_model is not None:
+            stub_rank_gated_modules(self.get_model(), meta_model)
+
+        # Architecture-agnostic ownership: a module's owning stage is wherever
+        # it is REAL, per the load-time exchange. The only non-derivable cases
+        # are the build-everywhere, fire-on-last modules (real on every rank,
+        # so ambiguous in the exchange), whose stage is structural (sampling
+        # runs on the last rank). ``setdefault`` keeps a derived entry.
+        module_meta, owners = self._exchange_pp_module_meta()
+        last_stage = pp_world_size - 1
+        for structural in ("logits", "samples", "logits_processor"):
+            owners.setdefault(structural, last_stage)
+        module_map = PPModuleMap(pp_world_size)
+        module_map.set_derived_owners(owners)
+        self.pp_module_map = module_map
+
+        # One pull group per TP column: pulls flow between the same-TP-offset
+        # member of each PP stage.
+        tp_size = get_tp_group().world_size
+        pull_group = None
+        for tp_offset in range(tp_size):
+            column = [
+                pp_rank * tp_size + tp_offset for pp_rank in range(pp_world_size)
+            ]
+            group = dist.new_group(ranks=column, backend="gloo")
+            if dist.get_rank() in column:
+                pull_group = group
+
+        buffer: dict = {}
+        condition = threading.Condition()
+        listener = PPListener(
+            buffer=buffer,
+            condition=condition,
+            pull_group=pull_group,
+            local_rank=pp_group.rank_in_group,
+            device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+        )
+        listener.start()
+        # Belt-and-braces shutdown: a worker torn down without the graceful
+        # collect path leaves the daemon listener busy-looping on a dead dist
+        # context at 100% CPU; the stop flag breaks it out.
+        atexit.register(listener.stop)
+        self.pp_listener = listener
+
+        return PPInterleaver(
+            module_map,
+            listener,
+            pp_group.rank_in_group,
+            module_meta,
+            taps=taps,
+            fragments=VLLMFragments(),
+        )
+
+    def _graft_pp_missing_envoys(self, meta_model: torch.nn.Module) -> None:
+        """Graft the meta model's children onto each PPMissingLayer envoy.
+
+        A stub has no children, so the envoy tree is missing every sub-module
+        of a non-local layer. ``_wrap_envoy`` builds and attaches each child
+        (recursively, via Envoy's own construction), handling shadowed names;
+        the grafted envoys wrap meta-device modules that never run; reads on
+        them resolve by ownership to lazies exactly like the stub itself.
+        """
+        from ..pp import is_pp_missing
+
+        meta_modules = {
+            f"{self.nnsight_model.path}.{name}": module
+            for name, module in meta_model.named_modules()
+        }
+
+        def graft(envoy: Any) -> None:
+            if is_pp_missing(envoy._module):
+                meta_module = meta_modules.get(envoy.path)
+                if meta_module is not None:
+                    for name, child in meta_module.named_children():
+                        envoy._wrap_envoy(name, child)
+            for child_envoy in list(envoy._children):
+                graft(child_envoy)
+
+        graft(self.nnsight_model)
+
+    def _exchange_pp_module_meta(self) -> tuple:
+        """Allgather per-module dtype across PP ranks AND derive ownership.
+
+        Each rank contributes ``{path: {dtype}}`` for its local
+        (non-PPMissing) modules; dtype comes from the module's own parameters
+        (no forward needed: probing shapes with a fake-mode forward over the
+        TP-sharded model collides with vLLM's parameter ``__torch_function__``
+        and never completes). The merged map is identical on every rank and
+        provides the dtype hint stamped on lazy placeholders; pull replies
+        carry their own shape and true dtype.
+
+        Returns ``(merged_meta, owners)``: a module real on exactly one stage
+        is owned by it; one real on several (containers, build-everywhere
+        modules) is ambiguous and dropped.
+        """
+        import torch.distributed as dist
+
+        from ..pp import is_pp_missing
+
+        pp_group = get_pp_group()
+
+        local_meta = {}
+        for name, module in self.get_model().named_modules():
+            if not is_pp_missing(module):
+                param = next(module.parameters(recurse=False), None)
+                dtype = param.dtype if param is not None else self.model_config.dtype
+                local_meta[name] = {"dtype": dtype}
+
+        local_bytes = pickle.dumps(local_meta)
+        local_tensor = torch.tensor(list(local_bytes), dtype=torch.uint8, device="cpu")
+        size_tensor = torch.tensor([len(local_bytes)], dtype=torch.int64)
+
+        all_sizes = [
+            torch.zeros(1, dtype=torch.int64) for _ in range(pp_group.world_size)
+        ]
+        dist.all_gather(all_sizes, size_tensor, group=pp_group.cpu_group)
+
+        max_size = max(s.item() for s in all_sizes)
+        padded = torch.zeros(max_size, dtype=torch.uint8)
+        padded[: len(local_bytes)] = local_tensor
+
+        all_padded = [
+            torch.zeros(max_size, dtype=torch.uint8)
+            for _ in range(pp_group.world_size)
+        ]
+        dist.all_gather(all_padded, padded, group=pp_group.cpu_group)
+
+        merged = {}
+        rank_metas = []
+        for buf, size in zip(all_padded, all_sizes):
+            rank_meta = pickle.loads(buf[: size.item()].numpy().tobytes())
+            merged.update(rank_meta)
+            rank_metas.append(rank_meta)
+
+        from ..pp import derive_owners
+
+        return merged, derive_owners(rank_metas)
 
     def capture_model(self) -> Any:
         """Record vLLM's CUDA graphs with the interleaver open.
@@ -627,6 +849,25 @@ class NNsightGPUModelRunner(GPUModelRunner):
             _saves().clear()
 
         interleaver = self.nnsight_model.interleaver
+        if self.nnsight_pp:
+            # Round counts are per-request state; once nothing is tracked they
+            # cannot matter, same reasoning as the saves-set clear above.
+            if not self.nnsight_requests.requests:
+                interleaver.rounds.clear()
+            from ..pp_tls_swap import enabled as _tls_swap_enabled
+            from ..pp_tls_swap import install as _tls_swap_install
+
+            # Per-greenlet torch state isolation, installed on THIS thread (the
+            # greenlets' thread); load_model may run on another. A failed build
+            # raises here, at engine start.
+            if _tls_swap_enabled():
+                _tls_swap_install()
+            # Workers parked on cross-stage pulls of already-produced rounds
+            # are resumed now, before this step's forward; for those the wait
+            # is transfer only. drain=False leaves pulls of the current and
+            # later rounds parked: their values are produced by forwards this
+            # serve must not delay.
+            interleaver.serve_pulls(block=True, drain=False)
         # The scheduler picks this step's requests partway through the forward, so
         # there is nothing to register yet. Entering empty leaves the interleaver
         # with no worker to start — `Requests.scope` starts them as they appear.
@@ -636,9 +877,29 @@ class NNsightGPUModelRunner(GPUModelRunner):
             output = super().execute_model(scheduler_output, intermediate_tensors)
             # The forward is done; what follows it is per-request, not per-token.
             self.nnsight_requests.unflatten(self.nnsight_model)
+            # One step-gate serve per generation step: paces open-ended
+            # tracer.iter loops whose bodies never park (see STEP_GATE).
+            interleaver.handle(STEP_GATE, None)
+            if self.nnsight_pp:
+                # This forward completed one round for every request it
+                # carried; the counts feed the step-start serve's
+                # produced-round comparison. Then serve whatever pulls have
+                # already landed, without waiting: a downstream stage's value
+                # is produced only after this method returns.
+                rounds = interleaver.rounds
+                for req_id in scheduler_output.num_scheduled_tokens:
+                    rounds[req_id] = rounds.get(req_id, 0) + 1
+                interleaver.serve_pulls(block=False)
+                interleaver.step += 1
         return output
 
     def sample_tokens(self, *args: Any, **kwargs: Any) -> Any:
+        # PP: complete stragglers whose producing round has finished before
+        # the once-only logits offer below. vLLM calls this method on EVERY
+        # rank, so the produced-round gate stays on: a non-last rank's pull for
+        # the round in flight resolves only after later stages run.
+        if self.nnsight_pp:
+            self.nnsight_model.interleaver.serve_pulls(block=True, drain=False)
         if self.execute_model_state is not None:
             original = self.execute_model_state.logits
             # Stays `original` if a tracer.stop() unwinds the handle before it
@@ -668,6 +929,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
         return output
 
     def _sample(self, *args: Any, **kwargs: Any) -> Any:
+        if self.nnsight_pp:
+            self.nnsight_model.interleaver.serve_pulls(block=True, drain=False)
         sampler_output = super()._sample(*args, **kwargs)
 
         with self._still_running():
@@ -777,13 +1040,45 @@ class NNsightGPUModelRunner(GPUModelRunner):
         if finished:
             requests.harvest(finished)
 
+        # PP finalize, on EVERY rank (collect_nnsight arrives via
+        # collective_rpc): complete the finished requests' workers' remaining
+        # producible pulls. The workers are named explicitly, since a later
+        # step's scheduling drops them from the interleaver's per-step list,
+        # and the serve keeps the produced-round gate: a pull for a produced
+        # round waits on its transfer only, while a pull past generation end
+        # stays parked and is unwound by finish_dangling below as the loop's
+        # exit. A concurrent request's workers are untouched and are resumed by
+        # its own step serves. Then hold the drain barrier so no rank clears
+        # its published buffer while a peer's pull is still in flight, and
+        # clear only the finished requests' entries; still-parked wire requests
+        # for the cleared ids get error replies instead of hanging their
+        # consumers.
+        if self.nnsight_pp:
+            finishing = [
+                request for request in requests.requests.values() if request.named(finished)
+            ]
+            self.nnsight_model.interleaver.serve_pulls(
+                block=True,
+                drain=False,
+                mediators=[mediator for request in finishing for mediator in request.workers()],
+            )
+            self.pp_listener.drain_barrier()
+            if finishing:
+                self.pp_listener.clear_buffer(req_ids=[request.id for request in finishing])
+
         # Every rank ran the block and so has workers to wind up, but only one
         # rank's values are wanted: the reads are gathered, so every rank holds
         # the same ones. Only the *reporting* is gated — an early return here
         # once left every other rank's workers in place for the life of the
         # engine. Registered values are answered from every rank, since a
-        # registered block runs wherever the layers it reads live.
-        reporting = get_pp_group().rank == 0
+        # registered block runs wherever the layers it reads live. Under PP
+        # every stage's TP rank 0 reports: each stage holds the slots it owns,
+        # and the engine merges them.
+        reporting = (
+            get_tp_group().rank_in_group == 0
+            if self.nnsight_pp
+            else get_pp_group().rank == 0
+        )
         taps = self.nnsight_model.interleaver.taps
         saved = _saves()
         for request in list(requests.requests.values()):
@@ -820,7 +1115,22 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # Still parked when its request finished: waiting on a
                     # location the model never reached — its deferred error.
                     requests.finish_dangling(mediator, taps)
+                    # An exception raised while the finalize serve above
+                    # resumed the worker landed on ``mediator.exception``;
+                    # captured here so it ships as the request's error.
+                    if (
+                        mediator.exception is not None
+                        and getattr(mediator, "nnsight_error", None) is None
+                    ):
+                        from ....intervention.errors import capture_exception
+
+                        mediator.nnsight_error = capture_exception(mediator.exception)
                 values = request.saves()
+                if self.nnsight_pp:
+                    # A lazy inside a saved value strips to a sentinel for the
+                    # engine-side merge; a name owned purely by another stage
+                    # is that stage's to ship.
+                    values = strip_saves(values)
                 if reporting:
                     sequence["saves"] = values
                 if done:
@@ -833,6 +1143,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if reporting and entry["error"] is None:
                 entry["error"] = request.deferred()
             if done and not request.copies:
+                if self.nnsight_pp:
+                    for mediator in request.workers():
+                        self.nnsight_model.interleaver.discard_pulls(mediator)
                 requests.requests.pop(request.id, None)
 
         # The flat keys are the primary sequence, which is all there is unless the
