@@ -759,3 +759,134 @@ class TestMultipleWrappers:
         with w2.trace(x):
             a2 = w2.a.output.save()
         assert torch.allclose(a1, a2)
+
+
+class TranscoderSet(nn.Module):
+    """A container that keeps its modules one level down, behind its own
+    ``__getitem__`` — the shape a set of transcoders or SAEs takes."""
+
+    def __init__(self, n: int = 4):
+        super().__init__()
+        self.items = nn.ModuleList([nn.Linear(8, 8) for _ in range(n)])
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+    def __iter__(self):
+        return iter(self.items)
+
+
+class IndexedNoIter(nn.Module):
+    """Indexes and counts, but leaves iteration to Python's ``__getitem__``
+    protocol."""
+
+    def __init__(self, n: int = 3):
+        super().__init__()
+        self.items = nn.ModuleList([nn.Linear(8, 8) for _ in range(n)])
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+
+class IndexesATensor(nn.Module):
+    """``__getitem__`` that means something other than a submodule."""
+
+    def __init__(self):
+        super().__init__()
+        self.w = nn.Parameter(torch.zeros(3))
+
+    def __getitem__(self, index):
+        return self.w[index]
+
+
+class IndexesAFreshModule(nn.Module):
+    """``__getitem__`` returning a module this tree does not wrap."""
+
+    def __getitem__(self, index):
+        return nn.Linear(8, 8)
+
+
+class Container(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList([nn.Linear(8, 8) for _ in range(3)])
+        self.seq = nn.Sequential(nn.Linear(8, 8), nn.ReLU())
+        self.dct = nn.ModuleDict({"a": nn.Linear(8, 8)})
+        self.tset = TranscoderSet()
+        self.noiter = IndexedNoIter()
+        self.tensor_indexed = IndexesATensor()
+        self.fresh = IndexesAFreshModule()
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return self.tset[1](x)
+
+
+class TestContainerDunders:
+    """``len``, iteration and indexing answer for the same entries.
+
+    Torch's containers hold their modules as their own entries, so all three go
+    through the envoy children. A container holding them one level down counts
+    and indexes the modules, and the envoy follows it there rather than
+    reporting a length whose every index raises.
+    """
+
+    @pytest.fixture
+    def envoy(self):
+        return Envoy(Container())
+
+    def test_torch_containers_index_by_child_name(self, envoy):
+        assert envoy.layers[1] is getattr(envoy.layers, "1")
+        assert envoy.seq[0]._module is envoy._module.seq[0]
+        assert envoy.dct["a"]._module is envoy._module.dct["a"]
+
+    def test_torch_containers_agree_across_dunders(self, envoy):
+        for child in (envoy.layers, envoy.seq, envoy.dct):
+            assert len(child) == len(list(child))
+
+    def test_a_delegating_container_agrees_across_dunders(self, envoy):
+        assert len(envoy.tset) == 4
+        assert len(list(envoy.tset)) == 4
+        assert [child.path for child in envoy.tset] == [
+            f"model.tset.items.{index}" for index in range(4)
+        ]
+
+    def test_indexing_a_delegating_container_names_the_module_it_returns(self, envoy):
+        assert envoy.tset[2] is envoy.tset.items[2]
+        assert envoy.tset[2]._module is envoy._module.tset[2]
+
+    def test_a_negative_index_delegates(self, envoy):
+        assert envoy.tset[-1] is envoy.tset.items[3]
+
+    def test_iteration_is_bounded_by_len_without_dunder_iter(self, envoy):
+        assert len(envoy.noiter) == 3
+        assert [child.path for child in envoy.noiter] == [
+            f"model.noiter.items.{index}" for index in range(3)
+        ]
+
+    def test_a_non_module_index_raises(self, envoy):
+        # Handing back the tensor element would break the contract that indexing
+        # an envoy yields an envoy.
+        with pytest.raises(AttributeError):
+            envoy.tensor_indexed[0]
+
+    def test_an_untracked_module_raises(self, envoy):
+        with pytest.raises(AttributeError):
+            envoy.fresh[0]
+
+    def test_a_delegating_container_traces(self, envoy):
+        x = torch.randn(1, 8)
+        with envoy.trace(x):
+            second = envoy.tset[1].output.save()
+        module = envoy._module
+        expected = x
+        for layer in module.layers:
+            expected = layer(expected)
+        assert torch.allclose(second, module.tset[1](expected))
