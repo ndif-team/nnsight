@@ -14,43 +14,21 @@ cross-stage reads. It pins per-request publish narrowing, request-id-keyed
 pulls, and the save merge keeping both invokes' values distinct.
 """
 
-import functools
-import json
 import os
-import subprocess
 import sys
-import tempfile
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 pytest.importorskip("vllm")
 
+import _support
+from _support import PROMPT, cosine, free_gpus, run_worker
 
-def _free_gpus(min_free_mib=12000):
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,memory.free",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        gpus = []
-        for line in result.stdout.strip().splitlines():
-            index, free = line.split(",")
-            if int(free.strip()) >= min_free_mib:
-                gpus.append(index.strip())
-        return gpus
-    except Exception:
-        return []
+pytestmark = pytest.mark.gpu
 
 
-FREE_GPUS = _free_gpus()
+FREE_GPUS = free_gpus()
 
 if len(FREE_GPUS) < 2:
     pytest.skip(
@@ -58,78 +36,14 @@ if len(FREE_GPUS) < 2:
         allow_module_level=True,
     )
 
+PROMPT_B = _support.PROMPT_B
 GPUS_PP1 = FREE_GPUS[0]
 GPUS_PP2 = f"{FREE_GPUS[0]},{FREE_GPUS[1]}"
 
-WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_parity_worker.py")
-REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-)
 
-PROMPT = "The Eiffel Tower is located in the city of"
-PROMPT_B = "Madison Square Garden is located in the city of"
-
-
-@functools.lru_cache(maxsize=None)
 def run(pp, scenario, *extra):
-    """Run one scenario in a subprocess; cached so references are booted once."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        output_path = f.name
-    log_path = output_path + ".log"
-    try:
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = GPUS_PP1 if pp == 1 else GPUS_PP2
-        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        env["PYTHONPATH"] = os.path.join(REPO_ROOT, "src")
-        cmd = [
-            sys.executable,
-            WORKER,
-            scenario,
-            "--pp",
-            str(pp),
-            "--prompt",
-            PROMPT,
-            "--output",
-            output_path,
-            *extra,
-        ]
-        # Engine logs go to a file, not pipes: a pipe would make this call
-        # wait for EOF, which a leaked engine subprocess could hold open long
-        # after the worker itself exited.
-        with open(log_path, "w") as log:
-            result = subprocess.run(
-                cmd, stdout=log, stderr=log, timeout=600, env=env, cwd=REPO_ROOT
-            )
-        try:
-            with open(output_path) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            data = None
-        if data is None or data.get("status") != "ok":
-            with open(log_path) as log:
-                tail = log.read()[-4000:]
-            detail = (
-                f"{data.get('error')}\n{data.get('traceback')}"
-                if data
-                else f"no output written\nWORKER LOG TAIL:\n{tail}"
-            )
-            raise RuntimeError(
-                f"parity worker failed (scenario={scenario}, pp={pp}, "
-                f"rc={result.returncode}):\n{detail}"
-            )
-        return data
-    finally:
-        for path in (output_path, log_path):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
-
-def cosine(a, b):
-    a = torch.tensor(a, dtype=torch.float32).flatten()
-    b = torch.tensor(b, dtype=torch.float32).flatten()
-    return F.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item()
+    """One scenario on a PP=1 reference or PP=2 engine, in its own subprocess."""
+    return run_worker(scenario, pp=pp, gpus=GPUS_PP1 if pp == 1 else GPUS_PP2, extra=tuple(extra))
 
 
 def test_reference_predicts_paris():
@@ -249,3 +163,8 @@ def test_concurrent_requests_see_different_activations():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q", "-x", "-p", "no:cacheprovider"]))
+
+
+def test_every_rank_releases_workers_after_a_trace():
+    counts = run(2, "release")["counts"]
+    assert len(counts) == 2 and all(count == 0 for count in counts), counts
