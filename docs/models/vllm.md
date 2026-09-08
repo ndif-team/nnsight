@@ -138,6 +138,31 @@ length. Slice the donor to the rows you are writing (`served[POS] = donor[POS]`)
 handing back a shorter tensor. Every other dimension is the model's to check the same way, and
 mismatches there surface from the next kernel.
 
+### `.skip()` needs the whole step
+
+A skip has to cover **every row of the step**, and a step's rows are not yours: they hold other
+traces' requests, other tenants' requests, and decodes of requests whose own block has already
+finished. Your replacement tiles your rows only, so the moment anything else is scheduled beside
+you the skip cannot cover the step and
+`ValueError: A batched .skip() has to cover every row` is raised — outside the per-request
+deferral, so vLLM sees it as a fatal engine error rather than your request's:
+`EngineDeadError`, every in-flight request of every client lost, and the model object unusable
+afterwards. The message names your invokes; the row that did not skip is usually a stranger's.
+
+Whether a given script survives is the scheduler's decision, not the code's — one invoke skipping
+alone is fine, two invokes that are not co-scheduled are fine, three with the middle one skipping
+takes the engine. Do not build on it. To remove a module's contribution, write its output instead
+(`model.model.layers[L].mlp.output[:] = 0`): you pay the compute you would have saved, and the
+mistake costs one request.
+
+A decoder layer's `.input` is not the hidden state either. vLLM calls
+`forward(positions, hidden_states, residual)`, so `layer.input` is the `[tokens]` positions vector
+and [skip.md](../usage/skip.md)'s `module.skip(module.input)` pass-through feeds positions in as a
+layer output — the next layer's `hidden_states, residual = layer(...)` then fails to unpack it,
+inside the model's forward, and that is fatal too. Read the arguments through `.inputs`
+(`args, kwargs = layer.inputs`; `args[1]` and `args[2]` are the hidden state and the residual)
+whenever you want the values a layer was called with.
+
 ### `logits` and `samples`
 
 These are vLLM-specific served values on the model — `eproperty` descriptors, the same mechanism behind a module's `.output`/`.input` — not on a vanilla `vllm.LLM`, and only meaningful inside a trace. Read them for the logits and sampled ids of each step; for the finished request as a whole, read `tracer.result`.
@@ -488,6 +513,9 @@ False ...}`.
 
 - **`enforce_eager=True` is forced unless you declare `taps`** — see [CUDA graphs with taps](#cuda-graphs-with-taps).
 - **One prompt per invoke** — no `tracer.invoke(["a", "b"])`.
+- **`.skip()` is effectively unsupported** — a skip has to cover every row of the step, which under
+  continuous batching are not all yours, and the failure takes the engine down rather than the
+  request. See [`.skip()` needs the whole step](#skip-needs-the-whole-step).
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
 - **No backward / gradients, and no source tracing inside a fused CUDA kernel** — the kernel's
   inputs and outputs are locations; its interior is not Python.

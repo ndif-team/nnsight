@@ -96,8 +96,13 @@ with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
 `tracer.iter` returns an `Iterations` object; subscripting selects the range
 (`iterator.py`). Looping over it walks the running mediator's `iteration` pointer
 across the selected steps — before each yield it pins `iteration` so the first read
-in the body binds to that occurrence. Whatever `iteration` was before the loop is
-restored on exit, so loops can nest. `tracer.all()` is `tracer.iter[:]`.
+in the body binds to that occurrence, and the pin then relaxes: the rest of the
+body's requests follow the model. Restoring the pointer on exit therefore restores
+a relaxed pointer, so a read placed after a nested inner loop binds to the step the
+*inner* loop left the model on, not the outer step it is written under — measured
+at step 3 for an inner `tracer.iter[[3]]` inside an outer `tracer.iter[1:2]`. Nest
+loops only when the outer body reads nothing after the inner one; see
+[iteration.md](../gotchas/iteration.md). `tracer.all()` is `tracer.iter[:]`.
 
 ## The one rule
 

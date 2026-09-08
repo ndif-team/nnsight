@@ -355,7 +355,7 @@ model.transformer.h[LAYER].sae = ModuleSAE(d_model, n_features).to(model.device)
 
 with model.edit(inplace=True):
     acts = model.transformer.h[LAYER].output
-    model.transformer.h[LAYER].output[:] = model.transformer.h[LAYER].sae(acts, hook=True)
+    model.transformer.h[LAYER].output = model.transformer.h[LAYER].sae(acts, hook=True)
 
 with model.trace(prompt):
     feats = model.transformer.h[LAYER].sae.encode.output.save()

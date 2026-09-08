@@ -91,8 +91,14 @@ An edit can attach a module to the tree (adapter/LoRA/SAE) and route activations
 model.transformer.h[0].adapter = MyAdapter()
 with model.edit(inplace=True):
     acts = model.transformer.h[0].output
-    model.transformer.h[0].output[:] = model.transformer.h[0].adapter(acts, hook=True)
+    model.transformer.h[0].output = model.transformer.h[0].adapter(acts, hook=True)
 ```
+
+Route it as a **replacement** (`output = ...`), not an in-place write (`output[:] = ...`).
+The in-place form writes the attachment's result back into the tensor that is its own
+input, so autograd refuses the later backward with `RuntimeError: one of the variables
+needed for gradient computation has been modified by an inplace operation` — which is
+exactly the training the attachment exists for.
 
 A plain edit applies once (at the location's first occurrence). To re-apply it at every occurrence — each step of a generation loop — put the passthrough under the tracer's `iter`:
 
@@ -100,7 +106,7 @@ A plain edit applies once (at the location's first occurrence). To re-apply it a
 with model.edit(inplace=True) as tracer:
     for _ in tracer.iter[:]:
         acts = model.transformer.h[0].output
-        model.transformer.h[0].output[:] = model.transformer.h[0].adapter(acts, hook=True)
+        model.transformer.h[0].output = model.transformer.h[0].adapter(acts, hook=True)
 ```
 
 ## Which envoy an edit belongs to

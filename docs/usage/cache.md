@@ -75,6 +75,23 @@ cache["model.transformer.h.0"].input    # first positional/keyword arg
 
 Without `include_inputs=True`, `.inputs` is `None`.
 
+!!! warning "Recorded inputs can hold live GPU state"
+
+    The `device=` move reaches tensors and the containers around them, not tensors
+    held inside arbitrary objects. A HuggingFace decoder block is called with
+    `past_key_values=<DynamicCache>` in its kwargs, so with `include_inputs=True`
+    every layer's entry keeps a reference to the model's **live KV cache**, on the
+    compute device — one object, shared by all the entries.
+
+    Measured on gpt2, batch 32 x ~80 tokens, holding the caches of 8 traces:
+    8 MiB of GPU growth with `include_inputs=False`, 1320 MiB with it on (a
+    64-batch Llama-3.2-3B sweep held 3404 MiB the same way), and about a fifth
+    more time per trace.
+
+    It comes back when the caches are released, so drop them when the sweep is
+    over — or leave `include_inputs=False` and `.save()` the specific `.input`
+    you wanted.
+
 ### Storage transforms
 
 ```python
@@ -222,7 +239,7 @@ model.transformer.h[9].adapter = MyAdapter()
 with model.trace("The Eiffel Tower is in") as tracer:
     cache = tracer.cache()
     acts = model.transformer.h[9].output
-    model.transformer.h[9].output[:] = model.transformer.h[9].adapter(acts, hook=True)
+    model.transformer.h[9].output = model.transformer.h[9].adapter(acts, hook=True)
 
 "model.transformer.h.9.adapter" in cache.keys()          # True; False without hook=True
 ```
@@ -294,7 +311,10 @@ Returns a `CacheView` (already saved, so it survives past the trace).
   the batch's length. An empty `tracer.invoke()` sees the whole batch. See
   [invoke-and-batching.md](invoke-and-batching.md).
 - **The cache moves tensors to CPU by default.** Pass `device=None` (or a device)
-  to keep them elsewhere.
+  to keep them elsewhere. The move reaches tensors and containers, not tensors
+  inside other objects — with `include_inputs=True` a decoder block's
+  `past_key_values` keeps the model's live KV cache on the compute device (see
+  [Include inputs](#include-inputs)).
 - **Always pass `modules=` on a real model.** Caching all 151 of GPT-2's modules
   costs 1.1 GiB and 20x the time of caching its 12 blocks (36 MiB). A cache and a
   hand-written `save()` loop over the same modules cost the same (19.0 ms against

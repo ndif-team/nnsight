@@ -241,6 +241,60 @@ with model.generate(prompt, max_new_tokens=4) as tracer:
 
 ---
 
+## A backwards read in a loop past step 0 gives the next step's value
+
+### Symptom
+
+A body that reads two layers out of forward order raises `OutOfOrderError` in a
+plain trace and under `tracer.iter[0:...]`, and raises nothing under
+`tracer.iter[1:...]` — the values just come back one step ahead of the step label.
+Or the loop is cut short with the "never reached" warning although the run made
+every step the loop asked for.
+
+### Cause
+
+The same pin relaxation as the section above, on the read side: after the body's
+first request the loop stops pinning the step, so a request the model has already
+run past this step binds to its *next* occurrence instead of being refused. At step
+0 there is no earlier occurrence to slide onto, which is why the identical body
+raises there.
+
+### Wrong code
+
+```python
+# baseline norms of h[0] over 4 steps: [54.691, 61.350, 53.869, 54.052]
+with model.generate(prompt, max_new_tokens=4, min_new_tokens=4) as tracer:
+    got = nnsight.save([])
+    for step in tracer.iter[1:3]:
+        model.transformer.h[6].output                  # first request: pins step
+        got.append(model.transformer.h[0].output[0, -1].norm())   # backwards: next step
+# got == [53.869, 54.052] — labelled steps 1 and 2, holding steps 2 and 3
+```
+
+### Right code
+
+```python
+with model.generate(prompt, max_new_tokens=4, min_new_tokens=4) as tracer:
+    got = nnsight.save([])
+    for step in tracer.iter[1:3]:
+        got.append(model.transformer.h[0].output[0, -1].norm())
+        model.transformer.h[6].output
+# got == [61.350, 53.869] — the steps the labels name
+```
+
+### Mitigation
+
+- Read and write in the order the model reaches the locations, exactly as in a
+  plain trace ([order-and-deadlocks.md](order-and-deadlocks.md)).
+- **The "never reached" warning is ambiguous.** When the skewed request runs off
+  the end of the generation it is reported as "the loop asked for a step the run
+  did not make", which points at `min_new_tokens=`; a step list in descending order
+  (`tracer.iter[[3, 1]]`) is cut short the same way even though the run made step
+  1. If the run did make the steps you asked for, look for a backwards access in
+  the loop body before you touch the bound.
+
+---
+
 ## `tracer.iter[N]` counts occurrences, not always generation steps
 
 ### Symptom

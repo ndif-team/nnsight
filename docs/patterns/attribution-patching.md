@@ -132,9 +132,48 @@ to, the block residual.
 
 ### Per-head attribution
 
-Reshape attention output into `[B, S, n_heads, head_dim]` and take the elementwise
-product per head, summing only over `head_dim`. See
-[per-head-attention](per-head-attention.md).
+Track the attention output **before** the output projection, where the hidden
+dimension still decomposes per head: `attn.c_proj.input` (`o_proj.input` on
+Llama-style models), or `.source.attention_interface_1.output[0]`, which is already
+`[B, S, n_heads, head_dim]`. The two routes give the same numbers to the bit.
+Then sum the product over `head_dim` only:
+
+```python
+def per_head(L):                      # [B, S, hidden]; columns are head-major
+    return model.transformer.h[L].attn.c_proj.input
+
+clean_acts, corrupt_acts, grads = [None] * n_layers, [None] * n_layers, [None] * n_layers
+with torch.no_grad():
+    with model.trace(clean):
+        for L in range(n_layers):
+            clean_acts[L] = per_head(L).save()
+
+with model.trace(corrupt):
+    refs = []
+    for L in range(n_layers):
+        a = per_head(L)
+        refs.append(a)
+        corrupt_acts[L] = a.save()
+    logits = model.lm_head.output[:, -1, :]
+    metric = logits[:, paris] - logits[:, rome]
+    with metric.sum().backward():
+        for L in reversed(range(n_layers)):
+            grads[L] = refs[L].grad.save()
+
+n_heads = model.config.n_head
+head_dim = model.config.n_embd // n_heads
+heads = torch.zeros(n_layers, n_heads)
+for L in range(n_layers):
+    d = (clean_acts[L] - corrupt_acts[L]) * grads[L]      # [B, S, hidden]
+    heads[L] = d.view(*d.shape[:2], n_heads, head_dim).sum(dim=(0, 1, 3))
+```
+
+Do **not** reshape `attn.output[0]` this way: it is the output *of* `c_proj`, and
+after that projection columns `[h*head_dim : (h+1)*head_dim]` are not head `h`. On
+this prompt pair the two maps disagree in sign for 70 of GPT-2's 144 heads and name
+a different top head (`(9, 8)` against `(6, 9)`) — a plausible number, unrelated to
+the head. [per-head-attention](per-head-attention.md) measures the same gap for
+ablation.
 
 ### Both passes in one session
 

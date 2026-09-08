@@ -2,7 +2,7 @@
 title: Skip
 one_liner: Bypass a module's (or operation's) forward with `.skip(replacement)`, substituting a value for its output.
 tags: [usage, intervention, skip]
-related: [docs/usage/access-and-modify.md, docs/usage/stop-and-early-exit.md, docs/usage/source.md]
+related: [docs/usage/access-and-modify.md, docs/usage/stop-and-early-exit.md, docs/usage/source.md, docs/models/vllm.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/source.py, src/nnsight/intervention/batching.py]
 ---
 
@@ -63,6 +63,14 @@ with model.trace(x):
     out = model.output.save()
 # out == fc2(relu(x))
 ```
+
+`.input` is the module's *first* argument, which is the value to pass through only when
+the module takes the activation first. On vLLM it does not: a decoder layer is called
+`forward(positions, hidden_states, residual)`, so `layer.input` is the `[tokens]` positions
+vector, and skipping the layer with it hands positions to the next layer as a hidden state —
+which fails inside the model's forward and takes the whole engine with it. Read the arguments
+off `.inputs` there (`args, kwargs = layer.inputs`; `args[1]` and `args[2]` are the hidden
+state and the residual) — and read the vLLM gotcha below before skipping there at all.
 
 ## Match the module's real output
 
@@ -130,6 +138,10 @@ replacement fills its own rows and they're concatenated back into the batch. See
 - **`skip` only works inside an active trace.**
 - **Skips respect forward-pass order** like any access within one invoke — a skip
   requested after the model has run that module raises `OutOfOrderError`.
+- **On vLLM, treat `.skip()` as unsupported.** A skip there has to cover every row of
+  the *step*, which holds other requests — other clients' included — and the failure
+  takes the engine down rather than the request. Write the module's output instead. See
+  [vllm.md](../models/vllm.md#skip-needs-the-whole-step).
 - **A skip is one-shot per module call.** Across generation steps, each step needs
   its own skip — use `tracer.iter[...]` or a persistent edit for every-step
   behavior.

@@ -214,6 +214,19 @@ nor `model.session()` retains anything per iteration.
 - **A gradient that never arrives raises rather than hangs.** Asking for the
   `.grad` of a tensor autograd never reaches — a branch off the metric's path, for
   instance — surfaces `OutOfOrderError` at the end of the run.
+- **A backward block cannot be nested inside another backward block.** The outer
+  block's hook is still registered while the inner one runs, and re-firing it on
+  the parked worker surfaces from inside autograd as
+  `ValueError: cyclic parent chain`, naming nothing you wrote. Write the two as
+  siblings — one block after the other, `retain_graph=True` on the earlier (plus
+  `create_graph=True` when the second differentiates the first's gradient).
+- **Interventions inside a gradient-checkpointed segment never reach the
+  backward.** `torch.utils.checkpoint` runs the segment twice and the block served
+  the first pass, so the recompute — the one autograd differentiates — runs
+  unmodified: the forward output is right and the parameter gradients inside the
+  segment are wrong, with nothing to signal it. Turn checkpointing off while
+  tracing (`model.gradient_checkpointing_disable()` on HuggingFace,
+  `model.set_grad_checkpointing(False)` on timm).
 - **A bare `tensor.backward()` is untouched** — it runs vanilla PyTorch and returns
   `None`.
 
