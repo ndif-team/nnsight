@@ -211,6 +211,160 @@ class TestSetattr:
         assert len(paths) == len(set(paths))
 
 
+class Stack(nn.Module):
+    def __init__(self, n=4):
+        super().__init__()
+        self.layers = nn.ModuleList([nn.Linear(8, 8) for _ in range(n)])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+class SharedStack(nn.Module):
+    """A ModuleList holding one module twice — torch still indexes three entries."""
+
+    def __init__(self):
+        super().__init__()
+        self.shared = nn.Linear(8, 8)
+        self.layers = nn.ModuleList([self.shared, nn.Linear(8, 8), self.shared])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+class TestSharedEntries:
+    @pytest.fixture
+    def shared(self):
+        return Envoy(SharedStack())
+
+    def test_every_entry_is_indexable(self, shared):
+        # `named_children()` deduplicates by identity, so entry 2 used to be
+        # missing entirely and `layers[2]` raised IndexError.
+        assert len(list(shared.layers)) == 3
+        assert shared.layers[1]._module is shared._module.layers[1]
+        assert shared.layers[2]._module is shared._module.shared
+
+    def test_a_shared_entry_is_the_one_envoy(self, shared):
+        assert shared.layers[0] is shared.shared
+        assert shared.layers[2] is shared.shared
+
+    def test_a_shared_module_is_listed_once(self, shared):
+        # The same rule torch's named_modules() follows.
+        assert len(shared.modules()) == len(list(shared._module.named_modules()))
+
+    def test_the_repr_shows_every_entry(self, shared):
+        assert "(0-2): 3 x Linear" in repr(shared.layers)
+
+    def test_a_shared_list_traces(self, shared):
+        x = torch.randn(1, 8)
+        with shared.trace(x):
+            middle = shared.layers[1].output.save()
+        module = shared._module
+        assert torch.allclose(middle, module.layers[1](module.shared(x)))
+
+
+class TestRebuiltContainer:
+    """A container rebuilt from modules the tree already wraps — truncating layers."""
+
+    @pytest.fixture
+    def stack(self):
+        return Envoy(Stack())
+
+    def test_the_entries_are_kept(self, stack):
+        stack.layers = nn.ModuleList(list(stack._module.layers)[:2])
+        assert len(list(stack.layers)) == 2
+        assert [layer.path for layer in stack.layers] == [
+            "model.layers.0",
+            "model.layers.1",
+        ]
+
+    def test_the_tree_still_mirrors_the_module(self, stack):
+        stack.layers = nn.ModuleList(list(stack._module.layers)[:2])
+        assert {node.path for node in stack.modules()} == module_paths(stack._module)
+
+    def test_a_truncated_stack_traces(self, stack):
+        stack.layers = nn.ModuleList(list(stack._module.layers)[:2])
+        x = torch.randn(1, 8)
+        with stack.trace(x):
+            last = stack.layers[1].output.save()
+        assert torch.allclose(last, stack._module(x))
+
+    def test_gpt2_truncated_blocks(self):
+        # Keeping the first four blocks of a real model is the ordinary way a
+        # user hits this; every block is already wrapped, so the new ModuleList
+        # used to end up with no children at all.
+        from nnsight.modeling.transformers import TransformersModel
+
+        model = TransformersModel(
+            "openai-community/gpt2", task="text-generation", dispatch=True
+        )
+        model.transformer.h = nn.ModuleList(list(model.transformer._module.h)[:4])
+        assert len(list(model.transformer.h)) == 4
+        with model.trace("Hello"):
+            hidden = model.transformer.h[3].output.save()
+        assert hidden.shape[-1] == model._module.config.n_embd
+
+
+class TestReplacement:
+    def test_a_replacement_keeps_its_index(self):
+        # Remove-then-append put the new child last, shifting every index after
+        # it, so `envoy[2]` named the module the wrapped module holds at 3.
+        net = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 8), nn.Tanh())
+        sequential = Envoy(net)
+        setattr(sequential, "1", nn.Identity())  # `sequential[1] = ...` is not a thing
+        assert [type(child._module) for child in sequential] == [type(m) for m in net]
+        assert isinstance(sequential[1]._module, nn.Identity)
+        assert isinstance(sequential[3]._module, nn.Tanh)
+
+    def test_a_replaced_module_is_deregistered(self, envoy, module):
+        # Left registered, the replaced module would come back as an alias of
+        # its replacement and serve the replacement's values.
+        old_module = module.head
+        old_envoy = envoy.head  # held, so the registry entry can't just be collected
+        envoy.head = nn.Identity()
+        assert id(old_module) not in envoy.interleaver.envoys
+        envoy.spare = old_module
+        assert envoy.spare is not old_envoy
+        assert envoy.spare.path == "model.spare"
+
+
+class SelfNaming(nn.Module):
+    """A property returning the module itself, as `base_model` does on a base model."""
+
+    def __init__(self):
+        super().__init__()
+        self.layer = nn.Linear(8, 8)
+
+    @property
+    def base_model(self):
+        return self
+
+    def forward(self, x):
+        return self.layer(x)
+
+
+class TestSelfNamingAttribute:
+    def test_it_resolves_to_this_envoy(self):
+        envoy = Envoy(SelfNaming())
+        assert envoy.base_model is envoy
+        assert envoy.interleaver.envoys[id(envoy._module)] is envoy
+
+    def test_it_adds_no_path_to_the_tree(self):
+        envoy = Envoy(SelfNaming())
+        before = {node.path for node in envoy.modules()}
+        envoy.base_model
+        assert {node.path for node in envoy.modules()} == before
+
+    def test_a_rename_through_it_resolves(self):
+        # A duplicate envoy re-ran `_bind_aliases` on the same module: RecursionError.
+        envoy = Envoy(SelfNaming(), rename={"base_model.layer": "inner"})
+        assert envoy.inner is envoy.layer
+
+
 class TestTraceable:
     def _model(self):
         ran = []
