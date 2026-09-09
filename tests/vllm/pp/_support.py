@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Any, Optional
 
 import torch
@@ -53,8 +54,8 @@ STALL_BOUND_S = 20.0
 # ---------------------------------------------------------------------------
 
 
-def free_gpus(min_free_mib: int = 12000) -> list[str]:
-    """GPU indices with at least ``min_free_mib`` free, in nvidia-smi order."""
+def _nvidia_smi_free() -> list[tuple[str, int]]:
+    """``(index, free MiB)`` per GPU from nvidia-smi, in its order; empty without it."""
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
@@ -64,12 +65,33 @@ def free_gpus(min_free_mib: int = 12000) -> list[str]:
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
-    gpus = []
+    rows = []
     for line in result.stdout.strip().splitlines():
         index, free = line.split(",")
-        if int(free.strip()) >= min_free_mib:
-            gpus.append(index.strip())
-    return gpus
+        rows.append((index.strip(), int(free.strip())))
+    return rows
+
+
+_FROM_ENV = object()
+
+
+def free_gpus(min_free_mib: int = 12000, visible: Any = _FROM_ENV, rows: Optional[list] = None) -> list[str]:
+    """Physical GPU indices with at least ``min_free_mib`` free, within the allocation.
+
+    ``visible`` is the ``CUDA_VISIBLE_DEVICES`` value to stay inside: by
+    default the process's own, ``None`` for no allocation at all. Its order is
+    kept, so the allocation's first GPUs are used first; an empty value selects
+    nothing. Every engine this suite boots is a spawned process that reads
+    ``CUDA_VISIBLE_DEVICES`` itself, so the indices handed to it are physical.
+    """
+    if visible is _FROM_ENV:
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if rows is None:
+        rows = _nvidia_smi_free()
+    free = {index for index, mib in rows if mib >= min_free_mib}
+    if visible is None:
+        return [index for index, _ in rows if index in free]
+    return [index.strip() for index in visible.split(",") if index.strip() in free]
 
 
 # ---------------------------------------------------------------------------
@@ -77,13 +99,25 @@ def free_gpus(min_free_mib: int = 12000) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def run_two_ranks(target, *args) -> None:
-    """Spawn ``target(rank, world, rdv, *args)`` on two gloo ranks and join."""
+# Longer than any wait the harness can make a rank do (a pull times out after
+# PP_PULL_TIMEOUT_S, 30s); a run past it is a deadlock and is torn down.
+HARNESS_TIMEOUT_S = 120.0
+
+
+def run_two_ranks(target, *args, timeout: float = HARNESS_TIMEOUT_S) -> None:
+    """Spawn ``target(rank, world, rdv, *args)`` on two gloo ranks; fail past ``timeout``."""
     fd, rdv = tempfile.mkstemp(prefix="nnsight_pp_rdv_")
     os.close(fd)
     os.remove(rdv)
+    context = mp.spawn(target, args=(2, rdv, *args), nprocs=2, join=False)
     try:
-        mp.spawn(target, args=(2, rdv, *args), nprocs=2, join=True)
+        deadline = time.monotonic() + timeout
+        while not context.join(timeout=1.0):
+            if time.monotonic() > deadline:
+                for process in context.processes:
+                    if process.is_alive():
+                        process.kill()
+                raise AssertionError(f"two-rank harness did not finish within {timeout:.0f}s")
     finally:
         if os.path.exists(rdv):
             os.remove(rdv)
