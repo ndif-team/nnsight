@@ -5,6 +5,14 @@ vLLM shards its linear layers under tensor parallelism, so the value at a
 tensor. A user asked for the layer, not a piece of it, so those are gathered
 before a worker sees them and re-split before vLLM's own forward carries on.
 
+A *fused* column-parallel layer takes one more step. ``QKVParallelLinear`` and
+``MergedColumnParallelLinear`` pack several projections into one weight and each
+rank holds a slice of every one of them, so the ranks' concatenation comes out
+``[q0 k0 v0 | q1 k1 v1]`` rather than ``[q | k | v]``. The gather un-interleaves
+that back into the layout a single rank has and the write-back re-interleaves it,
+because per-head slicing and ``gate, up = value.chunk(2, -1)`` are what these
+values are read for and both are silently wrong on the rank-major order.
+
 A ``FusedMoE`` layer needs the same correction for a different reason: an MoE
 block that defers the combine (``reduce_results=False`` — Qwen-MoE, DeepSeek)
 returns per-rank partial sums that the *outer block* all-reduces afterwards, so
@@ -30,8 +38,9 @@ extra hooks.
 
 from __future__ import annotations
 
+import warnings
 from functools import partial
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 
@@ -97,6 +106,10 @@ class VLLMFragments(Fragments):
     def whole(self, location: str, value: Any) -> "tuple[Any, Any]":
         """The real tensor behind ``value``, and how to cut it back down.
 
+        The whole is in the layout a single rank would have produced, fused
+        projections included, so a recipe written against ``tp=1`` reads and
+        writes the same features here.
+
         vLLM's rules describe a location and nothing else — no value here carries
         its own layout — so the way back is `split` with this location bound to it.
         """
@@ -121,6 +134,14 @@ class VLLMFragments(Fragments):
             if groups > 1:
                 world = groups * module.tp_size
                 collective = lambda tensor: _one_per_group(tensor_model_parallel_all_gather(tensor), world, groups)
+            # A fused layer's own piece is `[q_r | k_r | v_r]`, so the ranks'
+            # concatenation interleaves the projections. Undoing it here is what
+            # makes the promise the whole gather is for: the same slice means the
+            # same feature at every `tp_size`.
+            layout = _fused_sub_shards(module) if isinstance(module, ColumnParallelLinear) else None
+            if layout is not None:
+                gather, (widths, replicas) = collective, layout
+                collective = lambda tensor: _unfuse(gather(tensor), widths, replicas, module.tp_size)
         else:
             # Row sharding splits the summed terms, and a deferred-combine FusedMoE
             # leaves each rank a partial sum of the experts' output — either way
@@ -136,7 +157,9 @@ class VLLMFragments(Fragments):
         Applied to whatever intervention code left behind, so an edit made to the
         assembled tensor is carried back into the model rather than dropped — and
         to a value that was never gathered at all (a `.skip` replacement, or the
-        argument of an ad-hoc call), which is already the real tensor.
+        argument of an ad-hoc call), which is already the real tensor. Either way
+        the value is in the single-rank layout, so a fused layer's piece is
+        re-interleaved as well as narrowed.
         """
         from vllm.model_executor.layers.linear import (
             ColumnParallelLinear,
@@ -155,6 +178,16 @@ class VLLMFragments(Fragments):
             return apply(whole, lambda tensor: tensor / group_size, torch.Tensor)
 
         if isinstance(module, ColumnParallelLinear) or side == "input":
+            layout = _fused_sub_shards(module) if isinstance(module, ColumnParallelLinear) else None
+            if layout is not None:
+                widths, replicas = layout
+                return apply(
+                    whole,
+                    lambda tensor: _fuse(
+                        tensor, widths, replicas, module.tp_size, module.tp_rank
+                    ),
+                    torch.Tensor,
+                )
             return apply(
                 whole,
                 lambda tensor: split_tensor_along_last_dim(
@@ -176,6 +209,93 @@ def _one_per_group(gathered: torch.Tensor, world: int, group_size: int) -> torch
     """
     chunks = gathered.chunk(world, dim=-1)
     return torch.cat(chunks[::group_size], dim=-1)
+
+
+def _fused_sub_shards(module: Any) -> "tuple[List[int], List[int]] | None":
+    """The projections packed into one rank's piece of a column-parallel layer.
+
+    Their widths *on one rank*, in packing order, and how many adjacent ranks
+    hold a copy of each. ``None`` for a layer whose piece is a single block,
+    which is every column-parallel layer but the two fused ones and needs no
+    reordering at all.
+
+    The widths are vLLM's own: ``ColumnParallelLinear.__init__`` divides
+    ``output_sizes`` by ``tp_size`` into ``output_partition_sizes`` for exactly
+    the two subclasses that set ``output_sizes``, and leaves one entry — the
+    whole shard — for everything else. Read against vLLM 0.27.1.
+    """
+    from vllm.model_executor.layers.linear import (
+        MergedColumnParallelLinear,
+        QKVParallelLinear,
+    )
+
+    widths = list(getattr(module, "output_partition_sizes", ()))
+    if len(widths) < 2:
+        return None
+
+    if isinstance(module, QKVParallelLinear) and len(widths) == 3:
+        # Q is sharded across every rank, but a model with fewer KV heads than
+        # ranks has its K and V replicated instead: vLLM's weight loader takes
+        # `shard_rank = tp_rank // num_kv_head_replicas`, so that many adjacent
+        # ranks hold the same K and V and the gather carries each of them once
+        # per rank in the group.
+        replicas = getattr(module, "num_kv_head_replicas", 1)
+        return widths, [1, replicas, replicas]
+
+    if isinstance(module, MergedColumnParallelLinear):
+        return widths, [1] * len(widths)
+
+    # Some other subclass packs projections nnsight has no layout for — a QKV
+    # with an indexer (MiniMax-M3) is one. Leaving it in rank order is the only
+    # safe answer, but a silent one would read exactly like the layout this
+    # module exists to remove.
+    warnings.warn(
+        f"{type(module).__name__} packs {len(widths)} projections into each rank's"
+        " shard and nnsight has no layout for it, so its gathered value stays in"
+        " rank order ([q0 k0 v0 | q1 k1 v1], not [q | k | v]). Slice it per rank."
+    )
+    return None
+
+
+def _unfuse(
+    gathered: torch.Tensor, widths: List[int], replicas: List[int], tp_size: int
+) -> torch.Tensor:
+    """Rank-major to projection-major: ``[q0 k0 v0 | q1 k1 v1]`` -> ``[q | k | v]``.
+
+    The ranks sharing a replicated projection are contiguous, so one rank out of
+    every ``replicas`` of them carries it exactly once — which is also what makes
+    the result the single-rank width rather than a KV shard per rank.
+    """
+    pieces = gathered.chunk(tp_size, dim=-1)
+
+    parts = []
+    offset = 0
+    for width, every in zip(widths, replicas):
+        parts.extend(piece[..., offset : offset + width] for piece in pieces[::every])
+        offset += width
+    return torch.cat(parts, dim=-1)
+
+
+def _fuse(
+    whole: torch.Tensor,
+    widths: List[int],
+    replicas: List[int],
+    tp_size: int,
+    tp_rank: int,
+) -> torch.Tensor:
+    """One rank's ``[q_r | k_r | v_r]`` back out of a whole ``[q | k | v]``.
+
+    `_unfuse` for a single rank, which is all `split` ever needs: building the
+    rank-major whole and then dropping every other rank's piece would cost a
+    second full-width tensor to reach the same columns.
+    """
+    pieces = []
+    offset = 0
+    for width, every in zip(widths, replicas):
+        start = offset + width * (tp_rank // every)
+        pieces.append(whole[..., start : start + width])
+        offset += width * (tp_size // every)
+    return torch.cat(pieces, dim=-1)
 
 
 def _moe_layer() -> Any:
