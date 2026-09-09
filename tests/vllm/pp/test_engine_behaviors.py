@@ -58,6 +58,36 @@ def test_cross_stage_write_changes_logits(pp2_engine):
     assert not torch.equal(clean, zeroed)
 
 
+def test_cross_stage_inputs_read_carries_the_argument_structure(pp2_engine):
+    """A layer's ``.inputs`` is ``((positions, hidden, residual), {})``, int64
+    beside bf16 in a nested tuple. The downstream rank pulls an upstream
+    layer's inputs in place, and a write computed from them changes the logits
+    exactly as the same write computed from the known values does."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        previous = _layer(model, EARLY - 1).output[0]
+        structure = _layer(model, EARLY).inputs.save()
+        (positions, hidden, residual), kwargs = structure
+        # ``positions.max() + 1`` is the token count; ``hidden`` is the
+        # previous layer's output, so ``drift`` is zero.
+        scale = float(positions.max() + 1)
+        drift = float((hidden - previous).abs().max())
+        late = _layer(model, LATE).output
+        _layer(model, LATE).output = (late[0] * (scale + drift),) + tuple(late[1:])
+        pulled = model.logits.save()
+
+    (positions, hidden, residual), kwargs = structure
+    n_tokens = positions.shape[0]
+    assert positions.dtype == torch.int64 and positions.tolist() == list(range(n_tokens))
+    assert hidden.dtype == torch.bfloat16 and residual.shape == hidden.shape and kwargs == {}
+
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        late = _layer(model, LATE).output
+        _layer(model, LATE).output = (late[0] * float(n_tokens),) + tuple(late[1:])
+        reference = model.logits.save()
+    assert torch.equal(pulled, reference)
+
+
 def test_bounded_loop_saves_each_step(pp2_engine):
     model = pp2_engine
     with model.trace(PROMPT, temperature=0.0, max_tokens=4) as tracer:

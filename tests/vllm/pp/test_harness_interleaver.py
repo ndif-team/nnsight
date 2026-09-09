@@ -7,13 +7,15 @@ sets. Both ranks run the SAME intervention block, as under real PP: reads of a
 local module park and are served by that rank's ``handle``; reads of the peer's
 module are answered with lazies and completed through the pull protocol.
 
-Wire level: buffered and parked serves, tuples, dtypes, error replies for
-values the producer cannot encode, the scoped clear, the drain barrier.
+Wire level: buffered and parked serves, container structures and mixed
+dtypes, error replies for values the producer cannot pickle, the scoped clear,
+the drain barrier.
 Interleaver level: cross-stage read and write, the within-stage fragments
 gather, publish scoping, collect-time serving, and error delivery onto the
 worker greenlet.
 """
 
+import collections
 import threading
 import time
 
@@ -23,6 +25,10 @@ import torch.distributed as dist
 from _support import Stage, run_two_ranks
 
 FRAGMENTED = "model.h.0.output"
+
+# A namedtuple value crosses the wire as its own type (pickled by reference;
+# both ranks import this module).
+Row = collections.namedtuple("Row", "ids score")
 
 
 # ---------------------------------------------------------------------------
@@ -35,12 +41,14 @@ def _listener_protocol(rank, world, rdv):
     listener, buffer, condition = stage.listener, stage.buffer, stage.condition
 
     if rank == 1:
-        # Producer: one value up front, one late, one non-tensor.
+        # Producer: values up front, one late, one non-tensor, one that
+        # cannot be pickled.
         with condition:
             buffer[("model.h.0.output.i0", "req-a")] = torch.arange(12, dtype=torch.float32).reshape(3, 4)
             buffer[("model.h.0.output.i0", None)] = (torch.ones(2, 2), torch.full((2, 2), 5.0))
             buffer[("model.samples.i0", "req-a")] = torch.tensor([7, 8, 9], dtype=torch.int32)
             buffer[("model.h.1.inputs.i0", "req-a")] = {"not": "a tensor"}
+            buffer[("model.h.3.output.i0", "req-a")] = threading.Lock()
 
         def publish_late():
             time.sleep(0.5)
@@ -67,16 +75,19 @@ def _listener_protocol(rank, world, rdv):
         assert v3.dtype == torch.int32 and v3.tolist() == [7, 8, 9], v3
         v4 = p4.complete()
         assert v4.shape == (2, 3) and torch.all(v4 == 2.5), v4
+        # A value without tensors travels whole inside the reply's metadata.
         p5 = listener.begin_pull(1, "model.h.1.inputs.i0", "req-a")
+        assert p5.complete() == {"not": "a tensor"}
+        p6 = listener.begin_pull(1, "model.h.3.output.i0", "req-a")
         try:
-            p5.complete()
-            raise AssertionError("a dict-valued pull should have raised")
+            p6.complete()
+            raise AssertionError("an unpicklable value should have error-replied")
         except RuntimeError as error:
-            assert "model.h.1" in str(error) and "detach" in str(error), error
+            assert "model.h.3" in str(error) and "cannot pickle" in str(error), error
         listener.drain_barrier()
-        p6 = listener.begin_pull(1, "model.h.9.output.i0", "req-a")
+        p7 = listener.begin_pull(1, "model.h.9.output.i0", "req-a")
         try:
-            p6.complete(timeout=5.0)
+            p7.complete(timeout=5.0)
             raise AssertionError("an abandoned pull should have raised")
         except RuntimeError as error:
             assert "never produced" in str(error), error
@@ -88,51 +99,49 @@ def test_listener_protocol():
     run_two_ranks(_listener_protocol)
 
 
-def _wire_overflow(rank, world, rdv):
+def _wire_structures(rank, world, rdv):
     stage = Stage(rank, world, rdv)
+    values = {
+        "single": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+        "one_tuple": (torch.arange(6, dtype=torch.float32).reshape(2, 3),),
+        "named": Row(torch.tensor([1, 2, 3]), 0.5),
+        # A module's ``.inputs``: ``((args), {kwargs})`` with int64 positions
+        # beside bf16 hidden states and a ``None`` residual.
+        "inputs": (
+            (torch.arange(4, dtype=torch.int64), torch.full((4, 2), 1.5, dtype=torch.bfloat16), None),
+            {"flag": torch.tensor(True)},
+        ),
+        "many": tuple(torch.full((i + 1,), float(i)) for i in range(64)),
+        "empty": torch.empty(0, 4, dtype=torch.float16),
+        "scalar": torch.tensor(2.5, dtype=torch.float64),
+    }
     if rank == 1:
-        # 16 rank-1 tensors need 2 + 16*2 = 34 shape-header slots, over the
-        # 32-slot header: the producer error-replies rather than desyncing.
         with stage.condition:
-            stage.buffer[("model.h.0.output.i0", None)] = tuple(torch.zeros(2) for _ in range(16))
+            for name, value in values.items():
+                stage.buffer[(f"model.{name}.output.i0", None)] = value
     dist.barrier()
     if rank == 0:
-        pull = stage.listener.begin_pull(1, "model.h.0.output.i0")
-        try:
-            pull.complete(timeout=10.0)
-            raise AssertionError("an oversized value should have error-replied")
-        except RuntimeError as error:
-            assert "shape-header slots" in str(error), error
+        pulls = {name: stage.listener.begin_pull(1, f"model.{name}.output.i0") for name in values}
+        got = {name: pull.complete(timeout=10.0) for name, pull in pulls.items()}
+        assert isinstance(got["single"], torch.Tensor) and torch.equal(got["single"], values["single"])
+        one = got["one_tuple"]
+        assert type(one) is tuple and len(one) == 1 and torch.equal(one[0], values["single"]), one
+        assert type(got["named"]) is Row and got["named"].score == 0.5, got["named"]
+        assert got["named"].ids.tolist() == [1, 2, 3]
+        (positions, hidden, residual), kwargs = got["inputs"]
+        assert positions.dtype == torch.int64 and positions.tolist() == [0, 1, 2, 3]
+        assert hidden.dtype == torch.bfloat16 and hidden.shape == (4, 2) and torch.all(hidden == 1.5)
+        assert residual is None and kwargs["flag"].dtype == torch.bool and bool(kwargs["flag"])
+        assert len(got["many"]) == 64
+        assert all(t.shape == (i + 1,) and torch.all(t == i) for i, t in enumerate(got["many"]))
+        assert got["empty"].shape == (0, 4) and got["empty"].dtype == torch.float16
+        assert got["scalar"].shape == () and got["scalar"].dtype == torch.float64
+        assert got["scalar"].item() == 2.5
     stage.close()
 
 
-def test_unserializable_value_error_replies():
-    run_two_ranks(_wire_overflow)
-
-
-def _wire_mixed_dtype(rank, world, rdv):
-    stage = Stage(rank, world, rdv)
-    if rank == 1:
-        with stage.condition:
-            stage.buffer[("model.h.0.output.i0", None)] = (
-                torch.zeros(2, dtype=torch.float32),
-                torch.tensor([5, 6], dtype=torch.int64),
-            )
-    dist.barrier()
-    if rank == 0:
-        # The header carries one dtype, so a mixed-dtype tuple comes back as an
-        # error reply naming the mix.
-        pull = stage.listener.begin_pull(1, "model.h.0.output.i0")
-        try:
-            value = pull.complete(timeout=10.0)
-            raise AssertionError(f"a mixed-dtype tuple was delivered reinterpreted: {[t.dtype for t in value]}")
-        except RuntimeError as error:
-            assert "mixes dtypes" in str(error), error
-    stage.close()
-
-
-def test_mixed_dtype_tuple_is_not_silently_reinterpreted():
-    run_two_ranks(_wire_mixed_dtype)
+def test_reply_preserves_structure_and_dtypes():
+    run_two_ranks(_wire_structures)
 
 
 # ---------------------------------------------------------------------------
