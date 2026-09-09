@@ -27,7 +27,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any, AsyncIterator, Optional, Union
 
 from ...schema.config import CONFIG
-from ...schema.response import RESULT, ResponseModel, Status
+from ...schema.response import RESULT, MetaData, ResponseModel, Status
 from ...schema.request import RequestModel
 from ...tracing.backend import Backend
 from ...tracing.tracer import Tracer, save
@@ -95,6 +95,7 @@ class RemoteBackend(Backend):
         self.blocking = blocking
         self.job_id = job_id
         self.status: Optional[Status] = None
+        self.meta_data: Optional[MetaData] = None
         self.host = host or CONFIG.API.HOST
         if not self.host.startswith(("http://", "https://")):
             raise ValueError(
@@ -169,8 +170,19 @@ class RemoteBackend(Backend):
         The shared status handling for every update, however it arrived (websocket,
         poll): update the display, raise [`RemoteError`][nnsight.intervention.backends.remote.RemoteError] on ERROR, and return
         whether the status is COMPLETED (so the caller knows to fetch the result).
+
+        Also where [`meta_data`][nnsight.intervention.backends.remote.RemoteBackend.meta_data]
+        is taken off the response, since every waiting mode but
+        [`stream`][nnsight.intervention.backends.remote.AsyncRemoteBackend.stream]
+        reaches its result through here.
         """
         self.display.update(response)
+        # Recorded before the raise: a failed job reports its cost too, and on an
+        # OOM that report is the most useful thing it has to say. `tracer` is
+        # bound by the time the backend runs, so an `except RemoteError` can read
+        # `tracer.backend.meta_data`.
+        if response.meta_data is not None:
+            self.meta_data = response.meta_data
         if response.status == Status.ERROR:
             raise RemoteError(response.description)
         return response.status == Status.COMPLETED
@@ -476,6 +488,8 @@ class AsyncRemoteBackend(RemoteBackend):
         try:
             while True:
                 response = await self.receive()
+                if response.meta_data is not None:
+                    self.meta_data = response.meta_data
                 yield response
                 if response.status == Status.COMPLETED:
                     yield await self.download(response.data)
