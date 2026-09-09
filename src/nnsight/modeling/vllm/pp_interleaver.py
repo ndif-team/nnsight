@@ -105,6 +105,13 @@ class PPInterleaver(VLLMInterleaver):
         # after EVERY stage finished round k-1 — so when this rank opens
         # round k, all stages have completed rounds 0..k-1 for the request.
         self.rounds: dict = {}
+        # The round each request is running or about to run on this rank,
+        # maintained by the runner at the start of every step. An upstream
+        # stage has finished that round before this rank opens it, so it is
+        # the upstream clock: an upstream-owned value of round ``opened`` or
+        # earlier exists, where a downstream-owned value exists only for rounds
+        # below ``rounds``.
+        self.opened: dict = {}
         # In-flight pulls keyed by (id(mediator), untagged park location).
         self._pulls: dict[tuple[int, str], Any] = {}
 
@@ -118,9 +125,10 @@ class PPInterleaver(VLLMInterleaver):
         # A forced lazy parking for its value.
         if location.startswith(PULL_LOCATION_PREFIX):
             source_rank, req_id, provider = decode_pull_location(location)
-            # An upstream-owned value from a round this rank has opened
-            # already exists (pipeline order: the earlier stage finishes a
-            # round before ours starts it), so the wait is transfer only.
+            # An upstream-owned value from the round this rank has opened, or
+            # an earlier one, already exists (pipeline order: the earlier stage
+            # finishes a round before ours opens it), so the wait is transfer
+            # only.
             # Serve it in place — blocking the worker right here, inside
             # whatever switched it in — instead of parking. Parking would
             # surrender the swap window: the worker could only resume at a
@@ -134,13 +142,11 @@ class PPInterleaver(VLLMInterleaver):
             # resumed by the serve point once that round has run.
             if source_rank < self.local_rank:
                 occurrence = _occurrence(provider)
-                rounds = (
-                    self.rounds.get(req_id, 0) if req_id is not None else None
-                )
+                opened = self._opened(req_id)
                 if (
-                    rounds is None
+                    opened is None
                     or occurrence is None
-                    or occurrence <= rounds
+                    or occurrence <= opened
                 ):
                     pull = self.listener.begin_pull(source_rank, provider, req_id)
                     return (pull.complete(),)
@@ -191,6 +197,12 @@ class PPInterleaver(VLLMInterleaver):
         # A write (SWAP) or skip to a remote-owned module: absorbed — the
         # owning rank executes the same block line against the real module.
         return (None,)
+
+    def _opened(self, req_id: Optional[str]) -> Optional[int]:
+        """The round this rank has opened for ``req_id``; ``None`` outside the engine."""
+        if req_id is None:
+            return None
+        return self.opened.get(req_id, self.rounds.get(req_id, 0))
 
     def _req_id(self, mediator: Mediator) -> Optional[str]:
         """The vLLM request id this worker rides, stamped by the runner at
@@ -283,10 +295,10 @@ class PPInterleaver(VLLMInterleaver):
         scheduling has dropped from :attr:`mediators`.
 
         ``drain=False`` (the start of a step) blocks only on pulls whose
-        target the pipeline has already produced: a pull's occurrence tag and
-        the requester's completed-round count share the sampling-round clock,
-        so ``occurrence < rounds`` means the producing round finished and the
-        wait is transfer only. A pull for the current or a later round is left
+        target the pipeline has already produced: a downstream stage has
+        finished the rounds this rank completed (``occurrence < rounds``), an
+        upstream stage also the round this rank has opened
+        (``occurrence <= opened``); for those the wait is transfer only. A pull for the current or a later round is left
         parked — its value is produced by forwards this serve point must not
         delay; blocking on it inverts the pipeline order into a deadlock (a
         worker chaining per-step forces under ``tracer.iter`` re-parks here on
@@ -321,14 +333,22 @@ class PPInterleaver(VLLMInterleaver):
                 if not block and not pull.ready:
                     continue
                 if not drain and not pull.ready:
-                    _, req_id, provider = decode_pull_location(untagged)
+                    source_rank, req_id, provider = decode_pull_location(untagged)
                     rounds = self.rounds.get(req_id)
                     if rounds is not None:
                         occurrence = _occurrence(provider)
-                        # An unparseable occurrence is treated as current-round
-                        # (left parked): its transfer is in flight and the next
-                        # boundary completes it, which is always safe.
-                        if occurrence is None or occurrence >= rounds:
+                        # Produced rounds: an upstream stage has finished the
+                        # round this rank opened; a downstream stage only the
+                        # rounds this rank completed. An unparseable occurrence
+                        # is treated as current-round (left parked): its
+                        # transfer is in flight and the next boundary completes
+                        # it, which is always safe.
+                        produced = (
+                            self._opened(req_id) + 1
+                            if source_rank < self.local_rank
+                            else rounds
+                        )
+                        if occurrence is None or occurrence >= produced:
                             continue
                 del self._pulls[key]
                 try:

@@ -107,6 +107,19 @@ def test_upstream_pull_ahead_of_the_first_round_parks():
     assert result is None
 
 
+def test_upstream_pull_of_the_opened_round_serves_in_place_after_this_ranks_forward():
+    # After a forward the completed-round count has advanced past the round
+    # this rank opened; the upstream stage has produced only the opened round.
+    interleaver, mediator, listener = build(local_rank=1)
+    mediator.pp_req_id = "req"
+    interleaver.rounds["req"] = 3
+    interleaver.opened["req"] = 2
+    served = interleaver.intercept(mediator, Event.VALUE, encode_pull_location(0, "req", "model.h.0.output.i2"), ())
+    parked = interleaver.intercept(mediator, Event.VALUE, encode_pull_location(0, "req", "model.h.0.output.i3"), ())
+    assert served == (SERVED,)
+    assert parked is None
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -166,6 +166,22 @@ def test_per_step_pulls_in_both_directions(pp2_engine):
     assert len(pairs) == 4 and time.time() - t0 < STALL_BOUND_S
 
 
+def test_bounded_loop_with_pulls_in_both_directions(pp2_engine):
+    """A bounded loop runs ahead of the model, so its upstream force for the
+    next round parks; at the next step start that round has been produced by
+    the upstream stage and the pull completes before this rank's own visit
+    of the layer the peer is pulling."""
+    model = pp2_engine
+    t0 = time.time()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=4) as tracer:
+        pairs = nnsight.save([])
+        for _ in tracer.iter[:4]:
+            early = float(_layer(model, EARLY).output[0].sum())
+            late = float(_layer(model, LATE).output[0].sum())
+            pairs.append((early, late))
+    assert len(pairs) == 4 and time.time() - t0 < STALL_BOUND_S
+
+
 def test_a_finished_request_leaves_a_concurrent_one_running(pp2_engine):
     """Collect for the short invoke's request serves only that request's
     workers; the long invoke's per-step pulls continue to their own end."""
@@ -185,12 +201,44 @@ def test_a_finished_request_leaves_a_concurrent_one_running(pp2_engine):
 
 
 # ---------------------------------------------------------------------------
+# Registered blocks
+# ---------------------------------------------------------------------------
+
+
+def test_registered_block_saves_a_remote_layer_for_every_request(pp2_engine):
+    """A block installed with ``model.edit()`` runs on every rank for every
+    request; a value it saves from a stage-1 layer comes home real from the
+    owning stage, sized to the request's own prompt. A prompt the engine has
+    not seen, so no prefix is served from the cache."""
+    model = pp2_engine
+    prompts = ["Registered blocks run for every request the engine handles", "A"]
+    with model.edit() as (tracer, registration):
+        hidden = _layer(model, LATE).output[0].save()
+    try:
+        outputs = model.generate(prompts, max_tokens=2, temperature=0.0, ignore_eos=True)
+        assert len(outputs) == len(prompts)
+        for output in outputs:
+            value = output.saves["hidden"]
+            assert isinstance(value, torch.Tensor), type(value)
+            assert value.shape[0] == len(output.prompt_token_ids), (value.shape, len(output.prompt_token_ids))
+    finally:
+        registration.clear()
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
 
 
 def test_every_rank_releases_finished_workers(pp2_engine):
-    """After the traces above, no rank tracks a request: workers, their saved
-    tensors, and their pull records go with the requests that finished."""
-    counts = pp2_engine.vllm_entrypoint.llm_engine.collective_rpc("nnsight_request_count")
-    assert counts and all(count == 0 for count in counts), counts
+    """A request with cross-stage pulls on every step finishes; afterwards no
+    rank tracks it: workers, their saved tensors, and their pull records go
+    with the request."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=3) as tracer:
+        hs = nnsight.save([])
+        for _ in tracer.iter[:3]:
+            hs.append(float(_layer(model, LATE).output[0].sum()))
+    assert len(hs) == 3
+    counts = model.vllm_entrypoint.llm_engine.collective_rpc("nnsight_request_count")
+    assert len(counts) == 2 and all(count == 0 for count in counts), counts

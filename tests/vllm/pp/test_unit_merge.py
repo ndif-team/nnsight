@@ -334,3 +334,19 @@ def test_cache_views_merge_shared_paths_entry_wise():
     assert torch.equal(
         merged._cache.entries["model.rotary"][0].output, value
     )
+
+
+def test_merge_collected_unions_registered_values_across_stages():
+    stage0 = pickle.dumps({"req": {
+        "saves": {}, "error": None,
+        "registered": {"h": [torch.ones(1), NOT_ON_THIS_RANK]},
+        "sequences": {0: {"saves": {}, "registered": {"h": [torch.ones(1), NOT_ON_THIS_RANK]}}},
+    }})
+    stage1 = pickle.dumps({"req": {
+        "saves": {}, "error": None,
+        "registered": {"h": [NOT_ON_THIS_RANK, torch.zeros(1)]},
+        "sequences": {0: {"saves": {}, "registered": {"h": [NOT_ON_THIS_RANK, torch.zeros(1)]}}},
+    }})
+    merged = merge_collected([stage0, stage1])
+    for h in (merged["req"]["registered"]["h"], merged["req"]["sequences"][0]["registered"]["h"]):
+        assert torch.equal(h[0], torch.ones(1)) and torch.equal(h[1], torch.zeros(1))
