@@ -245,7 +245,13 @@ class TestAdHocCall:
         with vllm_qwen_tp.trace(ET_prompt, temperature=0.0, top_p=1):
             module = _submodule(vllm_qwen_tp, path)
             hidden = module.input  # gathered whole; the caller holds the real thing
-            expected = module.output[0].save()
+            # Cloned, and it matters here: down_proj's output *is* the decoder
+            # layer's returned hidden_states, and the next layer opens with
+            # `input_layernorm(hidden_states, residual)` -> fused_add_rms_norm,
+            # which rewrites that buffer in place. An un-cloned save compares the
+            # ad-hoc call against post-mutation state rather than against this
+            # location's value, and reads as a gather/split bug in the call.
+            expected = module.output[0].clone().save()
             result = module(hidden)
             # The module's own (output, bias) pair, not whole()'s (value, undo).
             assert torch.is_tensor(result[0]), f"ad-hoc call returned {type(result[0])}"
@@ -272,7 +278,11 @@ class TestAdHocCall:
         with vllm_qwen_tp.trace(ET_prompt, temperature=0.0, top_p=1):
             module = _submodule(vllm_qwen_tp, path)
             hidden = module.input  # replicated, already whole
-            expected = module.output[0].save()
+            # Cloned for the same reason as the row-parallel case above: a served
+            # value is the engine's live buffer. This one survives un-cloned today
+            # (act_fn allocates rather than writing back over gate_up's output),
+            # but the test should not rest on that.
+            expected = module.output[0].clone().save()
             result = module(hidden)
             assert torch.is_tensor(result[0]), f"ad-hoc call returned {type(result[0])}"
             adhoc = result[0].save()
