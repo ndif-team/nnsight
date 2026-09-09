@@ -790,3 +790,165 @@ class TestCppBacktraceGuard:
                 "the crash doesn't reproduce on this interpreter/toolchain "
                 f"(returncode {result.returncode}), so the guard's effect can't be shown"
             )
+
+
+class TestVLLMBatcherTokenAxis:
+    """``VLLMBatcher`` narrows and widens on whichever axis carries tokens.
+
+    A model vLLM has its own definition for emits ``[total_tokens, hidden]``, so
+    tokens are dim 0. A model without one is served through vLLM's Transformers
+    backend, which runs the wrapped HuggingFace module with a leading singleton
+    batch dim, so its decoder layers emit ``[1, total_tokens, hidden]`` and
+    tokens are dim 1. The base dim-0 rule reads ``shape[0] == 1 != total`` there
+    and calls the activation unbatched — a block gets every request's tokens and
+    its writes are dropped, with nothing to indicate it.
+
+    CPU-only, no engine: ``total`` is stamped on directly, the way the model
+    runner stamps it every scheduled step.
+    """
+
+    @staticmethod
+    def _batcher(total=8):
+        from nnsight.modeling.vllm.batching import VLLMBatcher
+
+        batcher = VLLMBatcher(None)
+        batcher.total = total
+        return batcher
+
+    def test_native_slab_narrows_on_dim_0(self):
+        batcher = self._batcher()
+        slab = torch.arange(8.0).unsqueeze(1).expand(8, 4)
+        span = batcher.narrow(slab, [3, 5])
+        assert span.shape == (5, 4)
+        assert torch.equal(span[:, 0], torch.arange(3.0, 8.0))
+
+    def test_native_slab_widens_on_dim_0(self):
+        batcher = self._batcher()
+        merged = batcher.widen(torch.zeros(8, 4), [3, 5], torch.ones(5, 4))
+        assert merged.shape == (8, 4)
+        assert torch.all(merged[:3] == 0)
+        assert torch.all(merged[3:] == 1)
+
+    def test_transformers_backend_slab_narrows_on_dim_1(self):
+        batcher = self._batcher()
+        slab = torch.arange(8.0).reshape(1, 8, 1).expand(1, 8, 4)
+        span = batcher.narrow(slab, [3, 5])
+        assert span.shape == (1, 5, 4)
+        assert torch.equal(span[0, :, 0], torch.arange(3.0, 8.0))
+
+    def test_transformers_backend_slab_widens_on_dim_1(self):
+        batcher = self._batcher()
+        merged = batcher.widen(torch.zeros(1, 8, 4), [3, 5], torch.ones(1, 5, 4))
+        assert merged.shape == (1, 8, 4)
+        assert torch.all(merged[0, :3] == 0)
+        assert torch.all(merged[0, 3:] == 1)
+
+    def test_narrowed_span_is_a_view_so_in_place_edits_land(self):
+        # The block edits what it was served; the model reads the slab. Both
+        # layouts have to hand back a view for that to work.
+        batcher = self._batcher()
+        for slab in (torch.zeros(8, 4), torch.zeros(1, 8, 4)):
+            batcher.narrow(slab, [3, 5])[...] = 1
+            assert slab.sum() == 20  # 5 tokens x 4 wide, and nothing else
+
+    def test_tensor_on_neither_axis_passes_through(self):
+        batcher = self._batcher()
+        stats = torch.zeros(3, 4)  # matches total on no axis: not batched
+        assert batcher.narrow(stats, [3, 5]) is stats
+        assert batcher.widen(stats, [3, 5], torch.ones(3, 4)) is stats
+
+
+class TestVLLMBatcherCloneReads:
+    """``NNSIGHT_VLLM_CLONE_READS`` serves copies instead of views into the slab.
+
+    By default a block is handed a view, so its in-place edits land in the slab
+    the model reads next — and so a value it keeps aliases a buffer vLLM's fused
+    kernels overwrite a few ops later. The env var trades one for the other for a
+    whole engine: reads become private copies, and in-place edits stop reaching
+    the model. Both halves are pinned here, because the second is the cost of
+    turning it on and is just as silent as the problem it fixes.
+
+    CPU-only, no engine. The flag is read once per batcher, so each case builds
+    its own after setting the environment.
+    """
+
+    @staticmethod
+    def _batcher(monkeypatch, value, total=8):
+        from nnsight.modeling.vllm.batching import CLONE_READS, VLLMBatcher
+
+        if value is None:
+            monkeypatch.delenv(CLONE_READS, raising=False)
+        else:
+            monkeypatch.setenv(CLONE_READS, value)
+        batcher = VLLMBatcher(None)
+        batcher.total = total
+        return batcher
+
+    def test_off_by_default(self, monkeypatch):
+        batcher = self._batcher(monkeypatch, None)
+        assert batcher.clone_reads is False
+        slab = torch.zeros(8, 4)
+        assert batcher.narrow(slab, [3, 5])._base is slab  # a view, not a copy
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "FALSE", "no", "off", " off "])
+    def test_falsy_spellings_leave_it_off(self, monkeypatch, value):
+        assert self._batcher(monkeypatch, value).clone_reads is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on"])
+    def test_truthy_spellings_turn_it_on(self, monkeypatch, value):
+        assert self._batcher(monkeypatch, value).clone_reads is True
+
+    def test_a_kept_read_survives_the_slab_being_overwritten(self, monkeypatch):
+        # The bug the flag exists for: a fused kernel rewrites the buffer after
+        # the block read it, so an aliasing read comes back holding the later
+        # value. Standing in for the kernel with an explicit in-place write.
+        off = self._batcher(monkeypatch, None)
+        slab = torch.ones(8, 4)
+        aliased = off.narrow(slab, [3, 5])
+
+        on = self._batcher(monkeypatch, "1")
+        copied = on.narrow(slab, [3, 5])
+
+        slab.mul_(1000)  # the next layer's add+norm, in place
+
+        assert torch.all(aliased == 1000)  # what a save gets today
+        assert torch.all(copied == 1)  # what was actually computed
+
+    def test_in_place_edits_stop_reaching_the_model(self, monkeypatch):
+        # The cost of turning it on, pinned so it can't regress into a surprise:
+        # with a copy served there is nothing aliasing the slab to write into.
+        batcher = self._batcher(monkeypatch, "1")
+        slab = torch.zeros(8, 4)
+        batcher.narrow(slab, [3, 5])[...] = 1
+        assert torch.all(slab == 0)
+
+    def test_assigning_the_edited_copy_back_still_lands(self, monkeypatch):
+        # ...and the documented way around it: edit the copy, write it back.
+        # That is a swap, which goes through widen and does not involve narrow.
+        batcher = self._batcher(monkeypatch, "1")
+        slab = torch.zeros(8, 4)
+        edited = batcher.narrow(slab, [3, 5])
+        edited[...] = 1
+        merged = batcher.widen(slab, [3, 5], edited)
+        assert torch.all(merged[:3] == 0)
+        assert torch.all(merged[3:] == 1)
+
+    def test_copies_reach_into_containers(self, monkeypatch):
+        # A vLLM decoder layer returns the (hidden, residual) pair, so the clone
+        # has to walk the tuple rather than only handling a bare tensor.
+        batcher = self._batcher(monkeypatch, "1")
+        hidden, residual = torch.ones(8, 4), torch.ones(8, 4)
+        served = batcher.narrow((hidden, residual), [3, 5])
+        hidden.mul_(1000)
+        assert isinstance(served, tuple)
+        assert torch.all(served[0] == 1)
+
+    def test_a_tensor_on_no_token_axis_is_copied_too(self, monkeypatch):
+        # An unbatched tensor passes narrow through untouched, but it aliases the
+        # model's memory exactly as much as a batched one does.
+        batcher = self._batcher(monkeypatch, "1")
+        stats = torch.ones(3, 4)
+        served = batcher.narrow(stats, [3, 5])
+        stats.mul_(1000)
+        assert served is not stats
+        assert torch.all(served == 1)

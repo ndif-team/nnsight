@@ -155,7 +155,22 @@ them; the `Interleaver` brackets the gather (see
   it exactly once. With TP=1 nothing is recorded and `enabled` stays `False`.
 - `VLLMBatcher` keeps only the row math: its `batching` property is always `True`,
   because a request's tokens sit alongside others in the slab, so even a lone
-  invoke must be narrowed to its own span.
+  invoke must be narrowed to its own span. `_token_dim` picks the axis to narrow
+  on — dim 0 for a model vLLM has its own definition for, dim 1 for one served
+  through vLLM's Transformers backend, whose decoder layers carry the wrapped
+  HuggingFace module's leading singleton batch dim (`[1, total_tokens, hidden]`).
+  The base's dim-0-only rule reads `shape[0] == 1 != total` on those and calls the
+  activation unbatched, so a block sees every request's tokens and its writes are
+  dropped. The graph-replay path is not covered: `Interleaver.replay` trims a
+  padded tap tensor with `t[:total]`, which is still dim-0-only.
+- `VLLMBatcher.narrow` also honours `NNSIGHT_VLLM_CLONE_READS`, which serves each
+  worker a copy of its span instead of a view. Read from the environment, not
+  `CONFIG`, and once per batcher: the one that narrows is built in the worker
+  (`GPUModelRunner.load_model`), so a client-side `CONFIG` field would never reach
+  it. Taps go through the same handoff and are covered. With it on there is
+  nothing aliasing engine memory, so an in-place edit is dropped — `_copy_into`
+  writes back the unchanged value — and a swap (which routes through `widen`) is
+  the only form that lands.
 
 The gather lives on the interleaver, not the batcher, because `Batcher.narrow` runs
 once per *parked worker*: a gather there would run one collective per reader, and

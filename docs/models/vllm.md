@@ -108,7 +108,9 @@ Four things differ from the HuggingFace path, and every one of them changes what
 
 - **Clone what you keep.** A served value is the model's live buffer, and the next layer's fused
   add+norm rewrites it in place — `layers[8].output[0].save()` comes back holding a later layer's
-  data. Reduce or `.clone()` before you save (`(out[0] + out[1]).mean(0).cpu().save()`).
+  data. Reduce or `.clone()` before you save (`(out[0] + out[1]).mean(0).cpu().save()`). To have the
+  engine do it for you everywhere, set `NNSIGHT_VLLM_CLONE_READS=1` — at the cost of in-place edits;
+  see [Serving copies instead of views](#serving-copies-instead-of-views).
 - **Where tensors live.** A tensor your block references from outside (a steering vector) is
   serialized with the block and arrives in the worker as it was; move it onto the served value
   (`v.to(h.device, h.dtype)`). Saved tensors come back on the worker's device (`cuda:0`) unless
@@ -461,8 +463,47 @@ What changes under graphs, and why:
 - **Only taps are reachable.** A location you didn't declare is never visited by a replayed step, so a block that reads one parks until the request ends and the request's error says `'...' is not a tap on this engine`. Declare it, or drop `taps` for the eager engine. `model.taps` lists the resolved set after dispatch. Keep the set small: each tap splits the graph, and a break at every module would cost what replay bought.
 - **Edits land in place.** The next kernel reads the tap's tensor from a fixed address, so an in-place edit (`output[0][:] += v`, `output[0][:, i] = 0`) is exactly right and a replacement (`output = t`) is copied back into that memory, so it has to keep the rows it
   replaces — see [Replacing a value](#replacing-a-value-keeps-its-rows).
-- **Clone what you keep.** The value served at a tap *is* the graph's memory, rewritten next step. A tensor you `.save()` or append under `tracer.iter` aliases it; call `.clone()` if you read it after the step. The un-cloned list still comes back as N separate tensors — each is copied at collect time — but the decode entries all hold the last step's values, and nothing warns. (The prefill entry is a different buffer, sized to the prompt, so it survives; every decode entry aliases the same one-row tensor.) The eager engine has the same rule: a served value is the model's live buffer, and the next layer's fused add+norm (or DeepSeek's MLA attention, which rotates the `q_proj` output in place) rewrites it after the module returns — `.clone()` makes a read a read.
+- **Clone what you keep.** The value served at a tap *is* the graph's memory, rewritten next step. A tensor you `.save()` or append under `tracer.iter` aliases it; call `.clone()` if you read it after the step. The un-cloned list still comes back as N separate tensors — each is copied at collect time — but the decode entries all hold the last step's values, and nothing warns. (The prefill entry is a different buffer, sized to the prompt, so it survives; every decode entry aliases the same one-row tensor.) The eager engine has the same rule: a served value is the model's live buffer, and the next layer's fused add+norm (or DeepSeek's MLA attention, which rotates the `q_proj` output in place) rewrites it after the module returns — `.clone()` makes a read a read. `NNSIGHT_VLLM_CLONE_READS=1` applies that clone to every read on either engine, and costs in-place edits — see [Serving copies instead of views](#serving-copies-instead-of-views).
 - **`torch.compile` is off.** Breakable graphs keep replay and drop the compiled path; that is most of the throughput, not all of it. The flag is process-wide, so one process holds either graph engines or compiled ones.
+## Serving copies instead of views
+
+What a block reads is a view into the engine's own memory. That is what makes an in-place edit
+work — the block writes where the model will read next — and it is why a value kept past the point
+it was read is unreliable: fused kernels (`fused_add_rms_norm`, MLA's in-place rotation of the
+`q_proj` output) overwrite those buffers a few ops later. The per-site fix is `.clone()`, which is
+easy to forget and silent when forgotten.
+
+`NNSIGHT_VLLM_CLONE_READS=1` makes the trade once, for a whole engine: every value handed to a block
+is a private copy, so `.save()`, `tracer.cache()` and appends under `tracer.iter` all keep what was
+computed without a clone at each site.
+
+```bash
+NNSIGHT_VLLM_CLONE_READS=1 python sweep.py
+```
+
+Set it in the environment, not in `CONFIG` — the batcher that serves the copies lives in the
+engine's worker process, so it has to be set before `VLLM(...)` builds the engine and spawns the
+worker. Falsy spellings (`0`, `false`, `no`, `off`) leave it off, which is the default.
+
+**In-place edits do not survive it.** With a copy served there is nothing aliasing the engine's
+memory, so this writes to the copy and the model never sees it:
+
+```python
+model.model.layers[10].output[0][:] += v          # dropped under CLONE_READS
+```
+
+Assign the edited value back instead — a replacement is spliced in and lands either way:
+
+```python
+out = model.model.layers[10].output
+out[0][:] += v
+model.model.layers[10].output = out               # lands under either setting
+```
+
+The copy is of the request's own token span, not the whole batch, but it is still one allocation per
+module read per step. Leave it off for a throughput run; turn it on for a sweep whose saves matter
+more than its speed.
+
 ## Where an error comes from
 
 Your block runs in vLLM's EngineCore subprocess, and that decides where you read about a failure.
@@ -524,6 +565,12 @@ False ...}`.
   `NotImplementedError: scan is unavailable on vLLM: ... Trace a prompt and read the shapes off the
   activations it serves.`
 - **Text prompts only** — image/video inputs are not accepted; vision-language checkpoints load and their language trunk traces normally.
+- **A model without a native vLLM definition traces, with one exception.** vLLM serves it through
+  its Transformers backend, which runs the wrapped HuggingFace module with a leading singleton
+  batch dim, so its activations are `[1, total_tokens, hidden]` rather than `[total_tokens, hidden]`.
+  Reads and writes are scoped to the right tokens either way. Declaring `taps` on such a model is
+  not covered: the graph-replay path still trims padding on dim 0, so a tap can be served the
+  step's padding rows.
 - **Version sensitivity** — nnsight targets vLLM's V1 engine and imports its internals directly
   (`vllm.tokenizers`, `vllm.v1.worker.gpu_model_runner`, `vllm.v1.engine.async_llm`). The `vllm`
   extra carries no upper bound, so `pip install "nnsight[vllm]"` takes the current release; a
