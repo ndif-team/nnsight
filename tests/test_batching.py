@@ -790,3 +790,69 @@ class TestCppBacktraceGuard:
                 "the crash doesn't reproduce on this interpreter/toolchain "
                 f"(returncode {result.returncode}), so the guard's effect can't be shown"
             )
+
+
+class TestVLLMBatcherTokenAxis:
+    """``VLLMBatcher`` narrows and widens on whichever axis carries tokens.
+
+    A model vLLM has its own definition for emits ``[total_tokens, hidden]``, so
+    tokens are dim 0. A model without one is served through vLLM's Transformers
+    backend, which runs the wrapped HuggingFace module with a leading singleton
+    batch dim, so its decoder layers emit ``[1, total_tokens, hidden]`` and
+    tokens are dim 1. The base dim-0 rule reads ``shape[0] == 1 != total`` there
+    and calls the activation unbatched — a block gets every request's tokens and
+    its writes are dropped, with nothing to indicate it.
+
+    CPU-only, no engine: ``total`` is stamped on directly, the way the model
+    runner stamps it every scheduled step.
+    """
+
+    @staticmethod
+    def _batcher(total=8):
+        from nnsight.modeling.vllm.batching import VLLMBatcher
+
+        batcher = VLLMBatcher(None)
+        batcher.total = total
+        return batcher
+
+    def test_native_slab_narrows_on_dim_0(self):
+        batcher = self._batcher()
+        slab = torch.arange(8.0).unsqueeze(1).expand(8, 4)
+        span = batcher.narrow(slab, [3, 5])
+        assert span.shape == (5, 4)
+        assert torch.equal(span[:, 0], torch.arange(3.0, 8.0))
+
+    def test_native_slab_widens_on_dim_0(self):
+        batcher = self._batcher()
+        merged = batcher.widen(torch.zeros(8, 4), [3, 5], torch.ones(5, 4))
+        assert merged.shape == (8, 4)
+        assert torch.all(merged[:3] == 0)
+        assert torch.all(merged[3:] == 1)
+
+    def test_transformers_backend_slab_narrows_on_dim_1(self):
+        batcher = self._batcher()
+        slab = torch.arange(8.0).reshape(1, 8, 1).expand(1, 8, 4)
+        span = batcher.narrow(slab, [3, 5])
+        assert span.shape == (1, 5, 4)
+        assert torch.equal(span[0, :, 0], torch.arange(3.0, 8.0))
+
+    def test_transformers_backend_slab_widens_on_dim_1(self):
+        batcher = self._batcher()
+        merged = batcher.widen(torch.zeros(1, 8, 4), [3, 5], torch.ones(1, 5, 4))
+        assert merged.shape == (1, 8, 4)
+        assert torch.all(merged[0, :3] == 0)
+        assert torch.all(merged[0, 3:] == 1)
+
+    def test_narrowed_span_is_a_view_so_in_place_edits_land(self):
+        # The block edits what it was served; the model reads the slab. Both
+        # layouts have to hand back a view for that to work.
+        batcher = self._batcher()
+        for slab in (torch.zeros(8, 4), torch.zeros(1, 8, 4)):
+            batcher.narrow(slab, [3, 5])[...] = 1
+            assert slab.sum() == 20  # 5 tokens x 4 wide, and nothing else
+
+    def test_tensor_on_neither_axis_passes_through(self):
+        batcher = self._batcher()
+        stats = torch.zeros(3, 4)  # matches total on no axis: not batched
+        assert batcher.narrow(stats, [3, 5]) is stats
+        assert batcher.widen(stats, [3, 5], torch.ones(3, 4)) is stats

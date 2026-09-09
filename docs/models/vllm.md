@@ -524,6 +524,12 @@ False ...}`.
   `NotImplementedError: scan is unavailable on vLLM: ... Trace a prompt and read the shapes off the
   activations it serves.`
 - **Text prompts only** — image/video inputs are not accepted; vision-language checkpoints load and their language trunk traces normally.
+- **A model without a native vLLM definition traces, with one exception.** vLLM serves it through
+  its Transformers backend, which runs the wrapped HuggingFace module with a leading singleton
+  batch dim, so its activations are `[1, total_tokens, hidden]` rather than `[total_tokens, hidden]`.
+  Reads and writes are scoped to the right tokens either way. Declaring `taps` on such a model is
+  not covered: the graph-replay path still trims padding on dim 0, so a tap can be served the
+  step's padding rows.
 - **Version sensitivity** — nnsight targets vLLM's V1 engine and imports its internals directly
   (`vllm.tokenizers`, `vllm.v1.worker.gpu_model_runner`, `vllm.v1.engine.async_llm`). The `vllm`
   extra carries no upper bound, so `pip install "nnsight[vllm]"` takes the current release; a
