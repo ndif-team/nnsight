@@ -77,7 +77,7 @@ def merge_collected(payloads: list) -> dict:
             for name, value in (entry.get("saves") or {}).items():
                 into["saves"][name] = _merge_save(into["saves"].get(name, NOT_ON_THIS_RANK), value, name)
             for name, value in (entry.get("registered") or {}).items():
-                into["registered"].setdefault(name, value)
+                into["registered"][name] = _merge_save(into["registered"].get(name, NOT_ON_THIS_RANK), value, name)
             for index, sequence in (entry.get("sequences") or {}).items():
                 target = into["sequences"].setdefault(
                     index, {"saves": {}, "registered": {}}
@@ -85,7 +85,7 @@ def merge_collected(payloads: list) -> dict:
                 for name, value in (sequence.get("saves") or {}).items():
                     target["saves"][name] = _merge_save(target["saves"].get(name, NOT_ON_THIS_RANK), value, name)
                 for name, value in (sequence.get("registered") or {}).items():
-                    target["registered"].setdefault(name, value)
+                    target["registered"][name] = _merge_save(target["registered"].get(name, NOT_ON_THIS_RANK), value, name)
             if into["error"] is None:
                 into["error"] = entry.get("error")
     return merged

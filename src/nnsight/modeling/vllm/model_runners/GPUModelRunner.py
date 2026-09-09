@@ -405,7 +405,7 @@ class Requests:
         ):
             mediator.nnsight_error = capture_exception(mediator.exception)
 
-    def harvest(self, finished: set[str]) -> None:
+    def harvest(self, finished: set[str], pp: bool = False) -> None:
         """Shelve finished requests' registered values until they are collected.
 
         Driven by the scheduler's own finished set, and again by a collect that
@@ -427,6 +427,11 @@ class Requests:
                 self.finish_dangling(mediator, quiet=True)
                 names = getattr(mediator, "nnsight_saved", set()) | mediator.presaved
                 saved = {name: mediator.lcls[name] for name in names if name in mediator.lcls}
+                if pp:
+                    # A lazy inside a registered value strips to a sentinel for
+                    # the engine-side merge, as a trace's saves do; the owning
+                    # stage ships the real data.
+                    saved = strip_saves(saved)
                 # A block that raised has to be reported: it saved nothing, and
                 # without this a broken registration would look like an idle one.
                 error = getattr(mediator, "nnsight_error", None)
@@ -808,7 +813,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # one place the runner is told it is over.
         finished = getattr(scheduler_output, "finished_req_ids", None)
         if finished:
-            requests.harvest(set(finished))
+            requests.harvest(set(finished), pp=self.nnsight_pp)
         requests.add(
             scheduler_output.scheduled_new_reqs, self.nnsight_persistent_objects
         )
@@ -854,6 +859,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # cannot matter, same reasoning as the saves-set clear above.
             if not self.nnsight_requests.requests:
                 interleaver.rounds.clear()
+                interleaver.opened.clear()
             from ..pp_tls_swap import enabled as _tls_swap_enabled
             from ..pp_tls_swap import install as _tls_swap_install
 
@@ -862,11 +868,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # raises here, at engine start.
             if _tls_swap_enabled():
                 _tls_swap_install()
+            # This step opens the next round for every request it carries;
+            # an upstream stage has finished that round already.
+            for req_id in scheduler_output.num_scheduled_tokens:
+                interleaver.opened[req_id] = interleaver.rounds.get(req_id, 0)
             # Workers parked on cross-stage pulls of already-produced rounds
             # are resumed now, before this step's forward; for those the wait
-            # is transfer only. drain=False leaves pulls of the current and
-            # later rounds parked: their values are produced by forwards this
-            # serve must not delay.
+            # is transfer only. drain=False leaves pulls of rounds not yet
+            # produced parked: their values come from forwards this serve must
+            # not delay.
             interleaver.serve_pulls(block=True, drain=False)
         # The scheduler picks this step's requests partway through the forward, so
         # there is nothing to register yet. Entering empty leaves the interleaver
@@ -1038,7 +1048,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # Harvest anything finished that the scheduler has not got to yet, so a
         # collect never reads an empty shelf for a request that is over.
         if finished:
-            requests.harvest(finished)
+            requests.harvest(finished, pp=self.nnsight_pp)
 
         # PP finalize, on EVERY rank (collect_nnsight arrives via
         # collective_rpc): complete the finished requests' workers' remaining
