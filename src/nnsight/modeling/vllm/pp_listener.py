@@ -36,14 +36,19 @@ FIFO per pair, and aborts on a size-mismatched recv):
     consumer's request. It carries the requester rank, a per-pull response tag,
     and the lookup key.
   - **Replies** ride the per-pull response tag carried in the request, so
-    concurrent consumers each receive only their own reply. Every reply is
-    self-describing: a fixed-size header carrying the tensor count, the value's
-    TRUE dtype, and per-tensor shapes, then the flat data. Sizing always comes
-    from the producer: only it knows the produced shape and dtype (sampled ids
-    are int32, not the model's compute dtype — a weight-derived guess
-    under-sizes the buffer and gloo aborts).
-  - **Errors** ride the same channel: a header whose first slot is the error
-    sentinel, then the message bytes, so a consumer raises instead of hanging.
+    concurrent consumers each receive only their own reply. A reply is two
+    messages: a fixed-size header ``[status, meta_nbytes, data_nbytes]``, then
+    one byte message holding the pickled metadata (the value with every tensor
+    replaced by its dtype, shape and byte offset; every other leaf verbatim)
+    followed by the tensors' raw bytes at aligned offsets. The consumer sizes
+    its recv from the header and rebuilds each tensor as a view of the
+    received bytes, so any container structure (a one-element tuple, a
+    namedtuple, a module's ``((args), {kwargs})`` inputs) and any mix of
+    dtypes arrives as produced. Sizing always comes from the producer: only it
+    knows the produced shapes and dtypes under run-ahead.
+  - **Errors** ride the same channel: a header whose status slot is the error
+    sentinel and whose second slot is the message length, then the message
+    bytes, so a consumer raises instead of hanging.
     A per-op gloo recv timeout cannot be the backstop instead: expiry closes
     the whole peer pair (probed), breaking every later pull.
 """
@@ -51,6 +56,7 @@ FIFO per pair, and aborts on a size-mismatched recv):
 from __future__ import annotations
 
 import itertools
+import pickle
 import struct
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +64,7 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.distributed as dist
+from torch.utils._pytree import tree_map
 
 from .pp import PP_LISTENER_BACKOFF_S, PP_PULL_TIMEOUT_S
 
@@ -73,39 +80,19 @@ _TAG_RANGE = 1 << 20
 # Reserved tag for the request-finalize drain barrier, one above the entire
 # response-tag range so it never aliases TAG_REQUEST or any in-flight reply.
 TAG_DRAIN = TAG_RESPONSE_BASE + _TAG_RANGE
-_META_SLOTS = 32  # shape-header buffer size
-
-# Error-reply sentinel in the shape header's slot 0 (a real reply always has
-# >= 1 tensor there); slot 1 then carries the UTF-8 message length.
+# A reply header is three int64 slots: ``[status, meta_nbytes, data_nbytes]``.
+# ``status`` is ``_STATUS_OK`` for a value, or ``_ERROR_SENTINEL`` for an error
+# reply whose UTF-8 message length then rides in the second slot.
+_REPLY_HEADER_SLOTS = 3
+_STATUS_OK = 0
 _ERROR_SENTINEL = -1
 _ERROR_MSG_CAP = 2048  # bound the on-wire error message
 
-# Wire codec for the shape header's dtype slot. Both ranks run identical code,
-# so a fixed enum agrees on the wire. A dtype outside the table cannot be sized
-# by the consumer; the producer error-replies it instead.
-_DTYPE_CODE_UNKNOWN = 0
-_DTYPE_TO_CODE = {
-    torch.float32: 1,
-    torch.float64: 2,
-    torch.float16: 3,
-    torch.bfloat16: 4,
-    torch.int64: 5,
-    torch.int32: 6,
-    torch.int16: 7,
-    torch.int8: 8,
-    torch.uint8: 9,
-    torch.bool: 10,
-    torch.complex64: 11,
-    torch.complex128: 12,
-}
-# float8 variants exist only on recent torch builds.
-for _code, _name in enumerate(
-    ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz"),
-    start=13,
-):
-    if hasattr(torch, _name):
-        _DTYPE_TO_CODE[getattr(torch, _name)] = _code
-_CODE_TO_DTYPE = {code: dtype for dtype, code in _DTYPE_TO_CODE.items()}
+# The metadata pickle and every tensor's bytes start at a multiple of this
+# within the reply message, so the consumer views each slice in its dtype in
+# place (a ``view`` needs the storage offset divisible by the element size;
+# 64 covers every torch dtype).
+_ALIGN = 64
 
 # Bounded pool that performs reply sends off the recv loop. Replies are always
 # quick (the consumer's recv is already posted), so a small pool keeps up.
@@ -170,13 +157,79 @@ def provider_to_module_path(provider_string: str) -> str:
     return provider_string
 
 
+class _TensorSlot:
+    """One tensor's place in a reply: its dtype, shape, and byte range in the
+    message's data region. Stands in for the tensor inside the pickled
+    metadata."""
+
+    def __init__(self, dtype: torch.dtype, shape: tuple, offset: int, nbytes: int) -> None:
+        self.dtype = dtype
+        self.shape = shape
+        self.offset = offset
+        self.nbytes = nbytes
+
+
+def _aligned(nbytes: int) -> int:
+    """``nbytes`` rounded up to a multiple of ``_ALIGN``."""
+    return -(-nbytes // _ALIGN) * _ALIGN
+
+
+def _encode_reply(value: Any) -> tuple:
+    """Encode ``value`` as a reply: ``(header, message)``.
+
+    The metadata is ``value`` with each tensor replaced by a :class:`_TensorSlot`
+    and pickled, so the container structure and every non-tensor leaf
+    (``None``, a scalar, a namedtuple field) travel inside the pickle. The
+    message is that pickle, then each tensor's raw bytes at its slot's aligned
+    offset. A leaf that cannot be pickled raises here, before anything is sent.
+    """
+    slots: list = []
+
+    def to_slot(leaf: Any) -> Any:
+        if not isinstance(leaf, torch.Tensor):
+            return leaf
+        tensor = leaf.detach().contiguous().cpu()
+        offset = _aligned(slots[-1][0].offset + slots[-1][0].nbytes) if slots else 0
+        slot = _TensorSlot(
+            tensor.dtype, tuple(tensor.shape), offset, tensor.numel() * tensor.element_size()
+        )
+        slots.append((slot, tensor))
+        return slot
+
+    meta = pickle.dumps(tree_map(to_slot, value))
+    data_start = _aligned(len(meta))
+    data_nbytes = slots[-1][0].offset + slots[-1][0].nbytes if slots else 0
+    message = torch.empty(data_start + data_nbytes, dtype=torch.uint8)
+    message[: len(meta)] = torch.frombuffer(bytearray(meta), dtype=torch.uint8)
+    for slot, tensor in slots:
+        if slot.nbytes:
+            start = data_start + slot.offset
+            message[start : start + slot.nbytes] = tensor.view(-1).view(torch.uint8)
+    header = torch.tensor([_STATUS_OK, len(meta), data_nbytes], dtype=torch.int64)
+    return header, message
+
+
+def _decode_reply(message: torch.Tensor, meta_nbytes: int) -> Any:
+    """Rebuild a reply's value from its message: unpickle the metadata and
+    view each tensor slot over the data region in place."""
+    meta = pickle.loads(message[:meta_nbytes].numpy().tobytes())
+    data = message[_aligned(meta_nbytes) :]
+
+    def from_slot(leaf: Any) -> Any:
+        if not isinstance(leaf, _TensorSlot):
+            return leaf
+        return data[leaf.offset : leaf.offset + leaf.nbytes].view(leaf.dtype).reshape(leaf.shape)
+
+    return tree_map(from_slot, meta)
+
+
 class Pull:
     """One in-flight cross-stage pull, received on a waiter thread.
 
     Built by :meth:`PPListener.begin_pull`, which has already sent the request
     and handed the reply's recv sequence to the waiter pool — the issue-early
     half of the overlap contract. The waiter blocks in the recvs (header, then
-    data sized and typed from it), assembles the value on CPU, and flips
+    the byte message sized from it), rebuilds the value on CPU, and flips
     :attr:`ready`; the transfer therefore completes while the forward runs,
     without the forward thread ever blocking.
 
@@ -227,20 +280,21 @@ class Pull:
         # Device placement happens here, on the collecting thread, so the copy
         # is ordered on that thread's stream rather than the waiter's.
         device = self._listener._device
-        if isinstance(self._value, tuple):
-            return tuple(t.to(device) for t in self._value)
-        return self._value.to(device)
+        return tree_map(
+            lambda t: t.to(device) if isinstance(t, torch.Tensor) else t,
+            self._value,
+        )
 
     def _receive(self) -> None:
         """Recv the full reply (runs on the waiter pool; blocking is its job)."""
         try:
             group = self._listener._pull_group
-            header = torch.zeros(_META_SLOTS, dtype=torch.int64)
+            header = torch.zeros(_REPLY_HEADER_SLOTS, dtype=torch.int64)
             dist.recv(header, group=group, group_src=self._source_rank, tag=self._tag)
+            status, meta_nbytes, data_nbytes = header.tolist()
 
-            first = int(header[0].item())
-            if first == _ERROR_SENTINEL:
-                err_buf = torch.zeros(int(header[1].item()), dtype=torch.uint8)
+            if status == _ERROR_SENTINEL:
+                err_buf = torch.zeros(meta_nbytes, dtype=torch.uint8)
                 dist.recv(
                     err_buf, group=group, group_src=self._source_rank, tag=self._tag
                 )
@@ -250,39 +304,13 @@ class Pull:
                     f"its owning rank ({self._source_rank}): {msg}"
                 )
 
-            # A real reply: dtype code in slot 1, then [ndim, *dims] per tensor.
-            # The data buffer is sized and typed entirely from the header — the
-            # producer is the only side that knows the produced shape under
+            # A value: one byte message, sized by the header, holding the
+            # pickled metadata then the tensors' bytes. The producer is the
+            # only side that knows the produced shapes and dtypes under
             # run-ahead.
-            recv_dtype = _CODE_TO_DTYPE.get(int(header[1].item()))
-            if recv_dtype is None:
-                raise RuntimeError(
-                    f"PP cross-stage pull of {self._module_path!r}: reply "
-                    f"header carries unknown dtype code {int(header[1].item())}"
-                )
-            shapes = []
-            idx = 2
-            total_numel = 0
-            for _ in range(first):
-                ndim = int(header[idx].item())
-                idx += 1
-                shape = [int(header[idx + j].item()) for j in range(ndim)]
-                idx += ndim
-                numel = 1
-                for s in shape:
-                    numel *= s
-                shapes.append((shape, numel))
-                total_numel += numel
-
-            flat = torch.zeros(total_numel, dtype=recv_dtype)
-            dist.recv(flat, group=group, group_src=self._source_rank, tag=self._tag)
-
-            results = []
-            offset = 0
-            for shape, numel in shapes:
-                results.append(flat[offset:offset + numel].reshape(shape))
-                offset += numel
-            self._value = results[0] if len(results) == 1 else tuple(results)
+            message = torch.empty(_aligned(meta_nbytes) + data_nbytes, dtype=torch.uint8)
+            dist.recv(message, group=group, group_src=self._source_rank, tag=self._tag)
+            self._value = _decode_reply(message, meta_nbytes)
         except BaseException as error:
             self._error = error
         finally:
@@ -477,53 +505,17 @@ class PPListener:
         for req in waiters:
             self._reply_pool.submit(self._serve_reply, req, value)
 
-    @staticmethod
-    def _encode_shape_header(cpu_tensors):
-        """Build the reply's shape header: slot 0 = tensor count, slot 1 =
-        dtype code, then ``[ndim, *dims]`` per tensor. Raises ``ValueError`` on
-        a value that doesn't fit the header or the dtype codec — caught by
-        ``_serve_reply`` and turned into an error reply, not a wedged consumer.
-        """
-        needed = 2 + sum(1 + t.ndim for t in cpu_tensors)
-        if needed > _META_SLOTS:
-            raise ValueError(
-                f"cross-stage value needs {needed} shape-header slots > "
-                f"{_META_SLOTS} ({len(cpu_tensors)} tensors, shapes "
-                f"{[tuple(t.shape) for t in cpu_tensors]})"
-            )
-        shape_meta = torch.zeros(_META_SLOTS, dtype=torch.int64)
-        shape_meta[0] = len(cpu_tensors)
-        # Slot 1 carries the value's real dtype so the consumer sizes its recv
-        # buffer from the truth, not a weight-derived guess. All tensors share
-        # one dtype (the ``cat`` in ``_serve_reply`` requires it).
-        if cpu_tensors:
-            code = _DTYPE_TO_CODE.get(cpu_tensors[0].dtype, _DTYPE_CODE_UNKNOWN)
-            if code == _DTYPE_CODE_UNKNOWN:
-                raise ValueError(
-                    f"cross-stage value dtype {cpu_tensors[0].dtype} is not "
-                    f"wire-encodable (no code in the dtype codec)"
-                )
-            shape_meta[1] = code
-        idx = 2
-        for t in cpu_tensors:
-            shape_meta[idx] = t.ndim
-            idx += 1
-            for s in t.shape:
-                shape_meta[idx] = s
-                idx += 1
-        return shape_meta
-
     def _serve_error_reply(self, req, message):
         """Tell a blocked consumer its pull failed, instead of leaving it hung.
 
-        Rides the normal reply channel: a header with slot 0 ==
-        ``_ERROR_SENTINEL`` and the UTF-8 message length in slot 1, followed by
-        the message bytes — both on the pull's private response tag.
+        Rides the normal reply channel: a header whose status slot is
+        ``_ERROR_SENTINEL`` and whose second slot is the UTF-8 message length,
+        followed by the message bytes, both on the pull's private response tag.
         """
         requesting_rank, response_tag = req
         group = self._pull_group
         msg = message.encode("utf-8")[:_ERROR_MSG_CAP]
-        header = torch.zeros(_META_SLOTS, dtype=torch.int64)
+        header = torch.zeros(_REPLY_HEADER_SLOTS, dtype=torch.int64)
         header[0] = _ERROR_SENTINEL
         header[1] = len(msg)
         try:
@@ -540,46 +532,25 @@ class PPListener:
 
     def _serve_reply(self, req, value):
         """Send one reply on its per-pull response tag (runs on the reply pool):
-        shape metadata then flat data. The consumer's recv on this tag is
+        the header, then the byte message. The consumer's recv on this tag is
         already posted (issue-early), so each ``send`` completes promptly.
 
-        The whole reply is PREPARED before any send, so a serialization failure
-        (a non-tensor value, a mixed-dtype tuple, a shape too big for the
-        header) is caught while an error reply can still be sent — never after
-        a partial send that would desync the consumer's posted recvs.
+        The whole reply is encoded before the first send, so an encoding
+        failure (a leaf that cannot be pickled) becomes an error reply on the
+        same tag, which the consumer's posted recvs read as such.
         """
         requesting_rank, response_tag = req
         group = self._pull_group
 
         try:
-            tensors = list(value) if isinstance(value, (tuple, list)) else [value]
-            cpu_tensors = [t.detach().contiguous().cpu() for t in tensors]
-            # The data message is one flat tensor and the header carries one
-            # dtype (slot 1), so every element must share it. ``cat`` cannot
-            # enforce this: it silently promotes a mixed input, and the
-            # consumer would rebuild every element in the first tensor's
-            # dtype. A mixed container is real user-reachable data (a remote
-            # layer's ``.inputs`` bundles int64 positions with bf16 hidden
-            # states), so refuse it explicitly and let the error reply name
-            # the location. Supporting mixed containers instead would take a
-            # dtype code per tensor in the header plus a single uint8
-            # byte-blob data message (each tensor viewed as bytes).
-            dtypes = {t.dtype for t in cpu_tensors}
-            if len(dtypes) > 1:
-                raise ValueError(
-                    f"cross-stage value mixes dtypes "
-                    f"{sorted(str(d) for d in dtypes)}; a reply ships one "
-                    f"dtype, so read the elements separately"
-                )
-            flat = torch.cat([t.contiguous().view(-1) for t in cpu_tensors])
-            shape_meta = self._encode_shape_header(cpu_tensors)
+            header, message = _encode_reply(value)
         except Exception as exc:
             self._serve_error_reply(req, f"{type(exc).__name__}: {exc}")
             return
 
         try:
-            dist.send(shape_meta, group=group, group_dst=requesting_rank, tag=response_tag)
-            dist.send(flat, group=group, group_dst=requesting_rank, tag=response_tag)
+            dist.send(header, group=group, group_dst=requesting_rank, tag=response_tag)
+            dist.send(message, group=group, group_dst=requesting_rank, tag=response_tag)
         except Exception:
             if not dist.is_initialized() or self._stop_event.is_set():
                 return
