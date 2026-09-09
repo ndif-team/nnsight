@@ -2,48 +2,75 @@
 title: DiffusionModel
 one_liner: Wraps any diffusers DiffusionPipeline (UNet- or transformer-based) with NNsight tracing.
 tags: [models, diffusion, diffusers]
-related: [docs/models/index.md, docs/models/language-model.md]
-sources: [src/nnsight/modeling/diffusion.py:221, src/nnsight/intervention/batching.py, tests/test_diffusion.py]
+related: [docs/models/index.md, docs/models/nnsight-base.md, docs/models/transformers-model.md]
+sources: [src/nnsight/modeling/diffusion.py, src/nnsight/modeling/huggingface.py, tests/test_diffusion.py]
 ---
 
 # DiffusionModel
 
+
+## Asking the same weights for a different task
+
+`DiffusionModel(repo_id)` builds whatever class the repo's `model_index.json`
+declares. For every Stable Diffusion repo that is the text-to-image pipeline, so
+`image=` has nowhere to go even though the weights serve image-to-image perfectly
+well.
+
+`automodel=` names the class to load through instead:
+
+```python
+from diffusers import AutoPipelineForImage2Image
+from nnsight.modeling.diffusion import DiffusionModel
+
+model = DiffusionModel("stable-diffusion-v1-5/stable-diffusion-v1-5",
+                       automodel=AutoPipelineForImage2Image)
+
+with model.trace("a photo of a cat", image=source, strength=0.5,
+                 num_inference_steps=20):
+    latents = model.unet.output[0].save()
+    result = model.output.save()
+```
+
+`AutoPipelineForImage2Image` picks the right class for the architecture, so the
+same line works for Flux, Kandinsky, SD3 and the rest. Its siblings are
+`AutoPipelineForText2Image`, `AutoPipelineForInpainting` and
+`AutoPipelineForText2Audio`. A concrete class works too, either as the class or
+as a name in `diffusers`:
+
+```python
+DiffusionModel(repo, automodel="StableDiffusionImg2ImgPipeline")
+```
+
+Everything else is unchanged: components are envoys, interventions fire per
+denoising step, and `model.output` is the pipeline's output object.
+
 ## What this is for
 
-`nnsight.DiffusionModel` wraps any `diffusers.DiffusionPipeline` so you can trace and intervene on its sub-modules — UNet (Stable Diffusion), transformer (Flux, DiT), VAE, text encoder — with the same NNsight API as language models. It supports:
+`nnsight.DiffusionModel` wraps any `diffusers.DiffusionPipeline` so you can trace and intervene on its sub-modules — UNet (Stable Diffusion), transformer (Flux, DiT, SD3), VAE, text encoder — with the same NNsight API as other models. It supports:
 
-- Single-step tracing (`.trace()` defaults to `num_inference_steps=1` for fast exploration)
-- Full-pipeline generation (`.generate()` runs all denoising steps)
+- Running the whole pipeline via `.trace()` or `.generate()` — a traced run defaults to a fast one-step pass
 - Iterating across denoising steps with `tracer.iter[:]`
-- Batching multiple prompts via invokes
+- Multi-prompt / batched generation via `tracer.invoke(...)`, with denoiser interventions narrowed per-invoke
+- Reproducible runs with `seed=` (or diffusers' native `generator=`)
 - Lazy meta-tensor loading — only config files are downloaded with `dispatch=False`
-- Works with both UNet-based pipelines (Stable Diffusion 1.x/2.x/XL) and transformer-based pipelines (Flux, DiT, SD3)
-
-This is a less-common path than `LanguageModel` but follows the same patterns.
+- Both UNet-based pipelines (SD 1.x/2.x/XL) and transformer-based pipelines (Flux, DiT, SD3)
 
 ## When to use / when not to use
 
 Use `DiffusionModel` when:
 - You have a diffusers pipeline (`StableDiffusionPipeline`, `FluxPipeline`, `DiTPipeline`, etc.) loadable from a HuggingFace repo.
-- You want to study denoising trajectories, intervene on the U-Net / transformer / VAE / text encoder, or capture activations across inference steps.
-- You're researching mechanistic interpretability of diffusion models, prompt steering, or representation engineering on image generation.
+- You want to study denoising trajectories, intervene on the UNet / transformer / VAE / text encoder, or capture activations across inference steps.
 
 Do not use `DiffusionModel` when:
-- Your pipeline isn't a `diffusers.DiffusionPipeline` subclass — wrap the underlying `torch.nn.Module` directly with [`NNsight`](nnsight-base.md).
+- Your pipeline isn't a `diffusers.DiffusionPipeline` — wrap the underlying `torch.nn.Module` with [`NNsight`](nnsight-base.md).
 - You need vLLM-style serving — vLLM is for LLMs, not diffusion pipelines.
 
 ## Loading
 
 ```python
 from nnsight import DiffusionModel
-import torch
 
-sd = DiffusionModel(
-    "stabilityai/stable-diffusion-2-1",
-    torch_dtype=torch.float16,
-    safety_checker=None,
-    dispatch=True,
-)
+sd = DiffusionModel("stabilityai/stable-diffusion-2-1", dispatch=True)
 ```
 
 ### Constructor
@@ -52,194 +79,217 @@ sd = DiffusionModel(
 DiffusionModel(
     repo_id,
     *,
-    automodel=DiffusionPipeline,    # diffusers pipeline class or string name
-    revision=None,
-    dispatch=False,
-    meta_buffers=True,
-    rename=None,
-    envoys=None,
-    import_edits=False,
-    **kwargs,                       # forwarded to the pipeline's from_pretrained()
+    revision=None,          # git branch / tag / commit
+    dispatch=False,         # True = load real weights now; False = lazy meta build
+    rename=None,            # dict of module-path aliases
+    **kwargs,               # forwarded to DiffusionPipeline.from_pretrained()
 )
 ```
 
 | Parameter | Description |
 |-----------|-------------|
-| `repo_id` | HuggingFace repo ID (e.g. `"stabilityai/stable-diffusion-2-1"`, `"black-forest-labs/FLUX.1-schnell"`). |
-| `automodel` | The diffusers pipeline class. Defaults to `DiffusionPipeline` (which auto-resolves the right subclass from `model_index.json`). Can also be a string name resolvable from `diffusers.pipelines` (e.g. `"FluxPipeline"`). See `diffusion.py:266`. |
-| `dispatch` | If `True`, real weights download immediately via `Diffuser(automodel, repo_id, ...)`. If `False`, only `model_index.json` and per-component `config.json` files are downloaded — every `nn.Module` component is built on the meta device via `_build_pipeline_from_config` (`diffusion.py:58`). |
-| `device_map` | Defaults to `"balanced"` if `None` or `"auto"` is passed. See `diffusion.py:342`. |
-| `safety_checker=None`, `feature_extractor=None`, etc. | Pipeline component overrides. Forwarded to the pipeline constructor. |
-| `torch_dtype` | Forwarded to `from_pretrained` for real loading. Note: it is filtered out of meta-loading (`diffusion.py:152`) because pipeline `__init__` doesn't accept it. |
+| `repo_id` | HuggingFace repo id (e.g. `"stabilityai/stable-diffusion-2-1"`, `"black-forest-labs/FLUX.1-schnell"`). |
+| `dispatch` | `True` loads real weights via `DiffusionPipeline.from_pretrained` during `__init__`. `False` (default) builds a meta pipeline: each `nn.Module` component from its config on the `meta` device, light components (schedulers, tokenizers) loaded normally (`_build_component`). |
+| `rename` | Module-path aliases, e.g. `{"unet": "denoiser"}`. |
+| `torch_dtype`, `safety_checker=None`, `variant`, ... | Forwarded to `from_pretrained` for real loading. |
 
-All other `**kwargs` go to the pipeline's `from_pretrained()`.
+The concrete pipeline class is resolved automatically from the repo's `model_index.json` (`_class_name`); there is no `automodel=` parameter.
 
-### Dispatch behavior
+Precision goes by **`torch_dtype=`**, diffusers' spelling, since the keyword is forwarded to `DiffusionPipeline.from_pretrained` untouched. `dtype=`, which is what `TransformersModel` takes, is accepted and ignored:
 
-- `dispatch=False` (default) downloads only the configs (a few KB total) and instantiates each `nn.Module` component on the `meta` device via `cls.from_config(...)` or `cls(auto_cfg)`. Tokenizers are loaded normally (lightweight). Schedulers and feature extractors are set to `None` and only loaded on real dispatch. See `_build_pipeline_from_config` at `diffusion.py:58`.
-- The pipeline's full architecture is wrapped in a `Diffuser` (`diffusion.py:164`) that exposes every `nn.Module` component as a sub-attribute, so you can write `sd.unet.output`, `sd.text_encoder.output`, etc., before any weights are loaded.
-- First `.trace()` / `.generate()` call triggers `.dispatch()` automatically.
+```python
+DiffusionModel(REPO, torch_dtype=torch.float16, dispatch=True).unet.dtype   # torch.float16
+DiffusionModel(REPO, dtype=torch.float16, dispatch=True).unet.dtype         # torch.float32
+```
 
 ## Canonical pattern
 
+`.trace()` and `.generate()` both run the **whole pipeline**, and `model.output` (like `tracer.result`) is the pipeline's return object (with `.images`).
+
+!!! warning "A traced run denoises once by default"
+
+    `.trace()` defaults to `num_inference_steps=1` — a fast one-step pass for inspecting or editing activations — and `with model.generate(...):` is a traced run, so it takes that default too. Only a bare `model.generate(...)` call, outside a trace, uses the pipeline's own default. On SD 1.4 the same call is 51 denoiser forwards outside a `with` and 1 inside it, and a single step gives a noise blob rather than an image, with nothing printed to say so.
+
+    **Pass `num_inference_steps=N` whenever the image itself matters.**
+
 ```python
 from nnsight import DiffusionModel
-import torch
 
-sd = DiffusionModel(
-    "stabilityai/stable-diffusion-2-1",
-    torch_dtype=torch.float16,
-    safety_checker=None,
-    dispatch=True,
-)
+sd = DiffusionModel("hf-internal-testing/tiny-stable-diffusion-torch")
 
-# Single-step trace (fast)
-with sd.trace("A photo of a cat") as tracer:
-    denoiser_out = sd.unet.output.save()
-    output = tracer.result.save()
+with sd.generate("a photo of a cat", num_inference_steps=2, output_type="np") as tracer:
+    out = sd.output.save()
 
-print(denoiser_out[0].shape)
-output.images[0].save("cat.png")
+print(out.images.shape)        # (1, 128, 128, 3)
 ```
 
-`.trace()` defaults to `num_inference_steps=1` (set in `__call__` at `diffusion.py:471`). Override by passing `num_inference_steps=N` explicitly.
-
-### Full generation across steps
+`.trace()` is the same but one-step unless you say otherwise:
 
 ```python
-with sd.generate("A cat", num_inference_steps=50, seed=42) as tracer:
-    denoiser_outputs = list().save()
-    for step in tracer.iter[:]:
-        denoiser_outputs.append(sd.unet.output[0].clone())
-    output = tracer.result.save()
-
-assert len(denoiser_outputs) == 50
-output.images[0].save("cat_50steps.png")
+with sd.trace("a photo of a cat", output_type="np"):   # one denoising step
+    out = sd.output.save()
+# out.images.shape == (1, 128, 128, 3)
 ```
 
-`.generate()` does **not** override `num_inference_steps`, so the pipeline's own default (or your explicit value) takes effect.
-
-### Transformer-based pipelines (Flux, DiT, SD3)
-
-Same API, different denoiser attribute name:
+Run without a trace to bypass NNsight entirely:
 
 ```python
-flux = DiffusionModel("black-forest-labs/FLUX.1-schnell", dispatch=True)
-
-with flux.trace("A cat"):
-    transformer_out = flux.transformer.output.save()
+out = sd.generate("a photo of a cat", num_inference_steps=2)   # default output_type -> PIL
+out.images[0].save("cat.png")
 ```
 
-### Intervening on the denoiser
+### Reading the denoiser
 
 ```python
-# Zero out the UNet output — drastically changes the image
-with sd.trace("A cat", num_inference_steps=1) as tracer:
-    sd.unet.output[0][:] = 0
-    output = tracer.result.save()
+with sd.generate("a cat", num_inference_steps=2, output_type="np"):
+    unet_out = sd.unet.output[0].save()      # unet runs return_dict=False -> tuple
 ```
 
-### Batching multiple prompts
+Transformer-based pipelines (Flux, DiT, SD3) use `sd.transformer` instead of `sd.unet`.
 
-`DiffusionBatcher` (in `nnsight/intervention/batching.py`) automatically handles three batch-size scenarios:
+### Running one component's forward alone
 
-1. **Plain prompts** — one row per prompt
-2. **`num_images_per_prompt`** — N rows per prompt
-3. **Classifier-free guidance** (`guidance_scale > 1`) — doubles the batch (uncond + cond)
+To run a single component (rather than the whole pipeline), trace that envoy directly. This needs a dispatched model — a child-envoy trace does not dispatch the model for you:
 
 ```python
-with sd.generate(num_inference_steps=20, num_images_per_prompt=3, seed=423) as tracer:
+sd.dispatch()
+
+# build one denoiser forward's inputs from its config
+cfg = sd.unet.config
+sample = torch.randn(1, cfg.in_channels, cfg.sample_size, cfg.sample_size)
+timestep = torch.tensor(1.0)
+encoder_hidden_states = torch.randn(1, 4, cfg.cross_attention_dim)
+
+with sd.unet.trace(sample, timestep, encoder_hidden_states=encoder_hidden_states):
+    out = sd.unet.output.save()
+# out.sample.shape == sample.shape   # UNet2DConditionOutput
+```
+
+### Multi-prompt / batched generation
+
+Multiple `tracer.invoke(prompt)` blocks batch into a single pipeline run. Each invoke's interventions on the denoiser (`sd.unet` / `sd.transformer`) are narrowed to just that invoke's rows — accounting for classifier-free-guidance doubling and `num_images_per_prompt`. Open the trace with the shared kwargs (no top-level prompt) and give each prompt its own `invoke`:
+
+```python
+with sd.generate(num_inference_steps=2, output_type="np") as tracer:
     with tracer.invoke("a cat"):
-        out_cat = sd.unet.output[0].save()                          # 3 rows
-    with tracer.invoke(["a panda", "a birthday cake"]):
-        out_pair = sd.unet.output[0].save()                         # 6 rows
-    with tracer.invoke("a wave"):
-        out_wave = sd.unet.output[0].save()                         # 3 rows
-    with tracer.invoke():
-        out_all = sd.unet.output[0].save()                          # 12 rows
+        a = sd.unet.output[0].save()
+    with tracer.invoke("a dog"):
+        b = sd.unet.output[0].save()
+# a.shape[0] == 2 and b.shape[0] == 2  (each invoke sees its own uncond + cond rows)
 ```
 
-With `guidance_scale=7.5`, those become 6 / 12 / 6 / 24 rows respectively (CFG doubles each). See `tests/test_diffusion.py:184` for the full set of batching tests.
+With `num_images_per_prompt=2`, each invoke's denoiser view is `2 images x guidance = 4` rows. Edits stay isolated to their invoke — zeroing one prompt's denoiser rows leaves the other prompt's rows untouched.
 
-### Seed reproducibility
+Note: reading the *pipeline result object* per-invoke inside a batched trace is not supported (the required-field `StableDiffusionPipelineOutput` can't be rebuilt by the row-narrowing walk). Batched interventions read component tensors like `sd.unet.output[0]`.
 
-Pass `seed=N` to either `.trace()` or `.generate()`:
+### Iterating across denoising steps
+
+The denoiser runs once per iteration of the pipeline's loop, and `tracer.iter[:N]` repeats the block's body for the first `N` of them. Bound the loop by the number of **denoiser calls**, which the scheduler decides — it is not always `num_inference_steps`:
 
 ```python
-with sd.generate("A cat", num_inference_steps=2, seed=42) as tracer:
-    output1 = tracer.result.save()
+import nnsight
 
-with sd.generate("A cat", num_inference_steps=2, seed=42) as tracer:
-    output2 = tracer.result.save()
+STEPS = 2
+sd.pipeline.scheduler.set_timesteps(STEPS)
+CALLS = len(sd.pipeline.scheduler.timesteps)      # PNDM: 3 for 2 steps
 
-# output1.images[0] == output2.images[0] (pixel-exact)
+with sd.generate("a cat", num_inference_steps=STEPS, output_type="np") as tracer:
+    outs = nnsight.save([])
+    for step in tracer.iter[:CALLS]:
+        outs.append(sd.unet.output[0])
+    images = tracer.result.save()
+# len(outs) == CALLS; step is a plain int, so `if step > 3:` really branches
 ```
 
-When multiple prompts are batched, each gets `seed + offset` to avoid identical noise (`diffusion.py:435`).
+SD 1.x defaults to `PNDMScheduler`, which calls the denoiser `num_inference_steps + 1` times (50 steps, 51 forwards); `DDIMScheduler` on the same pipeline calls it exactly `num_inference_steps` times. `len(scheduler.timesteps)` after `set_timesteps` is the count in both cases.
 
-### Accessing the underlying `DiffusionPipeline`
+Bounding the loop past the calls the run makes cuts it short with a warning — bounded and open loops alike — and the statements after the loop never run: `tracer.result.save()` among them, leaving the name unbound after the block. If the loop body touches no module at all, an open `tracer.iter[:]` never returns.
 
-For non-traced operations on the raw diffusers pipeline (saving, scheduler swaps, `pipeline.to(...)`, attention slicing, custom call paths, etc.), reach through `model._model` — that's the `Diffuser` wrapper — and grab its `.pipeline` attribute:
+### Intervening / skipping
 
 ```python
-pipeline = model._model.pipeline       # the raw diffusers DiffusionPipeline
+# zero the UNet output
+with sd.generate("a cat", num_inference_steps=2, output_type="np"):
+    sd.unet.output[0][:] = 0
+    zeroed = sd.output.save()
 
-# Anything diffusers supports works directly on it
-pipeline.scheduler = SomeOtherScheduler.from_config(pipeline.scheduler.config)
-pipeline.enable_attention_slicing()
-pipeline.save_pretrained("./my-finetune")
-
-# You can also call it directly (bypasses NNsight entirely — same as the snippet below)
-output = pipeline("A cat", num_inference_steps=20)
+# bypass a component with a replacement value: skip() takes what that component
+# would have returned, so build it from the config
+cfg = sd.unet.config
+shape = (2, cfg.block_out_channels[0], cfg.sample_size, cfg.sample_size)  # 2 rows = guidance
+with sd.generate("a cat", num_inference_steps=2, output_type="np", seed=0) as tracer:
+    sd.unet.conv_in.skip(torch.zeros(shape))
+    skipped = tracer.result.save()
 ```
 
-Source: `src/nnsight/modeling/diffusion.py:193` (`Diffuser.__init__` stores `self.pipeline`) and `:218` (`Diffuser.forward` delegates `__call__` to `self.pipeline`).
-
-Once you've mutated the pipeline in place, the next `model.trace()` / `model.generate()` call uses the modified pipeline. NNsight only re-wraps the `nn.Module` components on construction, so swapping non-module components (like the scheduler) at any time is fine.
-
-### Run without a tracing context
+### Caching component activations
 
 ```python
-output = sd.generate("A cat", num_inference_steps=20)
-output.images[0].save("cat.png")
+with sd.generate("a cat", num_inference_steps=2, output_type="np") as tracer:
+    cache = tracer.cache(modules=[sd.unet]).save()
 ```
 
-This bypasses NNsight entirely — no interleaver, no envoys, just the underlying pipeline call.
+### Reproducibility
+
+Pass `seed=` (an int) — it is turned into a reproducible `generator` internally:
+
+```python
+a = sd.generate("a cat", seed=7, num_inference_steps=2, output_type="np")
+b = sd.generate("a cat", seed=7, num_inference_steps=2, output_type="np")
+# a.images == b.images
+```
+
+For a batch (`num_images_per_prompt>1` or multiple prompts) a single `seed` fans out to one generator per image (`seed + i`), so each image is independently reproducible while the run as a whole stays deterministic:
+
+```python
+out = sd.generate("a cat", seed=7, num_images_per_prompt=2, num_inference_steps=2, output_type="np")
+# out.images.shape[0] == 2; the two images differ, but re-running with seed=7 reproduces both
+```
+
+Passing diffusers' native `generator=` still works and **overrides** `seed=`:
+
+```python
+g = torch.Generator().manual_seed(7)
+out = sd.generate("a cat", generator=g, num_inference_steps=2, output_type="np")
+```
+
+### Renaming components
+
+```python
+model = DiffusionModel(REPO, rename={"unet": "denoiser"})
+with model.generate("a cat", num_inference_steps=2, output_type="np"):
+    denoised = model.denoiser.output[0].save()
+```
 
 ## Special properties
 
 | Attribute | Description | Source |
 |-----------|-------------|--------|
-| `model.unet` / `model.transformer` | The denoiser. Attribute name depends on the pipeline (UNet-based vs transformer-based). | `Diffuser.__init__` at `diffusion.py:201` |
-| `model.vae` | The VAE encoder/decoder. | same |
-| `model.text_encoder` (and `model.text_encoder_2` for SDXL/Flux) | Text encoder(s). Only `nn.Module` components are wrapped as Envoys. | same |
-| `model.tokenizer` | Pipeline's tokenizer. Loaded eagerly even in meta mode. | `_build_pipeline_from_config` at `diffusion.py:120` |
-| `model.config` | Pipeline `model_index.json` config dict. | `diffusion.py:285` |
-| `model.automodel` | The diffusers pipeline class used for loading. | `diffusion.py:270` |
-| `model._model` | The underlying `Diffuser` wrapper. Use `model._model.pipeline` to reach the raw diffusers `DiffusionPipeline` (for non-traced operations — see [Accessing the underlying DiffusionPipeline](#accessing-the-underlying-diffusionpipeline)). | `diffusion.py:277`, `diffusion.py:193` |
-| `tracer.result` (inside trace) | The final pipeline output (typically a dataclass with `.images`). |
+| `model.pipeline` | The raw `diffusers.DiffusionPipeline`. Use it for non-traced operations (scheduler swaps, `save_pretrained`, ...). | `DiffusionModel._load` |
+| `model.unet` / `model.transformer` | The denoiser envoy (attribute name depends on the pipeline). | `_PipelineModule.__init__` |
+| `model.vae`, `model.text_encoder` (and `_2` for SDXL/Flux) | Other `nn.Module` components, as envoys. | same |
+| `model.output` | The pipeline's return object (e.g. `.images`) inside a trace. | — |
+| `model._module` | The `_PipelineModule` wrapper; `model._module.pipeline` is the same object as `model.pipeline`. | `_PipelineModule` |
+| `model.dispatched` | Whether real weights are loaded. | `MetaMixin` |
 
-The pipeline's **scheduler** is **not** wrapped as an Envoy — only `nn.Module` and `PreTrainedTokenizerBase` components are (`diffusion.py:201`). To intervene on scheduler behavior you'd modify the pipeline directly.
+Only `torch.nn.Module` components are wrapped as envoys — the **scheduler is not**. To change scheduler behavior, mutate `model.pipeline` directly before the trace.
 
 ## Limitations
 
-- **Scheduler / non-module components are not Envoy-wrapped.** Only `torch.nn.Module` and `PreTrainedTokenizerBase` instances are exposed as sub-envoys (`diffusion.py:201`). If you need to intervene on a scheduler, do it pre-trace.
-- **`torch_dtype` only applies during real dispatch.** Meta-loading filters it out because pipeline constructors don't accept it (`diffusion.py:152`).
-- **Custom pipelines outside `diffusers.pipelines`** may fail to resolve in `_resolve_component_cls` (`diffusion.py:19`). The function tries `diffusers`, `transformers`, and `diffusers.pipelines.<lib_name>`. Components it can't resolve are set to `None` in meta mode and only built on real dispatch.
-- **`.trace()` defaults to 1 step.** If you forget to pass `num_inference_steps=`, you get a 1-step image which is essentially noise. This is intentional for fast tracing — call `.generate()` for normal output.
-- **No remote execution yet.** `DiffusionModel` is a `HuggingFaceModel` subclass and inherits remote infrastructure, but as of this writing diffusion models are not deployed on NDIF (see 0.6.0 release notes).
-
-## Gotchas
-
-- **Tuple vs tensor outputs.** UNet returns a tuple in some diffusers versions and a single tensor in others. Use `sd.unet.output[0]` defensively, or `if isinstance(out, tuple)` checks.
-- **CFG doubles your batch silently.** `guidance_scale > 1` (the default for most SD pipelines) means every batch row appears twice. Account for this when slicing batched outputs (see the batching tests in `tests/test_diffusion.py:220`).
-- **`device_map="auto"` is rewritten to `"balanced"`** for diffusion pipelines because diffusers expects that string (`diffusion.py:342`).
-- **Meta loading downloads small config files.** `dispatch=False` is not a hard offline mode — it still hits the HF Hub for `model_index.json` and each component's `config.json`. This is by design, so the Envoy tree mirrors the real architecture.
+- **Any traced run defaults to one denoising step.** `.trace()` and `with model.generate(...):` both denoise once; only a bare `model.generate(...)` call uses the pipeline's default. Pass `num_inference_steps=N` when you want an image rather than a probe.
+- **The denoiser call count is the scheduler's, not `num_inference_steps`.** SD 1.x's default `PNDMScheduler` makes one call more than it takes steps, so a `tracer.iter[:num_inference_steps]` loop leaves the last call untouched. Bound by `len(scheduler.timesteps)`.
+- **An open `tracer.iter[:]` drops the statements after the loop**, and hangs if the loop body makes no module access. Bound the loop.
+- **Precision goes by `torch_dtype=`.** `dtype=` is accepted and ignored, leaving the pipeline in float32.
+- **Writes inside the denoising loop are ordered.** Reading a later component and then writing an earlier one raises `OutOfOrderError` rather than parking the write until the next step, whether or not the access sits inside a `tracer.iter` loop.
+- **Per-invoke pipeline result objects aren't supported in a batched trace.** Read component tensors (e.g. `sd.unet.output[0]`) inside `tracer.invoke(...)` blocks, not `sd.output`.
+- **Scheduler / non-module components are not Envoy-wrapped.** Do scheduler swaps on `model.pipeline` pre-trace.
+- **Op-level `.source` raises `SourceNotAvailable`** only when a forward has no Python source to instrument (a builtin or C function); decorated and closure forwards are instrumented — see [source.md](../usage/source.md).
+- **UNet output shape varies.** With `return_dict=False` it's a tuple; use `sd.unet.output[0]`.
+- **Remote:** diffusion models are not deployed on NDIF as of this writing.
 
 ## Related
 
-- [docs/models/index.md](index.md) — pick the right wrapper
-- [docs/models/nnsight-base.md](nnsight-base.md) — base class
-- `src/nnsight/modeling/diffusion.py` — source (Diffuser wrapper, DiffusionModel class, `_build_pipeline_from_config`)
-- `src/nnsight/intervention/batching.py` — `DiffusionBatcher` implementation
-- `tests/test_diffusion.py` — runnable examples for tracing, generation, batching, CFG, swapping, seeded reproducibility, meta loading, and Flux
+- [docs/models/index.md](index.md) — decision tree
+- [docs/models/nnsight-base.md](nnsight-base.md) — base wrapper
+- `src/nnsight/modeling/diffusion.py` — source (`_PipelineModule`, `DiffusionModel`, `DiffusionBatcher`, meta build)
+- `tests/test_diffusion.py` — runnable examples (build, generate/trace, component trace, interventions, iteration, skip, cache, rename, seed reproducibility, batching, output types)

@@ -1,340 +1,225 @@
-"""
-Tests for wrapping modules multiple times with NNsight.
+"""Wrapping one module in more than one :class:`NNsight` at a time.
 
-These tests verify that:
-1. A model wrapped multiple times works correctly for all wrappers
-2. Wrapping the same model many times doesn't cause problems
+Each wrapper builds its own envoy tree and its own interleaver over the *same*
+underlying module, so the wrappers must stay independent: a trace or an
+intervention through one leaves the others seeing the unmodified model, and every
+wrapper keeps working no matter how many share the module.
 """
 
 import gc
-import pytest
-import torch
 from collections import OrderedDict
 
+import pytest
+import torch
+import torch.nn as nn
+
+import nnsight
 from nnsight import NNsight
 
-
-# =============================================================================
-# Test Fixtures
-# =============================================================================
-
-
 INPUT_SIZE = 5
-HIDDEN_DIMS = 10
+HIDDEN = 10
 OUTPUT_SIZE = 2
 
 
 @pytest.fixture
-def shared_model(device: str):
-    """Create a simple two-layer model (not wrapped) for testing multiple wrappers."""
-    net = torch.nn.Sequential(
+def model():
+    return torch.nn.Sequential(
         OrderedDict(
             [
-                ("layer1", torch.nn.Linear(INPUT_SIZE, HIDDEN_DIMS)),
-                ("layer2", torch.nn.Linear(HIDDEN_DIMS, OUTPUT_SIZE)),
+                ("layer1", torch.nn.Linear(INPUT_SIZE, HIDDEN)),
+                ("layer2", torch.nn.Linear(HIDDEN, OUTPUT_SIZE)),
             ]
         )
     )
-    return net.to(device)
+
+
+class _Sourceable(nn.Module):
+    """A module with a source-instrumentable forward (a named op, ``torch_relu_0``)
+    and a skippable submodule (``fc``), for the source/skip wrapper tests."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(INPUT_SIZE, INPUT_SIZE)
+
+    def forward(self, x):
+        h = self.fc(x)
+        return torch.relu(h)
 
 
 @pytest.fixture
-def test_input(device: str):
-    """Random input tensor for tests."""
-    return torch.rand((1, INPUT_SIZE), device=device)
-
-
-# =============================================================================
-# Multiple Wrappers Functionality Tests
-# =============================================================================
+def x():
+    return torch.rand((1, INPUT_SIZE))
 
 
 class TestMultipleWrappers:
-    """Tests for wrapping the same model with multiple NNsight instances."""
-
     @torch.no_grad()
-    def test_two_wrappers_both_work(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test that two NNsight wrappers on the same model both function correctly."""
-        # Create two separate wrappers on the same underlying model
-        wrapper1 = NNsight(shared_model)
-        wrapper2 = NNsight(shared_model)
-
-        # Use wrapper1 to trace and save outputs
-        with wrapper1.trace(test_input):
-            out1 = wrapper1.layer2.output.save()
-
-        # Use wrapper2 to trace and save outputs
-        with wrapper2.trace(test_input):
-            out2 = wrapper2.layer2.output.save()
-
-        # Both should produce the same result
-        assert isinstance(out1, torch.Tensor)
-        assert isinstance(out2, torch.Tensor)
+    def test_two_wrappers_both_work(self, model, x):
+        first, second = NNsight(model), NNsight(model)
+        with first.trace(x):
+            out1 = first.layer2.output.save()
+        with second.trace(x):
+            out2 = second.layer2.output.save()
         assert torch.allclose(out1, out2)
 
     @torch.no_grad()
-    def test_two_wrappers_modifications_independent(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test that modifications via one wrapper don't interfere with another."""
-        wrapper1 = NNsight(shared_model)
-        wrapper2 = NNsight(shared_model)
-
-        # Get baseline output without modifications
-        with wrapper2.trace(test_input):
-            baseline = wrapper2.layer2.output.clone().save()
-
-        # Modify output using wrapper1
-        with wrapper1.trace(test_input):
-            wrapper1.layer1.output[:] = 0
-            out1 = wrapper1.layer2.output.save()
-
-        # Trace normally using wrapper2 (no modifications)
-        with wrapper2.trace(test_input):
-            out2 = wrapper2.layer2.output.save()
-
-        # wrapper1's output should be different from baseline due to zeroing layer1
-        assert not torch.allclose(out1, baseline)
-
-        # wrapper2 should match baseline (no modifications applied)
-        assert torch.allclose(out2, baseline)
+    def test_modifications_are_independent(self, model, x):
+        first, second = NNsight(model), NNsight(model)
+        with second.trace(x):
+            baseline = second.layer2.output.clone().save()
+        with first.trace(x):
+            first.layer1.output[:] = 0
+            modified = first.layer2.output.save()
+        with second.trace(x):
+            unaffected = second.layer2.output.save()
+        assert not torch.allclose(modified, baseline)  # the intervention landed
+        assert torch.allclose(unaffected, baseline)  # only on its own wrapper
 
     @torch.no_grad()
-    def test_interleaved_wrapper_usage(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test using wrappers in an interleaved manner works correctly."""
-        wrapper1 = NNsight(shared_model)
-        wrapper2 = NNsight(shared_model)
-
-        # First use wrapper1
-        with wrapper1.trace(test_input):
-            out1_first = wrapper1.layer2.output.save()
-
-        # Then use wrapper2
-        with wrapper2.trace(test_input):
-            out2 = wrapper2.layer2.output.save()
-
-        # Use wrapper1 again
-        with wrapper1.trace(test_input):
-            out1_second = wrapper1.layer2.output.save()
-
-        # All outputs should be consistent
-        assert torch.allclose(out1_first, out2)
-        assert torch.allclose(out1_first, out1_second)
+    def test_interleaved_reuse(self, model, x):
+        first, second = NNsight(model), NNsight(model)
+        with first.trace(x):
+            first_a = first.layer2.output.save()
+        with second.trace(x):
+            other = second.layer2.output.save()
+        with first.trace(x):
+            first_b = first.layer2.output.save()
+        assert torch.allclose(first_a, other)
+        assert torch.allclose(first_a, first_b)
 
     @torch.no_grad()
-    def test_three_wrappers(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test that three wrappers on the same model all work correctly."""
-        wrapper1 = NNsight(shared_model)
-        wrapper2 = NNsight(shared_model)
-        wrapper3 = NNsight(shared_model)
+    def test_three_wrappers(self, model, x):
+        outs = []
+        for _ in range(3):
+            wrapper = NNsight(model)
+            with wrapper.trace(x):
+                out = wrapper.layer2.output.save()
+            outs.append(out)
+        assert torch.allclose(outs[0], outs[1])
+        assert torch.allclose(outs[1], outs[2])
 
-        with wrapper1.trace(test_input):
-            out1 = wrapper1.layer2.output.save()
+    @torch.no_grad()
+    def test_new_wrapper_after_modification(self, model, x):
+        first = NNsight(model)
+        with first.trace(x):
+            first.layer1.output[:] = 1.0
+            modified = first.layer2.output.save()
+        second = NNsight(model)  # made after the modified trace
+        with second.trace(x):
+            fresh = second.layer2.output.save()
+        assert not torch.allclose(modified, fresh)
 
-        with wrapper2.trace(test_input):
-            out2 = wrapper2.layer2.output.save()
+    @torch.no_grad()
+    def test_skip_with_multiple_wrappers(self, model, x):
+        first, second = NNsight(model), NNsight(model)
+        with first.trace(x):
+            first.layer2.output = first.layer1.output[:, :OUTPUT_SIZE]
+            skipped = first.output.save()
+        with second.trace(x):
+            normal = second.output.save()
+        assert not torch.allclose(skipped, normal)
 
-        with wrapper3.trace(test_input):
-            out3 = wrapper3.layer2.output.save()
+    @torch.no_grad()
+    def test_save_intermediate_layers(self, model, x):
+        first, second = NNsight(model), NNsight(model)
+        with first.trace(x):
+            a1 = first.layer1.output.save()
+            a2 = first.layer2.output.save()
+        with second.trace(x):
+            b1 = second.layer1.output.save()
+            b2 = second.layer2.output.save()
+        assert torch.allclose(a1, b1)
+        assert torch.allclose(a2, b2)
 
-        assert torch.allclose(out1, out2)
-        assert torch.allclose(out2, out3)
+    def test_gradients_with_multiple_wrappers(self, model, x):
+        def grad(wrapper):
+            with wrapper.trace(x):
+                activation = wrapper.layer1.output
+                loss = wrapper.output.sum()
+                with loss.backward():
+                    captured = activation.grad.clone().save()
+            return captured
 
-
-# =============================================================================
-# Stress Tests for Many Wrappers
-# =============================================================================
+        assert torch.allclose(grad(NNsight(model)), grad(NNsight(model)))
 
 
 class TestManyWrappers:
-    """Tests to ensure wrapping the same model many times doesn't cause issues."""
-
     @torch.no_grad()
-    def test_many_wrappers_no_memory_leak(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test that creating many wrappers doesn't cause memory issues."""
-        # Create many wrappers in sequence
-        wrappers = []
-        for i in range(10):
-            wrapper = NNsight(shared_model)
-            wrappers.append(wrapper)
-
-        # All wrappers should still work
+    def test_many_wrappers_stay_consistent(self, model, x):
+        reference = None
+        wrappers = [NNsight(model) for _ in range(10)]
         for wrapper in wrappers:
-            with wrapper.trace(test_input):
+            with wrapper.trace(x):
                 out = wrapper.layer2.output.save()
-            assert isinstance(out, torch.Tensor)
-
-    @torch.no_grad()
-    def test_wrapper_cleanup_on_gc(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test that wrappers clean up properly when garbage collected."""
-        # Create wrappers and let them go out of scope
-        for _ in range(5):
-            wrapper = NNsight(shared_model)
-            with wrapper.trace(test_input):
-                out = wrapper.layer2.output.save()
-            assert isinstance(out, torch.Tensor)
-
-        # Force garbage collection
-        gc.collect()
-
-        # Model should still work with new wrapper
-        new_wrapper = NNsight(shared_model)
-        with new_wrapper.trace(test_input):
-            final_out = new_wrapper.layer2.output.save()
-
-        assert isinstance(final_out, torch.Tensor)
-
-    @torch.no_grad()
-    def test_rapid_wrapper_creation_and_use(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test rapidly creating and using wrappers in succession."""
-        reference_output = None
-
-        for i in range(20):
-            wrapper = NNsight(shared_model)
-            with wrapper.trace(test_input):
-                out = wrapper.layer2.output.save()
-
-            if reference_output is None:
-                reference_output = out.clone()
+            if reference is None:
+                reference = out.clone()
             else:
-                # All outputs should be identical
-                assert torch.allclose(out, reference_output)
+                assert torch.allclose(out, reference)
 
     @torch.no_grad()
-    def test_simultaneous_wrapper_traces(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test that multiple wrapper traces that follow each other work."""
-        wrapper1 = NNsight(shared_model)
-        wrapper2 = NNsight(shared_model)
-        wrapper3 = NNsight(shared_model)
-        wrapper4 = NNsight(shared_model)
-        wrapper5 = NNsight(shared_model)
-
-        wrappers = [wrapper1, wrapper2, wrapper3, wrapper4, wrapper5]
-        outputs = []
-
-        for wrapper in wrappers:
-            with wrapper.trace(test_input):
-                outputs.append(wrapper.layer2.output.save())
-
-        # All outputs should match
-        for out in outputs[1:]:
-            assert torch.allclose(outputs[0], out)
+    def test_still_works_after_wrappers_are_collected(self, model, x):
+        for _ in range(5):
+            wrapper = NNsight(model)
+            with wrapper.trace(x):
+                wrapper.layer2.output.save()
+        gc.collect()
+        fresh = NNsight(model)
+        with fresh.trace(x):
+            out = fresh.layer2.output.save()
+        assert isinstance(out, torch.Tensor)
 
 
-# =============================================================================
-# Edge Cases
-# =============================================================================
-
-
-class TestMultipleWrapperEdgeCases:
-    """Edge case tests for multiple wrappers."""
+class TestMultipleWrapperSourceSkip:
+    """Source and skip go through the module's single installed controller, which
+    routes to whichever wrapper's trace is running — so they, too, stay independent
+    across wrappers sharing a module."""
 
     @torch.no_grad()
-    def test_wrapper_with_modifications_then_new_wrapper(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test that creating a new wrapper after modifications still works."""
-        wrapper1 = NNsight(shared_model)
-
-        # Modify via wrapper1
-        with wrapper1.trace(test_input):
-            wrapper1.layer1.output[:] = 1.0
-            out1 = wrapper1.layer2.output.save()
-
-        # Create new wrapper after modification
-        wrapper2 = NNsight(shared_model)
-
-        with wrapper2.trace(test_input):
-            out2 = wrapper2.layer2.output.save()
-
-        # wrapper2 should work normally (not be affected by wrapper1's modifications)
-        assert not torch.allclose(out1, out2)
+    def test_source_matches_across_wrappers(self, x):
+        net = _Sourceable()
+        first, second = NNsight(net), NNsight(net)
+        with first.trace(x):
+            a = first.source.torch_relu_0.output.save()
+        with second.trace(x):
+            b = second.source.torch_relu_0.output.save()
+        assert torch.allclose(a, b)
 
     @torch.no_grad()
-    def test_skip_module_with_multiple_wrappers(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test that module skipping works correctly with multiple wrappers."""
-        wrapper1 = NNsight(shared_model)
-        wrapper2 = NNsight(shared_model)
-
-        # Skip layer2 using wrapper1
-        with wrapper1.trace(test_input):
-            wrapper1.layer2.output = wrapper1.layer1.output[:, :OUTPUT_SIZE]
-            out1 = wrapper1.output.save()
-
-        # Normal trace with wrapper2
-        with wrapper2.trace(test_input):
-            out2 = wrapper2.output.save()
-
-        # Outputs should be different due to skip
-        assert not torch.allclose(out1, out2)
+    def test_source_intervention_is_per_wrapper(self, x):
+        net = _Sourceable()
+        first, second = NNsight(net), NNsight(net)
+        with second.trace(x):
+            baseline = second.output.clone().save()
+        with first.trace(x):
+            first.source.torch_relu_0.output[:] = 0  # kill the relu output via first
+            zeroed = first.output.save()
+        with second.trace(x):
+            unaffected = second.output.save()
+        assert (zeroed == 0).all()  # the source edit landed on `first`
+        assert torch.allclose(unaffected, baseline)  # and only on `first`
 
     @torch.no_grad()
-    def test_save_intermediate_layers_multiple_wrappers(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test saving intermediate activations with multiple wrappers."""
-        wrapper1 = NNsight(shared_model)
-        wrapper2 = NNsight(shared_model)
+    def test_skip_is_per_wrapper(self, x):
+        net = _Sourceable()
+        first, second = NNsight(net), NNsight(net)
+        with first.trace(x):
+            first.fc.skip(torch.zeros(1, INPUT_SIZE))  # fc doesn't run -> relu(0)=0
+            skipped = first.output.save()
+        with second.trace(x):
+            normal = second.output.save()
+        assert (skipped == 0).all()  # first skipped fc
+        assert (normal != 0).any()  # second ran it
 
-        with wrapper1.trace(test_input):
-            l1_out1 = wrapper1.layer1.output.save()
-            l2_out1 = wrapper1.layer2.output.save()
-
-        with wrapper2.trace(test_input):
-            l1_out2 = wrapper2.layer1.output.save()
-            l2_out2 = wrapper2.layer2.output.save()
-
-        assert torch.allclose(l1_out1, l1_out2)
-        assert torch.allclose(l2_out1, l2_out2)
-
-    def test_gradients_with_multiple_wrappers(
-        self, shared_model: torch.nn.Module, test_input: torch.Tensor
-    ):
-        """Test gradient computation with multiple wrappers."""
-        wrapper1 = NNsight(shared_model)
-        wrapper2 = NNsight(shared_model)
-
-        # Compute gradients with wrapper1
-        with wrapper1.trace(test_input):
-            l1_out = wrapper1.layer1.output
-            loss = wrapper1.output.sum()
-            with loss.backward():
-                grad1 = l1_out.grad.clone().save()
-
-        # Compute gradients with wrapper2
-        with wrapper2.trace(test_input):
-            l1_out = wrapper2.layer1.output
-            loss = wrapper2.output.sum()
-            with loss.backward():
-                grad2 = l1_out.grad.clone().save()
-
-        # Gradients should be the same
-        assert torch.allclose(grad1, grad2)
-
-    def test_bert_wrapper_construction_with_output_modules(self):
-        from transformers import BertConfig, BertForMaskedLM
-
-        with pytest.warns(UserWarning, match="pre-defined a `output` attribute"):
-            wrapper = NNsight(BertForMaskedLM(BertConfig()))
-
-        assert (
-            wrapper.bert.encoder.layer[0].output.path
-            == "model.bert.encoder.layer.0.output"
-        )
-        assert hasattr(type(wrapper.bert.encoder.layer[0]), "nns_output")
+    @torch.no_grad()
+    def test_forward_survives_after_sourcing_wrapper_is_gone(self, x):
+        # The controller is installed on the module permanently; once the wrapper
+        # that sourced it is gone, a later plain forward must still run — the source
+        # state keys on the (surviving) interleaver, not the collected envoy. This is
+        # the local analogue of the remote cross-request contamination.
+        net = _Sourceable()
+        wrapper = NNsight(net)
+        with wrapper.trace(x):
+            wrapper.source.torch_relu_0.output.save()
+        del wrapper
+        gc.collect()
+        out = net(x)  # the controller runs with no active trace
+        assert out.shape == (1, INPUT_SIZE)

@@ -1,11 +1,14 @@
+# Shipped baseline config. Do NOT edit in place (it lives in site-packages and
+# is overwritten on upgrade). Override via ~/.config/nnsight/config.yaml, a file
+# pointed to by $NNSIGHT_CONFIG, or environment variables (NDIF_HOST,
+# NDIF_API_KEY). Precedence: this file < user file < environment.
 API:
-  APIKEY: null
   HOST: https://api.ndif.us
+  APIKEY: null
   COMPRESS: true
 APP:
-  CACHE_DIR: ~/.cache/nnsight/
-  CROSS_INVOKER: true
   DEBUG: false
-  PYMOUNT: true
   REMOTE_LOGGING: true
-  TRACE_CACHING: false
+  # Mount .save() on every object so `value.save()` works (else use
+  # `nnsight.save(value)`). Adds `.save` to all objects process-wide.
+  PYMOUNT: true
