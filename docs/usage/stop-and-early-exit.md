@@ -1,96 +1,181 @@
 ---
 title: Stop and Early Exit
-one_liner: Cut a forward pass short with `tracer.stop()`; raises `EarlyStopException`, swallowed by the interleaver.
+one_liner: Cut a forward pass short with `tracer.stop()`; raises EarlyStopException, swallowed by the interleaver.
 tags: [usage, control-flow, early-stop]
 related: [docs/usage/trace.md, docs/usage/iter-all-next.md, docs/usage/skip.md]
-sources: [src/nnsight/intervention/tracing/tracer.py:447, src/nnsight/intervention/interleaver.py:355, src/nnsight/intervention/interleaver.py:1264, src/nnsight/intervention/interleaver.py:589]
+sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py]
 ---
 
 # Stop and Early Exit
 
 ## What this is for
 
-`tracer.stop()` aborts the current forward pass at the point where the worker thread is currently blocked. Any module that has not yet executed by the time `stop()` fires is **never executed** — the model raises `EarlyStopException`, the interleaver catches it on `__exit__`, and the trace exits cleanly.
+`tracer.stop()` aborts the current run at the point the worker is currently
+parked. Any module that hasn't executed yet is **never executed** — the block
+raises `EarlyStopException`, which the interleaver treats as a clean early exit
+(not an error) and swallows.
 
-This is how you "save what you need and bail" without dragging the rest of the forward pass along.
+This is how you "save what you need and bail" without running the rest of the
+forward pass.
 
 ## When to use / when not to use
 
-- Use to short-circuit when you have already collected the activations you need.
-- Use to terminate generation mid-step when a condition is met.
-- Don't use as an error path — `stop()` is treated as a successful early exit, not as an error.
-- Don't use to skip a single module — that's `module.skip(value)` (`docs/usage/skip.md`).
+- Use to short-circuit once you've collected the activations you need.
+- Use to end generation mid-run when a condition is met.
+- Don't use as an error path — `stop()` is a successful early exit.
+- Don't use to skip a single module — that's `module.skip(value)` ([skip.md](skip.md)).
 
 ## Canonical pattern
 
 ```python
-with model.trace("Hello") as tracer:
-    h0 = model.transformer.h[0].output.save()
-    # We don't need anything past layer 0
+from nnsight.modeling.transformers import TransformersModel
+
+model = TransformersModel("openai-community/gpt2", dispatch=True)
+
+with model.trace("Hello world") as tracer:
+    h0 = model.transformer.h[0].output.save()   # save BEFORE stopping
     tracer.stop()
 
 # Layers 1..N never ran. h0 is populated.
-print(h0.shape)
+print(h0.shape)   # torch.Size([1, 2, 768])
 ```
-
-## How it works
-
-`InterleavingTracer.stop` (`src/nnsight/intervention/tracing/tracer.py:447`) calls `Mediator.stop()` (`interleaver.py:1264`):
-
-```python
-def stop(self):
-    self.push()
-    raise EarlyStopException()
-```
-
-`EarlyStopException` (`interleaver.py:355`) propagates up through the worker thread, then through the model's forward pass, and is finally **swallowed** by `Interleaver.__exit__` (`interleaver.py:589`):
-
-```python
-if exc_type is not None and issubclass(exc_type, EarlyStopException):
-    return True
-```
-
-Mediator state is cleaned up via `cancel()` and registered hooks are removed via `Mediator.remove_hooks()`.
 
 ## Stop in generation
 
 ```python
-with model.generate("Hello", max_new_tokens=20) as tracer:
-    for step in tracer.iter[:]:
-        tok = model.lm_head.output[0, -1].argmax(dim=-1).save()
-        if tok.item() == model.tokenizer.eos_token_id:
+import nnsight
+
+with model.generate("Hello", max_new_tokens=20, do_sample=False) as tracer:
+    picks = nnsight.save([])
+    for step in tracer.all():
+        picks.append(model.lm_head.output[0, -1].argmax(dim=-1))
+        if len(picks) == 3:
             tracer.stop()
+# len(picks) == 3 — the run ended after the third step, not the twentieth
 ```
 
-`stop()` ends the entire generation, not just one step. To skip a single step's interventions but keep generating, just exit the `if` block.
+Any condition works, since `picks[-1]` is a real tensor: an EOS id, a probability
+threshold, a token you were waiting for.
 
-## Stop in nested invokes
+`stop()` ends the whole run, not just one step. It also ends the loop, so the
+loop's own bound never has to hold — an open `tracer.all()` is the natural form
+here.
 
-`tracer.stop()` aborts the **current** mediator's interleaving. The mediator is the one whose worker thread is calling `stop()` (i.e. the current invoke). Other mediators that have already finished their work still get their saved values back.
+## The location you stop at still happens
 
-## Saving state before stop
-
-`Mediator.stop` calls `self.push()` first (`interleaver.py:1267`), which flushes the worker frame's locals back into the user's frame. So variables you assigned before `stop()` survive — even ones not explicitly `.save()`'d, as long as they go through the cross-invoker push pathway.
-
-For values you intend to consume after the trace exits, **always** call `.save()` (or `nnsight.save(...)`) before `stop()`:
+A stop ends what comes *after* the location the worker is parked on, not that
+location itself. That module has already run by the time the stop is raised, so
+the visit is finished before the forward unwinds: the value is served, any edit
+you made to it lands, and a cache observing it records it.
 
 ```python
-with model.trace("Hello") as tracer:
+with model.trace("Hello world") as tracer:
+    cache = tracer.cache(modules=[model.transformer.h[5]]).save()
+    model.transformer.h[5].output
+    tracer.stop()
+
+print(list(cache.keys()))   # ['model.transformer.h.5']
+```
+
+Layer 5 is there; layers 6 and up never ran, so they are not.
+
+## A stop in one invoke ends the whole batch
+
+Invokes are rows of one shared forward pass, so a `stop()` in any one of them
+ends the run for all of them — there is no way to keep going for the other rows.
+The step it fires on does finish, though: an invoke parked on the same visit is
+served in it, so every invoke records that step.
+
+```python
+with model.generate(max_new_tokens=8, do_sample=False) as tracer:
+    with tracer.invoke("The capital of France is"):
+        picks = nnsight.save([])
+        for _ in tracer.all():
+            picks.append(model.lm_head.output[0, -1].argmax(dim=-1))
+            if len(picks) == 3:
+                tracer.stop()
+    with tracer.invoke("The capital of Spain is"):
+        others = nnsight.save([])
+        for _ in tracer.all():
+            others.append(model.lm_head.output[0, -1].argmax(dim=-1))
+# len(picks) == len(others) == 3
+```
+
+The second invoke's loop was cut short by the first invoke's stop rather than by
+a bound of its own, so it warns that it asked for a step the run did not make,
+like any loop the run outruns ([iter-all-next.md](iter-all-next.md)). If the
+invokes need to stop independently, run them as separate traces.
+
+## The run's result is gone after a stop
+
+A stop cuts the run off before it returns anything, so there is no result to
+read. A `tracer.result.save()` after the `stop()` is unreachable like any other
+trailing statement, and moving it into a separate empty invoke does not rescue
+it:
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke("Hello world"):
+        h = model.transformer.h[0].output.save()
+        tracer.stop()
+    with tracer.invoke():
+        r = tracer.result.save()
+# OutOfOrderError: 'result.i0' was requested but the model already ran past it
+```
+
+Save the activations you need before stopping; if you also need the model's
+output, do not stop.
+
+## Saving `tracer.result` before `stop()` runs the whole pass
+
+`tracer.result` is served when the call returns, so a worker that asks for it
+parks until the run is over — and the `stop()` written below it is only reached
+once everything has already run:
+
+```python
+with model.trace("Hello world") as tracer:
+    h = model.transformer.h[0].output.save()
+    r = tracer.result.save()      # parks here until the run finishes
+    tracer.stop()                 # fires after the fact
+# r is a full CausalLMOutputWithCrossAttentions: r.logits.shape == (1, 2, 50257)
+```
+
+The code looks like an early exit and reads back like one. The tell is `r`: it
+holds logits for every position, which a stopped run could not have produced.
+
+## Save before you stop
+
+Code after `tracer.stop()` in the same block does not run — Python raises at the
+call. So `.save()` (or `nnsight.save(...)`) anything you want to keep **before**
+calling `stop()`:
+
+```python
+with model.trace("Hello world") as tracer:
     h = model.transformer.h[0].output.save()   # <-- save first
     tracer.stop()
 ```
 
 ## Gotchas
 
-- `stop()` only works inside an active interleaving — calling it outside a trace raises because `interleaver.current` is `None`.
-- Code after `stop()` in the same invoke does not run (Python sees the raised exception). Don't rely on side effects after the call.
-- Anything that depends on a later module's output (e.g. `model.lm_head.output.save()` if you stop at layer 0) will not be populated and will hit `MissedProviderError` if requested.
-- `EarlyStopException` is **not** an error — `Interleaver.__exit__` swallows it. Do not put `try/except EarlyStopException` around your trace expecting to catch user errors.
-- For per-module bypass without aborting the whole forward pass, use `module.skip(value)` instead.
+- **`stop()` only works inside an active trace.**
+- **Code after `stop()` in the same block never runs** — don't rely on trailing
+  side effects.
+- **Anything depending on a later module won't be populated.** Requesting a module
+  the run never reached (because you stopped before it) raises `OutOfOrderError`.
+  The module you stopped *at* is not one of those — it ran, and is cached.
+- **A stop in one invoke ends the batch.** One forward pass serves every invoke, so
+  the others stop where it did; their `tracer.all()` loops warn about the steps the
+  run did not make.
+- **`EarlyStopException` is not an error.** Don't wrap the trace in
+  `try/except EarlyStopException` expecting to catch user errors — the interleaver
+  already swallows it.
+- **The run's result is unreachable after a stop** — from after the `stop()`, and from a separate empty invoke, which raises `OutOfOrderError: 'result.i0'`.
+- **A `tracer.result.save()` placed *before* `stop()` defeats the stop** — the worker parks on the result until the run finishes.
+- **For per-module bypass without aborting the whole forward, use `module.skip(...)`.**
 
 ## Related
 
-- `docs/usage/trace.md`
-- `docs/usage/iter-all-next.md`
-- `docs/usage/skip.md`
-- `docs/usage/save.md`
+- [trace.md](trace.md)
+- [iter-all-next.md](iter-all-next.md)
+- [skip.md](skip.md)
+- [save.md](save.md)

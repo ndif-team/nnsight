@@ -3,25 +3,25 @@ title: NDIF Status and Availability
 one_liner: Check the NDIF service state and whether a specific model is currently running before submitting.
 tags: [remote, ndif, status]
 related: [docs/remote/index.md, docs/remote/api-key-and-config.md]
-sources: [src/nnsight/ndif.py:247, src/nnsight/ndif.py:326, src/nnsight/ndif.py:72]
+sources: [src/nnsight/ndif.py:197, src/nnsight/ndif.py:249, src/nnsight/ndif.py:128]
 ---
 
 # NDIF Status and Availability
 
 ## What this is for
 
-Models on NDIF can be in different deployment states (running, deploying, scheduled-but-cold, down). Submitting a request to a non-running model still works — it gets queued — but it may take a long time to dispatch. These functions tell you what's actually live so you can fail fast or pick a different revision.
+Models on NDIF can be in different deployment states (running, deploying, unhealthy). Submitting a request to a non-running model still works — it queues — but may take a while to dispatch. These functions tell you what's live so you can fail fast or pick a different revision.
 
 ## Canonical pattern
 
 ```python
 import nnsight
 
-print(nnsight.status())   # formatted table of every deployment
-nnsight.is_model_running("meta-llama/Llama-3.1-70B")    # -> True / False
+print(nnsight.status())                                    # formatted table
+nnsight.is_model_running("meta-llama/Llama-3.1-70B")       # -> True / False
 ```
 
-## status() — full deployment table
+## status() — deployment table
 
 ```python
 import nnsight
@@ -30,75 +30,61 @@ s = nnsight.status()
 print(s)
 ```
 
-Output (from the docstring example, `src/nnsight/ndif.py:247`):
+Output:
 
 ```
-NDIF Service: Up
-┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┓
-┃ Model Class   ┃ Repo ID                    ┃ Revision ┃ Type      ┃ Status  ┃
-┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━┩
-│ LanguageModel │ meta-llama/Llama-3.1-70B   │ main     │ Dedicated │ RUNNING │
-└───────────────┴────────────────────────────┴──────────┴───────────┴─────────┘
+NDIF Service: Up 🟢
+
+Model Class        Repo ID                   Revision  Level  State
+-----------------  ------------------------  --------  -----  ---------
+TransformersModel  meta-llama/Llama-3.1-70B  main      HOT    RUNNING
+TransformersModel  openai-community/gpt2     main      WARM   DEPLOYING
 ```
 
-`status()` returns an `NdifStatus` object that subclasses `dict` (`src/nnsight/ndif.py:72`), so you can also iterate it programmatically:
+Only **deployed** models appear — those at level `HOT` or `WARM` (`COLD`, i.e. downloaded but not up, is filtered out; `src/nnsight/ndif.py:222`).
+
+`status()` returns an `NdifStatus` (`src/nnsight/ndif.py:128`). It's a dict-like view over `deployments`, so you can inspect it programmatically:
 
 ```python
 s = nnsight.status()
 
-for repo_id, info in s.items():
-    print(repo_id, info['model_class'], info['type'].value, info['state'].value)
+print(s.status)                      # NdifStatus.Status.UP
+for repo_id in s:                    # iterates deployment repo ids
+    info = s[repo_id]
+    print(repo_id, info["model_class"], info["level"], info["state"])
 ```
 
-`status(raw=True)` returns the raw API JSON without formatting.
+Each `info` dict has `model_class`, `repo_id`, `revision`, `level`, `state`. `NdifStatus` supports `s[key]`, `key in s`, `len(s)`, `s.keys()`, and iteration.
 
-`nnsight.ndif_status()` is the deprecated alias kept for backwards compatibility. Use `status()` going forward.
+`status(raw=True)` returns the raw `/status` JSON instead of an `NdifStatus`.
 
-## NdifStatus enums
+`nnsight.ndif_status()` is a deprecated alias that warns and forwards to `status()`.
 
-`NdifStatus.Status` (overall service):
+## Service status values
 
-| Value | Meaning |
-|-------|---------|
-| `UP` | At least one model is `RUNNING`. |
-| `REDEPLOYING` | No model is running, but at least one is `DEPLOYING` or `NOT_DEPLOYED`. |
-| `DOWN` | API request failed or no models are running or being deployed. |
-
-`NdifStatus.ModelStatus` (per-model):
+`NdifStatus.status` is one of (`src/nnsight/ndif.py:136`):
 
 | Value | Meaning |
 |-------|---------|
-| `RUNNING` | Fully deployed; accepting requests immediately. |
-| `DEPLOYING` | Coming up; new requests will queue. |
-| `NOT_DEPLOYED` | Configured but not started; may take longer to become available. |
-| `DOWN` | Deployment failed or unavailable. |
+| `UP` | At least one model's state is `RUNNING`. |
+| `REDEPLOYING` | None running, but at least one is `DEPLOYING`. |
+| `DOWN` | Nothing running or deploying, or the service was unreachable. |
 
-`NdifStatus.DeploymentType`:
-
-| Value | Meaning |
-|-------|---------|
-| `DEDICATED` | Permanent deployment. |
-| `PILOT_ONLY` | Available only to pilot users. |
-| `SCHEDULED` | Runs on a schedule (e.g., specific hours). |
-
-Sources: `src/nnsight/ndif.py:90`, `src/nnsight/ndif.py:113`, `src/nnsight/ndif.py:138`.
+Per-model `state` values seen in the table: `RUNNING` (live), `DEPLOYING` (coming up; requests queue), `UNHEALTHY` (deployment problem). `level` is `HOT` or `WARM`.
 
 ## is_model_running
 
-For a yes/no answer about a single model:
+For a yes/no answer about a single model (`src/nnsight/ndif.py:249`):
 
 ```python
 if nnsight.is_model_running("meta-llama/Llama-3.1-70B"):
     with model.trace("Hello", remote=True):
         out = model.lm_head.output.save()
 else:
-    print("Model not currently running on NDIF — request will queue and warm.")
+    print("Model not currently running on NDIF — a request will queue and warm.")
 ```
 
-Implementation (`src/nnsight/ndif.py:326`):
-- Resolves the repo_id via `HfApi().model_info(repo_id).id` (handles redirects/aliases).
-- Walks `response["deployments"]` and matches on `repo_id` and `revision` (defaults to `"main"`).
-- Returns `True` only if `application_state == "RUNNING"`.
+It canonicalizes the repo id via the Hub (`HfApi().model_info(repo_id).id`, handling aliases/redirects), matches on `repo_id` and `revision`, and returns `True` only if `application_state == "RUNNING"`.
 
 Custom revision:
 
@@ -106,19 +92,9 @@ Custom revision:
 nnsight.is_model_running("meta-llama/Llama-3.1-70B", revision="my-finetune-branch")
 ```
 
-## "Deployed but not running" — what it means
-
-Some models are listed in the status table but not actively serving:
-
-- **`DEPLOYING`** — the deployment is starting up. Requests submitted now will queue and start running shortly.
-- **`NOT_DEPLOYED`** — the deployment is configured but cold. Submitting a request may trigger a warm-up depending on NDIF's policy; this can take significant time.
-- **`SCHEDULED` type** — only runs at certain times (e.g., overnight). Outside its window, requests queue until the next start.
-
-For real-time status outside Python, NDIF maintains a status page and the `/status` endpoint at `{CONFIG.API.HOST}/status`. The API URL is set via `CONFIG.API.HOST` (`src/nnsight/ndif.py:191`).
-
 ## Custom HOST
 
-If you've pointed `CONFIG.API.HOST` at a self-hosted or staging deployment, `status()` and `is_model_running()` automatically query that host:
+If you've pointed `CONFIG.API.HOST` at a self-hosted or staging deployment, `status()` and `is_model_running()` query that host automatically (both go through `{CONFIG.API.HOST}/status`):
 
 ```python
 from nnsight import CONFIG
@@ -129,13 +105,12 @@ nnsight.status()    # queries staging
 
 ## Gotchas
 
-- `status()` fails gracefully — on a network error it prints to stderr and returns an empty dict (`src/nnsight/ndif.py:275`). Check `s.status` if you need a hard signal.
-- `is_model_running` returns `False` on network failure too. Distinguish "false-because-down" from "false-because-no-network" by also calling `status()`.
-- The repo ID lookup uses HuggingFace; an unauthenticated rate limit can delay results if you call `is_model_running` in a tight loop. Cache the answer.
+- Both fail gracefully on a network error: `status()` prints a DOWN message to stderr and returns an empty `NdifStatus` (whose `.status` is `DOWN`); `is_model_running` returns `False`. So a `False` can mean "not running" *or* "couldn't reach NDIF" — check `status().status` to distinguish.
+- `is_model_running` makes a Hub call to canonicalize the repo id; an unauthenticated rate limit can slow a tight loop. Cache the answer.
 - `RUNNING` doesn't mean *no* queue — it means the deployment is live. Other users may be ahead of you.
 
 ## Related
 
-- https://discuss.ndif.us/ — outage reports.
 - [api-key-and-config.md](./api-key-and-config.md) — `CONFIG.API.HOST`.
 - [ndif-overview.md](./ndif-overview.md) — what happens when a job is submitted.
+- https://discuss.ndif.us/ — outage reports.

@@ -1,41 +1,47 @@
 ---
 title: Multi-Prompt Comparison
-one_liner: Run multiple prompts in one trace using `tracer.invoke(...)` and empty invokes for batch-wide ops; use barriers when invokes share modules.
+one_liner: Run multiple prompts in one trace using `tracer.invoke(...)`, with empty invokes for batch-wide ops and `tracer.barrier(n)` when one invoke hands a value to another.
 tags: [pattern, interpretability, batching, comparison]
 related: [docs/usage/invoke-and-batching.md, docs/usage/barrier.md, docs/patterns/activation-patching.md, docs/patterns/ablation.md]
-sources: [src/nnsight/intervention/tracing/tracer.py:433, src/nnsight/intervention/tracing/tracer.py:551]
+sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/barrier.py, src/nnsight/intervention/batching.py]
 ---
 
 # Multi-Prompt Comparison
 
 ## What this is for
 
-Many interpretability experiments are comparisons: clean vs corrupt, in-distribution vs out-of-distribution, baseline vs ablated, prompt with X vs prompt without X. The natural way to run them in nnsight is **multiple invokes inside one `model.trace()`** rather than multiple separate traces.
+Many interpretability experiments are comparisons: clean vs corrupt, baseline vs
+ablated, prompt-with-X vs prompt-without-X. Run them as **multiple invokes inside
+one `model.trace()`** rather than separate traces.
 
 Why one trace beats many:
 
-- **Single setup cost.** Each `model.trace(...)` pays a fixed ~0.3 ms compile + thread setup. Many comparisons in one trace amortizes this.
-- **Shared interventions.** A no-arg ("empty") invoke runs on the *combined batch* across all input invokes - one place to write a single intervention that applies to every prompt.
-- **Cross-invoke variable sharing.** Variables captured in one invoke can be used in a later invoke (with a barrier when both touch the same module).
+- **Single setup cost**, amortized across every comparison.
+- **Shared interventions.** An empty (`tracer.invoke()`) invoke runs on the
+  *combined batch* of all input invokes — one place for an intervention that applies
+  to every prompt.
+- **Cross-invoke value sharing.** A value read in one invoke can be used in another,
+  with a barrier when the consumer writes it.
 - **One remote round-trip.** With `remote=True`, all invokes ship as one job.
 
-The architectural concept: each `tracer.invoke(...)` is a worker thread. They run **serially in definition order**. See `docs/usage/invoke-and-batching.md`.
+Each `tracer.invoke(...)` block is a **worker** (a greenlet), and they resume in the
+order the model reaches what each asked for. See `docs/usage/invoke-and-batching.md`.
 
 ## When to use
 
 - Side-by-side baseline vs ablated / patched / steered.
 - Mean-difference / contrast-set computations (positive vs negative prompts).
 - Sweeps over a small set of prompts that share interventions.
-- Any setup where you used to write `for prompt in prompts: with model.trace(prompt): ...`.
+- Any sweep otherwise written as `for p in prompts: with model.trace(p): ...`.
 
 ## Canonical pattern
 
-Three invokes in one trace: a baseline, an ablated, and an empty-invoke that summarizes both.
+Two invokes in one trace: a baseline and an ablated run.
 
 ```python
-from nnsight import LanguageModel
+from nnsight.modeling.transformers import TransformersModel
 
-model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 prompt = "The Eiffel Tower is in the city of"
 LAYER = 9
@@ -43,113 +49,139 @@ LAYER = 9
 with model.trace() as tracer:
     with tracer.invoke(prompt):
         baseline = model.lm_head.output[:, -1, :].save()
-
     with tracer.invoke(prompt):
         model.transformer.h[LAYER].mlp.output[:] = 0
         ablated = model.lm_head.output[:, -1, :].save()
 
-print("baseline argmax:", model.tokenizer.decode(baseline.argmax(-1)[0]))
-print("ablated  argmax:", model.tokenizer.decode(ablated.argmax(-1)[0]))
+print(model.tokenizer.decode(baseline.argmax(-1)[0]))   # ' Paris'
+print(model.tokenizer.decode(ablated.argmax(-1)[0]))    # ' London'
 ```
 
-No barrier is needed - the two invokes do not share any variable.
+No barrier is needed — the two invokes do not share a variable.
 
 ## Empty invokes for batch-wide operations
 
-`tracer.invoke()` with no arguments is an **empty invoke**: a separate thread that operates on the *full batch* of all preceding input invokes. Two main uses:
-
-1. **Run an intervention or readout across the whole batch in one place.**
-2. **Re-access modules in a different order** - within a single invoke you must read modules in forward-pass order, but each empty invoke is a separate thread that gets its own forward pass replay.
+`tracer.invoke()` with no arguments is an **empty invoke**: a worker that sees the
+*whole batch* every input invoke contributes, with no row scoping. The batch is
+assembled before any worker starts, so an empty invoke written first sees the rows
+of the invokes below it just the same.
 
 ```python
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
-        out_a = model.lm_head.output[:, -1, :].save()        # shape [1, vocab]
+        a = model.lm_head.output[:, -1, :].save()        # [1, vocab]
     with tracer.invoke(["World", "Test"]):
-        out_b = model.lm_head.output[:, -1, :].save()        # shape [2, vocab]
-
-    # Empty invoke: sees the full [3, ...] batch.
+        b = model.lm_head.output[:, -1, :].save()        # [2, vocab]
     with tracer.invoke():
-        full = model.lm_head.output[:, -1, :].save()         # shape [3, vocab]
+        full = model.lm_head.output[:, -1, :].save()     # [3, vocab] — whole batch
 ```
 
-Empty invokes trigger **neither** `_prepare_input()` nor `_batch()` — they reuse the existing batched state from the preceding input invokes. So they work on the base `NNsight` (which does not implement batching) too — one input invoke + as many empty invokes as you want.
+```
+a.shape (1, 50257)   b.shape (2, 50257)   full.shape (3, 50257)
+```
+
+An empty invoke reuses the batch the input invokes built — no extra input prep, no
+call into the model's batching methods — so it works on the base `NNsight` too (one
+input invoke plus as many empty invokes as you like).
 
 ## When you need a barrier
 
-If two invokes both touch `.output` (or `.input`) of the same module and you want to share a variable between them, you **must** use `tracer.barrier(n)` to synchronize them. Without it, the second invoke runs before the first has materialized the value, and you get a `NameError`.
+An invoke can read a name a sibling bound once it has parked at a location the model
+reaches after the binding; a consumer that *writes* the value has not parked at all
+when it reads it, because the assignment evaluates its right-hand side first. Order
+those with `tracer.barrier(n)`. Every participating block calls it, and the last to
+arrive releases them all, so everything above the barrier has happened before
+anything below it. The full rule is in `docs/usage/invoke-and-batching.md`.
 
 ```python
 with model.trace() as tracer:
     barrier = tracer.barrier(2)
-
-    # Capture clean residual.
-    with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[:, -1, :]
+    with tracer.invoke("Madison Square Garden is in the city of"):
+        embeds = model.transformer.wte.output          # read source embeddings
         barrier()
-
-    # Patch into corrupt run.
-    with tracer.invoke("The Colosseum is in"):
+        source_tok = model.lm_head.output[:, -1, :].argmax(-1).save()
+    with tracer.invoke("_ _ _ _ _ _ _ _"):
         barrier()
-        model.transformer.h[5].output[:, -1, :] = clean_hs
-        patched = model.lm_head.output[:, -1, :].save()
+        model.transformer.wte.output = embeds          # ...swap them into this run
+        recv_tok = model.lm_head.output[:, -1, :].argmax(-1).save()
+
+# both decode to ' New'
 ```
 
-See `docs/usage/barrier.md` and `docs/patterns/activation-patching.md` for more examples.
+The receiver, fed the source's embeddings, reproduces the source's prediction.
+`barrier(n)` must be reached by exactly `n` blocks. Fewer and the round never
+releases, which surfaces as a `ValueError` when the run ends rather than a hang;
+more and it releases early, and the block it let through raises `NameError` on the
+value it was waiting for. See `docs/usage/barrier.md` and
+[activation-patching](activation-patching.md).
 
 ## Variations
 
 ### Sweep over prompts
 
 ```python
-prompts = ["The cat sat on the", "A dog ran on the", "The bird flew on the"]
+import nnsight
 
+prompts = ["The cat sat on the", "A dog ran on the", "The bird flew on the"]
 with model.trace() as tracer:
-    last_logits = []
+    outs = nnsight.save({})
     for p in prompts:
         with tracer.invoke(p):
-            last_logits.append(model.lm_head.output[:, -1, :].save())
+            outs[p] = model.lm_head.output[:, -1, :]
 
-for p, lg in zip(prompts, last_logits):
-    print(p, "->", model.tokenizer.decode(lg.argmax(-1)[0]))
+for p in prompts:
+    print(p, "->", repr(model.tokenizer.decode(outs[p].argmax(-1)[0])))
 ```
 
-### Mean / difference of activations
+```
+The cat sat on the -> ' floor'
+A dog ran on the -> ' ground'
+The bird flew on the -> ' ground'
+```
+
+Key the results by whatever the loop varies rather than appending to a list. Values
+appended from several invokes come back in the order the model reached them, so
+zipping the list against `prompts` misattributes every row as soon as the invokes
+stop reading the same module.
+
+### Mean / difference of activations (a steering direction)
 
 ```python
+import torch
+import nnsight
 positive = ["I love this", "This is wonderful"]
 negative = ["I hate this", "This is awful"]
 LAYER = 6
 
 with model.trace() as tracer:
-    pos_a, neg_a = [], []
+    pos_a = nnsight.save([])
+    neg_a = nnsight.save([])
     for p in positive:
         with tracer.invoke(p):
-            pos_a.append(model.transformer.h[LAYER].output[:, -1, :].save())
+            pos_a.append(model.transformer.h[LAYER].output[:, -1, :])
     for p in negative:
         with tracer.invoke(p):
-            neg_a.append(model.transformer.h[LAYER].output[:, -1, :].save())
+            neg_a.append(model.transformer.h[LAYER].output[:, -1, :])
 
-import torch
-pos = torch.cat([a for a in pos_a]).mean(0)
-neg = torch.cat([a for a in neg_a]).mean(0)
-direction = pos - neg
+direction = torch.cat(pos_a).mean(0) - torch.cat(neg_a).mean(0)   # [768]
 ```
 
 ### Pre-batched input (no invokes)
 
-If you just want a forward pass on a batch, pass the list directly:
+If you just want a forward on a batch and every row gets the same treatment, pass
+the list directly:
 
 ```python
 with model.trace(["Hello", "World"]):
-    last = model.lm_head.output[:, -1, :].save()    # shape [2, vocab]
+    last = model.lm_head.output[:, -1, :].save()    # [2, vocab]
 ```
 
-This is the right choice when you do *not* need different interventions per prompt.
+Use invokes instead when each prompt needs its own intervention.
 
-### Comparing clean / corrupt with shared intervention
+### Clean / corrupt with one shared intervention
 
-Use one input invoke per prompt, then an empty invoke that applies a uniform intervention across the batch:
+One input invoke per prompt, then an empty invoke applying a uniform intervention
+across the batch:
 
 ```python
 with model.trace() as tracer:
@@ -157,28 +189,32 @@ with model.trace() as tracer:
         pass
     with tracer.invoke("The Colosseum is in"):
         pass
-    with tracer.invoke():                           # empty: full [2, S]
-        model.transformer.h[5].mlp.output[:] = 0    # ablate uniformly
-        logits = model.lm_head.output[:, -1, :].save()  # [2, vocab]
+    with tracer.invoke():                              # empty: whole [2, S] batch
+        model.transformer.h[5].mlp.output[:] = 0       # ablate uniformly
+        logits = model.lm_head.output[:, -1, :].save() # [2, vocab]
 ```
-
-## Interpretation tips
-
-- **Pre-batching vs invokes** are equivalent for *plain* runs. Use invokes when each prompt needs its own intervention or you want side-by-side baseline/condition logits in one trace.
-- **Empty invokes operate on the *combined* batch.** Their interventions affect every prompt simultaneously, which is what you usually want for fair comparisons.
-- **Order matters: invokes run serially in definition order.** A variable defined in invoke 1 is visible in invoke 2 (provided it has been materialized - hence barriers when both touch the same module).
-- **Save inside the trace, not after.** `model.lm_head.output[:, -1, :].save()` inside an invoke. If you forget `.save()`, the value is gone.
 
 ## Gotchas
 
-- Multiple input invokes require the model to implement batching. `LanguageModel` does. Base `NNsight` does not - use one input invoke + empty invokes, or pre-batch the input.
-- Inside one invoke, modules must be accessed in forward order. To read modules in arbitrary order, use multiple empty invokes.
-- Cross-invoke variables on the *same* module need a barrier. See `docs/usage/barrier.md`.
-- A `tracer.barrier(n)` requires exactly `n` calls to `barrier()`. If you have a non-participating extra invoke, do not include it in the count.
+- **Multiple input invokes need a batching model.** `TransformersModel` batches; the
+  base `NNsight` does not — use one input invoke + empty invokes, or pre-batch.
+- **Read modules in forward order within one invoke.** To read in a different order,
+  use another (empty) invoke — a separate worker gets its own pass.
+- **A cross-invoke read must park past the binder first**, and a consumer that
+  writes cannot park at all — give that one a barrier. Reading a name the producer
+  has not bound yet raises `NameError`. See `docs/usage/barrier.md`.
+- **Prompts of different lengths are padded to the batch's longest.** An absolute
+  position index therefore means a different token depending on what else is in the
+  batch; `[:, -1]` is the one that holds. See
+  `docs/usage/invoke-and-batching.md`.
+- **`tracer.barrier(n)` needs exactly `n` callers** — do not count a
+  non-participating invoke.
+- **A GPT-2 block's `.output` is a plain tensor**; overwrite the whole tensor
+  (`h[L].output = x`) rather than an in-place slice of a tuple element.
 
 ## Related
 
-- `docs/usage/invoke-and-batching.md` - The full reference for invokes, empty invokes, and batching.
+- `docs/usage/invoke-and-batching.md` — invokes, empty invokes, batching.
 - `docs/usage/barrier.md`
-- [activation-patching](activation-patching.md) - The canonical example of a same-module cross-invoke pattern.
+- [activation-patching](activation-patching.md) — the canonical same-module cross-invoke pattern.
 - [ablation](ablation.md), [steering](steering.md)

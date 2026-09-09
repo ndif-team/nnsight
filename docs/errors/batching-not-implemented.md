@@ -1,101 +1,83 @@
 ---
-title: Batching Is Not Implemented
-one_liner: "NotImplementedError: Batching is not implemented for this model — multiple input invokes used on a model without _prepare_input/_batch."
+title: Model Does Not Support Batching Multiple Invokes
+one_liner: "NotImplementedError: <ModelClass> does not support batching multiple invokes — two or more input invokes on a model whose _batch() isn't implemented."
 tags: [error, batching, setup]
-related: [docs/usage/invoke-and-batching.md, docs/concepts/batching-and-invokers.md]
-sources: [src/nnsight/intervention/batching.py:104, src/nnsight/intervention/batching.py:181]
+related: [docs/usage/invoke-and-batching.md, docs/concepts/batching-and-invokers.md, docs/usage/extending.md]
+sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/batching.py, src/nnsight/modeling/transformers.py]
 ---
 
-# Batching Is Not Implemented
+# Model Does Not Support Batching Multiple Invokes
 
 ## Symptom
 
 ```
-NotImplementedError: Batching is not implemented for this model. Multiple invokers with inputs require `_prepare_input()` and `_batch()` methods on your model class (see `LanguageModel` for a reference implementation). Without these methods, you can still use one invoke with input and additional empty invokes (no arguments) — empty invokes operate on the entire batch and are useful for breaking up interventions to avoid execution-order conflicts.
+NotImplementedError: NNsight does not support batching multiple invokes
+```
+
+The class name is whatever model you used — e.g. a custom `NNsight` subclass prints
+its own name.
+
+`TransformersModel` implements batching, so it won't hit this for ordinary text
+inputs; it raises its own, more specific messages only for un-batchable multimodal
+inputs (`TransformersModel._batch_pipe` / `._batch_forward`):
+
+```
+NotImplementedError: Batching multimodal generate inputs isn't supported; pass a single text/images payload.
+NotImplementedError: Can't batch these inputs; pass text or token ids.
 ```
 
 ## Cause
 
-`Batchable._batch` raises `NotImplementedError` by default (`src/nnsight/intervention/batching.py:104`). The `Batcher` calls it from `Batcher.batch` whenever a **second (or later) input invoke** is registered (`:181`):
+`Envoy._batch` (`src/nnsight/intervention/envoy.py`) is what combines several
+invokes' inputs into one forward. The base default passes a single invoke straight
+through and raises for two or more:
 
 ```python
-self.batched_args, self.batched_kwargs = batchable._batch(
-    (self.batched_args, self.batched_kwargs), *args, **kwargs
-)
+def _batch(self, invokes, fn):
+    if not invokes:
+        return tuple(), {}
+    if len(invokes) == 1:
+        return invokes[0]
+    raise NotImplementedError(
+        f"{type(self).__name__} does not support batching multiple invokes"
+    )
 ```
 
-The first input invoke just stores its prepared input directly — it never touches `_batch`. So the error is raised only when you try to merge **two or more inputs into a single forward pass**.
+`Batcher.assemble` (`src/nnsight/intervention/batching.py`) calls it once all
+invokes are collected, so the error fires only when **two or
+more invokes contribute input rows**. A single input invoke, or one input invoke
+plus empty invokes, never needs `_batch` to merge anything.
 
-`LanguageModel` overrides `_prepare_input` (tokenizes) and `_batch` (pads + concatenates) so it just works. Bare `NNsight(my_torch_module)` inherits the default implementation and cannot batch arbitrary tensor inputs without help.
-
-## Common triggers
-
-- Multiple `tracer.invoke(...)` calls with different inputs on a `model = NNsight(some_torch_module)`.
-- Wrapping a HuggingFace model directly with `NNsight(hf_model)` instead of `LanguageModel(hf_model, tokenizer=tok)`.
-- Custom subclasses that override `_prepare_input` but forget to override `_batch` (or vice versa).
+`TransformersModel` overrides `_batch_size` (tokenizes / counts rows) and `_batch`
+(pads + concatenates), so it batches out of the box. A bare `NNsight(my_module)`
+inherits the base default and can't merge arbitrary tensor inputs without help.
 
 ## Fix
 
-Three options, in order of preference.
+### Add rows in one invoke, or use empty invokes
 
-**Option 1 — Use `LanguageModel` if it's a HuggingFace LM:**
-
-```python
-# WRONG — bare NNsight doesn't know how to batch tokens
-from nnsight import NNsight
-from transformers import AutoModelForCausalLM
-model = NNsight(AutoModelForCausalLM.from_pretrained("gpt2"))
-with model.trace() as tracer:
-    with tracer.invoke("Hello"): ...
-    with tracer.invoke("World"): ...    # NotImplementedError
-```
-
-```python
-# FIXED — LanguageModel implements _prepare_input + _batch
-from nnsight import LanguageModel
-model = LanguageModel("gpt2")
-with model.trace() as tracer:
-    with tracer.invoke("Hello"): ...
-    with tracer.invoke("World"): ...
-```
-
-**Option 2 — One input invoke + empty invokes:**
-
-Empty invokes (no arguments) skip `_batch` entirely (`src/nnsight/intervention/batching.py:196`) and operate on whatever the first input invoke already batched. This works even on bare `NNsight`.
+Empty invokes (`tracer.invoke()`) contribute no rows and see the whole batch, so
+they never touch `_batch`. This works on bare `NNsight`, and is the usual way to
+split interventions that would otherwise conflict on execution order:
 
 ```python
 with model.trace() as tracer:
-    with tracer.invoke(input_tensor):         # one input invoke
-        a = model.layer_5.output.save()
-    with tracer.invoke():                     # empty invoke — full batch, new thread
-        b = model.layer_2.output.save()
+    with tracer.invoke(input_tensor):        # one input invoke
+        a = model.layer5.output.save()
+    with tracer.invoke():                    # empty invoke — whole batch, new worker
+        b = model.layer2.output.save()
 ```
 
-**Option 3 — Implement `_prepare_input` and `_batch` on your model class:**
+### Or teach the model to batch
 
-```python
-class MyModel(NNsight):
-    def _prepare_input(self, *args, **kwargs):
-        # turn raw user input into (args, kwargs, batch_size)
-        x = args[0]
-        return (x,), kwargs, x.shape[0]
-
-    def _batch(self, batched_input, *args, **kwargs):
-        (b_args, b_kwargs) = batched_input
-        merged = torch.cat([b_args[0], args[0]], dim=0)
-        return (merged,) + b_args[1:], b_kwargs
-```
-
-See `LanguageModel` (`src/nnsight/modeling/language.py`) for a real-world reference implementation.
-
-## Mitigation / how to avoid
-
-- Reach for `LanguageModel` whenever the underlying model is a HuggingFace causal LM — batching is already wired.
-- If you only need to break interventions across multiple "passes" (not actually batch new inputs), use one input invoke + empty invokes.
-- When subclassing `NNsight` for a non-LM model, implement both `_prepare_input` and `_batch` together.
+`TransformersModel` overrides `_batch_size` (counts rows) and `_batch` (pads and
+concatenates), so HuggingFace models batch out of the box — reach for it rather
+than `NNsight(hf_model)`. For a non-HF model, implement the same two methods on
+your subclass: see [docs/usage/extending.md](../usage/extending.md), which carries
+the recipe and a worked example.
 
 ## Related
 
-- `docs/usage/invoke-and-batching.md`
-- `docs/concepts/batching-and-invokers.md`
-- `src/nnsight/modeling/language.py` (reference implementation)
+- [docs/usage/invoke-and-batching.md](../usage/invoke-and-batching.md)
+- [docs/concepts/batching-and-invokers.md](../concepts/batching-and-invokers.md)
+- [docs/usage/extending.md](../usage/extending.md)

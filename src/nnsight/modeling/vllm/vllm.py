@@ -1,521 +1,1083 @@
+"""Trace interventions on a vLLM inference engine.
+
+vLLM runs the model in its own worker process, so a trace cannot simply run
+alongside it the way it does for a local ``nn.Module``: this process holds only a
+meta-device copy of the module tree, with no weights to hook. The intervention
+therefore travels *to* the model. Each invoke's worker is serialized into its
+request's ``SamplingParams.extra_args`` and rides vLLM's own request pipeline into
+the worker, where [`GPUModelRunner`][nnsight.modeling.vllm.model_runners.GPUModelRunner]
+deserializes it, runs it against the real module, and ships saved values back.
+
+Two consequences shape everything here. Interventions are scoped to a *request*,
+so each invoke carries exactly one prompt — batching several prompts means several
+``tracer.invoke(...)`` blocks, not a list. And because the engine decides when a
+request runs, an activation arrives as a flat ``[total_tokens, hidden]`` slab of
+whatever the scheduler packed into that step rather than a padded ``[batch, seq]``
+stack; [`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher] is what maps a worker
+onto its own tokens within it.
+"""
+
+from __future__ import annotations
+
 import atexit
-import uuid
+import contextlib
+import os
+import re
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 
-from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
-from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.inputs import TokensPrompt
+from ...intervention.eproperty import eproperty
+from ...intervention.serialization import dumps
+from ..mixins.remotable import Remotable
 
-from vllm import LLM
-from vllm.distributed import (
-    destroy_distributed_environment,
-    destroy_model_parallel,
-    init_distributed_environment,
-    initialize_model_parallel,
-)
-from vllm.config import set_current_vllm_config
-from vllm.engine.arg_utils import EngineArgs
-from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.entrypoints.llm import LLM
-
-from ...intervention.envoy import eproperty
-from ...intervention.tracing.globals import Globals
-from ...intervention.tracing.tracer import ScanningTracer
-from ...intervention.tracing.util import push_variables
-from ..mixins import RemoteableMixin
-from .sampling import NNsightSamplingParams
-from ...intervention.serialization import save as serialize
-from ... import save
-from ... import CONFIG
-from .engines.engine import NNsightLLMEngine
-from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
-
-
-CONFIG.APP.CROSS_INVOKER = False
 if TYPE_CHECKING:
     from torch.nn import Module
 
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
 
+class VLLM(Remotable):
+    """A vLLM engine whose internals can be traced.
 
-class VLLM(RemoteableMixin):
-    """NNsight wrapper to conduct interventions on a vLLM inference engine.\
+    Interventions are written exactly as for any other model — the module tree
+    mirrors the architecture vLLM loaded — but they run inside the engine's worker
+    process. Sampling settings (``temperature``, ``max_tokens``, ``top_p``, ...)
+    are passed to ``trace``/``invoke`` rather than configured on the model, since
+    each invoke is its own vLLM request. Read generated tokens through
+    ``model.logits`` / ``model.samples`` under ``tracer.iter``, or the whole
+    finished request through ``tracer.result``.
+
+    Examples:
+        Single prompt, edit an activation, read the logits::
+
+            >>> model = VLLM("gpt2", dispatch=True)
+            >>> with model.trace("The Eiffel Tower is in", temperature=0.0):
+            ...     model.transformer.h[8].output[:] = 0
+            ...     logits = model.logits.save()
+            >>> model.tokenizer.decode(logits.argmax(dim=-1))
+
+        Several prompts is several ``invoke`` blocks (each is one request), not a
+        list — a shared save escapes each into its own name::
+
+            >>> with model.trace(temperature=0.0) as tracer:
+            ...     with tracer.invoke("The Eiffel Tower is in"):
+            ...         a = model.logits.save()
+            ...     with tracer.invoke("The capital of Japan is"):
+            ...         b = model.logits.save()
+
+        Streaming with ``mode="async"`` — saves arrive on the finished output::
+
+            >>> model = VLLM("gpt2", dispatch=True, mode="async")
+            >>> with model.trace("Hello", max_tokens=5) as tracer:
+            ...     logits = model.logits.save()
+            >>> async for output in tracer.backend:  # doctest: +SKIP
+            ...     last = output
+            >>> last.saves["logits"]                 # doctest: +SKIP
+
+        CUDA graphs on, at the cost of declaring up front which locations a
+        trace may touch (see [`taps`][nnsight.modeling.vllm.interleaver])::
+
+            >>> model = VLLM("gpt2", dispatch=True, taps=["transformer.h.*.output"])
+            >>> with model.trace("The Eiffel Tower is in", temperature=0.0):
+            ...     model.transformer.h[8].output[:] = 0          # in place
+            ...     hidden = model.transformer.h[6].output.clone().save()
+
+        A GPU-less client running a trace on a remote nnsight-serve engine — the
+        client only builds a meta tree and never dispatches::
+
+            >>> model = VLLM("gpt2")                                  # no GPU needed
+            >>> with model.trace("Hello", serve="http://host:8000"):  # doctest: +SKIP
+            ...     logits = model.logits.save()
 
     Attributes:
-        - vllm_entrypoint (vllm.LLM): vLLM language model.
-        - tokenizer (vllm.transformers_utils.tokenizer.AnyTokenizer): tokenizer.
-        - logits (eproperty): logit tensor.
-        - samples (eproperty): sampled token ids.
-
-    .. code-block:: python
-        from nnsight.models.VLLM import VLLM
-        from vllm import SamplingParams
-
-        model = VLLM("gpt2")
-
-        prompt = ["The Eiffel Tower is in the city of"]
-
-        with model.trace(prompt, temperature=0.0, top_p=0.95, stop=['.']) as tracer:
-            model.transformer.h[8].output[-1][:] = 0
-
-            output = model.output.save()
-
-        print(model.tokenizer.decode(output.value.argmax(dim=-1)[-1]))
+        vllm_entrypoint: The underlying ``vllm.LLM`` (sync) or ``AsyncLLM``
+            (async), or None until dispatch.
+        tokenizer: The tokenizer vLLM resolved for the checkpoint.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        mode: str = "sync",
+        taps: Iterable[str] = (),
+        **kwargs: Any,
+    ) -> None:
+        self.vllm_entrypoint = None
+        self.tokenizer = None
+        # Locations a CUDA-graph engine serves, as patterns until dispatch
+        # resolves them against the module tree (see `_resolve_taps`). Empty
+        # means the engine runs eagerly and every location is served.
+        self.taps: tuple[str, ...] = tuple(taps)
+        # ``mode="async"`` builds vLLM's streaming ``AsyncLLM`` instead of the
+        # synchronous ``LLM``; a trace then yields its outputs as they generate
+        # through ``async for output in tracer.backend``.
+        self._async_engine = mode == "async"
+        # Whether this construction brought up the process group — so only then do we
+        # tear it down (on dispatch and at exit), never a group nnsight found running.
+        self._owns_distributed = False
+        # Edits installed on the engine, so `clear_edits` can reach them; a
+        # cleared one drops out (see registration.Registration.clear).
+        self._installed_edits: list = []
 
-        mode = kwargs.pop("mode", "sync")
-        if mode not in ("sync", "async"):
-            raise ValueError(f"Invalid mode {mode!r}. Must be 'sync' or 'async'.")
-        self._async_engine: bool = mode == "async"
-        self._compat: bool = kwargs.pop("compat", True)
-
-        self.vllm_entrypoint: LLM = None
-        self.tokenizer: "AnyTokenizer" = None
-
+        # Model-parallel init has to happen before `Meta.__init__` opens its
+        # meta-device context: vLLM builds real rank tensors here and later calls
+        # `.tolist()` on them, which a meta tensor cannot serve.
         if not torch.distributed.is_initialized():
+            self._init_distributed()
+            self._owns_distributed = True
+            # Tear down only the group nnsight brought up — not one already running,
+            # and not once per construction (atexit does not dedupe).
+            atexit.register(VLLM._cleanup_distributed)
 
-            import socket
+        # A vLLM parallel layer called ad hoc — a logit lens — takes and returns
+        # one rank's piece, where the caller is holding whole tensors.
+        # `ParallelEnvoy` puts that right; a caller passing `envoys` of their own
+        # replaces it wholesale.
+        from .envoys import parallel_envoys
 
-            def get_free_port():
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.bind(("127.0.0.1", 0))
-                addr, port = s.getsockname()
-                s.close()
-                return port
-
-            port = get_free_port()
-            init_distributed_environment(
-                1,
-                0,
-                f"tcp://127.0.0.1:{port}",
-                0,
-                backend="gloo",
-            )
-
-            # Run model-parallel init under a default VllmConfig and OUTSIDE
-            # the ``init_empty_weights`` context that ``MetaMixin.__init__``
-            # opens for ``_load_meta``. vLLM 0.19+ creates rank tensors
-            # during this call; if torch is in meta-device mode, a later
-            # ``.tolist()`` raises "Cannot copy out of meta tensor".
-            with set_current_vllm_config(VllmConfig()):
-                initialize_model_parallel(
-                    tensor_model_parallel_size=1, pipeline_model_parallel_size=1
-                )
-
-        atexit.register(VLLM._cleanup_distributed)
+        kwargs.setdefault("envoys", parallel_envoys())
 
         super().__init__(*args, **kwargs)
 
-    @eproperty(description="Logits", iterate=True)
-    def logits(self):
-        """The logit tensor produced by the model before sampling.
-
-        Access during a trace to observe or modify logits::
-
-            with model.trace("Hello", temperature=0.0, top_p=1):
-                logits = model.logits.save()
-        """
-
-    @eproperty(description="Sampled token ids", iterate=True)
-    def samples(self):
-        """The sampled token IDs produced by the sampler after logits.
-
-        Access during a trace to observe or modify sampled tokens::
-
-            with model.trace("Hello", temperature=0.8, top_p=0.95, max_tokens=3) as tracer:
-                tokens = list().save()
-                for step in tracer.iter[:]:
-                    tokens.append(model.samples.item())
-        """
-
     @staticmethod
-    def _cleanup_distributed():
-        try:
-            destroy_model_parallel()
-        except Exception:
-            pass
-        try:
-            destroy_distributed_environment()
-        except Exception:
-            pass
+    def _init_distributed() -> None:
+        """Bring up a single-rank gloo process group on a free local port."""
+        import socket
 
-    def _load_meta(self, repo_id: str, **kwargs) -> "Module":
-
-        # no parallelism during initialization
-        kwargs["tensor_parallel_size"] = 1
-        kwargs["pipeline_parallel_size"] = 1
-
-        # creating vLLM Engine args
-        engine_args = EngineArgs(
-            model=repo_id,
-            **kwargs,
+        from vllm.config import VllmConfig, set_current_vllm_config
+        from vllm.distributed import (
+            init_distributed_environment,
+            initialize_model_parallel,
         )
 
-        # creating the vllm engine configuration
-        vllm_config = engine_args.create_engine_config()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
 
-        vllm_config.load_config.device = "meta"
+        init_distributed_environment(1, 0, f"tcp://127.0.0.1:{port}", 0, backend="gloo")
+        with set_current_vllm_config(VllmConfig()):
+            initialize_model_parallel(
+                tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+            )
 
-        # Load the meta-device weights under the vllm_config. Model-parallel
-        # init was already done in VLLM.__init__ outside the meta context.
-        with set_current_vllm_config(vllm_config):
-            loader = DummyModelLoader(vllm_config.load_config)
-            loader.load_weights = lambda *args, **kwargs: None
-            model = loader.load_model(vllm_config, vllm_config.model_config)
+    @staticmethod
+    def _cleanup_distributed() -> None:
+        from vllm.distributed import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+        )
 
+        for teardown in (destroy_model_parallel, destroy_distributed_environment):
+            try:
+                teardown()
+            except Exception:
+                pass
+
+    @eproperty(description="pre-sampling logits for this step")
+    def logits(self, value: Any) -> Any:
+        """The logits for this request's step, before sampling.
+
+        A hookable run-level value like a module's ``.output`` — reading it parks the
+        worker until the engine produces this step's logits; writing it swaps them.
+        Under ``tracer.iter`` each pass sees the next decoded step's logits::
+
+            with model.trace("Hello", temperature=0.0) as tracer:
+                logits = model.logits.save()
+        """
+        return value
+
+    @eproperty(description="token ids drawn from logits this step")
+    def samples(self, value: Any) -> Any:
+        """The token ids the sampler drew from [`logits`][nnsight.modeling.vllm.vllm.VLLM.logits] for this step.
+
+        Read or edit them inside a trace; setting them replaces the tokens the engine
+        continues generation from — force a token::
+
+            with model.trace("Hello", temperature=0.0, max_tokens=3) as tracer:
+                for _ in tracer.iter[:3]:
+                    model.samples = torch.zeros_like(model.samples)  # feed token 0
+        """
+        return value
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _meta_device():
+        """Let the meta tree build on a node with no GPU.
+
+        Constructing the tree makes vLLM pick an attention backend, which probes
+        the GPU's compute capability to choose a flash-attention version. The tree
+        is only ever read for its structure — a client never runs a forward — so on
+        a GPU-less node that probe is answered with a stand-in. A node with a real
+        GPU (a server) answers it itself, so nothing is faked there. A truly
+        CPU-only host (no CUDA at all) selects a CPU backend that never probes, so
+        this is a no-op there too.
+        """
+        if torch.cuda.is_available():
+            yield
+            return
+        from unittest import mock
+
+        with mock.patch("torch.cuda.get_device_capability", return_value=(8, 0)):
+            yield
+
+    def _load_meta(self, repo_id: str, **kwargs: Any) -> "Module":
+        from vllm.config import set_current_vllm_config
+        from vllm.engine.arg_utils import EngineArgs
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+        from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+        from vllm.tokenizers import cached_tokenizer_from_config
+
+        # The meta tree only needs the architecture, so build it single-rank
+        # regardless of the parallelism the real engine will use.
+        kwargs = {
+            **kwargs,
+            "tensor_parallel_size": 1,
+            "pipeline_parallel_size": 1,
+            # Sub-groups of the TP ranks; meaningless — and refused — at tp=1.
+            "decode_context_parallel_size": 1,
+        }
+
+        with self._meta_device():
+            vllm_config = EngineArgs(model=repo_id, **kwargs).create_engine_config()
+            vllm_config.load_config.device = "meta"
+
+            with set_current_vllm_config(vllm_config):
+                loader = DummyModelLoader(vllm_config.load_config)
+                # DummyModelLoader still fills its dummy weights; the tree is only
+                # needed for its structure, so skip the fill entirely.
+                loader.load_weights = lambda *args, **kwargs: None
+                model = loader.load_model(vllm_config, vllm_config.model_config)
+
+        # Rotary embeddings are cached globally by config, so a meta-built entry
+        # would be handed to the real engine on dispatch.
         _ROPE_DICT.clear()
 
+        # Whether any layer is recurrent rather than attention (a hybrid
+        # gated-delta / Mamba trunk, or an attention-free model). Recorded here —
+        # vLLM's model config is the authority — because a tapped engine must
+        # not replay a full graph over such a model's prefill (see `_load`).
+        mc = vllm_config.model_config
+        self._graph_unsafe_prefill = bool(
+            getattr(mc, "is_hybrid", False) or getattr(mc, "is_attention_free", False)
+        )
+
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-        if getattr(self.tokenizer, "pad_token", None) is None:
+        if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         return model
 
-    def _load(self, repo_id: str, **kwargs) -> "Module":
+    # The worker class vLLM instantiates in each of its processes; it installs the
+    # nnsight model runner, which is what deserializes and runs the blocks.
+    _WORKER_CLS = "nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker"
 
-        meta_model = self._load_meta(repo_id, **kwargs)
+    # A ready module (the worker-side runner wrapping the module vLLM already
+    # loaded) takes the base `_wrap` path: nothing to build — no engine, no
+    # meta tree; the caller sets the tokenizer.
 
-        destroy_model_parallel()
-        destroy_distributed_environment()
+    def _load(self, repo_id: str, **kwargs: Any) -> "Module":
+        # A lazily built model already has its meta tree — `Meta.__init__` built one
+        # to write interventions against — and `_update` is about to re-point the
+        # envoy tree at whatever comes back. Building a second, structurally
+        # identical tree here only costs a full architecture instantiation and
+        # repopulates the global rope cache that `_load_meta` then has to clear
+        # again. `dispatch=True` skips `__init__`'s build and arrives here with
+        # nothing, so it still builds.
+        meta_model = self.__dict__.get("_module")
+        if meta_model is None:
+            meta_model = self._load_meta(repo_id, **kwargs)
 
-        # Swap Ray executor for both sync and async paths.
-        _uses_ray = kwargs.get("distributed_executor_backend") == "ray"
-        if _uses_ray:
-            from .executors.ray_workaround import NNsightRayExecutor
+        self._require_v1_model_runner()
 
-            kwargs["distributed_executor_backend"] = NNsightRayExecutor
+        # A traced prompt has to be prefilled in one forward: chunked prefill
+        # would hand a block a slice of its prompt one step and the rest the
+        # next, and vLLM discards the sample of every chunk but the last. Off
+        # unless asked for; with it off a prompt that does not fit a step's token
+        # budget waits for the next step rather than being split (vLLM raises
+        # the budget to max_model_len so one prompt always fits). A caller who
+        # turns it on is told, per request, when a prompt was chunked.
+        kwargs.setdefault("enable_chunked_prefill", False)
+
+        if self.taps:
+            # vLLM's breakable graphs are what let a Python callable run at a
+            # point of every replay (see `.interleaver`). Without them a tap
+            # records nothing and a graph engine would serve no location at all,
+            # so refuse here rather than at the first trace.
+            try:
+                import vllm.compilation.breakable_cudagraph  # noqa: F401
+            except ImportError as error:
+                raise NotImplementedError(
+                    "taps need vLLM's breakable CUDA graphs "
+                    "(vllm.compilation.breakable_cudagraph), which this vLLM "
+                    "does not have. Upgrade vLLM, or drop `taps` for the eager engine."
+                ) from error
+            self.taps = self._resolve_taps(meta_model)
+            # The flag is read by the worker processes, which inherit the environment.
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            if getattr(self, "_graph_unsafe_prefill", False):
+                # A recurrent layer runs a different computation for a prefill
+                # than for a decode step, chosen per batch — a full graph
+                # captured for one composition replays the wrong one for the
+                # other, and the forward is silently wrong (a hybrid trunk's
+                # greedy generation diverges from eager). The compiled engine
+                # avoids this by splitting its graphs around the recurrent op;
+                # breakable graphs run without the compiler, so pin graphs to
+                # pure-decode steps and run prefill eagerly instead. Decode is
+                # where replay pays anyway. A caller's own setting wins.
+                compilation = kwargs.setdefault("compilation_config", {})
+                if isinstance(compilation, dict):
+                    compilation.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
+            kwargs["additional_config"] = {
+                **(kwargs.get("additional_config") or {}),
+                "nnsight_taps": list(self.taps),
+            }
+
+        # Graph replay is what `taps` buy, and what an eager engine forgoes, so
+        # the engine's mode follows from whether there are taps; a caller who
+        # asks for the opposite is told rather than crashed on a duplicate kwarg.
+        asked = kwargs.pop("enforce_eager", None)
+        if asked is not None and bool(asked) == bool(self.taps):
+            raise ValueError(
+                f"enforce_eager={asked!r} contradicts taps={list(self.taps)!r}: "
+                "a tapped engine replays CUDA graphs, an untapped one runs eagerly "
+                "so every location is served. Drop enforce_eager, or change taps."
+            )
+
+        # The real engine brings up its own process group; the one __init__ made
+        # to build the meta tree would collide with it. Only tear down a group this
+        # construction created — never one the caller already had running.
+        if self._owns_distributed:
+            self._cleanup_distributed()
 
         if self._async_engine:
-            # AsyncLLM spawns EngineCore in a subprocess.  When using Ray,
-            # the subprocess needs a running Ray cluster to connect to via
-            # ray.init(address="auto").  Pre-initialize Ray here so the
-            # cluster is available before the subprocess starts.
-            if _uses_ray:
-                import ray
-
-                if not ray.is_initialized():
-                    ray.init()
-            from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.v1.engine.async_llm import AsyncLLM
-
-            engine_args = AsyncEngineArgs(
-                model=repo_id,
-                worker_cls="nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker",
-                enforce_eager=True,
-                **kwargs,
-            )
-            async_llm = AsyncLLM.from_engine_args(engine_args)
-            self.vllm_entrypoint = async_llm
+            self.vllm_entrypoint = self._load_async(repo_id, **kwargs)
         else:
-            llm = LLM(
-                repo_id,
-                worker_cls="nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker",
-                enforce_eager=True,
-                **kwargs,
-            )
-
-            llm.llm_engine.__class__ = NNsightLLMEngine
-
-            self.vllm_entrypoint = llm
+            self.vllm_entrypoint = self._load_sync(repo_id, **kwargs)
 
         return meta_model
 
-    def _prepare_input(
-        self, *args, lora_request=None, **kwargs
-    ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
-        """Normalize a single user input into ``((prompts, params, lora_requests), kwargs, batch_size)``.
+    @staticmethod
+    def _require_v1_model_runner() -> None:
+        """Ask vLLM for the model runner nnsight instruments.
 
-        Accepts one of:
-        - A string prompt (e.g. ``"Hello world"``)
-        - A list of token IDs (e.g. ``[101, 2023, ...]``)
-        - A HuggingFace tokenizer output dict with ``input_ids`` and
-          optional ``attention_mask``
+        vLLM has two GPU model runners. nnsight instruments the original one
+        ([`NNsightGPUWorker`][nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker]
+        swaps in its subclass once the worker has built it, and refuses any other),
+        so the client asks for that one up front rather than letting the engine
+        come up only to be refused in the worker.
 
-        Each invoke must contain exactly one prompt. To process multiple
-        prompts, use separate ``tracer.invoke()`` calls.
+        From vLLM 0.27 the second runner is the *default* for every non-MoE model
+        (`use_v2_model_runner` in vLLM's config: ``is_default_v2_architecture or
+        not is_moe``), so this is the ordinary case rather than an exotic one. The
+        switch is vLLM's own environment variable, which it consults ahead of its
+        defaults, and the engine's worker processes inherit it.
+
+        A caller who has asked for the other runner explicitly is told so, rather
+        than silently overridden or silently uninstrumented.
+        """
+        import os
+
+        key = "VLLM_USE_V2_MODEL_RUNNER"
+        asked = os.environ.get(key)
+        if asked not in (None, "", "0"):
+            raise NotImplementedError(
+                f"{key}={asked!r} selects vLLM's V2 GPU model runner, which "
+                "nnsight does not instrument yet — the engine would run with no "
+                "interventions installed. Unset it to trace, or drop nnsight and "
+                "use vLLM directly for that run."
+            )
+        # Older vLLM has no such setting and ignores it.
+        os.environ[key] = "0"
+
+    def _resolve_taps(self, module: "Module") -> tuple[str, ...]:
+        """Expand the tap patterns into full locations on the module tree.
+
+        A pattern is a module path relative to the model with ``.input`` or
+        ``.output`` on the end, ``*`` standing for one path segment:
+        ``"model.layers.*.output"`` is every decoder layer's output. Resolved
+        against the torch module rather than the envoy tree, which on
+        ``dispatch=True`` is not built yet; the paths are the same.
+        """
+        names = [name for name, _ in module.named_modules() if name]
+        taps = []
+        for tap in self.taps:
+            # A source op — "<module>.source.<op>.output" — is an operation inside
+            # the module's forward. The module part resolves here; the op is
+            # checked on the worker, which is where the forward's source is read.
+            prefix, sourced, rest = tap.partition(".source.")
+            if sourced:
+                op, _, side = rest.rpartition(".")
+            else:
+                prefix, _, side = tap.rpartition(".")
+                op = None
+            pattern = re.escape(prefix).replace(r"\*", r"[^.]+")
+            matched = [name for name in names if re.fullmatch(pattern, name)]
+            if side not in ("input", "output") or not matched or (sourced and not op):
+                raise ValueError(
+                    f"Tap {tap!r} names no module. A tap is a module path ending in "
+                    ".input or .output, where * stands for one path segment — "
+                    "'model.layers.*.output' for every decoder layer's output — or "
+                    "an operation inside a module's forward, "
+                    "'model.layers.10.self_attn.source.qkv_split_0.output'."
+                )
+            # Under the worker's root envoy, which is built with Envoy's default
+            # path — the client's own is not set yet on `dispatch=True`.
+            for name in matched:
+                taps.append(f"model.{name}.source.{op}.{side}" if sourced else f"model.{name}.{side}")
+        return tuple(taps)
+
+    def _load_sync(self, repo_id: str, **kwargs: Any) -> Any:
+        from vllm import LLM
+
+        from .engines.engine import NNsightLLMEngine
+
+        llm = LLM(
+            repo_id,
+            worker_cls=self._WORKER_CLS,
+            # Hooks cannot fire inside a captured CUDA graph, which freezes the
+            # ops it replays — unless the engine has taps, which are recorded
+            # into the graph and replayed with it.
+            enforce_eager=not self.taps,
+            **kwargs,
+        )
+        # step() collects each finished request's saves; see NNsightLLMEngine.
+        llm.llm_engine.__class__ = NNsightLLMEngine
+        return llm
+
+    def _load_async(self, repo_id: str, **kwargs: Any) -> Any:
+        from vllm.engine.arg_utils import AsyncEngineArgs
+        from vllm.v1.engine.async_llm import AsyncLLM
+
+        # AsyncLLM runs its own output-handler loop rather than a synchronous
+        # step(), so saves are collected by the streaming backend instead (see
+        # nnsight.modeling.vllm.async_backend), and no engine subclass is needed.
+        engine_args = AsyncEngineArgs(
+            model=repo_id,
+            worker_cls=self._WORKER_CLS,
+            enforce_eager=not self.taps,
+            **kwargs,
+        )
+        return AsyncLLM.from_engine_args(engine_args)
+
+    def _batch_size(self, *inputs: Any, **kwargs: Any) -> int:
+        """Number of batch rows an invoke contributes — one request, so one row.
+
+        Keyword arguments are sampling settings rather than data, so an invoke with
+        only kwargs contributes nothing and sees the whole batch.
+        """
+        return 1 if inputs else 0
+
+    def _batch(self, invokes: list[tuple], fn: Any) -> tuple:
+        """Turn each invoke into one vLLM request.
+
+        Unlike a stacked-tensor model there is nothing to pad or combine: the
+        engine batches requests itself, so this only converts each invoke's input
+        into a prompt and its kwargs into that request's ``SamplingParams``.
 
         Returns:
-            Tuple of ``((prompts, params, lora_requests), kwargs, batch_size)``.
+            ``((prompts, params, lora_requests), {})`` for the traced call.
         """
+        from vllm import SamplingParams
 
-        prompts = []
-        params = []
-        lora_requests = []
-
-        for arg in args:
-            if arg == []:
-                raise ValueError("Empty list of prompts is not allowed")
-
-            # --- HuggingFace tokenizer dict (e.g. tokenizer("hello")) ---
-            if type(arg) is dict:
-                keys = set(arg.keys())
-                if "input_ids" in keys and keys.issubset(
-                    {"input_ids", "attention_mask"}
-                ):
-                    prompt = self._parse_hf_tokenizer_dict(arg)
-                    prompts.append(prompt)
-                    params.append(NNsightSamplingParams(**kwargs))
-                    lora_requests.append(lora_request)
-                    continue
-
-            # --- Token ID list (e.g. [101, 2023, ...]) ---
-            if type(arg) is list and isinstance(arg[0], int):
-                prompt = TokensPrompt(prompt_token_ids=arg)
-
-            # --- String prompt (e.g. "Hello world") ---
-            elif type(arg) is not list:
-                prompt = arg
-
-            # --- Multi-prompt list (not supported) ---
-            else:
-                raise ValueError(
-                    "Multiple prompts per invoke are not supported. "
-                    "Use separate tracer.invoke() calls for each prompt."
-                )
-
-            param = NNsightSamplingParams(**kwargs)
-            if kwargs:
-                param.is_default_param = False
-
-            prompts.append(prompt)
+        prompts, params, lora_requests = [], [], []
+        for inputs, kwargs in invokes:
+            kwargs = dict(kwargs)
+            lora_requests.append(kwargs.pop("lora_request", None))
+            prompts.append(self._prompt(*inputs))
+            # Which installed edits this request runs — nnsight's, not a sampling
+            # setting; it rides `extra_args` (see `_attach_mediators`).
+            edits = kwargs.pop("edits", None)
+            param = SamplingParams(**kwargs)
+            # Which settings this invoke named, for `_attach_mediators` to leave
+            # alone. Recorded rather than inferred: the value a caller passed
+            # cannot be told from the one it would have had by default, and half
+            # of vLLM's defaults are the obvious thing to type.
+            param.nnsight_named = frozenset(kwargs) | ({"edits"} if edits is not None else set())
+            param.nnsight_edits = self._edit_names(edits)
             params.append(param)
-            lora_requests.append(lora_request)
 
-        # If args were provided, kwargs were already consumed as sampling params above.
-        kwargs = kwargs if not args else {}
+        return (prompts, params, lora_requests), {}
 
-        return (prompts, params, lora_requests), kwargs, len(prompts)
+    def _prompt(self, *inputs: Any) -> Any:
+        """Convert one invoke's input into a vLLM prompt.
 
-    def _parse_hf_tokenizer_dict(self, arg: dict) -> TokensPrompt:
-        """Convert a HuggingFace tokenizer output dict to a vLLM ``TokensPrompt``.
-
-        Handles tensor-to-list conversion, single vs batched sequences,
-        and attention mask filtering.
+        Accepts a string, a list of token ids, a tokenizer's output, or one
+        of vLLM's own prompt dicts (``TokensPrompt``, ``TextPrompt``, and the
+        multimodal forms). A request is one sequence, so anything carrying several
+        prompts is rejected here rather than silently generating from the first.
         """
-        batch_input_ids = arg["input_ids"]
-        batch_attention_mask = arg.get("attention_mask", None)
+        from vllm.inputs import TokensPrompt
 
-        # Convert tensors to lists
-        if isinstance(batch_input_ids, torch.Tensor):
-            batch_input_ids = batch_input_ids.tolist()
-        if isinstance(batch_attention_mask, torch.Tensor):
-            batch_attention_mask = batch_attention_mask.tolist()
+        if len(inputs) != 1:
+            raise ValueError(
+                f"Each invoke takes exactly one prompt, got {len(inputs)}. "
+                "Use a separate tracer.invoke(...) per prompt."
+            )
+        prompt = inputs[0]
 
-        if batch_input_ids == []:
-            raise ValueError("Empty list of token ids is not allowed")
-
-        # Normalize single sequence to batch format
-        if isinstance(batch_input_ids[0], int):
-            batch_input_ids = [batch_input_ids]
-            if batch_attention_mask is not None:
-                batch_attention_mask = [batch_attention_mask]
-
-        if len(batch_input_ids) > 1:
+        # `Mapping`, not `dict`: a tokenizer hands back a `BatchEncoding`, which is
+        # a `UserDict` and so fails an `isinstance(..., dict)` test, which would put
+        # the tokenizer-output path below out of an actual tokenizer's reach.
+        if isinstance(prompt, Mapping):
+            # That output is ours to convert. Anything else is one of vLLM's own
+            # prompt dicts — `TypedDict`s, so plain dicts at runtime — and the
+            # engine knows them better than we do. Taking one of those for tokenizer
+            # output turns `TokensPrompt(...)` into `KeyError: 'input_ids'`.
+            if "input_ids" in prompt:
+                return self._tokenized_prompt(prompt)
+            return prompt
+        if isinstance(prompt, str):
+            return prompt
+        if isinstance(prompt, (list, tuple)):
+            if not prompt:
+                raise ValueError("Empty prompt")
+            if isinstance(prompt[0], int):
+                return TokensPrompt(prompt_token_ids=list(prompt))
             raise ValueError(
                 "Multiple prompts per invoke are not supported. "
-                "Use separate tracer.invoke() calls for each prompt."
+                "Use a separate tracer.invoke(...) per prompt."
             )
+        return prompt
 
-        input_ids = batch_input_ids[0]
-        attention_mask = (
-            batch_attention_mask[0] if batch_attention_mask is not None else None
-        )
+    def _tokenized_prompt(self, inputs: Any) -> Any:
+        """Convert a tokenizer's ``{input_ids, attention_mask}`` output to a prompt.
 
-        # Filter out masked tokens if attention mask is provided
-        if attention_mask is not None:
-            return TokensPrompt(
-                prompt_token_ids=[
-                    t for t, m in zip(input_ids, attention_mask) if m != 0
-                ]
-            )
+        vLLM has no padding to mask — a request is exactly its own tokens — so a
+        mask, if given, selects which ids survive.
+        """
+        from vllm.inputs import TokensPrompt
+
+        input_ids = inputs["input_ids"]
+        mask = inputs.get("attention_mask")
+
+        if isinstance(input_ids, torch.Tensor):
+            input_ids = input_ids.tolist()
+        if isinstance(mask, torch.Tensor):
+            mask = mask.tolist()
+
+        if not input_ids:
+            raise ValueError("Empty prompt")
+        # A tokenizer emits [[ids]] for one prompt and [ids] when unbatched.
+        if isinstance(input_ids[0], list):
+            if len(input_ids) > 1:
+                raise ValueError(
+                    "Multiple prompts per invoke are not supported. "
+                    "Use a separate tracer.invoke(...) per prompt."
+                )
+            input_ids = input_ids[0]
+            mask = mask[0] if mask else None
+
+        if mask is not None:
+            input_ids = [i for i, m in zip(input_ids, mask) if m != 0]
+
         return TokensPrompt(prompt_token_ids=input_ids)
 
-    def _batch(
-        self, batched_inputs, prompts, params, lora_requests, **kwargs
-    ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any], List[Any]], int]:
-        """Combine multiple invokes' prompts and sampling params into a single batch."""
+    @staticmethod
+    def _sampling_kwargs(kwargs: dict) -> dict:
+        """A copy of `kwargs` with generation length spelled the way vLLM spells it.
 
-        kwargs = {**kwargs, **batched_inputs[1]}
-
-        if len(batched_inputs[0]) == 0:
-
-            return (prompts, params, lora_requests), kwargs
-
-        batched_args = batched_inputs[0]
-        batched_kwargs = batched_inputs[1]
-
-        batched_args[0].extend(prompts)
-        batched_args[1].extend(params)
-        batched_args[2].extend(lora_requests)
-        return batched_args, batched_kwargs
-
-    def _serialize_mediators(
-        self,
-        prompts: List[str],
-        params: List[NNsightSamplingParams],
-        lora_requests: List[Any],
-        **kwargs,
-    ) -> Tuple[List[str], List[NNsightSamplingParams], List[Any]]:
-        """Serialize mediators and attach them to sampling params.
-
-        Collects all input mediators from the interleaver, serializes
-        each one into the corresponding ``NNsightSamplingParams.extra_args``,
-        and propagates any root-trace kwargs to params that still carry
-        defaults.
-
-        Returns:
-            ``(prompts, params, lora_requests)`` with mediator data attached.
+        vLLM's is ``max_tokens``; ``max_new_tokens`` is what the rest of nnsight
+        spells it, and is accepted on trace and generate alike, rewritten before it
+        reaches SamplingParams — where an unknown keyword raises rather than being
+        quietly ignored. The copy is what lets a caller pass its own dict through
+        twice (``generate`` hands one to ``trace`` and keeps the original).
         """
+        kwargs = dict(kwargs)
+        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
+        return kwargs
 
-        default_param = NNsightSamplingParams.from_optional()
+    def trace(self, *inputs: Any, **kwargs: Any) -> Any:
+        from .tracer import VLLMTracer
 
-        # Collect all input mediators (those with batch_group, i.e. not empty invokes)
-        input_mediators = []
-        for mediator in self.interleaver.mediators:
-            if mediator.batch_group is not None:
-                mediator.intervention.__source__ = "".join(mediator.info.source)
-                input_mediators.append(mediator)
+        kwargs = self._sampling_kwargs(kwargs)
 
-        # Compute saved_names: parent-frame variable names whose values are in Globals.saves.
-        # These are variables defined in the parent trace scope (e.g., shared lists)
-        # that need to be collected after all invokes complete on the worker.
-        saved_names = []
-        if input_mediators:
-            frame_globals = input_mediators[0].intervention.__globals__
-            saved_names = [
-                name for name, val in frame_globals.items() if id(val) in Globals.saves
-            ]
+        # `serve=url` runs the trace on a remote nnsight-serve engine; `api_key`
+        # rides along with it. Pop both before they reach the base trace.
+        serve = kwargs.pop("serve", None)
+        api_key = kwargs.pop("api_key", None)
 
-        trace_id = str(uuid.uuid4())
+        # A tracer whose worker-building the async/serve backends can call without
+        # running a forward (VLLMTracer.prepare). Keeps the base tracer untouched.
+        kwargs.setdefault("tracer_cls", VLLMTracer)
+        if serve is not None and kwargs.get("backend") is None:
+            from .serve.backend import LocalServeBackend
 
-        param_idx = 0
-        for idx, mediator in enumerate(input_mediators):
-            param = params[param_idx]
-            param.extra_args = {
-                "nnsight_mediator": serialize(mediator),
-                "nnsight_trace_id": trace_id,
-                "nnsight_trace_idx": idx,
-                "nnsight_saved_names": saved_names,
-                "nnsight_expected_count": len(input_mediators),
-            }
-            param_idx += 1
+            kwargs["backend"] = LocalServeBackend(self, serve, api_key=api_key)
+        # On an async engine the trace streams its outputs; the backend submits the
+        # request and yields them, in place of running the forward here.
+        elif (
+            self._async_engine
+            and kwargs.get("backend") is None
+            and not kwargs.get("remote")
+        ):
+            from .async_backend import AsyncVLLMBackend
 
-            # Update the sampling params with any kwargs passed to the root trace
-            for attr, value in kwargs.items():
-                if hasattr(NNsightSamplingParams, attr) and getattr(
-                    param, attr
-                ) == getattr(default_param, attr):
-                    setattr(param, attr, value)
+            kwargs["backend"] = AsyncVLLMBackend(self)
+        # The traced call is the engine request, not the meta module's forward:
+        # the module here has no weights to run.
+        kwargs.setdefault("fn", self._call)
+        return super().trace(*inputs, **kwargs)
 
-        return prompts, params, lora_requests
+    def scan(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse: there is no local forward for a fake-tensor pass to run.
 
-    def __call__(
-        self,
-        prompts: List[str],
-        params: List[NNsightSamplingParams],
-        lora_requests: List[Any],
-        **kwargs,
-    ) -> Any:
-        """Execute synchronous vLLM generation with NNsight interventions.
-
-        Each mediator maps to exactly one prompt/param (1:1).
+        [`scan`][nnsight.modeling.mixins.meta.Meta.scan] reads shapes by running the
+        model's own forward under a fake-tensor mode, on the meta module, with no
+        weights. Here that module is a client-side shell: the forward runs in the
+        engine's worker, on real weights, under ``torch.inference_mode``. Refused
+        up front rather than at the engine, which would build itself and then ask
+        a fake mode to run a request it can't fake.
         """
-
-        prompts, params, lora_requests = self._serialize_mediators(
-            prompts, params, lora_requests, **kwargs
+        raise NotImplementedError(
+            "scan is unavailable on vLLM: it runs the model's forward under a "
+            "fake-tensor mode to propagate shapes, and there is no forward here to "
+            "run — the engine's worker runs the real one, under "
+            "torch.inference_mode. Trace a prompt and read the shapes off the "
+            "activations it serves."
         )
 
-        # Do VLLM generation with NNsight
+    def edit(
+        self,
+        *,
+        name: str | None = None,
+        inplace: bool = True,
+        serve: str | None = None,
+        api_key: str | None = None,
+        backend: Any = None,
+    ) -> Any:
+        """Install a block on the engine, to run for every request it handles.
+
+        The vLLM form of [`Envoy.edit`][nnsight.intervention.envoy.Envoy.edit].
+        An ordinary edit is replayed by the envoy that stores it, which here is
+        the client — where there are no weights, so it would never run. This
+        sends the block to the engine instead, where every request afterwards
+        gets its own copy: requests you trace, and requests submitted by
+        something that has never heard of nnsight.
+
+        What the block saves comes back on that request's output, as
+        ``output.saves`` — the same place a trace's values arrive. For a request
+        you are tracing, read it through ``tracer.result.saves``.
+
+        The block is written like a trace body against the same envoy tree. It
+        belongs to no particular request, so there is nothing to
+        ``tracer.invoke(...)``.
+
+        Args:
+            name: What requests may address this edit by. A request that passes
+                ``edits=[...]`` (to ``trace``, ``invoke`` or a plain ``generate``)
+                runs the named edits it lists **and every edit installed without
+                a name**; a request that passes nothing runs every edit. A name
+                is a tag rather than a key — two edits may share one, and both
+                run when it is asked for. A request naming an edit nothing is
+                installed under fails rather than quietly running nothing.
+            inplace: Only ``True``. An edit here lives on the engine every caller
+                shares, so unlike the local form there is no copy to edit
+                instead.
+            serve: An nnsight-serve URL to install the block on, the counterpart
+                of ``trace(..., serve=url)``. Without it the block goes to this
+                process's own engine.
+            api_key: Sent as the ``ndif-api-key`` header alongside ``serve``.
+            backend: Optional backend for the underlying trace.
+
+        Returns:
+            ``(tracer, edit)`` — the tracer, whose ``iter``/``all`` is what lets
+            the block follow a request across its generated tokens rather than
+            seeing only the prefill; and the handle to
+            [`clear`][nnsight.modeling.vllm.registration.Registration.clear] it
+            with. [`clear_edits`][nnsight.modeling.vllm.vllm.VLLM.clear_edits]
+            clears every one still installed.
+
+        Examples:
+            Read one layer out of everything the engine runs::
+
+                >>> with model.edit() as (tracer, edit):     # doctest: +SKIP
+                ...     hidden = model.model.layers[16].output[0].save()
+                >>> outputs = model.generate(prompts, max_tokens=5)  # doctest: +SKIP
+                >>> outputs[3].saves["hidden"]               # doctest: +SKIP
+                >>> edit.clear()                             # doctest: +SKIP
+
+            Against a served engine, from a client with no GPU::
+
+                >>> with model.edit(serve="http://host:8000") as (tracer, edit):
+                ...     model.model.layers[16].output[0][:] = 0  # doctest: +SKIP
+
+            Named, so a request can choose::
+
+                >>> with model.edit(name="probe") as (tracer, edit):  # doctest: +SKIP
+                ...     score = model.model.layers[16].output[0][-1].norm().save()
+                >>> with model.edit(name="steer") as (tracer, edit2):  # doctest: +SKIP
+                ...     model.model.layers[8].output[0][:] += v
+                >>> outputs = model.generate(prompts, max_tokens=5, edits=["probe"])  # doctest: +SKIP
+                >>> outputs[0].saves["score"]     # the probe ran; the steer did not
+        """
+        from .registration import RegisteringTracer
+
+        if not inplace:
+            raise ValueError(
+                "a vLLM edit is installed on the engine itself, which every "
+                "caller shares — there is no copy to edit instead. Drop "
+                "inplace=False, or trace the requests you want to change."
+            )
+        if name is not None and not isinstance(name, str):
+            raise TypeError(f"edit name must be a string, got {type(name).__name__}")
+        return RegisteringTracer(
+            self, backend=backend, serve=serve, api_key=api_key, name=name
+        )
+
+    @staticmethod
+    def _edit_names(edits: Any) -> list[str] | None:
+        """Normalize an ``edits=`` argument: ``None`` means every edit; else a list of names."""
+        if edits is None:
+            return None
+        if isinstance(edits, str):
+            raise TypeError(
+                f"edits= takes a list of edit names, not a string; write edits=[{edits!r}]"
+            )
+        names = list(edits)
+        for name in names:
+            if not isinstance(name, str):
+                raise TypeError(f"edit names are strings, got {type(name).__name__}: {name!r}")
+        return names
+
+    def _check_edit_names(self, edits: list[str] | None) -> None:
+        """Refuse a name nothing is installed under, when this process holds the engine.
+
+        The worker makes the same check for every request (a served engine's
+        edits are installed over HTTP, which this process cannot see), but here
+        the mistake can be reported at the call rather than as the request's
+        deferred error.
+        """
+        if edits is None or getattr(self, "_serving", False):
+            return
+        installed = {edit.name for edit in self._installed_edits if edit.name is not None}
+        unknown = [name for name in edits if name not in installed]
+        if unknown:
+            raise ValueError(
+                f"edits={edits!r} names {unknown!r}, but no edit is installed under "
+                f"that name (installed: {sorted(installed)!r}). Install it with "
+                "model.edit(name=...), or drop it from the list."
+            )
+
+    def clear_edits(self) -> None:
+        """Clear every edit still installed on the engine.
+
+        The local form drops a list held on the envoy; here each edit lives on
+        the workers, so each is cleared through its own handle — which means this
+        is synchronous-engine only, like `clear` itself. Use `aclear_edits` on an
+        async engine, where it raises rather than half-clearing.
+        """
+        for edit in list(self._installed_edits):
+            edit.clear()
+
+    async def aclear_edits(self) -> None:
+        """`clear_edits`, awaited — the async engine's form.
+
+        A separate method rather than a `clear_edits` that returns something
+        awaitable on an async engine: a coroutine nobody awaits never runs at
+        all, so the sync-looking call would leave every edit installed and say
+        nothing. That is the failure `Registration._rpc` refuses, and it is worth
+        refusing here too — `clear`/`aclear` already come in this pair.
+        """
+        for edit in list(self._installed_edits):
+            await edit.aclear()
+
+    def generate(self, *inputs: Any, **kwargs: Any) -> Any:
+        """Generate — as a trace when used as a ``with`` block, plainly when not.
+
+        ``with model.generate(...)`` is `trace`: vLLM has no forward/generate
+        split, so the two are the same thing and generation length is
+        ``max_tokens`` (``max_new_tokens`` is accepted and rewritten). Read the
+        generated tokens through ``model.logits``/``model.samples`` under
+        ``tracer.iter``, or through ``tracer.result``.
+
+        Called without a ``with`` block it just runs the engine and hands back
+        vLLM's request outputs, so an edit's values — which arrive on the
+        output — can be read without reaching past the model for
+        ``model.vllm_entrypoint``::
+
+            >>> with model.edit() as (tracer, edit):              # doctest: +SKIP
+            ...     hidden = model.model.layers[16].output[0].save()
+            >>> outputs = model.generate(prompts, max_tokens=5)   # doctest: +SKIP
+            >>> outputs[5].saves["hidden"]                        # doctest: +SKIP
+
+        Which of the two it is comes from the call site — the same test
+        [`traceable`][nnsight.intervention.envoy.traceable] makes for a method
+        used either way: capturing a block that is not there raises, and that is
+        the signal to run plainly.
+        """
+        from ...tracing.tracer import WithBlockNotFoundError
+
+        tracer = self.trace(*inputs, **kwargs)
+        try:
+            # Idempotent, and reads the caller's frame from the same depth
+            # `__enter__` would — so this only asks the question, and entering
+            # the block later still captures normally.
+            tracer.capture()
+        except WithBlockNotFoundError:
+            return self._generate(*inputs, **kwargs)
+        return tracer
+
+    def _generate(self, *inputs: Any, **kwargs: Any) -> Any:
+        """Run the engine with no block of this caller's own.
+
+        Registered blocks still run — they belong to the engine, not to the
+        caller — so their values come back on the outputs this returns.
+
+        Args:
+            *inputs: One prompt, or a list of them. Unlike a trace there is no
+                invoke to be one-per-request, so a list is simply a batch.
+            **kwargs: Sampling settings for the whole batch.
+        """
+        from vllm import SamplingParams
+
+        if not self.dispatched:
+            self.dispatch()
+
+        kwargs = self._sampling_kwargs(kwargs)
+        lora_request = kwargs.pop("lora_request", None)
+        # Which installed edits these requests run; see `edit`. Rides the same
+        # field a trace's block does, so the worker reads it the same way.
+        edits = self._edit_names(kwargs.pop("edits", None))
+        self._check_edit_names(edits)
+        params = SamplingParams(**kwargs)
+        if edits is not None:
+            params.extra_args = {**(params.extra_args or {}), "nnsight_edits": edits}
+
+        prompts = inputs[0] if len(inputs) == 1 else list(inputs)
+        if self._async_engine:
+            # An async engine has no call that runs to completion, so this cannot
+            # hand back outputs — it hands back the await that will. Same shape
+            # either way: `outputs = model.generate(...)` on a sync engine,
+            # `outputs = await model.generate(...)` on an async one.
+            return self._generate_async(prompts, params, lora_request)
+        return self.vllm_entrypoint.generate(
+            prompts, params, lora_request=lora_request
+        )
+
+    async def _generate_async(self, prompts: Any, params: Any, lora_request: Any) -> list:
+        """Drive the async engine to completion and collect, as the sync path does.
+
+        Each prompt is its own request, submitted together so the engine batches
+        them, and each is drained to its final output. The collect is done here
+        because nothing else will: the streaming backend runs only for traces
+        nnsight itself submitted, so without this a registered block's values
+        would have no way onto these outputs.
+        """
+        import asyncio
+        import uuid
+
+        from .engines.engine import acollect, attach
+
+        engine = self.vllm_entrypoint
+        if not isinstance(prompts, (list, tuple)):
+            prompts = [prompts]
+
+        async def run(prompt: Any) -> Any:
+            request_id = uuid.uuid4().hex
+            output = None
+            async for output in engine.generate(
+                prompt, params, request_id, lora_request=lora_request
+            ):
+                pass
+            if output is None:
+                return None
+            entry = await acollect(engine, request_id, output)
+            if entry is not None:
+                attach(output, entry)
+            return output
+
+        return list(await asyncio.gather(*(run(prompt) for prompt in prompts)))
+
+    def _call(
+        self, prompts: list, params: list, lora_requests: list, **kwargs: Any
+    ) -> Any:
+        """Run the engine with this trace's workers attached to its requests."""
+        mediators = self._attach_mediators(params, **kwargs)
         outputs = self.vllm_entrypoint.generate(
             prompts, sampling_params=params, lora_request=lora_requests
         )
+        self._collect(mediators, outputs)
+        return outputs
 
-        saves = {}
+    @staticmethod
+    def _collect(mediators: list, outputs: list) -> None:
+        """Bring each request's saved values home to the worker that asked for them.
 
-        # Some of the output objects will have a saves attribute, which contains the saved variables
-        for output in outputs:
-            if hasattr(output, "saves"):
-                saves.update(output.saves)
+        The workers ran in another process, so the values here are new objects: mark
+        them saved in *this* process, and write them into the worker's scope, which
+        is where the tracer reads a block's results from once the run is over. A
+        worker that raised carries its error back too; re-raise the first real one
+        (a ``tracer.stop()`` is control flow and stays silent).
 
-        # Save the variables in our local environment
-        for value in saves.values():
-
-            save(value)
-
-        # Push the variables to the interleaver frame
-        push_variables(self.interleaver.mediators[0].info.frame, saves)
-
-    def trace(self, *inputs, **kwargs):
-        serve = kwargs.pop("serve", None)
-        if serve is not None and kwargs.get("backend") is None:
-            from ...intervention.backends.local_serve import LocalServeBackend
-            from .serve_tracer import ServeInterleavingTracer
-
-            blocking = kwargs.pop("blocking", True)
-            api_key = kwargs.pop("api_key", None)
-            kwargs["backend"] = LocalServeBackend(
-                self, host=serve, blocking=blocking, api_key=api_key
-            )
-            kwargs.setdefault("tracer_cls", ServeInterleavingTracer)
-        else:
-            if "api_key" in kwargs:
-                raise ValueError(
-                    "api_key= requires serve= to specify the server URL"
-                )
-            if (
-                self._async_engine
-                and kwargs.get("backend") is None
-                and not kwargs.get("remote")
-            ):
-                from .async_backend import AsyncVLLMBackend
-
-                kwargs["backend"] = AsyncVLLMBackend(self)
-        return super().trace(*inputs, **kwargs)
-
-    def generate(self, *inputs, **kwargs):
-        """Alias for :meth:`trace` to match the :class:`LanguageModel` API.
-
-        vLLM tracing is inherently multi-token (driven by ``max_tokens``),
-        so there's no separate generate vs forward distinction like there
-        is for HuggingFace causal LMs. ``max_new_tokens`` is accepted for
-        cross-API portability and rewritten to ``max_tokens``.
+        A name can come back more than once — one invoke per request, and one
+        sampled sequence per ``n`` within each — because the block ran once for
+        each. Those are separate values rather than copies of one thing, so they
+        come back as a list, in submission order. A name saved by exactly one run
+        stays that value, which is every trace that does not use several invokes
+        or ``n``; so does one whose runs all saved the same object, as they do for
+        ``tracer.result``, which is the request's single output however many
+        sequences sampled from it.
         """
-        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
-        return self.trace(*inputs, **kwargs)
+        from ...intervention.errors import raise_deferred
+        from ...tracing.tracer import mark
+        from .collect import merge_shared_saves
 
-    def interleave(self, fn: Callable, *args, **kwargs):
-        """Execute the traced function with vLLM, dispatching the engine if needed."""
-        if not self.dispatched and not isinstance(
-            self.interleaver.tracer, ScanningTracer
-        ):
+        per_request_saves = []
+        values: dict[str, list] = {}
+        for output in outputs:
+            # The trace's own names only. `output.saves` also carries whatever a
+            # registered block saved for this request, and those must not be
+            # pushed into the trace's variables.
+            sequences = getattr(output, "nnsight_sequences", None)
+            if not sequences:
+                sequences = [getattr(output, "nnsight_saves", {})]
+            per_request_saves.append(sequences[0])
+            for saves in sequences:
+                for name, value in saves.items():
+                    mark(value)  # results marked after the run; no trace to guard
+                    values.setdefault(name, []).append(value)
+
+        # A name bound and saved above the invoke blocks is one object locally,
+        # and ships back once per request with that request's writes; merge those
+        # copies element-wise so the result reads as it would locally. The merged
+        # containers are new objects; mark them so the result push keeps them.
+        shared = merge_shared_saves(mediators, per_request_saves)
+        for value in shared.values():
+            mark(value)
+
+        for name, found in values.items():
+            if name in shared:
+                continue
+            value = found[0]
+            # Several runs, but one object: `tracer.result` is the request's one
+            # output, served to every sequence's block, so it is not `n` values
+            # of anything. Identity is preserved across the collect, which pickles
+            # them together.
+            if len(found) > 1 and any(other is not value for other in found):
+                value = found
+                mark(value)  # the list itself is new, and is what gets pushed
+            for mediator in mediators:
+                mediator.lcls[name] = value
+
+        for output in outputs:
+            raise_deferred(getattr(output, "nnsight_error", None))
+
+    def _attach_mediators(self, params: list, **kwargs: Any) -> list:
+        """Serialize each invoke's worker into its request's ``extra_args``.
+
+        ``extra_args`` is a stock ``SamplingParams`` field that vLLM already carries
+        through to the worker, so the worker needs no transport of its own. Sampling
+        settings given to ``trace`` itself fill in for any request that did not set
+        them on its own invoke.
+
+        A worker with no batch group is an invoke with no prompt — it has no vLLM
+        request to ride, since each invoke *is* one request. An empty ``tracer.invoke()``
+        with a do-nothing body is a harmless no-op and is dropped, but one carrying
+        interventions would vanish silently, so that is refused. Unknown ``trace``
+        keyword arguments (a typo'd sampling setting) are refused too, rather than
+        silently ignored the way the fill loop otherwise would.
+
+        "Did not set them" is what the invoke recorded in `_batch`, not "still
+        equals vLLM's default". The two are not the same: ``temperature=1.0`` and
+        ``max_tokens=16`` *are* the defaults, so inferring it from the value would
+        let the trace-level setting overwrite an invoke that asked for one of them
+        while honouring a neighbouring ``temperature=0.99``.
+
+        Returns:
+            The workers that were attached, in request order.
+        """
+        from vllm import SamplingParams
+
+        from ...tracing.tracer import skippable
+
+        attached = []
+        for mediator in self.interleaver.mediators:
+            if mediator.batch_group is not None:
+                attached.append(mediator)
+            elif mediator.node is not None and skippable(mediator.node):
+                raise ValueError(
+                    "A `tracer.invoke(...)` with no prompt has no vLLM request to run "
+                    "on, so its interventions would be silently dropped. Each invoke is "
+                    "one request — give every invoke a prompt, or remove the empty invoke."
+                )
+
+        # `edits=` on the trace: the installed edits every invoke runs unless it
+        # named its own. Not a SamplingParams field, so it is taken out before
+        # the check below and rides `extra_args` beside the block.
+        kwargs = dict(kwargs)
+        trace_edits = self._edit_names(kwargs.pop("edits", None))
+        # Not on an nnsight-serve server: its edits arrive over HTTP, unseen by
+        # this list, and the worker checks every request anyway.
+        if not getattr(self, "_serving", False):
+            self._check_edit_names(trace_edits)
+            for param in params:
+                self._check_edit_names(getattr(param, "nnsight_edits", None))
+
+        default = SamplingParams()
+        for attr in kwargs:
+            if not hasattr(default, attr):
+                raise TypeError(
+                    f"unexpected trace argument {attr!r}: not a vLLM SamplingParams "
+                    "field. trace()/invoke() keyword arguments are sampling settings "
+                    "(temperature, top_p, max_tokens, ...)."
+                )
+
+        for mediator, param in zip(attached, params):
+            param.extra_args = {"nnsight_mediator": dumps(mediator)}
+            named = getattr(param, "nnsight_named", frozenset())
+            edits = getattr(param, "nnsight_edits", None) if "edits" in named else trace_edits
+            if edits is not None:
+                param.extra_args["nnsight_edits"] = edits
+            # A prefix-cached token is served from the KV cache without a forward
+            # pass, so no hook fires for it and the intervention silently sees a
+            # short activation — the trace reads only the tokens that were
+            # recomputed. That is invisible at the call site (no error, just fewer
+            # rows), and it bites exactly when a prompt repeats or shares a prefix
+            # with an earlier one, which is the normal case for a dataset sweep.
+            # Interventions are worth more than the cache hit, so force the
+            # recompute. Older vLLM has no such field; there the cache is not
+            # consulted this way and the read is whole anyway.
+            if hasattr(param, "skip_reading_prefix_cache"):
+                param.skip_reading_prefix_cache = True
+            for attr, value in kwargs.items():
+                if attr not in named:
+                    setattr(param, attr, value)
+
+        return attached
+
+    def interleave(self, fn: Callable, *args: Any, **kwargs: Any) -> Any:
+        """Dispatch the trace to the engine instead of running it here.
+
+        Overrides [`interleave`][nnsight.intervention.envoy.Envoy.interleave], which starts
+        each worker in this process alongside the model's forward. There is no
+        forward to run here — the weights live in the engine's worker — so the
+        workers are not started; they are serialized onto the requests by
+        `_call` and started by the model runner on the other side.
+        """
+        if not self.dispatched:
             self.dispatch()
+        # The caller (VLLMTracer.execute) cancels the interleaver in its own finally,
+        # covering both this normal return and a failure before it — so no cancel here.
+        return fn(*args, **kwargs)
 
-        try:
-            fn(*args, **kwargs)
-        finally:
-            self.interleaver.check_cache_full()
-            self.interleaver.cancel()
+    def _remoteable_model_key(self) -> str:
+        return self.args[0]
+
+    @classmethod
+    def _remoteable_from_model_key(cls, model_key: str, **kwargs: Any) -> "VLLM":
+        return cls(model_key, **kwargs)
 
     def _remoteable_persistent_objects(self) -> dict:
-        persistent_objects = super()._remoteable_persistent_objects()
-        persistent_objects["Tokenizer"] = self.tokenizer
-        return persistent_objects
+        objects = super()._remoteable_persistent_objects()
+        objects["Tokenizer"] = self.tokenizer
+        return objects
 
-    def __getstate__(self):
-
+    def __getstate__(self) -> dict:
         state = super().__getstate__()
+        # The engine is a live process handle; the far side has its own.
         state["vllm_entrypoint"] = None
         if self.tokenizer is not None:
             self.tokenizer._persistent_id = "Tokenizer"
-        state["tokenizer"] = self.tokenizer
         return state
-
-    def __setstate__(self, state):
-        super().__setstate__(state)
-        self.vllm_entrypoint = state["vllm_entrypoint"]
-        self.tokenizer = state["tokenizer"]

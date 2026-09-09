@@ -1,34 +1,69 @@
-from vllm.v1.worker import gpu_worker
+"""The one place nnsight gets into a vLLM worker process.
+
+vLLM's worker builds its model runner in ``init_device``; once it has, the
+runner's class is swapped for nnsight's subclass, which adds behaviour and no
+constructor state. `_load` names this class as vLLM's ``worker_cls``, a supported
+engine argument, so no part of vLLM's own startup is patched — and a runner
+nnsight does not instrument is refused here, in the worker, rather than coming up
+silently uninstrumented.
+"""
+
+from __future__ import annotations
+
+import pickle
+from typing import Any, Optional
+
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_worker import Worker
+
 from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
-from vllm.v1.worker import gpu_model_runner
 
 
-class NNsightGPUWorker(gpu_worker.Worker):
-    """Custom vLLM GPU worker that uses :class:`NNsightGPUModelRunner`.
+class NNsightGPUWorker(Worker):
+    """A vLLM GPU worker whose model runner interleaves interventions."""
 
-    Monkey-patches the default ``GPUModelRunner`` class before
-    initialization so vLLM creates NNsight-aware model runners
-    that can execute intervention code during model forward passes.
-    """
-
-    def __init__(self, *args, **kwargs):
-
-        gpu_model_runner.GPUModelRunner = NNsightGPUModelRunner
-
-        super().__init__(*args, **kwargs)
-
-    def init_device(self):
-        # NNsightRayExecutor sets distributed_executor_backend to a class
-        # instead of the string "ray". vLLM's init_device skips
-        # local_world_size checks for "ray" backends, so normalize the
-        # value before calling super().
-        backend = self.parallel_config.distributed_executor_backend
-        if backend is not None and not isinstance(backend, str):
-            from vllm.v1.executor.ray_executor import RayDistributedExecutor
-
-            if issubclass(backend, RayDistributedExecutor):
-                self.parallel_config.distributed_executor_backend = "ray"
+    def init_device(self) -> None:
         super().init_device()
+        runner = self.model_runner
+        if type(runner) is not GPUModelRunner:
+            raise NotImplementedError(
+                f"nnsight instruments vLLM's GPUModelRunner, but this worker built "
+                f"{type(runner).__module__}.{type(runner).__name__} (the V2 runner, "
+                "or a runner from another platform). Unset VLLM_USE_V2_MODEL_RUNNER "
+                "to trace, or drop nnsight and use vLLM directly for that run."
+            )
+        runner.__class__ = NNsightGPUModelRunner
 
-    def collect_nnsight(self, req_ids: list[str], finished_req_ids: list[str] | None = None):
-        return self.model_runner.collect_nnsight(req_ids, finished_req_ids)
+    def collect_nnsight(
+        self,
+        request_ids: list[str],
+        finished_request_ids: Optional[list[str]] = None,
+        outputs: Optional[Any] = None,
+    ) -> Optional[bytes]:
+        """Return this worker's saved values, as ``collective_rpc`` reaches it here.
+
+        ``outputs`` arrives pickled (see ``NNsightLLMEngine.step``): the RPC is
+        msgpack-encoded on the way in, and bytes are what it carries natively.
+        """
+        if isinstance(outputs, bytes):
+            outputs = pickle.loads(outputs)
+        return self.model_runner.collect_nnsight(
+            request_ids, finished_request_ids, outputs
+        )
+
+    def nnsight_request_count(self) -> int:
+        """How many requests this worker's runner still tracks, via ``collective_rpc``."""
+        return self.model_runner.nnsight_request_count()
+
+    def nnsight_register(
+        self, registration_id: str, payload: bytes, name: str | None = None
+    ) -> None:
+        """Install a block this worker runs for every request (``collective_rpc``).
+
+        ``name`` is what requests may address it by (``edits=[...]``).
+        """
+        return self.model_runner.nnsight_register(registration_id, payload, name=name)
+
+    def nnsight_clear_registered(self, registration_id: str) -> None:
+        """Remove a registration from this worker (``collective_rpc``)."""
+        return self.model_runner.nnsight_clear_registered(registration_id)

@@ -3,162 +3,194 @@ title: Modification Pitfalls
 one_liner: Common mistakes when modifying activations — in-place vs replacement, tuple outputs, and aliasing the "before" state.
 tags: [gotcha, intervention, modify]
 related: [docs/usage/access-and-modify.md, docs/gotchas/cross-invoke.md]
-sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/interleaver.py:198]
+sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, src/nnsight/intervention/interleaver.py]
 ---
 
 # Modification Pitfalls
 
 ## TL;DR
-- `output[:] = v` mutates the existing tensor in place; `output = v` rebinds (and triggers a `swap` event that replaces what the model sees). They are not interchangeable.
-- In transformers <5, transformer blocks returned a tuple `(hidden, ...)` — indexing `output[0]` was required. In transformers 5+ they return a plain tensor, so `output[:] = ...` and `output = ...` work directly. Some submodules (e.g. attention) still return tuples; index `output[0]` for those.
-- If you want to keep the "before" state of a value you're about to mutate, `.clone().save()` it first — otherwise `before` and `after` alias the same modified tensor.
-- For activation patching where two invokes both read the same module, `.clone()` the captured slice or it gets overwritten when the second invoke writes.
+- `output[:] = v` mutates the existing tensor in place; `output = v` is an assignment through the `eproperty` descriptor, which hands the model a different object to continue with. They are not interchangeable, but both take effect.
+- A GPT-2 (transformers 5+) **block** `.output` is a **plain tensor** `(batch, seq, hidden)` — index/edit it directly. Do **not** write `output[0]` expecting a tuple. Some *sub*modules (e.g. attention) still return tuples — for those, `.output[0]` is the tensor.
+- Assigning into a tuple output — `attn.output[0] = t` — raises `TypeError` (tuples don't support item assignment). Rebuild the tuple and assign the whole thing, or edit in place: `attn.output[0][:] = ...`.
+- To keep the "before" state of a value you're about to mutate, `.clone().save()` it first — otherwise `before` and `after` alias the same modified tensor.
+- Prefer replacing a **whole** tensor over an in-place slice-assign into a *tuple element* view across a barrier — the latter can crash. Assign the whole value instead.
+- A replacement with no connection to the value it replaced — `output = torch.zeros_like(output)` — cuts autograd there. If every path is cut (a whole block's `.output`), a later upstream `.grad` read fails loudly; if other paths bypass the replaced module (an MLP or attention output — the residual stream survives), upstream `.grad` reads succeed and are silently missing that module's contribution. Derive it from the old value, or write in place.
+- Editing an **activation** is scoped to that run; editing a **weight** is permanent, and the syntax looks identical. There is no warning.
 
 ---
 
 ## In-place `[:] = ` vs replacement `=`
 
 ### Symptom
-You expect a fresh tensor in the model's forward path, but downstream computations behave as if the original was used (or vice versa). Or: `output[0][:] = 0` works but `output[0] = torch.zeros(...)` silently does nothing visible to the model.
+`output[:] = 0` visibly changes the model; `output = torch.zeros(...)` also changes the model but via a different mechanism. Confusion when one is expected and the other used.
 
 ### Cause
-Two completely different mechanisms:
+- `output[:] = v` is `__setitem__` on the tensor `.output` handed you. It mutates storage the forward pass already holds a reference to, so the change is visible.
+- `output = v` is an assignment through a data descriptor. `.output` is an `eproperty`
+  (`src/nnsight/intervention/eproperty.py`) whose `__set__` calls `Mediator.swap(...)`,
+  sending a `SWAP` event so the interleaver substitutes your value into the forward pass for
+  the rest of the run. Nothing in your own namespace is rebound — the name on the left is a
+  module attribute, not a local.
 
-- `output[:] = v` is a Python `__setitem__` on the tensor returned by `.output`. It mutates the underlying storage. The model's forward pass already holds a reference to that tensor, so the mutation is visible.
-- `output = v` is a Python rebind on a name in *your* worker thread. Without nnsight, that would just shadow the local name and the model would never know. nnsight intercepts this via the `eproperty.__set__` descriptor (`src/nnsight/intervention/interleaver.py:306`), which sends a `SWAP` event to the mediator so the batcher actually replaces the value the model uses for the rest of the forward pass.
-
-So both work, but they have different semantics:
-
-- In-place edits the existing tensor; references to it elsewhere see the change.
-- Replacement substitutes a *new* tensor for downstream code; the original tensor is unchanged.
-
-The two get conflated when users try `output[0] = new_tensor` on a tuple output (e.g. attention modules, which still return tuples) — that's a `__setitem__` on a *tuple*, which raises `TypeError`.
+Both work; they differ in what they touch. In-place edits the existing tensor (other references see it); replacement substitutes a new tensor downstream (the original object is untouched).
 
 ### Wrong code
 ```python
 with model.trace("Hello"):
-    # attention modules still return a tuple in transformers 5+ —
+    # attention still returns a tuple — item assignment on a tuple fails
     # TypeError: 'tuple' object does not support item assignment
-    model.transformer.h[0].attn.output[0] = torch.zeros_like(model.transformer.h[0].attn.output[0])
+    model.transformer.h[0].attn.output[0] = torch.zeros_like(
+        model.transformer.h[0].attn.output[0]
+    )
 ```
 
 ### Right code
 ```python
-with model.trace("Hello"):
-    # transformer blocks return a tensor in transformers 5+ — modify directly
+with model.trace("Hello world"):
+    # a block's output is a plain tensor — edit it directly
     model.transformer.h[0].output[:] = 0
 
-    # OR replace the whole tensor (the eproperty __set__ schedules a swap)
+    # or replace the whole tensor (the setter schedules a SWAP)
     model.transformer.h[0].output = torch.zeros_like(model.transformer.h[0].output)
+```
 
-    # For modules that DO still return a tuple (e.g. attention), use in-place
-    # on the first element or rebuild the tuple:
-    model.transformer.h[0].attn.output[0][:] = 0
-    attn_out = model.transformer.h[0].attn.output
-    model.transformer.h[0].attn.output = (torch.zeros_like(attn_out[0]),) + attn_out[1:]
+For a tuple-returning submodule (attention), edit in place or rebuild the tuple:
+```python
+with model.trace("Hello world"):
+    model.transformer.h[0].attn.output[0][:] = 0          # in-place on the tensor
+    # OR replace the whole tuple:
+    out = model.transformer.h[0].attn.output
+    model.transformer.h[0].attn.output = (torch.zeros_like(out[0]),) + tuple(out[1:])
 ```
 
 ### Mitigation / how to spot it early
-- Ask "am I mutating storage, or substituting a new value?" Both are valid; just don't write `output[0] = new_tensor` on a tuple-returning module.
-- `model.scan(input)` will surface the tuple-vs-tensor structure so you can choose the right pattern before running.
+- Ask "am I mutating storage, or substituting a new value?" Both are valid; just never write `output[0] = new_tensor` on a tuple.
+- `print(module.output)` inside the trace shows whether you have a tensor or a tuple.
 
 ---
 
-## Tuple outputs
+## A replacement built from scratch cuts autograd
 
 ### Symptom
-`AttributeError: 'tuple' object has no attribute 'shape'`, or `TypeError: 'tuple' object does not support item assignment`. Confusion about why `module.output` doesn't behave like a tensor.
+Two symptoms, depending on what was replaced. Replace a **whole block's** `.output` and adding
+a `with loss.backward():` block to read an upstream gradient turns it into an `OutOfOrderError`
+whose location is a raw number:
+
+```
+OutOfOrderError: '139932764543792.grad.i0' was requested but the model already ran past it
+```
+
+Replace a **submodule's** `.output` (an MLP, an attention branch) and there is no error at
+all: upstream gradient reads succeed and return numbers that are quietly wrong.
 
 ### Cause
-Some submodules return a tuple instead of a tensor. The most common in HuggingFace models is the **attention module**, which returns `(attn_out, attn_weights)`. `.output` faithfully gives you that tuple; tensor operations and `.shape` are on the *first* element, not the tuple itself.
+A `.grad` read waits at a location derived from the tensor it belongs to. When you replace an
+activation with a tensor autograd has never seen — `torch.zeros_like(...)`, a fresh
+`torch.randn(...)`, anything loaded from disk — the graph is cut at that point. What happens
+next depends on whether any other path survives:
 
-In transformers <5, transformer blocks themselves also returned tuples. As of transformers 5+, the blocks return a plain tensor, so `model.transformer.h[i].output` *is* the hidden state directly — but submodules like `attn` still return tuples.
+- **Every path cut** (a whole block's `.output` replaced): the gradient the earlier tensor is
+  waiting for is never produced, and the wait is reported against an object id — the loud
+  failure above. Reading the fresh tensor's *own* `.grad` is also loud:
+  `RuntimeError: cannot register a hook on a tensor that doesn't require gradient`.
+- **A bypassed cut** (a submodule's `.output` replaced — the residual stream and sibling
+  branches route around it): upstream `.grad` reads **succeed** and silently return a
+  gradient missing that module's path. Measured on gpt2: replacing `h[3].mlp.output` with a
+  *detached copy of the very same values* leaves the forward pass bit-identical, yet moves
+  the layer-0 gradient's norm from 125,659 to 130,349 — a 45% difference in L2 — the entire
+  MLP-path contribution dropped with no warning.
 
 ### Wrong code
 ```python
-with model.trace("Hello"):
-    # attention output is a tuple — has no .shape
-    print(model.transformer.h[0].attn.output.shape)
+with model.trace("Hello world"):
+    hs = model.transformer.h[0].output
+    model.transformer.h[6].output = torch.zeros_like(model.transformer.h[6].output)
+    loss = model.output.logits.sum()
+    with loss.backward():
+        grad = hs.grad.clone().save()      # OutOfOrderError, id location
+```
 
-    # tuple does not support __setitem__
-    model.transformer.h[0].attn.output[0] = my_replacement
+```python
+with model.trace("Hello world"):
+    hs = model.transformer.h[0].output
+    model.transformer.h[6].mlp.output = torch.zeros_like(model.transformer.h[6].mlp.output)
+    loss = model.output.logits.sum()
+    with loss.backward():
+        grad = hs.grad.clone().save()      # succeeds — silently partial
 ```
 
 ### Right code
 ```python
-with model.trace("Hello"):
-    # access the first element of the attention tuple
-    attn_out = model.transformer.h[0].attn.output[0]
-    print(attn_out.shape)
+with model.trace("Hello world"):
+    hs = model.transformer.h[0].output
+    model.transformer.h[6].output[:] = 0      # in-place: the graph survives
+    loss = model.output.logits.sum()
+    with loss.backward():
+        grad = hs.grad.clone().save()         # a real (here, all-zero) gradient
+```
 
-    # in-place modification of the first element
-    model.transformer.h[0].attn.output[0][:] = 0
+Any replacement *derived* from the old value works the same way —
+`output = output * 0`, `output = output + steering`, `output = torch.cat([...])`. The rule is
+that the new value has to descend from the old one.
 
-    # full-tuple replacement when you need a different first element
-    out = model.transformer.h[0].attn.output
-    model.transformer.h[0].attn.output = (my_replacement,) + out[1:]
+### Mitigation / how to spot it early
+- If a location in an error message is a long number rather than a module path, it is a
+  `.grad` whose tensor was orphaned by a replacement.
+- The worse case is the one with no error message: a fresh-tensor replacement on a bypassed
+  submodule leaves every upstream gradient quietly missing that module's contribution. No
+  symptom flags it — audit any `= torch.zeros_like(...)`-style replacement whenever
+  gradients are in the experiment.
+- Reach for `[:] =` by default when gradients are anywhere in the experiment.
+
+---
+
+## Tensor vs tuple outputs
+
+### Symptom
+`AttributeError: 'tuple' object has no attribute 'shape'`, or `TypeError: 'tuple' object does not support item assignment`.
+
+### Cause
+In transformers 5+, transformer **blocks** return a plain tensor, so `model.transformer.h[i].output` *is* the hidden state `(batch, seq, hidden)`. But some submodules still return tuples — GPT-2's **attention** module returns a 2-tuple whose first element is the attention output, so `.output` is that tuple and tensor ops live on `.output[0]`. Its second element is `None` unless the model was loaded asking for attention weights: carry it along, don't read it.
+
+Verified structure on GPT-2:
+```python
+with model.trace("Hello world"):
+    print(type(model.transformer.h[0].output).__name__)        # Tensor, shape (1, 2, 768)
+    print(type(model.transformer.h[0].attn.output).__name__)   # tuple, len 2
 ```
 
 ### Mitigation / how to spot it early
-- `print(module.output)` inside the trace prints the actual value — useful for confirming whether you have a tensor or a tuple.
-- `print(model)` shows the module type but not the return shape; running a one-step `model.scan(...)` is the quickest way to see the structure.
+- Don't assume. `print(module.output)` inside a trace, or `print(module.source)`, reveals the return structure.
+- A one-step `model.scan(...)` surfaces the shape/tuple structure without running the model.
 
 ---
 
 ## Saving the "before" state of an in-place edit
 
 ### Symptom
-You save `before` and then save `after` with an in-place modification between them — both come out identical (and equal to the modified value).
+You save `before`, then mutate in place, then save `after` — both come out identical (the modified value).
 
 ### Cause
-`.save()` records the *id* of the object, not a snapshot. If `before` aliases the same tensor that `after` does, an in-place edit is visible through both. The fix is to `.clone()` before the modification so `before` points at a separate tensor whose storage is unaffected.
-
-### Wrong code
-```python
-with model.trace("Hello"):
-    before = model.transformer.h[0].output.save()   # alias
-    model.transformer.h[0].output[:] = 0
-    after = model.transformer.h[0].output.save()
-# before and after both contain the zeroed tensor
-```
+`.save()` records the object, not a snapshot. If `before` aliases the tensor you mutate, the in-place edit is visible through both. `.clone()` first so `before` points at independent storage.
 
 ### Right code
 ```python
-with model.trace("Hello"):
+with model.trace("Hello world"):
     before = model.transformer.h[0].output.clone().save()
     model.transformer.h[0].output[:] = 0
     after = model.transformer.h[0].output.save()
 # before holds the original, after holds the zeros
 ```
 
-### Mitigation / how to spot it early
-- Any time you save a tensor and *also* mutate the same activation, clone the saved one.
-- Replacement (`output = new`) doesn't have this problem because the new tensor and the original are already different objects — but the original isn't going to be visible to downstream operations either.
-
 ---
 
-## Activation patching needs `.clone()` for cross-invoke same-module patches
+## Activation patching across invokes needs `.clone()`
 
 ### Symptom
-You capture a slice in invoke 1 and use it in invoke 2, but the patched value behaves like it was overwritten or has unexpected content. Sometimes errors like `RuntimeError: ... has been modified by an inplace operation`.
+A slice captured in invoke 1 and written in invoke 2 behaves like it was overwritten, or `RuntimeError: ... modified by an inplace operation`.
 
 ### Cause
-A capture like `clean_hs = model.transformer.h[5].output[:, -1, :]` is a *view*, not a copy. When invoke 2 then writes `model.transformer.h[5].output[:, -1, :] = clean_hs`, the assignment uses the (now overwritten) underlying storage in the second invoke's batched activation slot. Because of how the batcher handles slicing across the combined batch, the read-then-write can collapse into a no-op or corrupt the slice.
-
-`.clone()` materializes the view as an independent tensor, so the value captured in invoke 1 is not affected by invoke 2's writes.
-
-### Wrong code
-```python
-with model.trace() as tracer:
-    barrier = tracer.barrier(2)
-    with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[:, -1, :]   # view
-        barrier()
-    with tracer.invoke("The Colosseum is in"):
-        barrier()
-        model.transformer.h[5].output[:, -1, :] = clean_hs   # may not behave
-        patched = model.lm_head.output.save()
-```
+`clean_hs = module.output[:, -1, :]` is a *view* into the batched activation. When invoke 2 writes back into the same batch rows, the read-then-write can collapse. `.clone()` materializes an independent tensor.
 
 ### Right code
 ```python
@@ -170,16 +202,95 @@ with model.trace() as tracer:
     with tracer.invoke("The Colosseum is in"):
         barrier()
         model.transformer.h[5].output[:, -1, :] = clean_hs
-        patched = model.lm_head.output.save()
+        patched = model.output.logits.save()
 ```
 
-### Mitigation / how to spot it early
-- Whenever you slice into `.output` and pass the slice to another invoke, `.clone()` it.
-- This is the same root cause as the "save aliases the modified tensor" gotcha above — views and in-place writes don't mix.
+(See [cross-invoke.md](cross-invoke.md) for why the barrier is needed here.)
 
 ---
 
+## A tuple `.output` needs its elements edited, not reassigned
+
+### Symptom
+`TypeError: 'tuple' object does not support item assignment` from
+`h[5].attn.output[0] = new_attn`.
+
+### Cause
+Some modules return a tuple (an attention block's `(output, weights)`), and
+Python tuples are immutable. The *tensors inside* the tuple are not — and
+`.output` hands back the live ones.
+
+### Two ways to write
+```python
+out = model.transformer.h[5].attn.output
+
+# Edit the existing tensor in place — writes straight through, no assignment.
+out[0][:, -1, :] = clean
+
+# Put a *different* tensor in its place — rebuild the tuple and assign that.
+model.transformer.h[5].attn.output = (new_attn,) + tuple(out[1:])
+```
+
+Use the first when you are modifying the values that are there; use the second
+when the replacement is a new tensor (a reshape, a stack, an arithmetic result)
+that has to take the element's place.
+
+---
+
+## A weight edit inside a trace is permanent
+
+### Symptom
+Two edits that read almost identically behave completely differently across runs:
+
+```python
+with model.trace(ids):                       # ACTIVATION -- scoped to this run
+    model.transformer.h[5].output[:] = 0
+
+with model.trace(ids):                       # WEIGHT -- permanent
+    model.transformer.wte.weight[100] = 0.0
+```
+
+```
+activation write: run differs from base: True | NEXT run back to baseline: True
+weight write    : run differs from base: True | NEXT run back to baseline: False
+                                              | wte[100] still zero: True
+```
+
+Every later trace in the process — and anything else holding that model — now runs
+against a modified checkpoint.
+
+### Cause
+Not an nnsight behaviour: `.output` is a value the interleaver hands you for the
+duration of the run, while `.weight` is the module's real `nn.Parameter`. Writing
+to it is an ordinary in-place mutation of the loaded model, and the trace block
+does not scope it. The trap is that `with model.trace(...)` reads like a scope for
+everything inside it.
+
+### Fix
+Save and restore around the edit, or work on a copy:
+
+```python
+saved = model.transformer.wte.weight[100].clone()
+try:
+    with model.trace(ids):
+        model.transformer.wte.weight[100] = 0.0
+        out = model.lm_head.output.save()
+finally:
+    model.transformer.wte.weight.data[100] = saved
+```
+
+For a persistent-but-reversible change, prefer [`model.edit()`](../usage/edit.md),
+which stores the intervention and can be undone with `clear_edits()`. For a
+genuine weight edit (ROME-style), do it deliberately and outside a trace, so the
+permanence is visible at the call site.
+
+Reading weights is of course fine, and composes with activations inside a trace.
+One related trap: before dispatch, a model's parameters are **meta** tensors —
+correct shape and dtype, no storage. Shape-preserving arithmetic on them succeeds
+silently and fails somewhere later, in torch's words rather than nnsight's. Pass
+`dispatch=True` (or run a trace) before reading weights.
+
 ## Related
-- [docs/usage/access-and-modify.md](../usage/access-and-modify.md) — full reference for reading and writing module outputs.
+- [docs/usage/access-and-modify.md](../usage/access-and-modify.md) — reading and writing module values.
 - [docs/gotchas/cross-invoke.md](cross-invoke.md) — barrier rules for cross-invoke patches.
-- [docs/gotchas/order-and-deadlocks.md](order-and-deadlocks.md) — module-access order constraints (related to write semantics).
+- [docs/gotchas/order-and-deadlocks.md](order-and-deadlocks.md) — module-access order constraints.

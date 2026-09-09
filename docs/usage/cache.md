@@ -1,47 +1,61 @@
 ---
 title: Activation Cache
-one_liner: tracer.cache() records module outputs (and optionally inputs) into a dict-like object that survives generation steps.
+one_liner: tracer.cache() records module outputs (and optionally inputs) into a path- and attribute-addressable view.
 tags: [usage, cache, intervention]
-related: [docs/usage/access-and-modify.md, docs/usage/iter-all-next.md, docs/usage/save.md]
-sources: [src/nnsight/intervention/tracing/tracer.py:28, src/nnsight/intervention/tracing/tracer.py:465, src/nnsight/intervention/hooks.py:356, src/nnsight/intervention/hooks.py:397]
+related: [docs/usage/access-and-modify.md, docs/usage/iter-all-next.md, docs/usage/save.md, docs/usage/invoke-and-batching.md]
+sources: [src/nnsight/intervention/cache.py, src/nnsight/intervention/tracer.py]
 ---
 
 # Activation Cache
 
 ## What this is for
 
-`tracer.cache(...)` registers persistent forward hooks on the target modules and accumulates their outputs (and optionally inputs) into a `Cache.CacheDict`. Unlike the one-shot hooks behind `.output` / `.input`, cache hooks fire on every forward pass and are assigned `mediator_idx = float('inf')` so they always fire **after** any intervention hooks — the cache captures **post-intervention** values (`src/nnsight/intervention/hooks.py:390`).
+`tracer.cache(...)` records the activations of many modules at once during a
+trace. Because the interleaver already funnels every module input/output through
+`Interleaver.handle` (applying interventions first), the cache is just a
+**post-intervention observer** — it needs no per-module controllers of its own. It
+captures *every* selected module across the whole run: every layer, and (in a
+generation loop) every step.
 
-The cache is the right tool when you want activations from many modules in one shot, or activations across all generation steps without writing per-step `.save()` calls.
+Reach for it when you want the same value from many modules, or activations across
+all generation steps without writing per-step `.save()` calls.
 
 ## When to use / when not to use
 
 - Use when you want the same value from many modules.
-- Use when you want activations across every generation step (cache appends across steps automatically).
-- Use when you want post-intervention values (cache hooks run after intervention hooks).
-- Skip when you only need one value — `module.output.save()` is simpler and avoids hooking the whole tree.
+- Use when you want activations across every generation step (cache appends one
+  entry per step automatically).
+- Use when you want post-intervention values (the cache observes after
+  interventions apply).
+- Skip when you only need one value — `module.output.save()` is simpler.
 
 ## Canonical pattern
 
 ```python
-with model.trace("Hello") as tracer:
-    cache = tracer.cache()  # Cache every module by default
+from nnsight.modeling.transformers import TransformersModel
 
-# Dict access (envoy paths):
-print(cache['model.transformer.h.0'].output)
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
-# Or attribute access:
-print(cache.model.transformer.h[0].output)
+with model.trace("The Eiffel Tower is in") as tracer:
+    cache = tracer.cache()                          # every module's output
+
+# By path:
+cache["model.transformer.h.0"].output              # a tensor
+# Or by navigating the tree:
+cache.transformer.h[0].output                      # same value
 ```
+
+`cache.keys()` lists the cached paths (all of them, at the root), in the order
+the run reaches them — not the order you passed `modules=`.
 
 ## Variations
 
 ### Cache a subset of modules
 
-Pass either Envoy objects or path strings:
+Pass Envoy objects or path strings:
 
 ```python
-with model.trace("Hello") as tracer:
+with model.trace("The Eiffel Tower is in") as tracer:
     cache = tracer.cache(modules=[
         model.transformer.h[0],
         model.transformer.h[5],
@@ -55,108 +69,264 @@ with model.trace("Hello") as tracer:
 with model.trace("Hello") as tracer:
     cache = tracer.cache(include_inputs=True)
 
-inputs = cache['model.transformer.h.0'].inputs   # (args, kwargs)
-first  = cache['model.transformer.h.0'].input    # First positional/keyword arg
+cache["model.transformer.h.0"].inputs   # (args, kwargs)
+cache["model.transformer.h.0"].input    # first positional/keyword arg
 ```
+
+Without `include_inputs=True`, `.inputs` is `None`.
+
+!!! warning "Recorded inputs can hold live GPU state"
+
+    The `device=` move reaches tensors and the containers around them, not tensors
+    held inside arbitrary objects. A HuggingFace decoder block is called with
+    `past_key_values=<DynamicCache>` in its kwargs, so with `include_inputs=True`
+    every layer's entry keeps a reference to the model's **live KV cache**, on the
+    compute device — one object, shared by all the entries.
+
+    Measured on gpt2, batch 32 x ~80 tokens, holding the caches of 8 traces:
+    8 MiB of GPU growth with `include_inputs=False`, 1320 MiB with it on (a
+    64-batch Llama-3.2-3B sweep held 3404 MiB the same way), and about a fifth
+    more time per trace.
+
+    It comes back when the caches are released, so drop them when the sweep is
+    over — or leave `include_inputs=False` and `.save()` the specific `.input`
+    you wanted.
 
 ### Storage transforms
 
 ```python
+import torch
 with model.trace("Hello") as tracer:
     cache = tracer.cache(
-        device=torch.device("cpu"),  # Move to CPU before storing (default)
-        dtype=torch.float32,         # Cast (default: keep)
-        detach=True,                 # Detach from autograd (default)
+        device=torch.device("cpu"),  # move captured tensors here (default CPU); None = leave
+        dtype=torch.float32,         # optional cast (default: keep)
+        detach=True,                 # detach from autograd (default)
         include_output=True,
         include_inputs=False,
+        non_blocking=False,          # default: synchronous copy. True is async and
+                                     # requires your own sync (see note below)
     )
 ```
 
+!!! warning "`non_blocking=True` is opt-in, and unsafe unless you synchronise"
+
+    The move to `device` is enqueued asynchronously and **nothing synchronises
+    before you read the result**, so a capture off a CUDA device can be read while
+    the copy is still in flight. Reading a CPU tensor does *not* synchronise CUDA.
+
+    Measured on GPT-2, batch 128 x 64 tokens, 12 blocks captured, idle GPU:
+
+    | | differs from a plain `register_forward_hook` |
+    |---|---|
+    | `non_blocking=True` | **10/10 batches**, up to 100% of elements wrong |
+    | `non_blocking=False` (the default) | 0/10, bit-identical |
+
+    The values are not permanently wrong -- they arrive late; a
+    `torch.cuda.synchronize()` after the trace makes the same capture bit-exact.
+    The window scales with copy size, so a small example looks fine while a
+    corpus-scale run is silently corrupted. This is why the default is
+    `False`: correctness costs roughly 15-20% throughput, and the failure it
+    prevents is invisible.
+
+    Pass `non_blocking=True` only if you synchronise yourself before reading.
+
 ### Cache across generation steps
 
-Cache hooks are persistent for the lifetime of the interleaver. They append a new `Cache.Entry` per forward pass when the same path is hit twice:
+A module reached once per step accumulates one entry per step:
 
 ```python
-with model.generate("Hello", max_new_tokens=5) as tracer:
+with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
     cache = tracer.cache(modules=[model.transformer.h[-1]])
 
-# cache['model.transformer.h.11'] is now a list of 5 Entry objects
-# (one per generation step) since each step hit the same path.
+len(cache["model.transformer.h.11"])            # 3 (one per step)
+cache["model.transformer.h.11"].output          # a list of 3 tensors
 ```
 
-### Entry vs list[Entry] dispatch
+### Single vs multiple visits
 
-`Cache.add` (`src/nnsight/intervention/tracing/tracer.py:228`) decides at runtime whether `cache[path]` stays a single `Cache.Entry` or gets promoted to a `list[Cache.Entry]`. The first hit on a path stores an `Entry`. The second hit on the same `key` (e.g. another `output` for the same module) replaces it with a list and appends from then on.
-
-That means the user-facing shape depends on how many times the module fired during the trace:
+`cache[path].output` unwraps automatically: a **single visit** returns the value
+directly (a tensor), **multiple visits** return a `list`. `len(cache[path])` is the
+visit count.
 
 ```python
-# Single forward pass: cache[path] is a Cache.Entry
+# single forward -> one visit -> tensor
 with model.trace("Hello") as tracer:
     cache = tracer.cache(modules=[model.transformer.h[-1]])
+type(cache["model.transformer.h.11"].output).__name__   # 'Tensor'
 
-entry = cache['model.transformer.h.11']
-print(type(entry))            # Cache.Entry
-print(entry.output.shape)  # works directly
-```
-
-```python
-# Multi-step generation: same path hit N times → list[Cache.Entry]
-with model.generate("Hello", max_new_tokens=5) as tracer:
+# generation -> N visits -> list of tensors
+with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
     cache = tracer.cache(modules=[model.transformer.h[-1]])
-
-entries = cache['model.transformer.h.11']
-print(type(entries))               # list
-print(len(entries))                # 5
-print(entries[0].output.shape)  # per-step access via indexing
+isinstance(cache["model.transformer.h.11"].output, list)   # True
 ```
-
-Defensive read pattern when you don't know which case you're in:
-
-```python
-val = cache['model.transformer.h.11']
-outputs = [e.output for e in val] if isinstance(val, list) else [val.output]
-```
-
-The convenience accessors `cache.<path>.output` / `.input` / `.inputs` only unwrap a single `Cache.Entry`. For a list, index first: `cache['<path>'][0].output`.
 
 ### Cache + interventions
 
-Cache hooks run after intervention hooks (`mediator_idx=inf`), so caches see post-intervention values:
+The cache observes post-intervention values:
 
 ```python
 with model.trace("Hello") as tracer:
     cache = tracer.cache()
     model.transformer.h[0].output[:] = 0
 
-# cache['model.transformer.h.0'].output is all zeros
+(cache["model.transformer.h.0"].output == 0).all()   # True
 ```
+
+### Caching inside an invoke
+
+A cache opened inside `tracer.invoke(...)` records that invoke's rows — at the
+**whole batch's padded sequence length**, and nothing in the view marks which
+positions are pad. A two-token prompt batched against an eight-token one comes
+back as `[1, 8, 768]`, six of those positions padding:
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke("the cat"):                                     # 2 tokens
+        short = tracer.cache(modules=[model.transformer.h[0]])
+    with tracer.invoke("a much longer prompt here about many things"):  # 8 tokens
+        pass
+
+short["model.transformer.h.0"].output.shape          # torch.Size([1, 8, 768])
+# the same prompt alone: torch.Size([1, 2, 768])
+```
+
+Pad positions are not blank, and at GPT-2's block 0 they carry a *larger* norm
+than either real token — `192.4` at each of the six, against `136.7` and `56.7`
+for "the" and " cat". A mean over the sequence axis of that capture is three
+quarters padding. Reduce over the sequence axis only after masking, or index from
+the right (`[:, -1]`), which is stable because the padding is on the left.
+[invoke-and-batching.md](invoke-and-batching.md) has the mechanism and the mask.
+
+To capture the **whole** combined batch instead, open the cache in an empty
+`tracer.invoke()`, which sees every row:
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke("the cat"): pass
+    with tracer.invoke("a much longer prompt here about many things"): pass
+    with tracer.invoke():
+        batch = tracer.cache(modules=[model.transformer.h[0]])
+
+batch["model.transformer.h.0"].output.shape          # torch.Size([2, 8, 768])
+```
+
+### Gradients through a cache
+
+`detach=True` (the default) stores values cut off from autograd. Pass
+`detach=False`, and `device=None` so the tensors stay where the graph is, to get
+captures you can call `backward()` on:
+
+```python
+with model.trace("the cat") as tracer:
+    cache = tracer.cache(modules=[model.transformer.h[0]], detach=False, device=None)
+
+cache["model.transformer.h.0"].output.requires_grad      # True
+cache["model.transformer.h.0"].output.sum().backward()   # fills model .grad
+```
+
+This keeps the whole graph alive for as long as the cache is, so it costs the
+memory a normal backward pass would. `detach=True` is the default for that reason.
+
+### Modules called ad hoc
+
+A cache records the modules the run reaches. Calling a module yourself inside the
+trace body does not reach it unless you pass `hook=True`, which runs the module's
+full `__call__`:
+
+```python
+model.transformer.h[9].adapter = MyAdapter()
+
+with model.trace("The Eiffel Tower is in") as tracer:
+    cache = tracer.cache()
+    acts = model.transformer.h[9].output
+    model.transformer.h[9].output = model.transformer.h[9].adapter(acts, hook=True)
+
+"model.transformer.h.9.adapter" in cache.keys()          # True; False without hook=True
+```
+
+Without `hook=True` neither the adapter nor its submodules appear in the cache —
+which is the case where you most want them. See
+[edit.md](edit.md) for attaching the module in the first place.
+
+### Saving a cache to disk
+
+A `CacheView` pickles: `Cache.__getstate__` drops the model, so `torch.save` /
+`torch.load` round-trip without dragging the weights along. Path access works
+straight away on the loaded view; **tree navigation needs the model re-attached**,
+or it raises `AttributeError: 'NoneType' object has no attribute 'path'`:
+
+```python
+back = torch.load(path, weights_only=False)
+back["model.transformer.h.0"].output       # works
+back._cache.model = model                  # re-attach, then:
+back.transformer.h[0].output               # works
+```
+
+### Cache honors renames
+
+Alias navigation resolves against the model's envoy tree, so renamed modules and
+`ModuleList` indices work in cache keys too:
+
+```python
+g = TransformersModel("openai-community/gpt2", dispatch=True, rename={"mlp": "my_mlp"})
+with g.trace("Hello") as tracer:
+    cache = tracer.cache()
+torch.equal(cache.transformer.h[0].my_mlp.output,
+            cache["model.transformer.h.0.mlp"].output)   # True
+```
+
+See [rename-modules.md](rename-modules.md).
 
 ## API
 
 ```python
 tracer.cache(
-    modules=None,           # None | List[Envoy | str]; None = all modules
-    device=torch.device("cpu"),
+    modules=None,                 # None | list[Envoy | str]; None = every module
+    device=torch.device("cpu"),   # None leaves tensors where they are
     dtype=None,
     detach=True,
     include_output=True,
     include_inputs=False,
+    non_blocking=False,           # default; True is async but needs your own sync
 )
 ```
 
-Returns a `Cache.CacheDict` (already wrapped in `.save()`). Hook handles live on `mediator.hooks` and are removed automatically when the interleaver exits (`src/nnsight/intervention/tracing/tracer.py:546`).
+Returns a `CacheView` (already saved, so it survives past the trace).
 
 ## Gotchas
 
-- **Call `tracer.cache(...)` BEFORE the interventions you want it to capture.** Cache hooks always fire last on a given module, but they only attach for modules registered at cache creation time.
-- **`tracer.cache()` must be called inside an interleaving context** (i.e. inside `.trace()` / `.generate()` / `.session()`); calling it at module construction time raises `ValueError("Cannot create a cache outside an invoker.")` (`src/nnsight/intervention/tracing/tracer.py:501`).
-- **Repeated forward hits accumulate.** When the same module fires twice (e.g. across generation steps, or shared-weight modules), the entry becomes a `list[Entry]`. Don't assume a single `Entry` per path.
-- **The cache moves tensors to CPU by default.** If you need them on GPU, pass `device=None` or the desired device.
-- See [docs/gotchas/save.md](../gotchas/save.md) for the full set.
+- **Declare `tracer.cache(...)` before reading or modifying a model value.** Cache
+  routes are fixed before the model starts; opening one after an activation access
+  raises `ValueError: tracer.cache() must be declared before reading or modifying a
+  model value`. Nothing is captured silently: the ordering is enforced, not assumed.
+- **`tracer.cache()` must be called inside a trace.** It registers on the running
+  worker's mediator; outside interleaving there is nothing to attach to.
+- **Multiple visits accumulate into a list.** Across generation steps (or a
+  shared-weight module hit twice), `cache[path].output` is a `list`. Don't assume a
+  single tensor. Index the *value*, `cache[path].output[i]` — the view itself is
+  not subscriptable by visit.
+- **`cache.keys()` is in reached order.** `zip(my_modules, cache.keys())`
+  misaligns whenever `modules=` was not already in forward order. Key off the path.
+- **A cache opened inside an invoke records that invoke's rows only**, padded to
+  the batch's length. An empty `tracer.invoke()` sees the whole batch. See
+  [invoke-and-batching.md](invoke-and-batching.md).
+- **The cache moves tensors to CPU by default.** Pass `device=None` (or a device)
+  to keep them elsewhere. The move reaches tensors and containers, not tensors
+  inside other objects — with `include_inputs=True` a decoder block's
+  `past_key_values` keeps the model's live KV cache on the compute device (see
+  [Include inputs](#include-inputs)).
+- **Always pass `modules=` on a real model.** Caching all 151 of GPT-2's modules
+  costs 1.1 GiB and 20x the time of caching its 12 blocks (36 MiB). A cache and a
+  hand-written `save()` loop over the same modules cost the same (19.0 ms against
+  18.8 ms, batch 32 x 64); the cache saves you the loop, not time.
+- **Wrap a collection run in `torch.no_grad()`** unless you need gradients, and
+  keep the batch shape fixed across a sweep: the same prompt in differently shaped
+  batches gives activations that agree to floating-point noise, not bit-exactly.
 
 ## Related
 
-- [access-and-modify](access-and-modify.md) — One-off `.output` / `.input` access.
-- [iter-all-next](iter-all-next.md) — Iteration semantics for generation.
-- [docs/concepts/interleaver-and-hooks.md](../concepts/interleaver-and-hooks.md) — Why cache hooks fire last.
+- [access-and-modify.md](access-and-modify.md) — one-off `.output` / `.input`.
+- [iter-all-next.md](iter-all-next.md) — generation-step iteration.
+- [rename-modules.md](rename-modules.md) — alias-aware cache keys.
+- [invoke-and-batching.md](invoke-and-batching.md) — rows, padding, and what an
+  invoke's slice of the batch contains.
