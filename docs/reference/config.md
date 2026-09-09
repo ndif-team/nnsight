@@ -66,6 +66,7 @@ CONFIG.save()                                 # explicit save
 | `NNSIGHT_DEBUG` | If set (any value), forces `CONFIG.APP.DEBUG = True`. |
 | `NNSIGHT_DISABLE_CPP_BACKTRACE` | Overrides `CONFIG.APP.DISABLE_CPP_BACKTRACE`. Falsy values (`0`, `false`, `no`, `off`) turn the guard **off**; anything else keeps it on (the default). |
 | `NNSIGHT_CONFIG` | Path to the user config file (overrides the `~/.config/nnsight/config.yaml` default). |
+| `NNSIGHT_VLLM_CLONE_READS` | vLLM only, and **not** a `CONFIG` field — it is read in the engine's worker process, so it has to be in the environment before `VLLM(...)`. If set to anything but a falsy value (`0`, `false`, `no`, `off`), a block is served private copies rather than views into the engine's memory: saved and cached values keep what was computed, and in-place edits stop reaching the model. See [vLLM: serving copies instead of views](../models/vllm.md#serving-copies-instead-of-views). |
 | `XDG_CONFIG_HOME` | Base dir for the default user config path. |
 
 Pass `-v` (or `--verbose`) on the command line — e.g. `python train.py -v` — to turn on debug mode for that run (equivalent to `NNSIGHT_DEBUG=1`). Note it's a plain `sys.argv` scan, so any launcher that also uses `-v` (e.g. `pytest -v`) will enable it too.

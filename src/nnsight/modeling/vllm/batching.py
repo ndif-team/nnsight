@@ -14,6 +14,12 @@ whichever axis carries tokens: dim 0 for a model vLLM has its own definition
 for, dim 1 for one served through vLLM's Transformers backend (see
 `VLLMBatcher._token_dim`).
 
+What a block is served is a *view* into that slab, so an in-place edit lands
+where the model will read it. The cost is that a read aliases live memory: vLLM's
+fused kernels overwrite activation buffers in place, so a tensor kept past the
+point it was read holds whatever was written over it (see `NNSIGHT_VLLM_CLONE_READS`
+and the "clone what you keep" rule in ``docs/models/vllm.md``).
+
 Gathering a sharded value is *not* here — see
 [`fragments`][nnsight.modeling.vllm.fragments]. The split is the point: narrowing
 happens once per parked worker, while a collective must happen once per value
@@ -22,15 +28,74 @@ however many workers read it.
 
 from __future__ import annotations
 
-from typing import Optional
+import os
+from typing import Any, Optional
 
 import torch
 
-from ...intervention.batching import Batcher
+from ...intervention.batching import Batcher, BatchGroup
+from ...util import apply
+
+#: Env var: serve every read a private copy instead of a view into the slab.
+CLONE_READS = "NNSIGHT_VLLM_CLONE_READS"
+
+# The falsy spellings `NNSIGHT_DISABLE_CPP_BACKTRACE` accepts, so the two agree.
+_FALSY = {"", "0", "false", "no", "off"}
+
+
+def clone_reads_enabled() -> bool:
+    """Whether `CLONE_READS` is set to anything but a falsy spelling.
+
+    Read from the environment rather than `CONFIG` because the batcher that does
+    the narrowing lives in the engine's *worker* process, built when the engine
+    loads the model. A `CONFIG.APP` field set in the client process would never
+    reach it; an env var set before `VLLM(...)` is inherited when the worker is
+    spawned.
+    """
+    value = os.environ.get(CLONE_READS)
+    return value is not None and value.strip().lower() not in _FALSY
 
 
 class VLLMBatcher(Batcher):
     """A [`Batcher`][nnsight.intervention.batching.Batcher] over vLLM's flat token axis."""
+
+    def __init__(self, envoy: Any, kwargs: Optional[dict] = None) -> None:
+        super().__init__(envoy, kwargs)
+        # Fixed for this batcher's life: the worker's is built once, when the
+        # engine loads the model, so there is no per-trace granularity to offer.
+        self.clone_reads = clone_reads_enabled()
+
+    def narrow(self, value: Any, group: BatchGroup) -> Any:
+        """Serve a worker its token span — a view, or a copy under `CLONE_READS`.
+
+        A view is the default because it is what makes an in-place edit work: the
+        block writes into the slab the model goes on to read. It is also what makes
+        a *read* unreliable, since vLLM's fused kernels (``fused_add_rms_norm``,
+        MLA's in-place rotation of the ``q_proj`` output) overwrite those buffers a
+        few ops later — a value kept past its read point comes back holding a later
+        layer's data, with nothing to indicate it. The documented answer is to
+        `.clone()` in the block, which is easy to forget and silent when forgotten.
+
+        `CLONE_READS` trades the other way for a whole engine: every value handed
+        to a block is a private copy, so anything kept is what was computed, and
+        `.save()`, `tracer.cache()` and appends under `tracer.iter` are all safe
+        without a clone at each site.
+
+        **In-place edits do not survive it.** With a copy served there is nothing
+        aliasing the slab, so ``layers[10].output[0][:] += v`` writes to the copy
+        and the model never sees it — silently, the same way it is silent today
+        when a save aliases. Assign instead: read, edit the copy, write it back
+        with ``layers[10].output = out``, which goes through `widen` and lands.
+        An `eproperty` that registered a `transform` write-back is unaffected —
+        that path already splices its edited value back through `widen`.
+
+        Off by default. The copy is of the narrowed span, not the whole slab, but
+        it is still one allocation per module read per step.
+        """
+        served = super().narrow(value, group)
+        if not self.clone_reads:
+            return served
+        return apply(served, lambda tensor: tensor.clone(), torch.Tensor)
 
     @property
     def batching(self) -> bool:
