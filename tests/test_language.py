@@ -862,6 +862,11 @@ class TestPeft:
 
         model._remoteable_set_env({"peft": lora_adapter})  # None -> X
         assert model.peft == lora_adapter and _has_lora(model)
+        assert model.base_model.model.transformer.h[0].path == (
+            "model.base_model.model.transformer.h.0"
+        )
+        assert model.base_model._children
+        assert "transformer" not in model.__dict__
 
         module_after_load = model._module
         model._remoteable_set_env({"peft": lora_adapter})  # X -> X (no-op)
