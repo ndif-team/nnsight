@@ -47,9 +47,13 @@ def _submodule(model, path):
 
 
 def _read(model, path, prompt):
+    # Every read is cloned: vLLM hands back a buffer it goes on writing to, so a
+    # saved reference reads as whatever overwrote it. It is not a sharding
+    # matter — the one-rank reference aliases exactly as readily, which is what
+    # made `qkv_proj` look like a layout failure when the layout was right.
     with model.trace(prompt, temperature=0.0, top_p=1):
-        hs = _submodule(model, path).output[0].save()
-        logits = model.logits.save()
+        hs = _submodule(model, path).output[0].clone().save()
+        logits = model.logits.clone().save()
     return hs, logits
 
 
@@ -60,7 +64,7 @@ def _zero_tail(model, path, prompt):
         value = out[0].clone()
         value[:, value.shape[-1] // 2 :] = 0
         _submodule(model, path).output = (value, *out[1:])
-        logits = model.logits.save()
+        logits = model.logits.clone().save()
     return logits
 
 
@@ -70,7 +74,7 @@ def _zero_all(model, path, prompt):
         out = _submodule(model, path).output
         value = torch.zeros_like(out[0])
         _submodule(model, path).output = (value, *out[1:])
-        logits = model.logits.save()
+        logits = model.logits.clone().save()
     return logits
 
 
@@ -171,19 +175,19 @@ class TestShardedRequests:
         with vllm_qwen_tp.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(ET_prompt):
                 et_hs = vllm_qwen_tp.model.layers[0].self_attn.qkv_proj.input.save()
-                et_logits = vllm_qwen_tp.logits.save()
+                et_logits = vllm_qwen_tp.logits.clone().save()
             with tracer.invoke(MSG_prompt):
                 msg_hs = vllm_qwen_tp.model.layers[0].self_attn.qkv_proj.input.save()
-                msg_logits = vllm_qwen_tp.logits.save()
+                msg_logits = vllm_qwen_tp.logits.clone().save()
 
         # Each sharded request is still narrowed to exactly its own tokens.
         assert et_hs.shape[0] == et_n
         assert msg_hs.shape[0] == msg_n
 
         with vllm_qwen_ref.trace(ET_prompt, temperature=0.0, top_p=1):
-            ref_et = vllm_qwen_ref.logits.save()
+            ref_et = vllm_qwen_ref.logits.clone().save()
         with vllm_qwen_ref.trace(MSG_prompt, temperature=0.0, top_p=1):
-            ref_msg = vllm_qwen_ref.logits.save()
+            ref_msg = vllm_qwen_ref.logits.clone().save()
 
         assert et_logits.argmax(dim=-1).item() == ref_et.argmax(dim=-1).item()
         assert msg_logits.argmax(dim=-1).item() == ref_msg.argmax(dim=-1).item()
@@ -195,7 +199,7 @@ class TestShardedRequests:
         ) as tracer:
             clean = list().save()
             for _ in tracer.iter[:4]:
-                clean.append(vllm_qwen_tp.logits)
+                clean.append(vllm_qwen_tp.logits.clone())
 
         with vllm_qwen_tp.trace(
             MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=4
@@ -208,7 +212,7 @@ class TestShardedRequests:
                         torch.zeros_like(out[0]),
                         *out[1:],
                     )
-                edited.append(vllm_qwen_tp.logits)
+                edited.append(vllm_qwen_tp.logits.clone())
 
         # A sharded edit at one decode step changes that step's logits.
         assert not torch.allclose(clean[1].float(), edited[1].float())
@@ -277,18 +281,18 @@ class TestAdHocCall:
         with vllm_qwen_tp.trace(ET_prompt, temperature=0.0, top_p=1):
             module = _submodule(vllm_qwen_tp, path)
             hidden = module.input  # gathered whole; the caller holds the real thing
-            expected = module.output[0].save()
+            expected = module.output[0].clone().save()
             result = module(hidden)
             # The module's own (output, bias) pair, not whole()'s (value, undo).
             assert torch.is_tensor(result[0]), f"ad-hoc call returned {type(result[0])}"
-            adhoc = result[0].save()
+            adhoc = result[0].clone().save()
 
         assert adhoc.shape == expected.shape
         assert _min_row_cosine(adhoc, expected) > 0.99
 
         with vllm_qwen_ref.trace(ET_prompt, temperature=0.0, top_p=1):
             module = _submodule(vllm_qwen_ref, path)
-            ref = module(module.input)[0].save()
+            ref = module(module.input)[0].clone().save()
 
         # A row-parallel output is all-reduced, so its layout matches the
         # single-rank run's and the values compare directly.
@@ -304,10 +308,10 @@ class TestAdHocCall:
         with vllm_qwen_tp.trace(ET_prompt, temperature=0.0, top_p=1):
             module = _submodule(vllm_qwen_tp, path)
             hidden = module.input  # replicated, already whole
-            expected = module.output[0].save()
+            expected = module.output[0].clone().save()
             result = module(hidden)
             assert torch.is_tensor(result[0]), f"ad-hoc call returned {type(result[0])}"
-            adhoc = result[0].save()
+            adhoc = result[0].clone().save()
 
         # Same engine, same gather: the reassembled ad-hoc output lays out
         # exactly as the traced read of the same location.
@@ -316,7 +320,7 @@ class TestAdHocCall:
 
         with vllm_qwen_ref.trace(ET_prompt, temperature=0.0, top_p=1):
             module = _submodule(vllm_qwen_ref, path)
-            ref = module(module.input)[0].save()
+            ref = module(module.input)[0].clone().save()
 
         # And the reassembled whole is the single-rank layer's own output,
         # column for column (as TestShardedRead checks for a traced read).

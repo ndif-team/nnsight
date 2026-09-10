@@ -223,6 +223,13 @@ def _fused_sub_shards(module: Any) -> "tuple[List[int], List[int]] | None":
     ``output_sizes`` by ``tp_size`` into ``output_partition_sizes`` for exactly
     the two subclasses that set ``output_sizes``, and leaves one entry — the
     whole shard — for everything else. Read against vLLM 0.27.1.
+
+    Replication is only ever read off ``num_kv_head_replicas``, so a merged
+    column that replicates a sub-shard some other way is not covered and does
+    not warn: ``_KimiGDNMergedColumnParallelLinear`` gives every rank the same
+    copy of one projection (``output_sizes[i] *= tp_size``, loaded with
+    ``tp_rank`` forced to 0), which reads here as an ordinary merged column and
+    comes back ``tp_size`` copies of it too wide.
     """
     from vllm.model_executor.layers.linear import (
         MergedColumnParallelLinear,
