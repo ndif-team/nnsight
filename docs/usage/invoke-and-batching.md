@@ -93,6 +93,48 @@ It is a fresh worker, which lets it reach a module an earlier invoke already
 passed — but within its own block it still reads in forward order, and going back
 raises `OutOfOrderError` like anywhere else.
 
+## Statements outside the invoke blocks run first
+
+In invoke mode — `model.trace()` with no input — the trace body is run once
+immediately, before any forward, to collect the `tracer.invoke(...)` blocks in it.
+Only the invoke bodies then run interleaved with the model. So a statement written
+outside an invoke has already run by the time the model starts, whatever it is
+written *after*:
+
+```python
+with model.trace() as tracer:
+    losses = nnsight.save([])
+    for t in texts:
+        with tracer.invoke(t):
+            losses.append(model.transformer.h[5].output[:, -1].sum())
+    loss = torch.stack(losses).mean()   # runs first, on the still-empty list
+# RuntimeError: stack expects a non-empty TensorList
+```
+
+Do the reduction **after** the trace instead, where the list is full:
+
+```python
+with model.trace() as tracer:
+    parts = nnsight.save([])
+    for t in texts:
+        with tracer.invoke(t):
+            parts.append(model.transformer.h[5].output[:, -1])
+
+torch.stack(parts)          # len(parts) == 2, shape (2, 1, 768)
+```
+
+If the reduced value has to feed another trace, put both traces in a
+[`session`](session.md).
+
+A `save()` written after the last invoke fails differently and further from its
+cause: saved names are pushed back out of the invokes' scopes, and the collection
+pass isn't one of them, so `nnsight.save(h)` on the last line of the body leaves
+nothing behind and reading `h` afterwards raises `NameError: name 'h' is not
+defined`. A save written *before* the invokes does come back, because each invoke's
+scope is copied from the surrounding one — which is why the rule looks arbitrary
+until you know that the body ran once on its own. Save inside the invoke that
+produces the value.
+
 ## Mixed input formats
 
 Every input format a forward accepts is batchable, and formats can be mixed
@@ -112,6 +154,29 @@ with model.trace() as tracer:
 
 Tokenizer kwargs on an invoke apply to that invoke's tokenization (not the
 model): `tracer.invoke("word " * 50, truncation=True, max_length=4)`.
+
+### Forward keywords are the batch's, not an invoke's
+
+Everything that reaches the model does so in **one** forward call, so it takes one
+set of keywords. Keywords from every invoke are merged into that call and the last
+invoke to pass one decides it for every row:
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke(P1, output_hidden_states=True):
+        ...
+    with tracer.invoke(P2, output_hidden_states=False):   # wins, for both rows
+        ...
+# UserWarning: Invokes disagree on the forward keyword 'output_hidden_states' ...
+```
+
+Disagreeing invokes warn; agreeing ones (and a keyword only one invoke passes) are
+quiet. Anything that has to differ per row belongs in that invoke's *input* rather
+than its keywords — passing `{"input_ids": ..., "attention_mask": ...}` as the
+invoke's positional input collates per row correctly, while
+`attention_mask=` as a keyword replaces the collated mask for the whole batch (on
+CUDA, usually as a device-side assert from somewhere inside the model). The same
+applies to generation parameters: `max_new_tokens` on an invoke is the batch's.
 
 ## Cross-invoke value sharing
 
@@ -197,6 +262,45 @@ bound out there, the consumer reads the *old* value. Nothing raises.
 Rows sit in the batch in invoke **declaration** order: concatenating each
 invoke's saved activation in the order the invokes were written reproduces what an
 empty invoke sees.
+
+### Which values are scoped to your rows
+
+Scoping is decided by a value's **leading dimension**, not by where the value came
+from. A tensor is narrowed to the invoke's rows when its leading dim is the
+combined batch size, or a whole multiple of it. The multiple is what covers a model
+that folds tokens into the batch axis before a module — every transformers MoE
+block does, ahead of its router, so `mlp.gate.output` and `mlp.experts.input` are
+`(batch*seq, ...)` and an invoke owns `seq` of those rows for each row of batch it
+contributed. Values reached through `.source` below such a reshape are scoped the
+same way. A leading dim that is a multiple by *coincidence* — four experts against
+two invokes — is sliced too; the shape is all there is to go on.
+
+Anything else is handed to every invoke **whole**. That is correct for a value that
+is not batched at all (a causal mask, rotary `cos`/`sin`, a constant built inside
+the forward), and wrong for one that is batched along an axis nnsight cannot
+recognize: a time-major `(seq, batch, hidden)` activation, a vision tower's
+`(patches, hidden)`, a list of per-sequence tensors (containers are not split;
+only the tensors inside them are). For those, three things follow:
+
+- a **read** sees the whole batch rather than this invoke's part of it;
+- an **in-place edit** applies to every invoke;
+- a **replacement** is dropped — there is nowhere to splice it.
+
+Both writes warn, naming the location, its leading dim and the batch size:
+
+```
+UserWarning: An in-place edit to `model.visual.merger.output` applies to every
+invoke: its leading dimension (256) is neither the batch size (2) nor a multiple
+of it, so nnsight served the whole batch rather than this invoke's rows.
+```
+
+A read does **not** warn: from a shape alone a value that isn't batched is
+indistinguishable from one that is batched on an axis nnsight can't read, and most
+values in that state are the former. When the warning does fire, trace that input
+on its own — or, if the model's batch layout is genuinely a different shape, give
+it a `_batcher_class` that knows it (see
+[extending.md](extending.md#4-custom-batcher-for-non-standard-batch-layouts)),
+which is how diffusion's guidance doubling and vLLM's flat token axis are handled.
 
 ### Every invoke is padded to the whole batch's length
 
@@ -287,8 +391,9 @@ with model.generate(max_new_tokens=5, do_sample=False) as tracer:
 
 Everything an invoke reads is narrowed the same way: `.input`, `.output`,
 `tracer.result`, and a `tracer.cache(...)` opened inside the block all carry that
-invoke's rows alone. In a 1 + 2 row batch the two input invokes see
-`[1, seq, 768]` and `[2, seq, 768]`, and an empty invoke sees `[3, seq, 768]`.
+invoke's rows alone, for every value the [row rules](#which-values-are-scoped-to-your-rows)
+can scope. In a 1 + 2 row batch the two input invokes see `[1, seq, 768]` and
+`[2, seq, 768]`, and an empty invoke sees `[3, seq, 768]`.
 
 ## Implementing batching for a custom model
 
@@ -326,6 +431,16 @@ class BatchEnvoy(Envoy):
   the run. The same error covers nesting two invokes.
 - **Reading a cross-invoke name before the binder ran raises `NameError`.** Park
   the reader past the binder's location, or use a barrier — see above.
+- **Statements outside the invoke blocks run before the model does.** The body of
+  an input-less `trace()` runs once to collect the invokes, so a reduction written
+  under the loop sees empty lists, and a `save()` after the last invoke leaves
+  nothing behind. Reduce after the trace — see above.
+- **Only values whose leading dim matches the batch are scoped to an invoke.**
+  Anything else is served whole; a write to one warns and applies batch-wide (or,
+  for a replacement, is dropped). See
+  [Which values are scoped to your rows](#which-values-are-scoped-to-your-rows).
+- **Forward keywords on an invoke are batch-wide.** One forward call takes one set
+  of them, so invokes that disagree warn and the last one written wins.
 - **A batched write has to keep its rows.** A block owns its invoke's rows of the
   combined batch, and a whole-tensor write is spliced back in as given — nothing
   checks the height. A block that owns rows `0:1` of 2 and assigns a two-row

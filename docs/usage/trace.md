@@ -75,7 +75,7 @@ with model.trace() as tracer:
         out_b = model.transformer.h[0].output.save()
 ```
 
-Each invoke's body sees only its own rows of the batch. See `docs/usage/invoke-and-batching.md` for empty invokes, batching constraints, and barriers.
+Each invoke's body sees its own rows of the batch — of every value whose leading dimension is the combined batch size or a whole multiple of it, which is how the scoping is decided. A value shaped otherwise (a time-major activation, a vision tower's patches) is served to every invoke whole, and a write to one warns rather than acting on one invoke. See `docs/usage/invoke-and-batching.md` for that rule in full, and for empty invokes, batching constraints, and barriers.
 
 ## Remote execution
 
