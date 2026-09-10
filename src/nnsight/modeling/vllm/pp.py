@@ -22,23 +22,11 @@ from typing import Optional
 import torch.nn as nn
 
 
-def _env_float(name: str, default: float) -> float:
-    """Read a float override from the environment, falling back to ``default``
-    on absence or a malformed value."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
 # How long a rank's serve point waits on an in-flight cross-stage pull before
 # raising loudly (vs hanging). The one deadline with false-trip risk: a pull of
 # a huge hidden state over a degraded cross-node link is slow but legitimate.
 # Override: NNSIGHT_PP_PULL_TIMEOUT.
-PP_PULL_TIMEOUT_S = _env_float("NNSIGHT_PP_PULL_TIMEOUT", 30.0)
+PP_PULL_TIMEOUT_S = float(os.environ.get("NNSIGHT_PP_PULL_TIMEOUT", 30.0))
 
 # Listener retry after a transient error (internal cadence, no false-trip risk).
 PP_LISTENER_BACKOFF_S = 0.5
