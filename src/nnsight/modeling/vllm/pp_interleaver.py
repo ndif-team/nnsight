@@ -355,26 +355,27 @@ class PPInterleaver(VLLMInterleaver):
                     value = pull.complete()
                     mediator.pending = mediator.switch(value)
                 except Exception as exception:
-                    # Two shapes land here. The pull failed (error reply,
-                    # timeout): the worker is still parked, so throw the error
-                    # into it at the line that forced the value — a worker
-                    # that catches it parks again (keep its new park); one
-                    # that doesn't is unwound (its finally blocks run) and the
-                    # error is recorded. Or the resumed worker itself raised
-                    # out of switch(): it is already unwound — just record.
-                    # Either way, like handle(), tear down only when not
-                    # deferring: on a shared engine this ends one request.
+                    # The pull failed (error reply, timeout) with the worker
+                    # still parked: throw the error into it at the line that
+                    # forced the value. A worker that catches it parks again
+                    # and keeps its new park. One that lets an exception out,
+                    # the thrown one or one of its own, is unwound (its
+                    # finally blocks run) and that exception is recorded. A
+                    # worker that raised out of switch() is already unwound
+                    # and its exception is recorded as is. Like handle(), tear
+                    # down only when not deferring: on a shared engine this
+                    # ends one request.
                     if mediator.alive:
                         try:
                             mediator.pending = mediator.worker.throw(exception)
                             progressed = True
-                            continue  # the worker recovered; not an error
-                        except BaseException:
-                            pass
+                            continue  # the worker recovered
+                        except BaseException as thrown:
+                            exception = thrown
                     mediator.pending = None
                     mediator.exception = exception
                     if not self.defer_exceptions:
-                        raise
+                        raise exception
                 progressed = True
 
     def discard_pulls(self, mediator: Mediator) -> None:

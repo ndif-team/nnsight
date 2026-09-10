@@ -344,11 +344,14 @@ def _wait_for_parked(listener, timeout=10.0):
 def _interleaver_errors(rank, world, rdv):
     """A failed pull is thrown at the force line, where user code can catch it;
     an uncaught failure unwinds only its own mediator under defer_exceptions
-    and propagates out of serve_pulls without it; an upstream in-place serve
-    raises at the force line directly. Failures are induced by finalizing the
+    and propagates out of serve_pulls without it; an exception the block raises
+    in place of the failure is what is recorded and what propagates; an
+    upstream in-place serve raises at the force line directly. Failures are induced by finalizing the
     producer while a pull is parked: clear_buffer error-replies every parked
     pull. One module per scenario, since the buffer persists across them."""
-    stage = Stage(rank, world, rdv, {"h.0": 0, "h.1": 1, "h.2": 1, "h.3": 1, "h.4": 0})
+    stage = Stage(
+        rank, world, rdv, {"h.0": 0, "h.1": 1, "h.2": 1, "h.3": 1, "h.4": 0, "h.5": 1, "h.6": 1}
+    )
     interleaver, listener = stage.interleaver, stage.listener
 
     # A caught failure: the worker pulls again and the drain loop serves the retry.
@@ -402,6 +405,44 @@ except RuntimeError:
         except RuntimeError as error:
             assert "never produced" in str(error), error
         assert doomed.exception is not None
+    else:
+        _wait_for_parked(listener)
+        listener.clear_buffer()
+    dist.barrier()
+
+    # The block raises its own exception in place of the failure: that is
+    # what is recorded (deferred) and what propagates (not deferred).
+    replacing = '''
+try:
+    x = Mediator.value("model.h.%d.output")
+    y = (x - 1).sum().item()
+except RuntimeError as error:
+    raise ValueError("replaced by the block") from error
+'''
+    if rank == 0:
+        interleaver.defer_exceptions = True
+        replaced = stage.mediator(replacing % 5)
+        with interleaver:
+            pass
+        interleaver.serve_pulls(block=True)
+        assert isinstance(replaced.exception, ValueError), replaced.exception
+        assert isinstance(replaced.exception.__cause__, RuntimeError)
+    else:
+        _wait_for_parked(listener)
+        listener.clear_buffer()
+    dist.barrier()
+
+    if rank == 0:
+        interleaver.defer_exceptions = False
+        replaced = stage.mediator(replacing % 6)
+        with interleaver:
+            pass
+        try:
+            interleaver.serve_pulls(block=True)
+            raise AssertionError("serve_pulls should have re-raised")
+        except ValueError as error:
+            assert "replaced by the block" in str(error), error
+        assert isinstance(replaced.exception, ValueError)
     else:
         _wait_for_parked(listener)
         listener.clear_buffer()

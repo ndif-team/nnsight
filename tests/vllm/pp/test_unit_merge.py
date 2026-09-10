@@ -259,18 +259,6 @@ class TestMergeCollected:
         x = merged["req"]["saves"]["x"]
         assert [t.item() for t in x] == [0.0, 1.0, 2.0]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "the pairwise fold truncates too early: after two payloads merge, "
-            "_union_sequence drops the trailing sentinel slot as overshoot, so "
-            "the third stage's real entry at that position counts as one-sided "
-            "and trips the stalled-worker warning. The drop is only valid "
-            "after the last payload has been folded in. Values merge "
-            "correctly; only the warning is spurious, and only at three or "
-            "more stages."
-        ),
-    )
     def test_three_stage_merge_emits_no_spurious_warning(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error", PPRankDivergenceWarning)

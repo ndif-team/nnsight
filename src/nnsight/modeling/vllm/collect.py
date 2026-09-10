@@ -219,21 +219,68 @@ def _union_sequence(a, b, label):
     for i in range(max(len(a), len(b))):
         x = a[i] if i < len(a) else NOT_ON_THIS_RANK
         y = b[i] if i < len(b) else NOT_ON_THIS_RANK
-        merged.append(merge_saved(x, y, _extend(label, f"[{i}]")))
-    while merged and not _has_real(merged[-1]):
-        merged.pop()
+        merged.append(_merge(x, y, _extend(label, f"[{i}]")))
     return merged
 
 
+def _trim_overshoot(value):
+    """Drop every list's trailing no-real tail, at any depth of ``value``.
+
+    A rank's worker that loops one step past generation end appends an
+    unconsumed lazy, which strips to a sentinel; once every rank's copy has
+    merged, a position no rank holds real data for carries nothing.
+    """
+    if isinstance(value, list):
+        items = [_trim_overshoot(x) for x in value]
+        while items and not _has_real(items[-1]):
+            items.pop()
+        return items
+    if isinstance(value, tuple):
+        return _rebuild_sequence(value, [_trim_overshoot(x) for x in value])
+    if isinstance(value, CacheView):
+        value._cache.entries = _trim_overshoot(value._cache.entries)
+        return value
+    if isinstance(value, Cache):
+        value.entries = _trim_overshoot(value.entries)
+        return value
+    if isinstance(value, Entry):
+        return Entry(
+            output=_trim_overshoot(value.output), inputs=_trim_overshoot(value.inputs)
+        )
+    if isinstance(value, dict):
+        for k in list(dict.__iter__(value)):
+            dict.__setitem__(value, k, _trim_overshoot(dict.__getitem__(value, k)))
+        return value
+    return value
+
+
 def merge_saved(a, b, label: Optional[str] = None):
+    """Union of two ranks' copies of a saved value; see :func:`merge_saved_all`."""
+    return _trim_overshoot(_merge(a, b, label))
+
+
+def merge_saved_all(values: list, label: Optional[str] = None):
+    """Union of one saved name's copies from every PP rank, in rank order.
+
+    The copies fold pairwise through :func:`_merge`, and the trailing no-real
+    overshoot tail is dropped once from the result, so a rank's sentinel at a
+    position that a later rank owns still counts as a position it reached.
+    """
+    merged = values[0]
+    for value in values[1:]:
+        merged = _merge(merged, value, label)
+    return _trim_overshoot(merged)
+
+
+def _merge(a, b, label: Optional[str] = None):
     """Position-wise union of two saved values from different PP ranks.
 
     - **dicts** union by key (disjoint per-stage ``tracer.cache()`` keys
       combine; shared keys recurse);
     - **lists** union by position, length-tolerant — shared positions recurse,
-      a position only one rank reached is taken as-is, and a trailing no-real
-      overshoot tail is dropped; one-sided REAL entries warn (stalled worker /
-      divergent control flow) but the complete side is kept;
+      a position only one rank reached is taken as-is; one-sided REAL entries
+      warn (stalled worker / divergent control flow) but the complete side is
+      kept;
     - **tuples** of equal length recurse and rebuild (NamedTuple-safe);
     - **leaves** prefer real over sentinel; two reals merge silently when
       equal or emit :class:`PPRankDivergenceWarning` when they differ
@@ -261,26 +308,23 @@ def merge_saved(a, b, label: Optional[str] = None):
     if isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b):
         return _rebuild_sequence(
             a,
-            [
-                merge_saved(x, y, _extend(label, f"[{i}]"))
-                for i, (x, y) in enumerate(zip(a, b))
-            ],
+            [_merge(x, y, _extend(label, f"[{i}]")) for i, (x, y) in enumerate(zip(a, b))],
         )
     if isinstance(a, CacheView) and isinstance(b, CacheView):
         # Each stage's cache observed its own modules; the union carries every
         # stage's recordings under one view. A path both stages recorded (a
         # module real on every rank) merges entry-wise below.
-        a._cache.entries = merge_saved(
+        a._cache.entries = _merge(
             a._cache.entries, b._cache.entries, _extend(label, ".entries")
         )
         return a
     if isinstance(a, Cache) and isinstance(b, Cache):
-        a.entries = merge_saved(a.entries, b.entries, _extend(label, ".entries"))
+        a.entries = _merge(a.entries, b.entries, _extend(label, ".entries"))
         return a
     if isinstance(a, Entry) and isinstance(b, Entry):
         return Entry(
-            output=merge_saved(a.output, b.output, _extend(label, ".output")),
-            inputs=merge_saved(a.inputs, b.inputs, _extend(label, ".inputs")),
+            output=_merge(a.output, b.output, _extend(label, ".output")),
+            inputs=_merge(a.inputs, b.inputs, _extend(label, ".inputs")),
         )
     if isinstance(a, dict) and isinstance(b, dict):
         # Union the key sets. A normal dict save carries identical keys on
@@ -294,9 +338,7 @@ def merge_saved(a, b, label: Optional[str] = None):
             other = (
                 dict.__getitem__(b, k) if dict.__contains__(b, k) else NOT_ON_THIS_RANK
             )
-            merged[k] = merge_saved(
-                dict.__getitem__(a, k), other, _extend(label, f"[{k!r}]")
-            )
+            merged[k] = _merge(dict.__getitem__(a, k), other, _extend(label, f"[{k!r}]"))
         for k in dict.__iter__(b):
             if not dict.__contains__(a, k):
                 merged[k] = dict.__getitem__(b, k)

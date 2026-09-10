@@ -19,7 +19,7 @@ from typing import Any, Optional
 from vllm.v1.engine.llm_engine import LLMEngine
 
 from ....intervention.cache import Cache, CacheView
-from ..collect import merge_saved
+from ..collect import merge_saved_all
 from ..lazy_remote_tensor import NOT_ON_THIS_RANK
 
 
@@ -34,18 +34,16 @@ def _holds_sentinel(value: Any) -> bool:
     return False
 
 
-def _merge_save(existing: Any, incoming: Any, name: str) -> Any:
-    """One name reported by two ranks: the earliest rank's copy, unless the
-    sides carry pipeline-parallel sentinels or are caches, which union."""
-    if existing is NOT_ON_THIS_RANK:
-        return incoming
-    if (
-        _holds_sentinel(existing)
-        or _holds_sentinel(incoming)
-        or isinstance(existing, (Cache, CacheView))
+def _merge_copies(copies: list, name: str) -> Any:
+    """One name as reported by every rank, in rank order: the earliest rank's
+    copy, unless the copies carry pipeline-parallel sentinels or are caches,
+    which union across all of them."""
+    if len(copies) > 1 and (
+        any(_holds_sentinel(copy) for copy in copies)
+        or isinstance(copies[0], (Cache, CacheView))
     ):
-        return merge_saved(existing, incoming, name)
-    return existing
+        return merge_saved_all(copies, name)
+    return copies[0]
 
 
 def merge_collected(payloads: list) -> dict:
@@ -61,34 +59,37 @@ def merge_collected(payloads: list) -> dict:
     rank's wins. They are equal, but they are on different devices, and a value
     whose device depended on which rank answered last would be a confusing thing
     to hand back next to a traced one. Under pipeline parallelism each stage
-    ships the slots it owns and a sentinel for the rest, and the stages' copies
-    of a name union slot-wise (see
-    [`merge_saved`][nnsight.modeling.vllm.collect.merge_saved]).
+    ships the slots it owns and a sentinel for the rest, and every stage's copy
+    of a name unions slot-wise in one pass (see
+    [`merge_saved_all`][nnsight.modeling.vllm.collect.merge_saved_all]).
     """
-    merged: dict[str, dict] = {}
+    kinds = ("saves", "registered")
+    gathered: dict[str, dict] = {}
     for payload in payloads or ():
         if payload is None:
             continue
         for request_id, entry in pickle.loads(payload).items():
-            into = merged.setdefault(
+            into = gathered.setdefault(
                 request_id,
                 {"saves": {}, "error": None, "registered": {}, "sequences": {}},
             )
-            for name, value in (entry.get("saves") or {}).items():
-                into["saves"][name] = _merge_save(into["saves"].get(name, NOT_ON_THIS_RANK), value, name)
-            for name, value in (entry.get("registered") or {}).items():
-                into["registered"][name] = _merge_save(into["registered"].get(name, NOT_ON_THIS_RANK), value, name)
+            for kind in kinds:
+                for name, value in (entry.get(kind) or {}).items():
+                    into[kind].setdefault(name, []).append(value)
             for index, sequence in (entry.get("sequences") or {}).items():
-                target = into["sequences"].setdefault(
-                    index, {"saves": {}, "registered": {}}
-                )
-                for name, value in (sequence.get("saves") or {}).items():
-                    target["saves"][name] = _merge_save(target["saves"].get(name, NOT_ON_THIS_RANK), value, name)
-                for name, value in (sequence.get("registered") or {}).items():
-                    target["registered"][name] = _merge_save(target["registered"].get(name, NOT_ON_THIS_RANK), value, name)
+                target = into["sequences"].setdefault(index, {"saves": {}, "registered": {}})
+                for kind in kinds:
+                    for name, value in (sequence.get(kind) or {}).items():
+                        target[kind].setdefault(name, []).append(value)
             if into["error"] is None:
                 into["error"] = entry.get("error")
-    return merged
+    for into in gathered.values():
+        for kind in kinds:
+            into[kind] = {name: _merge_copies(copies, name) for name, copies in into[kind].items()}
+        for target in into["sequences"].values():
+            for kind in kinds:
+                target[kind] = {name: _merge_copies(copies, name) for name, copies in target[kind].items()}
+    return gathered
 
 
 def attach(output: Any, entry: dict) -> None:
