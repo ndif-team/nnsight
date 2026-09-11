@@ -215,6 +215,46 @@ brought in, and including a container rebuilt from blocks the tree already wraps
 (`model.transformer.h = nn.ModuleList(list(model.transformer._module.h)[:4])`).
 Each such entry names the one envoy at the module's first path.
 
+## Containers that index past their entries
+
+`len(envoy)`, iteration and `envoy[k]` answer for the same entries. For torch's
+own containers — `ModuleList`, `Sequential`, `ModuleDict` — that is the envoy
+children, because the tree mirrors their entries one-for-one. Indexing resolves
+by child name, which is what keeps a shared entry at its own name and what makes
+`layers[2]` an envoy rather than a bare module.
+
+A container may instead keep its modules one level down and reach them through
+its own `__getitem__` — a set of transcoders or SAEs holding them in a child
+`ModuleList`:
+
+```python
+class TranscoderSet(nn.Module):
+    def __init__(self, transcoders):
+        super().__init__()
+        self.transcoders = nn.ModuleList(transcoders)   # the tree's one child
+
+    def __len__(self):     return len(self.transcoders)
+    def __getitem__(self, i): return self.transcoders[i]
+```
+
+Its `__len__` counts eighteen transcoders while the envoy has one child, so an
+envoy that indexed only by name would report a length whose every index raised.
+The envoy asks the container instead, and names the envoy of whatever module it
+hands back, so all three agree on the modules:
+
+```python
+len(model.transcoders)      # 18
+model.transcoders[2]        # model.transcoders.transcoders.2 -- an Envoy
+list(model.transcoders)     # the 18 transcoder envoys
+```
+
+The delegation is a fallback, not the first move: a name that resolves to a child
+wins, so nothing about torch's containers changes. It only yields an `Envoy` —
+a `__getitem__` returning a tensor element, or a module built on the fly that
+this tree does not wrap, raises rather than handing back something no trace can
+address. A container with no `__iter__` of its own is walked over the length it
+reports, so a `__getitem__` that never raises `IndexError` cannot run away.
+
 ## Module renaming (aliases)
 
 `rename={...}` on `NNsight`/`Envoy` binds aliases pointing at the same child envoy (`_bind_aliases`, `envoy.py`). A single-component path (`{"transformer": "gpt"}`) binds wherever it resolves; a multi-component path (`{"transformer.h": "layers"}`) binds on the envoy it resolves from. Aliases are ordinary attributes referencing the same object, so they survive a dispatch re-point with no rebuild.
