@@ -301,12 +301,17 @@ def _finalize_by_round(rank, world, rdv):
     producible = stage.mediator(_READ_H1, req_id="req-P")
     # No completed rounds and no publisher: a pull the pipeline cannot produce.
     lookahead = stage.mediator(_READ_H1, req_id="req-L", register=(rank == 0))
-    stage.interleaver.rounds.update({"req-P": 1, "req-L": 0})
+    if rank == 0:
+        stage.interleaver.rounds.update({"req-P": 1, "req-L": 0})
     with stage.interleaver:
         if rank == 0:
             stage.interleaver.handle("model.h.0.output", torch.zeros(4))
         else:
             stage.interleaver.handle("model.h.1.output", torch.arange(4.0))
+    if rank == 1:
+        # The publish above is round 0 of req-P on this rank; the round closes
+        # after it, as a forward's does.
+        stage.interleaver.rounds.update({"req-P": 1, "req-L": 0})
     if rank == 0:
         stage.interleaver.mediators.clear()
         t0 = time.time()
@@ -328,6 +333,46 @@ def test_finalize_serves_finished_workers_by_round():
 # ---------------------------------------------------------------------------
 # Interleaver level: errors land on the worker
 # ---------------------------------------------------------------------------
+
+
+def _passed_round(rank, world, rdv):
+    """A pull for an occurrence of a round the owning rank has completed, with
+    nothing buffered for it, is answered with an error at once: on arrival when
+    the round is already closed, and from the parked table when it closes."""
+    stage = Stage(rank, world, rdv, {"h.0": 0, "h.1": 1})
+    listener = stage.listener
+    if rank == 1:
+        stage.interleaver.rounds["req-a"] = 1  # round 0 complete, nothing published
+    dist.barrier()
+    if rank == 0:
+        t0 = time.monotonic()
+        pull = listener.begin_pull(1, "model.h.1.output.i0", "req-a")
+        try:
+            pull.complete(timeout=10.0)
+            raise AssertionError("a pull for a completed round should have error-replied")
+        except RuntimeError as error:
+            assert "ran past" in str(error) and "model.h.1" in str(error), error
+        assert time.monotonic() - t0 < 5.0
+        # Round 1 is open on the owner: the pull parks, and the round closing
+        # answers it.
+        later = listener.begin_pull(1, "model.h.1.output.i1", "req-a")
+    dist.barrier()
+    if rank == 1:
+        _wait_for_parked(listener)
+        stage.interleaver.rounds["req-a"] = 2
+        listener.expire_passed()
+    else:
+        try:
+            later.complete(timeout=10.0)
+            raise AssertionError("a parked pull should have error-replied when its round closed")
+        except RuntimeError as error:
+            assert "ran past" in str(error), error
+    dist.barrier()
+    stage.close()
+
+
+def test_pull_for_a_completed_round_errors_at_once():
+    run_two_ranks(_passed_round)
 
 
 def _wait_for_parked(listener, timeout=10.0):

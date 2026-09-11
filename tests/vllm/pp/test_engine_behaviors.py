@@ -58,6 +58,28 @@ def test_cross_stage_write_changes_logits(pp2_engine):
     assert not torch.equal(clean, zeroed)
 
 
+def test_local_read_after_a_downstream_force_fails_fast(pp2_engine):
+    """Forcing a downstream layer parks the upstream rank's worker through the
+    forward, so its later read of an upstream layer is out of order there. The
+    downstream rank reads that same layer by pull, and the owner answers that
+    its forward already ran past it. The trace fails with the out-of-order
+    error well inside the pull timeout, and the engine serves the next trace."""
+    model = pp2_engine
+    t0 = time.time()
+    with pytest.raises(Exception) as info:
+        with model.trace(PROMPT, temperature=0.0, max_tokens=2):
+            late = _layer(model, LATE).output[0].sum()
+            early = _layer(model, EARLY).output[0].sum()
+            total = (late + early).save()
+    assert "ran past" in str(info.value) and f"layers.{EARLY}" in str(info.value), info.value
+    assert time.time() - t0 < STALL_BOUND_S
+    with model.trace(PROMPT, temperature=0.0, max_tokens=2):
+        early = _layer(model, EARLY).output[0].sum()
+        late = _layer(model, LATE).output[0].sum()
+        total = (early + late).save()
+    assert torch.isfinite(total)
+
+
 def test_cross_stage_inputs_read_carries_the_argument_structure(pp2_engine):
     """A layer's ``.inputs`` is ``((positions, hidden, residual), {})``, int64
     beside bf16 in a nested tuple. The downstream rank pulls an upstream

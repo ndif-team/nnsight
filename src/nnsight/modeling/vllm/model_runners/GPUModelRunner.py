@@ -883,6 +883,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 rounds = interleaver.rounds
                 for req_id in scheduler_output.num_scheduled_tokens:
                     rounds[req_id] = rounds.get(req_id, 0) + 1
+                # A pull parked for an occurrence of a round that just closed
+                # names a value this round never published; answer it now.
+                self.pp_listener.expire_passed()
                 interleaver.serve_pulls(block=False)
                 interleaver.step += 1
         return output

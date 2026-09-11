@@ -157,6 +157,14 @@ def provider_to_module_path(provider_string: str) -> str:
     return provider_string
 
 
+def occurrence_of(provider: str) -> Optional[int]:
+    """The ``.i{n}`` occurrence a tagged provider names, or ``None``."""
+    _, _, tag = provider.rpartition(".")
+    if tag.startswith("i") and tag[1:].isdigit():
+        return int(tag[1:])
+    return None
+
+
 class _TensorSlot:
     """One tensor's place in a reply: its dtype, shape, and byte range in the
     message's data region. Stands in for the tensor inside the pickled
@@ -355,6 +363,11 @@ class PPListener:
         # so check-and-park in the recv loop races safely against the
         # producer's write+dispatch.
         self._parked: Dict[Any, list] = {}
+        # The interleaver's completed-round count per request id, shared by
+        # reference. A round this rank has completed published every value it
+        # was going to, so a pull for an earlier occurrence with nothing
+        # buffered is answered with an error.
+        self.rounds: Optional[Dict[Any, int]] = None
         self._reply_pool = ThreadPoolExecutor(
             max_workers=_REPLY_POOL_SIZE, thread_name_prefix="pp-reply"
         )
@@ -478,6 +491,10 @@ class PPListener:
                     if lookup_key in self._buffer:
                         value = self._buffer[lookup_key]
                         self._reply_pool.submit(self._serve_reply, req, value)
+                    elif self._passed(lookup_key):
+                        self._reply_pool.submit(
+                            self._serve_error_reply, req, self._passed_message(lookup_key)
+                        )
                     else:
                         self._parked.setdefault(lookup_key, []).append(req)
 
@@ -491,6 +508,34 @@ class PPListener:
                 traceback.print_exc()
                 if self._stop_event.wait(timeout=PP_LISTENER_BACKOFF_S):
                     return
+
+    def _passed(self, key) -> bool:
+        """Whether ``key`` names an occurrence of a round this rank has
+        completed for its request, so the value will never be published."""
+        if self.rounds is None or not (isinstance(key, tuple) and len(key) == 2):
+            return False
+        provider, req_id = key
+        rounds = self.rounds.get(req_id)
+        occurrence = occurrence_of(provider)
+        return rounds is not None and occurrence is not None and occurrence < rounds
+
+    @staticmethod
+    def _passed_message(key) -> str:
+        provider, _ = key
+        return (
+            f"this rank's forward already ran past {provider!r} with no worker "
+            f"reading it there, so the value was never published (requested out "
+            f"of order)"
+        )
+
+    def expire_passed(self) -> None:
+        """Error-reply every parked pull whose round this rank has since
+        completed. Called by the runner as each round closes."""
+        with self._condition:
+            passed = [key for key in self._parked if self._passed(key)]
+            abandoned = [(key, req) for key in passed for req in self._parked.pop(key)]
+        for key, req in abandoned:
+            self._reply_pool.submit(self._serve_error_reply, req, self._passed_message(key))
 
     def dispatch_parked(self, key, value):
         """Serve any pulls parked waiting for ``key``.

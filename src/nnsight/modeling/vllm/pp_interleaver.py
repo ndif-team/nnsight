@@ -53,15 +53,8 @@ from .lazy_remote_tensor import (
     decode_pull_location,
     encode_pull_location,
 )
+from .pp_listener import occurrence_of as _occurrence
 from .pp import PPModuleMap, resolve_meta
-
-
-def _occurrence(provider: str) -> Optional[int]:
-    """The ``.i{n}`` occurrence a tagged provider names, or ``None``."""
-    _, _, tag = provider.rpartition(".")
-    if tag.startswith("i") and tag[1:].isdigit():
-        return int(tag[1:])
-    return None
 
 
 class PPInterleaver(VLLMInterleaver):
@@ -105,6 +98,7 @@ class PPInterleaver(VLLMInterleaver):
         # after EVERY stage finished round k-1 — so when this rank opens
         # round k, all stages have completed rounds 0..k-1 for the request.
         self.rounds: dict = {}
+        listener.rounds = self.rounds
         # The round each request is running or about to run on this rank,
         # maintained by the runner at the start of every step. An upstream
         # stage has finished that round before this rank opens it, so it is
