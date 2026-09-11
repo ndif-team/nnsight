@@ -20,6 +20,8 @@ stays thin and aliases / ``ModuleList`` indexing work for free.
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -66,7 +68,9 @@ class Cache:
 
     Attributes:
         model: The root envoy, used to resolve paths / aliases for [`CacheView`][nnsight.intervention.cache.CacheView].
-        targets: The module paths to keep, or ``None`` to keep every module.
+        targets: The module paths to keep, resolved against the envoy tree (see
+            [`_resolve_targets`][nnsight.intervention.cache.Cache._resolve_targets]),
+            or ``None`` to keep every module.
         entries: Recorded values, ``{module_path: [Entry, ...]}``.
     """
 
@@ -90,14 +94,87 @@ class Cache:
         self.include_inputs = include_inputs
         # None => every module; else the exact set of paths to keep.
         self.targets: set[str] | None = (
-            None
-            if modules is None
-            else {m if isinstance(m, str) else m.path for m in modules}
+            None if modules is None else self._resolve_targets(modules)
         )
         self.entries: dict[str, list[Entry]] = {}
         # Which slots of each path's newest Entry have been written this visit.
         # Recording-time bookkeeping only; see `_record`.
         self._open: dict[str, set[str]] = {}
+
+    def _resolve_targets(self, modules: Any) -> set[str]:
+        """The module paths ``modules=`` names, raising for anything that names none.
+
+        A target is matched against the paths the run reports, so a string that
+        resolves to no module -- a typo, a path missing the model's own name, a
+        glob, a regex -- subscribed to a location nothing ever provides: an empty
+        cache and no error. Resolving each one against the envoy tree here gives
+        the same error reading that module by attribute does.
+        """
+        if isinstance(modules, str) or not isinstance(modules, Iterable):
+            # A lone target rather than a list of them: a string would otherwise
+            # be taken a character at a time, and a callable or a regex is not
+            # iterable at all -- `_resolve` says what `modules=` accepts.
+            modules = [modules]
+
+        return {self._resolve(module) for module in modules}
+
+    def _resolve(self, module: Any) -> str:
+        """One ``modules=`` entry as a module path."""
+        from .envoy import Envoy
+
+        if isinstance(module, Envoy):
+            return module.path
+        if not isinstance(module, str):
+            raise TypeError(
+                f"cache modules= takes envoys (model.transformer.h[0]) or their "
+                f"paths ('model.transformer.h.0'), not {type(module).__name__}. "
+                f"Globs, regexes and predicates are not matched against the tree: "
+                f"select the modules yourself and pass them."
+            )
+
+        root = self.model.path
+        if module == root:
+            return root
+        if not module.startswith(f"{root}."):
+            # A target is spelled the way the cache's own keys are, from the
+            # model's own name down; the common miss is dropping that name, so
+            # say so when adding it back does resolve.
+            try:
+                suggestion = self._resolve(f"{root}.{module}")
+            except (AttributeError, TypeError):
+                suggestion = None
+            raise AttributeError(
+                f"{module!r} is not a module path"
+                + (
+                    f" -- did you mean {suggestion!r}?"
+                    if suggestion is not None
+                    else f": no module of {root!r} is named that."
+                )
+            )
+
+        envoy: Any = self.model
+        for name in module[len(root) + 1 :].split("."):
+            # `.output` / `.input` are values the run serves, not modules; reading
+            # one here would request it from the run instead of resolving a path.
+            if inspect.isdatadescriptor(getattr(type(envoy), name, None)):
+                raise AttributeError(
+                    f"{module!r} names {name!r}, which is a value nnsight serves "
+                    f"on every module, not a module. Cache targets are modules."
+                )
+            try:
+                envoy = getattr(envoy, name)
+            except AttributeError as error:
+                # The envoy's own miss, named against the target it came from —
+                # otherwise a list of paths doesn't say which one is wrong.
+                raise AttributeError(
+                    f"{module!r} is not a module path: {error}"
+                ) from error
+            if not isinstance(envoy, Envoy):
+                raise AttributeError(
+                    f"{module!r} is not a module: {name!r} is a "
+                    f"{type(envoy).__name__}."
+                )
+        return envoy.path
 
     def __getstate__(self) -> dict:
         # `model` is a live Envoy used only for CacheView navigation, and it drags

@@ -200,7 +200,11 @@ class InterleavingTracer(Tracer):
         per step (``len(cache[path])`` is the step count).
 
         Args:
-            modules: Envoys or path strings to capture; ``None`` captures every module.
+            modules: Envoys or their paths (``"model.transformer.h.0"``, the
+                whole path, as the cache's keys are) to capture; ``None``
+                captures every module. A path is resolved against the envoy
+                tree, so one that names no module raises rather than caching
+                nothing; globs, regexes and predicates are not matched.
             device: Device to move captured tensors to (default CPU); ``None`` leaves them.
             dtype: Optional dtype to cast captured tensors to.
             detach: Detach captured tensors from the autograd graph.
