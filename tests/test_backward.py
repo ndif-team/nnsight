@@ -119,3 +119,130 @@ class TestBareBackward:
         t = torch.tensor([2.0], requires_grad=True)
         (t * 3).sum().backward()
         assert torch.equal(t.grad, torch.tensor([3.0]))
+
+
+class _BatchEnvoy(Envoy):
+    """An Envoy that stacks each invoke's tensor input into one batch, so batching
+    behaviour can be exercised without a real batching model.
+
+    Mirrors the helper in ``test_batching.py``; kept local because that file is
+    deliberately all ``@torch.no_grad()`` and these are the gradient tests.
+    """
+
+    def _batch_size(self, *inputs, **kwargs):
+        return inputs[0].shape[0] if inputs else 0
+
+    def _batch(self, invokes, fn):
+        return (torch.cat([inputs[0] for inputs, _ in invokes]),), {}
+
+
+class TestBatchedInvokeGradients:
+    """An invoke's gradient is its own rows.
+
+    Invokes share one batched forward, so a module's output is one tensor with
+    every invoke's rows in it. Reading ``.grad`` inside an invoke has to narrow
+    to that invoke's slice — reading the whole batch, or another invoke's slice,
+    is a plausible-looking tensor that is silently the wrong gradient.
+
+    Row counts differ per invoke on purpose, so a slice taken at the wrong
+    offset fails on shape rather than on values that might round close.
+    """
+
+    @pytest.fixture
+    def batched(self):
+        torch.manual_seed(0)
+        model = MLP()
+        return model, _BatchEnvoy(model)
+
+    @pytest.mark.parametrize("target", [0, 1, 2])
+    def test_the_gradient_read_is_that_invokes_rows(self, batched, target):
+        model, envoy = batched
+        torch.manual_seed(1)
+        xs = [torch.randn(2, 8), torch.randn(3, 8), torch.randn(1, 8)]
+        expected = reference_grad(model, xs[target])
+
+        captured = {}
+        with envoy.trace() as tracer:
+            for index, x in enumerate(xs):
+                with tracer.invoke(x):
+                    if index == target:
+                        a1 = envoy.fc1.output
+                        with envoy.output.sum().backward():
+                            captured["grad"] = nnsight.save(a1.grad.clone())
+                    else:
+                        nnsight.save(envoy.output.sum())
+
+        got = captured["grad"]
+
+        # The batch is 6 rows; this invoke's is 2, 3 or 1 of them.
+        assert got.shape == xs[target].shape
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_the_gradient_read_is_not_another_invokes_rows(self, batched):
+        # Same row count on both invokes, so the shape check above cannot be
+        # what catches a wrong offset -- only the values can.
+        model, envoy = batched
+        torch.manual_seed(2)
+        first, second = torch.randn(3, 8), torch.randn(3, 8)
+        expected = reference_grad(model, second)
+        other = reference_grad(model, first)
+
+        captured = {}
+        with envoy.trace() as tracer:
+            with tracer.invoke(first):
+                nnsight.save(envoy.output.sum())
+            with tracer.invoke(second):
+                a1 = envoy.fc1.output
+                with envoy.output.sum().backward():
+                    captured["grad"] = nnsight.save(a1.grad.clone())
+
+        got = captured["grad"]
+
+        assert torch.allclose(got, expected, atol=1e-6)
+        assert not torch.allclose(got, other, atol=1e-4)
+
+    def test_each_invoke_reads_its_own_gradient(self, batched):
+        # Two invokes both taking a gradient. They share one autograd graph, so
+        # every backward but the last needs retain_graph=True.
+        model, envoy = batched
+        torch.manual_seed(3)
+        first, second = torch.randn(2, 8), torch.randn(3, 8)
+        expected_first = reference_grad(model, first)
+        expected_second = reference_grad(model, second)
+
+        with envoy.trace() as tracer:
+            with tracer.invoke(first):
+                a1 = envoy.fc1.output
+                with envoy.output.sum().backward(retain_graph=True):
+                    grad_first = nnsight.save(a1.grad.clone())
+            with tracer.invoke(second):
+                a1 = envoy.fc1.output
+                with envoy.output.sum().backward():
+                    grad_second = nnsight.save(a1.grad.clone())
+
+        assert grad_first.shape == first.shape
+        assert grad_second.shape == second.shape
+        assert torch.allclose(grad_first, expected_first, atol=1e-6)
+        assert torch.allclose(grad_second, expected_second, atol=1e-6)
+
+    def test_a_gradient_edit_stays_in_its_invoke(self, batched):
+        model, envoy = batched
+        torch.manual_seed(4)
+        first, second = torch.randn(2, 8), torch.randn(3, 8)
+        expected_first = reference_grad(model, first)
+        expected_second = reference_grad(model, second)
+
+        with envoy.trace() as tracer:
+            with tracer.invoke(first):
+                a1 = envoy.fc1.output
+                with envoy.output.sum().backward(retain_graph=True):
+                    a1.grad = a1.grad * 3.0
+                    grad_first = nnsight.save(a1.grad.clone())
+            with tracer.invoke(second):
+                a1 = envoy.fc1.output
+                with envoy.output.sum().backward():
+                    grad_second = nnsight.save(a1.grad.clone())
+
+        assert torch.allclose(grad_first, expected_first * 3.0, atol=1e-6)
+        # The other invoke's rows are untouched by the edit.
+        assert torch.allclose(grad_second, expected_second, atol=1e-6)
