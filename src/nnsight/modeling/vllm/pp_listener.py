@@ -368,6 +368,10 @@ class PPListener:
         # was going to, so a pull for an earlier occurrence with nothing
         # buffered is answered with an error.
         self.rounds: Optional[Dict[Any, int]] = None
+        # Per request id, why this rank's side of the request failed (its block
+        # did not deserialize, or its worker raised), set by the runner. A pull
+        # refused for that request carries the cause in its error reply.
+        self.failed: Dict[Any, str] = {}
         self._reply_pool = ThreadPoolExecutor(
             max_workers=_REPLY_POOL_SIZE, thread_name_prefix="pp-reply"
         )
@@ -413,11 +417,14 @@ class PPListener:
         with self._condition:
             if req_ids is None:
                 self._buffer.clear()
+                self.failed.clear()
                 for reqs in self._parked.values():
                     abandoned.extend(reqs)
                 self._parked.clear()
             else:
                 id_set = set(req_ids)
+                for req_id in id_set:
+                    self.failed.pop(req_id, None)
                 to_remove = [
                     k for k in self._buffer
                     if isinstance(k, tuple) and len(k) == 2 and k[1] in id_set
@@ -519,9 +526,14 @@ class PPListener:
         occurrence = occurrence_of(provider)
         return rounds is not None and occurrence is not None and occurrence < rounds
 
-    @staticmethod
-    def _passed_message(key) -> str:
-        provider, _ = key
+    def _passed_message(self, key) -> str:
+        provider, req_id = key
+        cause = self.failed.get(req_id)
+        if cause is not None:
+            return (
+                f"the owning rank's side of this request failed before it reached "
+                f"{provider!r}: {cause}"
+            )
         return (
             f"this rank's forward already ran past {provider!r} with no worker "
             f"reading it there, so the value was never published (requested out "

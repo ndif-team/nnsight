@@ -252,6 +252,10 @@ class LazyRemoteTensor:
     def __getattr__(self, name: str):
         if name.startswith("_") or name in LazyRemoteTensor._OWN_ATTRS:
             raise AttributeError(name)
+        return getattr(self._tensor(name), name)
+
+    def _tensor(self, name: str) -> Any:
+        """The materialized value, for a tensor attribute ``name``."""
         real = self._materialize()
         # Multi-output modules (e.g. Qwen2 / Llama decoder blocks) produce a
         # ``(hidden, residual)`` tuple, not a tensor. Forwarding a tensor
@@ -268,13 +272,13 @@ class LazyRemoteTensor:
                 f"index it first (e.g. ``lazy[0].{name}``) to operate on a "
                 f"single tuple element."
             )
-        return getattr(real, name)
+        return real
 
     # --- metadata ---
 
     @property
     def shape(self) -> Tuple[int, ...]:
-        return self._materialize().shape
+        return self._tensor("shape").shape
 
     @property
     def dtype(self) -> Optional[torch.dtype]:
@@ -285,7 +289,7 @@ class LazyRemoteTensor:
 
     @property
     def device(self) -> torch.device:
-        return self._materialize().device
+        return self._tensor("device").device
 
     def __repr__(self) -> str:
         status = "materialized" if self._real is not None else "lazy"

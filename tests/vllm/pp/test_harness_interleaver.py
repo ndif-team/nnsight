@@ -343,6 +343,8 @@ def _passed_round(rank, world, rdv):
     listener = stage.listener
     if rank == 1:
         stage.interleaver.rounds["req-a"] = 1  # round 0 complete, nothing published
+        listener.failed["req-b"] = "ValueError: raised by the block"
+        stage.interleaver.rounds["req-b"] = 1
     dist.barrier()
     if rank == 0:
         t0 = time.monotonic()
@@ -353,6 +355,13 @@ def _passed_round(rank, world, rdv):
         except RuntimeError as error:
             assert "ran past" in str(error) and "model.h.1" in str(error), error
         assert time.monotonic() - t0 < 5.0
+        # A request the owner's side failed on: the reply names that failure.
+        failed = listener.begin_pull(1, "model.h.1.output.i0", "req-b")
+        try:
+            failed.complete(timeout=10.0)
+            raise AssertionError("a pull for a failed request should have error-replied")
+        except RuntimeError as error:
+            assert "raised by the block" in str(error), error
         # Round 1 is open on the owner: the pull parks, and the round closing
         # answers it.
         later = listener.begin_pull(1, "model.h.1.output.i1", "req-a")

@@ -49,6 +49,16 @@ if TYPE_CHECKING:
     from ..vllm import VLLM
 
 
+def _failure_cause(request: "Request") -> Optional[str]:
+    """How this rank's side of ``request`` failed, or ``None`` while it runs."""
+    if request.error is not None:
+        return f"{request.error['type_name']}: {request.error['message']}"
+    for mediator in request.workers():
+        if mediator.exception is not None:
+            return f"{type(mediator.exception).__name__}: {mediator.exception}"
+    return None
+
+
 def _ids_unrandomized() -> bool:
     """Whether this vLLM was told not to suffix request ids."""
     from vllm import envs
@@ -884,7 +894,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 for req_id in scheduler_output.num_scheduled_tokens:
                     rounds[req_id] = rounds.get(req_id, 0) + 1
                 # A pull parked for an occurrence of a round that just closed
-                # names a value this round never published; answer it now.
+                # names a value this round never published; answer it now,
+                # naming this rank's failure for the request when it has one.
+                for request in self.nnsight_requests.requests.values():
+                    cause = _failure_cause(request)
+                    if cause is not None:
+                        self.pp_listener.failed[request.id] = cause
                 self.pp_listener.expire_passed()
                 interleaver.serve_pulls(block=False)
                 interleaver.step += 1
