@@ -360,7 +360,9 @@ class Events(Enum):
 class Cancelation(Exception):
     """Exception raised when a request is canceled."""
 
-    pass
+    def __init__(self, preserve_locals: bool = False):
+        super().__init__()
+        self.preserve_locals = preserve_locals
 
 
 class EarlyStopException(Exception):
@@ -625,7 +627,7 @@ class Interleaver:
             # Start all the mediators to begin their intervention threads amd wait for their first event.
             for idx, mediator in enumerate(self.mediators):
                 mediator.idx = idx
-                if mediator.alive:
+                if not mediator.active or mediator.alive:
                     continue
                 mediator.start(self)
 
@@ -694,6 +696,8 @@ class Interleaver:
         result = value
 
         for mediator in self.mediators:
+            if not mediator.active:
+                continue
             if iterate:
                 iteration = mediator.iteration_tracker[original_provider]
                 provider = f"{original_provider}.i{iteration}"
@@ -872,6 +876,9 @@ class Mediator:
         self.idx = None
         self.info = info
         self.batch_group = batch_group
+        # Runtimes can pause a request without consuming its pending hooks or
+        # advancing its iteration counters while other requests execute.
+        self.active = True
 
         self.interleaver = None
 
@@ -971,11 +978,15 @@ class Mediator:
 
         _intervention = self.intervention
         _args = (self, self.info, *self.args)
+        _caller_inference_mode = torch.is_inference_mode_enabled()
 
         def _worker_target():
             if _caller_stream is not None:
                 torch.cuda.set_stream(_caller_stream)
-            _intervention(*_args)
+            # Inference mode is thread-local. Runners such as vLLM create
+            # inference tensors that can only be edited while it is enabled.
+            with torch.inference_mode(_caller_inference_mode):
+                _intervention(*_args)
 
         # Start the worker thread.
         self.worker = Thread(
@@ -998,8 +1009,12 @@ class Mediator:
 
     ### Provider Methods ###
 
-    def cancel(self):
-        """Cancel the intervention thread and its ephemeral state."""
+    def cancel(self, preserve_locals: bool = False):
+        """Cancel the thread, optionally publishing final locals for collection.
+
+        Transport-only client mediators leave this disabled so stale client
+        variables cannot overwrite results returned by remote execution.
+        """
 
         self.history = set()
         self.iteration_tracker = defaultdict(int)
@@ -1010,7 +1025,9 @@ class Mediator:
             self.handle()
             if self.event_queue.has_value:
                 self.event_queue.get()
-                self.response_queue.put(Cancelation())
+                # Wait for the worker to publish its final locals/exception
+                # before collectors inspect its frame or remove saved IDs.
+                self.respond(Cancelation(preserve_locals=preserve_locals))
                 self.event_queue.get()
 
     def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
@@ -1392,6 +1409,11 @@ class Mediator:
         Args:
             exception: The exception that occurred
         """
+        # Remote runners need final locals from unbounded iteration. Client
+        # transport mediators must not publish their stale locals over results
+        # already returned from the worker, so collectors opt in explicitly.
+        if isinstance(exception, Cancelation) and exception.preserve_locals:
+            self.push()
         self.event_queue.put((Events.EXCEPTION, exception))
 
     @property
@@ -1480,6 +1502,7 @@ class Mediator:
             "idx": self.idx,
             "info": self.info,
             "batch_group": self.batch_group,
+            "active": self.active,
             "intervention": self.intervention,
             "all_stop": self.all_stop,
             "iteration_tracker": self.iteration_tracker,
@@ -1491,6 +1514,7 @@ class Mediator:
         self.idx = state["idx"]
         self.info = state["info"]
         self.batch_group = state["batch_group"]
+        self.active = state.get("active", True)
         self.intervention = state["intervention"]
         self.all_stop = state["all_stop"]
         self.iteration_tracker = state["iteration_tracker"]

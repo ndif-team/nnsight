@@ -1,5 +1,8 @@
 import atexit
 import uuid
+from importlib.metadata import version
+
+from packaging.version import Version
 
 import torch
 
@@ -176,6 +179,11 @@ class VLLM(RemoteableMixin):
         return model
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
+
+        if Version(version("vllm")) >= Version("0.29.0"):
+            # Reusing another request's KV cache can bypass interventions or
+            # reuse activations produced by a different intervention program.
+            kwargs.setdefault("enable_prefix_caching", False)
 
         meta_model = self._load_meta(repo_id, **kwargs)
 

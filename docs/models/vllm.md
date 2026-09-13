@@ -33,12 +33,42 @@ Do not use `VLLM` when:
 
 ## Loading
 
+The worker selects the adapter matching vLLM's resolved model runner. Model
+Runner V2 has an initial adapter for **vLLM >=0.29.0,<0.30.0**, supporting eager,
+single-GPU, text-only causal generation. It supports activation, raw-logit,
+and sampled-token interventions, including continuously batched requests and
+chunked prefill. Parallel execution, speculative/diffusion decoding, custom
+samplers, multimodal/pooling models, sampling trace replay, and KV transfer are
+rejected explicitly on this path. The legacy adapter remains available when
+vLLM selects Model Runner V1; these V2 restrictions do not change its TP support.
+
+On vLLM 0.29+, NNsight defaults `enable_prefix_caching=False`. The V2 adapter
+requires this: cache reuse can skip activation hooks or reuse state produced by
+a different intervention. Explicitly enabling prefix caching raises an error.
+
+With V2, `tracer.iter` counts **scheduled model executions**, including nonfinal
+prefill chunks and recomputation after preemption. `model.samples` exposes the
+candidate for each execution; vLLM discards candidates for unfinished prefill
+chunks. These samples are not necessarily emitted tokens. Raw `model.logits`
+interventions run before grammar constraints and sampling parameters. Sample
+interventions run before logprob calculation, output copying, and request-state
+updates, so all three consume the edited token.
+
+The V2 adapter is tested with GPT-2 on an A100 using vLLM 0.29.0 and CUDA 12.9.
+GPU tests cover token replacement and next-step feedback, selected-token
+logprobs, logits replacement, chunked prefill, and mixed traced/untraced requests.
+See [V2 developer notes](../developing/vllm-integration.md#model-runner-v2)
+for the validation commands and scope.
+Save collection finalizes completed requests. If an async consumer aborts before
+a final output and does not request finalization through `collect_nnsight`, its
+intervention resources are retained until worker shutdown.
+
 ```python
 from nnsight.modeling.vllm import VLLM
 
 model = VLLM(
     "meta-llama/Llama-3.1-8B",
-    tensor_parallel_size=2,
+    tensor_parallel_size=1,  # V2 currently supports one GPU
     gpu_memory_utilization=0.9,
     dispatch=True,
 )
@@ -320,7 +350,7 @@ Print `model` to see the actual tree for your model.
 - **No `.scan()`, no `tracer.cache()`, no module editing yet.** These work at the tracing layer but haven't been validated on the vLLM path. See `IDEAS.md` for the parity gap table.
 - **No source tracing on fused CUDA kernels.** vLLM uses custom CUDA ops for attention and other hot paths; `.source` only works on Python-level forward methods.
 - **Multi-tenant isolation is on you.** `Globals.saves` is process-global. For multi-user serving with isolation, use NDIF or build your own layer.
-- **Version sensitivity.** Currently pinned to vLLM 0.15.1, Ray 2.53.0, grpcio 1.76.0. The Ray actor workaround is a vLLM-version-specific hack.
+- **Version sensitivity.** The legacy adapter was originally documented against vLLM 0.15.1. The V2 adapter requires vLLM >=0.29.0,<0.30.0 and validates its supported configuration. The Ray actor workaround is version-specific.
 - **vLLM v1 only.** The integration targets vLLM's v1 architecture (the `AsyncLLM` import path is `vllm.v1.engine.async_llm`).
 - **Multi-modal models are not yet integrated.** vLLM supports VLMs but the NNsight `VLLM` wrapper is text-only for now (`IDEAS.md`).
 

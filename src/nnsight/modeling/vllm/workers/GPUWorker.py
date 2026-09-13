@@ -1,23 +1,30 @@
 from vllm.v1.worker import gpu_worker
-from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
-from vllm.v1.worker import gpu_model_runner
 
 
 class NNsightGPUWorker(gpu_worker.Worker):
-    """Custom vLLM GPU worker that uses :class:`NNsightGPUModelRunner`.
+    """Install the NNsight adapter for vLLM's selected GPU model runner.
 
-    Monkey-patches the default ``GPUModelRunner`` class before
-    initialization so vLLM creates NNsight-aware model runners
-    that can execute intervention code during model forward passes.
+    vLLM selects the runner during ``init_device``. Import and replace only
+    that implementation while it constructs the runner, then restore the
+    upstream class so other workers in this process remain unaffected.
     """
 
-    def __init__(self, *args, **kwargs):
-
-        gpu_model_runner.GPUModelRunner = NNsightGPUModelRunner
-
-        super().__init__(*args, **kwargs)
-
     def init_device(self):
+        # The upstream worker resolves this flag from its configuration (or
+        # the environment on older releases). Use the same decision rather
+        # than inferring the runner from the installed version.
+        if self.use_v2_model_runner:
+            from ..model_runners.GPUModelRunnerV2 import NNsightGPUModelRunnerV2
+            from vllm.v1.worker.gpu import model_runner
+
+            runner_cls = NNsightGPUModelRunnerV2
+            runner_cls.validate_config(self.vllm_config)
+        else:
+            from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
+            from vllm.v1.worker import gpu_model_runner as model_runner
+
+            runner_cls = NNsightGPUModelRunner
+
         # NNsightRayExecutor sets distributed_executor_backend to a class
         # instead of the string "ray". vLLM's init_device skips
         # local_world_size checks for "ray" backends, so normalize the
@@ -28,7 +35,22 @@ class NNsightGPUWorker(gpu_worker.Worker):
 
             if issubclass(backend, RayDistributedExecutor):
                 self.parallel_config.distributed_executor_backend = "ray"
-        super().init_device()
+
+        upstream_runner_cls = model_runner.GPUModelRunner
+        model_runner.GPUModelRunner = runner_cls
+        try:
+            super().init_device()
+        finally:
+            model_runner.GPUModelRunner = upstream_runner_cls
+            self.parallel_config.distributed_executor_backend = backend
+
+        if not isinstance(self.model_runner, runner_cls):
+            raise RuntimeError(
+                "vLLM did not initialize the selected NNsight model runner "
+                f"({runner_cls.__name__}); created "
+                f"{type(self.model_runner).__name__} instead. "
+                "This runner configuration is unsupported by NNsight."
+            )
 
     def collect_nnsight(self, req_ids: list[str], finished_req_ids: list[str] | None = None):
         return self.model_runner.collect_nnsight(req_ids, finished_req_ids)

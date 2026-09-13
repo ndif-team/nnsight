@@ -51,9 +51,13 @@ def tp(request):
 @pytest.fixture(scope="module")
 def vllm_gpt2(tp: int):
     """Load GPT-2 model with vLLM."""
-    return VLLM(
+    model = VLLM(
         "gpt2", tensor_parallel_size=tp, gpu_memory_utilization=0.1, dispatch=True
     )
+    try:
+        yield model
+    finally:
+        model.vllm_entrypoint.llm_engine.engine_core.shutdown()
 
 
 # =============================================================================
@@ -165,21 +169,32 @@ class TestSampling:
 
     @torch.no_grad()
     def test_sampling_temperature(self, vllm_gpt2, MSG_prompt: str):
-        """Test sampling with different temperatures."""
-        with vllm_gpt2.trace(max_tokens=3) as tracer:
-            with tracer.invoke(MSG_prompt, temperature=0.8, top_p=0.95):
-                samples_2 = list().save()
-                with tracer.iter[0:3]:
+        """Distinguish stochastic and greedy sampling on controlled logits."""
+        # Natural text may validly match greedy decoding at both temperatures.
+        # Give the stochastic sampler 64 plausible tokens and a fixed seed.
+        with vllm_gpt2.trace(max_tokens=16, ignore_eos=True) as tracer:
+            with tracer.invoke(MSG_prompt, temperature=1.0, top_p=1.0, seed=42):
+                samples_2 = [].save()
+                for step in tracer.iter[:16]:
+                    logits = vllm_gpt2.logits
+                    logits[:] = -torch.inf
+                    logits[:, 100:164] = 0
+                    logits[:, 100] = 1
                     samples_2.append(vllm_gpt2.samples.item())
 
             with tracer.invoke(MSG_prompt, temperature=0.0, top_p=1.0):
-                samples_1 = list().save()
-                with tracer.iter[0:3]:
+                samples_1 = [].save()
+                for step in tracer.iter[:16]:
+                    logits = vllm_gpt2.logits
+                    logits[:] = -torch.inf
+                    logits[:, 100:164] = 0
+                    logits[:, 100] = 1
                     samples_1.append(vllm_gpt2.samples.item())
 
-        assert vllm_gpt2.tokenizer.batch_decode(
-            samples_1
-        ) != vllm_gpt2.tokenizer.batch_decode(samples_2)
+        assert samples_1 == [100] * 16
+        assert len(samples_2) == 16
+        assert all(100 <= token < 164 for token in samples_2)
+        assert samples_2 != samples_1
 
 
 # =============================================================================
@@ -609,19 +624,24 @@ def async_loop():
     """
     loop = asyncio.new_event_loop()
     yield loop
+    loop.run_until_complete(loop.shutdown_asyncgens())
     loop.close()
 
 
 @pytest.fixture(scope="module")
 def vllm_gpt2_async(tp: int, async_loop):
     """Load GPT-2 model with vLLM async engine."""
-    return VLLM(
+    model = VLLM(
         "gpt2",
         tensor_parallel_size=tp,
         gpu_memory_utilization=0.1,
         dispatch=True,
         mode="async",
     )
+    try:
+        yield model
+    finally:
+        model.vllm_entrypoint.shutdown()
 
 
 class TestAsyncEngine:

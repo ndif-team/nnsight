@@ -3,6 +3,8 @@
 Instead of permanently registering hooks on every module (which incurs overhead
 on every forward pass regardless of whether any intervention is active), hooks
 are registered **on-demand** by each mediator and **self-remove** after firing.
+When a runtime sets ``mediator.active = False``, its hooks stay registered but
+neither consume values nor record cache entries until the mediator resumes.
 
 How this connects to ``eproperty``
 ----------------------------------
@@ -196,6 +198,9 @@ def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
 
     def hook(module: torch.nn.Module, args: Any, kwargs: Any) -> Any:
 
+        if not mediator.active:
+            return args, kwargs
+
         # Wait until the iter tracker has advanced to our target step.
         if mediator.iteration_tracker[path] != iteration:
             return args, kwargs
@@ -246,6 +251,9 @@ def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     )
 
     def hook(module: torch.nn.Module, _, output: Any) -> Any:
+
+        if not mediator.active:
+            return output
 
         if mediator.iteration_tracker[path] != iteration:
             return output
@@ -496,6 +504,8 @@ def cache_output_hook(
     """
 
     def hook(module: torch.nn.Module, input: Any, output: Any) -> None:
+        if not mediator.active:
+            return
         batch_group = mediator.batch_group
         # Skip entirely when the owning request is not scheduled in this
         # forward pass — otherwise the hook would narrow with stale positions
@@ -535,6 +545,8 @@ def cache_input_hook(
     """
 
     def hook(module: torch.nn.Module, args: Any, kwargs: Any) -> None:
+        if not mediator.active:
+            return
         batch_group = mediator.batch_group
         if batch_group is None or batch_group[0] == -1:
             return
@@ -671,6 +683,8 @@ def operation_output_hook(mediator: Mediator, op_accessor: OperationAccessor):
     handle = None
 
     def hook(value: Any) -> Any:
+        if not mediator.active:
+            return value
         if mediator.iteration_tracker[path] != iteration:
             return value
 
@@ -711,6 +725,8 @@ def operation_input_hook(mediator: Mediator, op_accessor: OperationAccessor):
     handle = None
 
     def hook(inputs: Any) -> Any:
+        if not mediator.active:
+            return inputs
         if mediator.iteration_tracker[path] != iteration:
             return inputs
 
@@ -755,6 +771,8 @@ def operation_fn_hook(mediator: Mediator, op_accessor: OperationAccessor):
     handle = None
 
     def hook(fn: Callable) -> Callable:
+        if not mediator.active:
+            return fn
         handle.remove()
         return mediator.handle(f"{op_accessor.path}.fn", fn)
 

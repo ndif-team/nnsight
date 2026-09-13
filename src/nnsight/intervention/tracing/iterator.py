@@ -121,6 +121,8 @@ def register_iter_hooks(mediator, model) -> List:
       They don't go through PyTorch's forward dispatch on every step;
       their values flow through :meth:`eproperty.provide` which bumps
       the tracker itself.
+    - Paused mediators (``active=False``) retain their counters, so calls
+      made for other requests do not advance a pending intervention.
 
     Known limitation
     ----------------
@@ -159,6 +161,8 @@ def register_iter_hooks(mediator, model) -> List:
         # hook closure captures its own path rather than sharing the
         # loop variable.
         def hook(module, _, output, _path=path):
+            if not mediator.active:
+                return
             mediator.iteration_tracker[f"{_path}.input"] += 1
             mediator.iteration_tracker[f"{_path}.output"] += 1
 

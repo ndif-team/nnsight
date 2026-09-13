@@ -16,6 +16,78 @@ This document focuses on the **internals** — process boundaries, interleaver e
 
 ## Architecture / How it works
 
+### Model Runner V2
+
+`model_runners/GPUModelRunnerV2.py` targets vLLM 0.29.x's
+`vllm.v1.worker.gpu.model_runner.GPUModelRunner`. `NNsightGPUWorker.init_device`
+reads vLLM's resolved `use_v2_model_runner`, imports only the selected adapter,
+and temporarily replaces the upstream class while the worker constructs it.
+It restores the upstream class in `finally` and verifies the resulting runner
+is instrumented. V2 configuration is validated before device initialization.
+
+Both adapters inherit `NNsightRunnerMixin` from `model_runners/runtime.py`.
+This module now owns `NNsightRequestHelper`, model wrapping, mediator transport,
+shared saves, and `collect_nnsight`. The legacy nested helper name is retained as
+an inherited alias. The descriptions of `_update_states`, `_sample`, and
+`execute_model_state.logits` below describe the **legacy adapter**.
+
+The V2 adapter uses these boundaries:
+
+1. `add_requests`: register mediators after upstream admission. Admission is
+   idempotent by request ID because preemption can admit a request again.
+2. `prepare_inputs`: assign slices from the actual `InputBatch.req_ids` and
+   `query_start_loc_np`. Batch size includes untraced requests and physical
+   padding, even when only one request has an intervention.
+3. `execute_model`: run forward hooks in the interleaver and preserve the
+   upstream `None` return that signals the execute-to-sample handoff.
+4. `sample`: scope a `compute_logits` wrapper to this call, exposing raw logits
+   before grammar processing. A scoped `Sampler.sample` wrapper exposes sampled
+   token IDs before upstream computes their logprobs and later copies them to
+   the CPU or updates GPU request state. Both methods are restored in `finally`;
+   profiling and prompt-logprob calls do not emit intervention events.
+
+`_set_batch_groups` switches between token, logit, and sample layouts. Each
+mediator has a generic `active` flag; inactive module/source/cache/iterator
+hooks preserve their registrations and counters without consuming values.
+Finished intervention threads are not restarted, while persistent cache hooks
+can remain active for later scheduled steps. `_provide` chains replacement
+tensors between mediators, including when a sliced swap allocates a new tensor.
+Intervention threads inherit the caller's CUDA stream and inference mode so
+in-place edits to vLLM inference tensors are valid and ordered with its kernels.
+
+Initial scope is eager, single-GPU text generation with ordinary sampling and
+no prefix cache or KV transfer. Configuration and sampler checks reject the
+other paths explicitly. Iterations represent scheduled forwards, including
+nonfinal prefill chunks and recomputation; upstream `num_sampled` remains the
+authority on whether a candidate token is emitted.
+
+Validation:
+
+```bash
+PYTHONPATH=src python -m pytest tests/test_vllm_v2.py \
+  tests/test_vllm_worker_selection.py tests/test_mediator_active.py --device cpu
+NNSIGHT_TEST_VLLM_V2=1 VLLM_USE_V2_MODEL_RUNNER=1 PYTHONPATH=src \
+  python -m pytest tests/test_vllm.py tests/test_vllm_v2.py --tp 1
+```
+
+The GPU tests require vLLM 0.29.x and a CUDA device. They have passed with GPT-2
+on an A100, vLLM 0.29.0+cu129, and PyTorch 2.13.0+cu129. They verify raw-logit
+replacement, sampled-token replacement and its reported logprob, feedback into
+the next decode step, chunked-prefill iteration and saves, and independent
+interventions on requests mixed with untraced traffic. FlashInfer's sampling
+build requires a compatible CUDA toolkit; set `CUDA_HOME` if the system's
+default `nvcc` is older than the installed runtime.
+The combined vLLM suite passed 63 tests, with 8 parallel/Ray cases skipped;
+the existing sync and async API tests are included in that run.
+
+CPU tests exercise real NNsight mediators and batching against a minimal
+upstream execution harness. They cover scheduling and preemption contracts,
+pause/resume behavior, cleanup, and adapter selection; they do not validate
+vLLM kernels, CUDA streams, or model loading. Worker-side collection cancels with
+`preserve_locals=True` and waits for acknowledgement, preserving saves from
+unbounded `tracer.iter[:]` loops at request completion. Client-side transport
+mediators leave this disabled so their stale locals cannot overwrite results.
+
 ### Two-process layout
 
 The `VLLM` Envoy class exists in two processes:
