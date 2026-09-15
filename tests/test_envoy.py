@@ -769,6 +769,14 @@ class TestParameters:
     def test_the_attribute_still_reaches_the_parameter(self, envoy, module):
         assert envoy.head.weight is module.head.weight
 
+    def test_a_module_that_serves_its_own_parameters_is_asked(self):
+        class Served(nn.Module):
+            def _nnsight_parameter(self, name):
+                return torch.full((2,), 7.0) if name == "weight" else None
+
+        envoy = Envoy(Served())
+        assert torch.equal(envoy.param("weight"), torch.full((2,), 7.0))
+
     def test_a_module_without_the_parameter_raises(self, envoy):
         with pytest.raises(AttributeError, match="act"):
             envoy.layers[0].mlp.act.param("weight")

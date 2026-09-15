@@ -708,6 +708,8 @@ class Envoy:
                 hidden = model.model.layers[-1].output[0]
                 logits = hidden @ model.lm_head.param("weight").T
 
+        A module that defines ``_nnsight_parameter(name)`` answers the read
+        itself, which lets a module standing in for one held elsewhere fetch it.
         Raises ``AttributeError`` for a module without such a parameter.
         """
         return self._parameter(name)
@@ -715,6 +717,10 @@ class Envoy:
     def _parameter(self, name: str) -> torch.Tensor:
         """The parameter or buffer ``name`` of this module. Runtimes that shard
         modules override this to return the whole tensor."""
+        # Presence is the signal: a module that answers parameter reads itself.
+        serve = getattr(self._module, "_nnsight_parameter", None)
+        if serve is not None:
+            return serve(name)
         value = getattr(self._module, name, None)
         if not isinstance(value, torch.Tensor):
             raise AttributeError(f"{self.path!r} has no parameter or buffer named {name!r}")
