@@ -15,8 +15,10 @@ cut down on the way in and the output reassembled on the way out, off the rules
 [`VLLMFragments`][nnsight.modeling.vllm.fragments.VLLMFragments] already recorded
 for exactly this envoy's two locations.
 
-Parameters are left alone. ``layer.weight`` is this rank's real slice here, as it
-is anywhere else in vLLM, and gathering one is the caller's business.
+``layer.weight`` is this rank's real slice here, as it is anywhere else in vLLM.
+``layer.param("weight")`` is the whole: the ranks' slices gathered by the parameter's
+own sharding metadata, with a merged projection's components and a
+vocab-parallel table's padding put back in order.
 """
 
 from __future__ import annotations
@@ -49,6 +51,71 @@ def parallel_envoys() -> dict:
         RowParallelLinear: ParallelEnvoy,
         VocabParallelEmbedding: ParallelEnvoy,
     }
+
+
+def _whole_parameter(module: torch.nn.Module, tensor: torch.Tensor) -> torch.Tensor:
+    """``tensor``, a parameter or buffer of ``module``, gathered across the
+    tensor-parallel group into the whole it is a slice of.
+
+    vLLM stamps a sharded parameter with the axes it could be split along; which
+    one the ranks did split follows the layer: a row-parallel layer splits its
+    ``input_dim``, every other parallel layer its ``output_dim``. A parameter
+    without that stamp is replicated and returned as is.
+    A merged column-parallel projection holds its components stacked per rank
+    (``[gate_r; up_r]``), so the gathered rows are regrouped per component. A
+    QKV projection is the same with q, k, v, where a k or v head replicated
+    across ranks is kept once. A vocab-parallel table is padded per rank and
+    reindexed into token order by the module's own mapping.
+    """
+    from vllm.distributed.communication_op import tensor_model_parallel_all_gather
+    from vllm.model_executor.layers.linear import (
+        MergedColumnParallelLinear,
+        QKVParallelLinear,
+        RowParallelLinear,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+
+    from .fragments import _tp_world_size
+
+    world = _tp_world_size()
+    if world == 1:
+        return tensor
+
+    if isinstance(module, VocabParallelEmbedding):
+        gathered = tensor_model_parallel_all_gather(tensor, dim=0)
+        order = module.get_sharded_to_full_mapping()[: module.num_embeddings]
+        return gathered[torch.tensor(order, device=gathered.device)]
+
+    # Presence is the signal: vLLM stamps only parameters it shards.
+    axis = "input_dim" if isinstance(module, RowParallelLinear) else "output_dim"
+    dim = getattr(tensor, axis, None)
+    if dim is None:
+        return tensor
+    gathered = tensor_model_parallel_all_gather(tensor, dim=dim)
+
+    if isinstance(module, QKVParallelLinear):
+        head, v_head = module.head_size, module.v_head_size
+        sizes = [module.num_heads * head, module.num_kv_heads * head, module.num_kv_heads * v_head]
+        keep_every = [1, module.num_kv_head_replicas, module.num_kv_head_replicas]
+    elif isinstance(module, MergedColumnParallelLinear):
+        sizes = [size // world for size in module.output_sizes]
+        keep_every = [1] * len(sizes)
+    else:
+        return gathered
+
+    if sum(sizes) != tensor.shape[dim]:
+        return gathered
+    shards = gathered.split(tensor.shape[dim], dim=dim)
+    components = [shard.split(sizes, dim=dim) for shard in shards]
+    return torch.cat(
+        [
+            torch.cat([components[rank][i] for rank in range(0, world, every)], dim=dim)
+            for i, every in enumerate(keep_every)
+        ],
+        dim=dim,
+    )
 
 
 class ParallelEnvoy(Envoy):
@@ -100,3 +167,7 @@ class ParallelEnvoy(Envoy):
             result, _ = fragments.whole(outof, result)
 
         return result
+
+    def _parameter(self, name: str) -> torch.Tensor:
+        """The whole parameter: this rank's slice gathered across the group."""
+        return _whole_parameter(self._module, super()._parameter(name))

@@ -696,6 +696,36 @@ class Envoy:
         """The set of devices the module's parameters live on (empty if it has none)."""
         return {parameter.device for parameter in self._module.parameters()}
 
+    def param(self, name: str) -> torch.Tensor:
+        """The module's parameter or buffer ``name``, whole.
+
+        On one device this is the module's own ``nn.Parameter``, the object
+        ``module.weight`` holds, so it costs nothing. A runtime that splits the
+        module across ranks reassembles the ranks' pieces here, so a block
+        written for one GPU reads the same tensor on every rank::
+
+            with model.trace(prompt):
+                hidden = model.model.layers[-1].output[0]
+                logits = hidden @ model.lm_head.param("weight").T
+
+        A module that defines ``_nnsight_parameter(name)`` answers the read
+        itself, which lets a module standing in for one held elsewhere fetch it.
+        Raises ``AttributeError`` for a module without such a parameter.
+        """
+        return self._parameter(name)
+
+    def _parameter(self, name: str) -> torch.Tensor:
+        """The parameter or buffer ``name`` of this module. Runtimes that shard
+        modules override this to return the whole tensor."""
+        # Presence is the signal: a module that answers parameter reads itself.
+        serve = getattr(self._module, "_nnsight_parameter", None)
+        if serve is not None:
+            return serve(name)
+        value = getattr(self._module, name, None)
+        if not isinstance(value, torch.Tensor):
+            raise AttributeError(f"{self.path!r} has no parameter or buffer named {name!r}")
+        return value
+
     #: The [`Batcher`][nnsight.intervention.batching.Batcher] class to batch with.
     #: Base default is the plain dim-0-stack [`Batcher`][nnsight.intervention.batching.Batcher]; a model whose batch
     #: layout differs (e.g. [`DiffusionBatcher`][nnsight.modeling.diffusion.DiffusionBatcher]

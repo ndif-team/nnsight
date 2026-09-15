@@ -31,7 +31,7 @@ from greenlet import getcurrent
 from .. import NNsightDeprecationWarning
 from ..tracing.tracer import Tracer, push_result
 from ..tracing.util import Scope
-from .interleaver import OutOfOrderError
+from .interleaver import Event, Mediator, OutOfOrderError, STEP_GATE
 
 if TYPE_CHECKING:
     from .interleaver import Mediator
@@ -132,13 +132,36 @@ class Iterations(Tracer):
         # The loop body runs inside the worker greenlet, which carries a weakref
         # to its own mediator (set in Mediator.start).
         mediator: Mediator = getcurrent().mediator()
+        open_ended = self.steps is None and self.stop is None
         previous = mediator.iteration
+        # The occurrence the loop's previous gate park was pinned to, if any.
+        gate = None
         try:
             for step in self._indices():
                 if step < 0:
                     raise ValueError(f"tracer.iter step cannot be negative: {step}")
                 mediator.iteration = step
+                parks_before = mediator.parks
                 yield step
+                if open_ended and mediator.parks == parks_before:
+                    # The step's body never parked (under pipeline parallelism
+                    # a body of remote-owned reads builds lazies and returns
+                    # immediately), so nothing paces this loop against the
+                    # model. Read the step gate, which the driver serves once
+                    # per generation step; when generation ends, this read
+                    # dangles and the dangling-worker unwind ends the loop.
+                    #
+                    # Each park waits for the NEXT gate serve: it pins to the
+                    # count of serves the worker has already seen, and at
+                    # least one past the previous gate park, so consecutive
+                    # park-free bodies wait on consecutive serves and one
+                    # serve releases exactly one step.
+                    tag = mediator.occurrence(STEP_GATE)
+                    if gate is not None and tag <= gate:
+                        tag = gate + 1
+                    gate = tag
+                    mediator.iteration = tag
+                    Mediator.event(Event.VALUE, STEP_GATE)
                 step += 1
         finally:
             mediator.iteration = previous

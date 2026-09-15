@@ -1,0 +1,364 @@
+"""Pipeline-parallel behaviors on one real PP=2 engine.
+
+Every test runs on the session's shared engine (``pp2_engine``): a trace
+written against the client's meta tree, executed across two stages. The tests
+cover the read, write, and save paths, then each shape of ``tracer.iter``
+against the cross-stage pull machinery. Where the failure mode of a shape is a
+pull that never completes (a 30s timeout), the test bounds the elapsed time
+well inside that limit.
+"""
+
+import time
+
+import nnsight
+import pytest
+import torch
+
+from _support import EARLY, LATE, PROMPT, PROMPT_B, STALL_BOUND_S
+
+pytestmark = pytest.mark.gpu
+
+
+def _layer(model, index):
+    return model.model.layers[index]
+
+
+# ---------------------------------------------------------------------------
+# Reads, writes, saves
+# ---------------------------------------------------------------------------
+
+
+def test_cross_stage_reads_and_logits(pp2_engine):
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        early = _layer(model, EARLY).output.save()
+        late = _layer(model, LATE).output.save()
+        logits = model.logits.save()
+
+    # Layer outputs are (hidden, residual) tuples; every slot is a real tensor
+    # after the merge (a sentinel would mean a stage's contribution was dropped).
+    for name, value in (("early", early), ("late", late)):
+        hidden = value[0] if isinstance(value, tuple) else value
+        assert isinstance(hidden, torch.Tensor), (name, type(value))
+        assert torch.isfinite(hidden.float()).all(), name
+    assert isinstance(logits, torch.Tensor) and logits.shape[-1] > 100_000 // 2
+    assert model.tokenizer.decode(logits[-1].argmax(dim=-1)).strip() == "Paris"
+
+
+def test_cross_stage_write_changes_logits(pp2_engine):
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        clean = model.logits.save()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        # A stage-0-owned write, replicated on both ranks: applied by the owner,
+        # absorbed by the non-owner.
+        hidden = _layer(model, EARLY).output[0]
+        _layer(model, EARLY).output = (hidden * 0,) + tuple(_layer(model, EARLY).output[1:])
+        zeroed = model.logits.save()
+    assert not torch.equal(clean, zeroed)
+
+
+def test_local_read_after_a_downstream_force_fails_fast(pp2_engine):
+    """Forcing a downstream layer parks the upstream rank's worker through the
+    forward, so its later read of an upstream layer is out of order there. The
+    downstream rank reads that same layer by pull, and the owner answers that
+    its forward already ran past it. The trace fails with the out-of-order
+    error well inside the pull timeout, and the engine serves the next trace."""
+    model = pp2_engine
+    t0 = time.time()
+    with pytest.raises(Exception) as info:
+        with model.trace(PROMPT, temperature=0.0, max_tokens=2):
+            late = _layer(model, LATE).output[0].sum()
+            early = _layer(model, EARLY).output[0].sum()
+            total = (late + early).save()
+    assert "ran past" in str(info.value) and f"layers.{EARLY}" in str(info.value), info.value
+    assert time.time() - t0 < STALL_BOUND_S
+    with model.trace(PROMPT, temperature=0.0, max_tokens=2):
+        early = _layer(model, EARLY).output[0].sum()
+        late = _layer(model, LATE).output[0].sum()
+        total = (early + late).save()
+    assert torch.isfinite(total)
+
+
+def test_uses_of_a_remote_module_raise_naming_the_owner(pp2_engine):
+    """On the stage that does not hold a module, a parameter read as an
+    attribute raises and names the owning stage; its served values still cross
+    stages."""
+    model = pp2_engine
+
+    with pytest.raises(Exception, match="lives on pipeline stage"):
+        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+            _layer(model, LATE).input_layernorm.weight
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        normed = model.model.norm.output.save()
+    hidden = normed[0] if isinstance(normed, tuple) else normed
+    assert torch.isfinite(hidden.float()).all()
+
+
+def test_param_pulls_a_remote_parameter_in_both_directions(pp2_engine):
+    """``param(name)`` on a module the other stage owns returns that stage's
+    tensor; the pulled copy equals the owner's own, so the merged value is the
+    same whichever rank's copy the merge keeps."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        late = _layer(model, LATE).input_layernorm.param("weight").float().abs().sum().save()
+        early = _layer(model, EARLY).input_layernorm.param("weight").float().abs().sum().save()
+    assert late > 0 and early > 0 and late != early
+    # Qwen2.5-0.5B layer 20's input norm weight, measured on one GPU.
+    assert float(late) == pytest.approx(1424.374, rel=1e-3)
+
+
+def test_calling_a_remote_module_computes_the_owner_result(pp2_engine):
+    """A call of a module the other stage owns runs here on the owner's
+    state: the final norm and a late layer's MLP applied to an early layer's
+    output give the values a single GPU gives (measured on one GPU)."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        h = _layer(model, EARLY).output[0]
+        normed = model.model.norm(h).float().norm().save()
+        through_mlp = _layer(model, LATE).mlp(h).float().norm().save()
+    assert float(normed) == pytest.approx(687.934, rel=1e-3)
+    assert float(through_mlp) == pytest.approx(1853.443, rel=1e-3)
+
+
+def test_hooked_call_of_a_remote_module_gives_the_same_value(pp2_engine):
+    """``hook=True`` on a module the other stage owns runs the same local
+    call; the meta copy's internals are not part of the tree, so only the
+    call's value is observable."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        out = _layer(model, EARLY).output
+        plain, _ = model.model.norm(out[0], out[1])
+        hooked, _ = model.model.norm(out[0], out[1], hook=True)
+        same = torch.equal(plain, hooked)
+        flag = torch.tensor(same).save()
+    assert bool(flag)
+
+
+def test_skip_of_a_remote_layer_applies_on_its_owner(pp2_engine):
+    """A ``.skip()`` of a layer the other stage owns is applied there: the
+    logits change, and the non-owning stage absorbs the skip."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        clean = model.logits.save()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        previous = _layer(model, LATE - 1).output
+        _layer(model, LATE).skip(previous)
+        skipped = model.logits.save()
+    assert not torch.equal(clean, skipped)
+
+
+def test_cross_stage_inputs_read_carries_the_argument_structure(pp2_engine):
+    """A layer's ``.inputs`` is ``((positions, hidden, residual), {})``, int64
+    beside bf16 in a nested tuple. The downstream rank pulls an upstream
+    layer's inputs in place, and a write computed from them changes the logits
+    exactly as the same write computed from the known values does."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        previous = _layer(model, EARLY - 1).output[0]
+        structure = _layer(model, EARLY).inputs.save()
+        (positions, hidden, residual), kwargs = structure
+        # ``positions.max() + 1`` is the token count; ``hidden`` is the
+        # previous layer's output, so ``drift`` is zero.
+        scale = float(positions.max() + 1)
+        drift = float((hidden - previous).abs().max())
+        late = _layer(model, LATE).output
+        _layer(model, LATE).output = (late[0] * (scale + drift),) + tuple(late[1:])
+        pulled = model.logits.save()
+
+    (positions, hidden, residual), kwargs = structure
+    n_tokens = positions.shape[0]
+    assert positions.dtype == torch.int64 and positions.tolist() == list(range(n_tokens))
+    assert hidden.dtype == torch.bfloat16 and residual.shape == hidden.shape and kwargs == {}
+
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        late = _layer(model, LATE).output
+        _layer(model, LATE).output = (late[0] * float(n_tokens),) + tuple(late[1:])
+        reference = model.logits.save()
+    assert torch.equal(pulled, reference)
+
+
+def test_bounded_loop_saves_each_step(pp2_engine):
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=4) as tracer:
+        steps = nnsight.save([])
+        for _ in tracer.iter[:4]:
+            steps.append(_layer(model, LATE).output[0])
+    assert len(steps) == 4
+    assert all(isinstance(step, torch.Tensor) for step in steps)
+
+
+def test_cache_unions_both_stages(pp2_engine):
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1) as tracer:
+        cache = tracer.cache(modules=[_layer(model, EARLY), _layer(model, LATE)]).save()
+    assert sorted(cache.keys()) == [f"model.model.layers.{EARLY}", f"model.model.layers.{LATE}"]
+
+
+# ---------------------------------------------------------------------------
+# tracer.iter shapes against the pull machinery
+# ---------------------------------------------------------------------------
+
+
+def test_open_loop_after_a_pre_loop_save_runs_every_step(pp2_engine):
+    """A save before the loop parks the worker while the first step's gate
+    serve passes; the loop then rides the remaining steps' serves."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=6) as tracer:
+        control = nnsight.save([])
+        for step in tracer.iter[:]:
+            control.append(step)
+    with model.trace(PROMPT, temperature=0.0, max_tokens=6) as tracer:
+        logits = model.logits.save()
+        steps = nnsight.save([])
+        for step in tracer.iter[:]:
+            steps.append(step)
+    assert len(steps) >= 6, list(steps)
+    assert list(steps) == list(control)[: len(steps)]
+
+
+def test_two_cross_stage_reads_per_step_match_across_traces(pp2_engine):
+    """The second read of a pinned step's body names the same round as the
+    first, whatever the engine's history: the same block returns the same
+    values on a fresh and on a warmed engine."""
+    model = pp2_engine
+
+    def run():
+        with model.trace(PROMPT, temperature=0.0, max_tokens=3) as tracer:
+            vals = nnsight.save([])
+            for _ in tracer.iter[:3]:
+                a = _layer(model, LATE).output[0]
+                b = _layer(model, LATE + 1).output[0]
+                vals.append(float(a.sum()) + float(b.sum()))
+        return list(vals)
+
+    first, second = run(), run()
+    assert len(first) == 3 and first == second, (first, second)
+
+
+def test_bounded_loop_over_an_upstream_layer_completes(pp2_engine):
+    """On the downstream rank the body's force is an upstream pull; a force for
+    a round this rank has not opened parks and is served once that round runs."""
+    model = pp2_engine
+    t0 = time.time()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=4) as tracer:
+        hs = nnsight.save([])
+        for _ in tracer.iter[:4]:
+            hs.append(float(_layer(model, EARLY).output[0].sum()))
+    assert len(hs) == 4 and time.time() - t0 < STALL_BOUND_S
+
+
+def test_open_loop_with_per_step_pulls_ends_with_the_run(pp2_engine):
+    model = pp2_engine
+    t0 = time.time()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=4) as tracer:
+        hs = nnsight.save([])
+        for _ in tracer.iter[:]:
+            hs.append(float(_layer(model, LATE).output[0].sum()))
+    assert len(hs) == 4 and time.time() - t0 < STALL_BOUND_S
+
+
+def test_bounded_loop_past_generation_end_keeps_reached_steps(pp2_engine):
+    """A loop asking for more steps than the request generates keeps the
+    reached steps' values; the pulls it parked for rounds that never ran are
+    unwound at collect, not waited on. The engine worker warns about the cut
+    loop in its own process, so the client sees the values and no error."""
+    model = pp2_engine
+    t0 = time.time()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=4) as tracer:
+        hs = nnsight.save([])
+        for _ in tracer.iter[:8]:
+            hs.append(float(_layer(model, LATE).output[0].sum()))
+    assert len(hs) == 4 and time.time() - t0 < STALL_BOUND_S
+
+
+def test_per_step_pulls_in_both_directions(pp2_engine):
+    """Each step forces one value from each stage, so at generation end both
+    ranks hold a parked pull of the other stage."""
+    model = pp2_engine
+    t0 = time.time()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=4) as tracer:
+        pairs = nnsight.save([])
+        for _ in tracer.iter[:]:
+            early = float(_layer(model, EARLY).output[0].sum())
+            late = float(_layer(model, LATE).output[0].sum())
+            pairs.append((early, late))
+    assert len(pairs) == 4 and time.time() - t0 < STALL_BOUND_S
+
+
+def test_bounded_loop_with_pulls_in_both_directions(pp2_engine):
+    """A bounded loop runs ahead of the model, so its upstream force for the
+    next round parks; at the next step start that round has been produced by
+    the upstream stage and the pull completes before this rank's own visit
+    of the layer the peer is pulling."""
+    model = pp2_engine
+    t0 = time.time()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=4) as tracer:
+        pairs = nnsight.save([])
+        for _ in tracer.iter[:4]:
+            early = float(_layer(model, EARLY).output[0].sum())
+            late = float(_layer(model, LATE).output[0].sum())
+            pairs.append((early, late))
+    assert len(pairs) == 4 and time.time() - t0 < STALL_BOUND_S
+
+
+def test_a_finished_request_leaves_a_concurrent_one_running(pp2_engine):
+    """Collect for the short invoke's request serves only that request's
+    workers; the long invoke's per-step pulls continue to their own end."""
+    model = pp2_engine
+    t0 = time.time()
+    with model.trace(temperature=0.0) as tracer:
+        with tracer.invoke(PROMPT, max_tokens=2):
+            short_logits = model.logits.save()
+        with tracer.invoke(PROMPT_B, max_tokens=8):
+            vals = nnsight.save([])
+            for _ in tracer.iter[:8]:
+                x = _layer(model, LATE).output[0]
+                y = _layer(model, LATE + 1).output[0]
+                vals.append(float(x.sum()) + float(y.sum()))
+    assert len(vals) == 8 and time.time() - t0 < STALL_BOUND_S
+    assert isinstance(short_logits, torch.Tensor)
+
+
+# ---------------------------------------------------------------------------
+# Registered blocks
+# ---------------------------------------------------------------------------
+
+
+def test_registered_block_saves_a_remote_layer_for_every_request(pp2_engine):
+    """A block installed with ``model.edit()`` runs on every rank for every
+    request; a value it saves from a stage-1 layer comes home real from the
+    owning stage, sized to the request's own prompt. A prompt the engine has
+    not seen, so no prefix is served from the cache."""
+    model = pp2_engine
+    prompts = ["Registered blocks run for every request the engine handles", "A"]
+    with model.edit() as (tracer, registration):
+        hidden = _layer(model, LATE).output[0].save()
+    try:
+        outputs = model.generate(prompts, max_tokens=2, temperature=0.0, ignore_eos=True)
+        assert len(outputs) == len(prompts)
+        for output in outputs:
+            value = output.saves["hidden"]
+            assert isinstance(value, torch.Tensor), type(value)
+            assert value.shape[0] == len(output.prompt_token_ids), (value.shape, len(output.prompt_token_ids))
+    finally:
+        registration.clear()
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_every_rank_releases_finished_workers(pp2_engine):
+    """A request with cross-stage pulls on every step finishes; afterwards no
+    rank tracks it: workers, their saved tensors, and their pull records go
+    with the request."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=3) as tracer:
+        hs = nnsight.save([])
+        for _ in tracer.iter[:3]:
+            hs.append(float(_layer(model, LATE).output[0].sum()))
+    assert len(hs) == 3
+    counts = model.vllm_entrypoint.llm_engine.collective_rpc("nnsight_request_count")
+    assert len(counts) == 2 and all(count == 0 for count in counts), counts

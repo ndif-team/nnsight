@@ -18,6 +18,10 @@ from vllm.v1.worker.gpu_worker import Worker
 
 from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
 
+#: The full meta-device model a pipeline-parallel worker builds before its real
+#: distributed groups exist, for the runner to take in ``load_model``. One
+#: worker per process, so one slot.
+
 
 class NNsightGPUWorker(Worker):
     """A vLLM GPU worker whose model runner interleaves interventions."""
