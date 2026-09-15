@@ -715,11 +715,8 @@ class Envoy:
     def _parameter(self, name: str) -> torch.Tensor:
         """The parameter or buffer ``name`` of this module. Runtimes that shard
         modules override this to return the whole tensor."""
-        module = self._module
-        value = module._parameters.get(name)
-        if value is None:
-            value = module._buffers.get(name)
-        if value is None:
+        value = getattr(self._module, name, None)
+        if not isinstance(value, torch.Tensor):
             raise AttributeError(f"{self.path!r} has no parameter or buffer named {name!r}")
         return value
 
