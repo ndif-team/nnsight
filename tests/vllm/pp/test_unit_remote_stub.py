@@ -55,13 +55,31 @@ def test_remote_modules_become_shells_and_local_ones_stay(stage0):
     assert not isinstance(model.blocks[0]._module, RemoteShell)
 
 
-def test_a_call_raises_naming_the_owner(stage0):
+def test_a_call_without_a_listener_raises_naming_the_owner(stage0):
     model, _ = stage0
     with pytest.raises(RemoteModuleError, match="stage 1"):
         model.norm(torch.zeros(1, 4))
     with pytest.raises(RemoteModuleError, match="stage 1"):
         model.blocks[1].proj(torch.zeros(1, 4))
     assert model.blocks[0](torch.zeros(1, 4)).shape == (1, 4)
+
+
+def test_a_call_runs_the_owner_state_here_and_drops_it():
+    module_map = PPModuleMap(2)
+    module_map.set_derived_owners({"blocks.0": 0, "blocks.1": 1, "norm": 1})
+    owner = Stack()  # what stage 1 holds
+    local, meta = Stack(), Stack()
+    listener = _FakeListener(state_of=owner.norm)
+    install_shells(local, meta, module_map, 0, listener)
+    model = NNsight(local)
+    graft_children(model, meta, 0, listener)
+    x = torch.randn(2, 4)
+    expected = owner.norm(x)
+    got = model.norm(x)
+    assert torch.allclose(got, expected)
+    assert listener.requests[-1] == (1, "model.norm.state", None)
+    # The meta copy is back on the meta device once the call has returned.
+    assert all(p.device.type == "meta" for p in model.norm._module._pp_meta.parameters())
 
 
 def test_a_parameter_raises_by_attribute_and_by_param(stage0):
@@ -76,12 +94,21 @@ def test_a_parameter_raises_by_attribute_and_by_param(stage0):
 
 
 class _FakeListener:
-    def __init__(self):
+    """Answers a parameter request with a constant and a state request with a
+    given module's state."""
+
+    _device = torch.device("cpu")
+
+    def __init__(self, state_of=None):
         self.requests = []
+        self.state_of = state_of
 
     def begin_pull(self, owner, provider, req_id=None):
         self.requests.append((owner, provider, req_id))
-        value = torch.full((4,), 3.0)
+        if provider.endswith(".state"):
+            value = dict(self.state_of.state_dict())
+        else:
+            value = torch.full((4,), 3.0)
 
         class Pull:
             def complete(self, timeout=None):

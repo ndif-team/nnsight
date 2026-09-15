@@ -619,9 +619,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # This rank answers the peers' parameter requests from its modules.
             from ..pp_envoys import parameter_resolver
 
-            interleaver.listener.parameters = parameter_resolver(
-                self.get_model(), interleaver.module_map.root_path
-            )
+            resolver = parameter_resolver(self.get_model(), interleaver.module_map.root_path)
+            interleaver.listener.parameters = resolver
+            interleaver.listener.states = resolver.state
 
         interleaver = self.nnsight_model.interleaver
         # No envoy: the spans come from the scheduler rather than from an invoke,

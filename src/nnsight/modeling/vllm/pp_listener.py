@@ -106,6 +106,9 @@ _KEY_SEP = "|"
 # A parameter request names ``"{module path}.param.{parameter name}"``; the
 # owner answers it from its module, with no request id and no round.
 PARAM_MARK = ".param."
+# A state request names ``"{module path}.state"``; the owner answers with the
+# module's state dict, parameters and persistent buffers by name.
+STATE_MARK = ".state"
 
 # A pull request is ONE fixed-size, self-identifying message on TAG_REQUEST:
 # 3 little-endian int64 [requester_rank, response_tag, key_len] followed by the
@@ -380,6 +383,9 @@ class PPListener:
         # parameter request from this rank's module, whatever the request's
         # round, since parameters are not produced by a forward.
         self.parameters: Optional[Callable[[str, str], Any]] = None
+        # ``module path -> state dict``, set by the runner, answering a state
+        # request from this rank's module the same way.
+        self.states: Optional[Callable[[str], Any]] = None
         self._reply_pool = ThreadPoolExecutor(
             max_workers=_REPLY_POOL_SIZE, thread_name_prefix="pp-reply"
         )
@@ -502,6 +508,10 @@ class PPListener:
                     path, _, name = provider_string.rpartition(PARAM_MARK)
                     self._reply_pool.submit(self._serve_parameter, req, path, name)
                     continue
+                if provider_string.endswith(STATE_MARK) and self.states is not None:
+                    path = provider_string[: -len(STATE_MARK)]
+                    self._reply_pool.submit(self._serve_state, req, path)
+                    continue
                 # Check-and-park under the buffer lock so it races safely with
                 # the producer's write + ``dispatch_parked``: either we already
                 # see the value (serve now via the pool) or we park and the
@@ -578,6 +588,15 @@ class PPListener:
         """Answer a parameter request from this rank's module (reply pool)."""
         try:
             value = self.parameters(path, name)
+        except Exception as exc:
+            self._serve_error_reply(req, f"{type(exc).__name__}: {exc}")
+            return
+        self._serve_reply(req, value)
+
+    def _serve_state(self, req, path):
+        """Answer a state request from this rank's module (reply pool)."""
+        try:
+            value = self.states(path)
         except Exception as exc:
             self._serve_error_reply(req, f"{type(exc).__name__}: {exc}")
             return

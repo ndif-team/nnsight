@@ -121,6 +121,20 @@ def test_head_weight_reads_across_stages_and_unembeds(smollm_pp2):
     assert int(lens) == int(sampled[-1].argmax(-1))
 
 
+def test_lens_through_a_remote_norm_call_and_head_weight(smollm_pp2):
+    """The benchmark's portable lens: the final norm called on a block's
+    output, then the head weight matmul; on stage 0 both come from stage 1.
+    A Llama-shaped layer returns ``(hidden, residual)`` and the norm takes
+    both, adding them before it normalizes, as the model's own forward does."""
+    model = smollm_pp2
+    with model.trace("The Eiffel Tower is located in the city of", temperature=0.0, max_tokens=1):
+        out = model.model.layers[-1].output
+        normed, _ = model.model.norm(out[0], out[1])
+        lens = torch.nn.functional.linear(normed[-1].float(), model.lm_head.param("weight").float()).argmax(-1).save()
+        sampled = model.logits.save()
+    assert int(lens) == int(sampled[-1].argmax(-1))
+
+
 def test_head_weight_row_reads_every_decode_step(smollm_pp2):
     """The generation-steering pattern: one row of the head per step."""
     model = smollm_pp2

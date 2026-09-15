@@ -396,11 +396,14 @@ def _param_serve(rank, world, rdv):
             raise AttributeError(f"{path!r} has no parameter or buffer named {name!r}")
 
         listener.parameters = resolve
+        listener.states = lambda path: {"weight": torch.full((3,), 2.0), "bias": torch.zeros(3)}
         stage.interleaver.rounds["req-a"] = 3  # closed rounds do not refuse a parameter
     dist.barrier()
     if rank == 0:
         value = listener.begin_pull(1, "model.h.1.param.weight").complete(timeout=10.0)
         assert torch.equal(value, torch.full((3,), 2.0)), value
+        state = listener.begin_pull(1, "model.h.1.state").complete(timeout=10.0)
+        assert set(state) == {"weight", "bias"} and torch.equal(state["bias"], torch.zeros(3))
         try:
             listener.begin_pull(1, "model.h.1.param.nope", "req-a").complete(timeout=10.0)
             raise AssertionError("an unknown parameter should have error-replied")

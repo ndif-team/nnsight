@@ -41,7 +41,7 @@ top1 = logits.argmax(-1).item()
 | write `.output`, `.input`, `.skip()` | absorbed here, applied on the owning stage |
 | `module.param("weight")` | the parameter is pulled from the owning stage's module and returned as a tensor here, each call afresh |
 | `module.weight` (the attribute) | raises, naming the owning stage; use `param("weight")` |
-| call the module, `model.model.norm(h)` | raises, naming the owning stage |
+| call the module, `model.model.norm(h)` | the module's state is pulled from the owning stage, the call runs here on it, and the state is dropped again; a module that computes from a buffer outside its state dict has to be called on its owner |
 | `.source` of the module | fails to resolve any operation |
 
 Saved values merge across stages slot by slot: a stage ships what it holds and a marker for the rest, and the client receives one whole value. `tracer.iter` steps every stage together.

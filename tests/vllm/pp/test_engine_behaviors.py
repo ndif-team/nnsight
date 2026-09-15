@@ -81,17 +81,11 @@ def test_local_read_after_a_downstream_force_fails_fast(pp2_engine):
 
 
 def test_uses_of_a_remote_module_raise_naming_the_owner(pp2_engine):
-    """On the stage that does not hold a module, a call, or a parameter read as
-    an attribute, raises and names the owning stage; its served values still
-    cross stages."""
+    """On the stage that does not hold a module, a parameter read as an
+    attribute raises and names the owning stage; its served values still cross
+    stages."""
     model = pp2_engine
 
-    with pytest.raises(Exception, match="lives on pipeline stage"):
-        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
-            model.model.norm(_layer(model, EARLY).output[0])
-    with pytest.raises(Exception, match="lives on pipeline stage"):
-        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
-            _layer(model, LATE).mlp(_layer(model, EARLY).output[0])
     with pytest.raises(Exception, match="lives on pipeline stage"):
         with model.trace(PROMPT, temperature=0.0, max_tokens=1):
             _layer(model, LATE).input_layernorm.weight
@@ -112,6 +106,19 @@ def test_param_pulls_a_remote_parameter_in_both_directions(pp2_engine):
     assert late > 0 and early > 0 and late != early
     # Qwen2.5-0.5B layer 20's input norm weight, measured on one GPU.
     assert float(late) == pytest.approx(1424.374, rel=1e-3)
+
+
+def test_calling_a_remote_module_computes_the_owner_result(pp2_engine):
+    """A call of a module the other stage owns runs here on the owner's
+    state: the final norm and a late layer's MLP applied to an early layer's
+    output give the values a single GPU gives (measured on one GPU)."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        h = _layer(model, EARLY).output[0]
+        normed = model.model.norm(h).float().norm().save()
+        through_mlp = _layer(model, LATE).mlp(h).float().norm().save()
+    assert float(normed) == pytest.approx(687.934, rel=1e-3)
+    assert float(through_mlp) == pytest.approx(1853.443, rel=1e-3)
 
 
 def test_skip_of_a_remote_layer_applies_on_its_owner(pp2_engine):

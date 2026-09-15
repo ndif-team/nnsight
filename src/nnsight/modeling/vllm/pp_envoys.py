@@ -4,11 +4,12 @@ Every rank runs the whole intervention block against the whole tree. On a rank
 that does not hold a module, its path carries a :class:`RemoteShell`. Reads and
 writes of ``.output``, ``.input`` and ``.inputs`` cross stages through the pull
 protocol without touching the module. ``param(name)`` pulls the parameter from
-the owner's module and returns it as a real tensor on this rank. A call, or
-the parameter as a plain attribute, has nothing real to work on here, so the
-shell raises and names the owning stage. The behavior lives on the module
-because a request's envoys are rebuilt on the worker around the modules the
-worker holds.
+the owner's module and returns it as a real tensor on this rank. A call pulls
+the module's state from the owner, runs the meta copy here with it, and drops
+the copy again, so the block gets the same result the owner computes. The
+parameter as a plain attribute has nothing real to work on here, so the shell
+raises and names the owning stage. The behavior lives on the module because a
+request's envoys are rebuilt on the worker around the modules the worker holds.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import torch
 
 from vllm.model_executor.models.utils import PPMissingLayer
 
-from .pp_listener import PARAM_MARK
+from .pp_listener import PARAM_MARK, STATE_MARK
 
 
 class RemoteModuleError(RuntimeError):
@@ -59,7 +60,28 @@ class RemoteShell(PPMissingLayer):
         )
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        self._remote("calling it")
+        """Run the meta copy here on the owner's state.
+
+        The state is pulled afresh for every call and dropped after it. A
+        buffer the module keeps out of its state dict is not carried over, so
+        a module that computes from one has to be called on its owner.
+        """
+        meta = self.__dict__.get("_pp_meta")
+        if meta is None or self._pp_listener is None:
+            self._remote("calling it")
+        from .fragments import _tp_world_size
+
+        if _tp_world_size() > 1:
+            self._remote("calling it under tensor parallelism")
+        state = self._pp_listener.begin_pull(
+            self._pp_owner, f"{self._pp_path}{STATE_MARK}", None
+        ).complete()
+        meta.to_empty(device=self._pp_listener._device)
+        try:
+            meta.load_state_dict(state)
+            return meta(*args, **kwargs)
+        finally:
+            meta.to_empty(device="meta")
 
     def _nnsight_parameter(self, name: str) -> torch.Tensor:
         """``param(name)``: the parameter pulled from the owner's module.
@@ -144,17 +166,25 @@ def graft_children(root: Any, meta_model: torch.nn.Module, local_rank: int, list
 
 
 def parameter_resolver(model: torch.nn.Module, root: str):
-    """The owner's side of ``param(name)``: ``(module path, name) -> tensor``
-    read from ``model``'s own modules, for the listener to answer requests."""
+    """The owner's side of ``param(name)`` and of a call: ``(module path,
+    name) -> tensor`` read from ``model``'s own modules, with ``.state``
+    giving ``module path -> state dict``, for the listener to answer."""
     modules = {f"{root}.{name}": module for name, module in model.named_modules() if name}
 
-    def resolve(path: str, name: str) -> torch.Tensor:
+    def held(path: str) -> torch.nn.Module:
         module = modules.get(path)
         if module is None or isinstance(module, RemoteShell):
             raise AttributeError(f"{path!r} is not held on this rank")
-        value = getattr(module, name, None)
+        return module
+
+    def resolve(path: str, name: str) -> torch.Tensor:
+        value = getattr(held(path), name, None)
         if not isinstance(value, torch.Tensor):
             raise AttributeError(f"{path!r} has no parameter or buffer named {name!r}")
         return value
 
+    def state(path: str) -> dict:
+        return dict(held(path).state_dict())
+
+    resolve.state = state
     return resolve
