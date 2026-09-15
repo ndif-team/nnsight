@@ -60,7 +60,7 @@ import pickle
 import struct
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch.distributed as dist
@@ -102,6 +102,10 @@ _REPLY_POOL_SIZE = 32
 # is ALWAYS ``"{req_id}|{provider}"`` (req_id empty for ``None``), decoding to
 # the composite ``(provider, req_id)`` tuple the producer buffers under.
 _KEY_SEP = "|"
+
+# A parameter request names ``"{module path}.param.{parameter name}"``; the
+# owner answers it from its module, with no request id and no round.
+PARAM_MARK = ".param."
 
 # A pull request is ONE fixed-size, self-identifying message on TAG_REQUEST:
 # 3 little-endian int64 [requester_rank, response_tag, key_len] followed by the
@@ -372,6 +376,10 @@ class PPListener:
         # did not deserialize, or its worker raised), set by the runner. A pull
         # refused for that request carries the cause in its error reply.
         self.failed: Dict[Any, str] = {}
+        # ``(module path, name) -> tensor``, set by the runner: answers a
+        # parameter request from this rank's module, whatever the request's
+        # round, since parameters are not produced by a forward.
+        self.parameters: Optional[Callable[[str, str], Any]] = None
         self._reply_pool = ThreadPoolExecutor(
             max_workers=_REPLY_POOL_SIZE, thread_name_prefix="pp-reply"
         )
@@ -490,6 +498,10 @@ class PPListener:
                 lookup_key = (provider_string, req_id_str or None)
 
                 req = (requesting_rank, response_tag)
+                if PARAM_MARK in provider_string and self.parameters is not None:
+                    path, _, name = provider_string.rpartition(PARAM_MARK)
+                    self._reply_pool.submit(self._serve_parameter, req, path, name)
+                    continue
                 # Check-and-park under the buffer lock so it races safely with
                 # the producer's write + ``dispatch_parked``: either we already
                 # see the value (serve now via the pool) or we park and the
@@ -561,6 +573,15 @@ class PPListener:
             return
         for req in waiters:
             self._reply_pool.submit(self._serve_reply, req, value)
+
+    def _serve_parameter(self, req, path, name):
+        """Answer a parameter request from this rank's module (reply pool)."""
+        try:
+            value = self.parameters(path, name)
+        except Exception as exc:
+            self._serve_error_reply(req, f"{type(exc).__name__}: {exc}")
+            return
+        self._serve_reply(req, value)
 
     def _serve_error_reply(self, req, message):
         """Tell a blocked consumer its pull failed, instead of leaving it hung.

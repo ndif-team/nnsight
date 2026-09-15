@@ -75,6 +75,41 @@ def test_a_parameter_raises_by_attribute_and_by_param(stage0):
     assert model.blocks[0].proj.param("weight") is model._module.blocks[0].proj.weight
 
 
+class _FakeListener:
+    def __init__(self):
+        self.requests = []
+
+    def begin_pull(self, owner, provider, req_id=None):
+        self.requests.append((owner, provider, req_id))
+        value = torch.full((4,), 3.0)
+
+        class Pull:
+            def complete(self, timeout=None):
+                return value
+
+        return Pull()
+
+
+def test_param_pulls_from_the_owner_while_the_attribute_still_raises():
+    module_map = PPModuleMap(2)
+    module_map.set_derived_owners({"blocks.0": 0, "blocks.1": 1, "norm": 1})
+    local, meta = Stack(), Stack()
+    listener = _FakeListener()
+    install_shells(local, meta, module_map, 0, listener)
+    model = NNsight(local)
+    graft_children(model, meta, 0, listener)
+    assert torch.equal(model.norm.param("weight"), torch.full((4,), 3.0))
+    assert torch.equal(model.blocks[1].proj.param("bias"), torch.full((4,), 3.0))
+    assert listener.requests == [
+        (1, "model.norm.param.weight", None),
+        (1, "model.blocks.1.proj.param.bias", None),
+    ]
+    with pytest.raises(RemoteModuleError, match="weight"):
+        model.norm.weight
+    with pytest.raises(AttributeError, match="no parameter"):
+        model.norm.param("nope")
+
+
 def test_an_attribute_neither_side_has_is_a_plain_attribute_error(stage0):
     model, _ = stage0
     with pytest.raises(AttributeError):

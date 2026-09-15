@@ -384,6 +384,36 @@ def test_pull_for_a_completed_round_errors_at_once():
     run_two_ranks(_passed_round)
 
 
+def _param_serve(rank, world, rdv):
+    """A parameter request is answered by the owner's resolver, whatever the
+    round; a name the resolver rejects comes back as an error reply."""
+    stage = Stage(rank, world, rdv, {"h.0": 0, "h.1": 1})
+    listener = stage.listener
+    if rank == 1:
+        def resolve(path, name):
+            if (path, name) == ("model.h.1", "weight"):
+                return torch.full((3,), 2.0)
+            raise AttributeError(f"{path!r} has no parameter or buffer named {name!r}")
+
+        listener.parameters = resolve
+        stage.interleaver.rounds["req-a"] = 3  # closed rounds do not refuse a parameter
+    dist.barrier()
+    if rank == 0:
+        value = listener.begin_pull(1, "model.h.1.param.weight").complete(timeout=10.0)
+        assert torch.equal(value, torch.full((3,), 2.0)), value
+        try:
+            listener.begin_pull(1, "model.h.1.param.nope", "req-a").complete(timeout=10.0)
+            raise AssertionError("an unknown parameter should have error-replied")
+        except RuntimeError as error:
+            assert "no parameter" in str(error), error
+    dist.barrier()
+    stage.close()
+
+
+def test_parameter_requests_are_answered_from_the_module():
+    run_two_ranks(_param_serve)
+
+
 def _wait_for_parked(listener, timeout=10.0):
     """Producer side: block until a consumer's pull is parked here."""
     deadline = time.monotonic() + timeout

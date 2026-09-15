@@ -597,7 +597,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
             from ..pp_envoys import install_shells
 
             install_shells(
-                self.get_model(), meta_model, interleaver.module_map, interleaver.local_rank
+                self.get_model(),
+                meta_model,
+                interleaver.module_map,
+                interleaver.local_rank,
+                interleaver.listener,
             )
         self.nnsight_model: VLLM = VLLM(self.get_model(), interleaver=interleaver)
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
@@ -609,7 +613,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
         if meta_model is not None:
             from ..pp_envoys import graft_children
 
-            graft_children(self.nnsight_model, meta_model, interleaver.local_rank)
+            graft_children(
+                self.nnsight_model, meta_model, interleaver.local_rank, interleaver.listener
+            )
+            # This rank answers the peers' parameter requests from its modules.
+            from ..pp_envoys import parameter_resolver
+
+            interleaver.listener.parameters = parameter_resolver(
+                self.get_model(), interleaver.module_map.root_path
+            )
 
         interleaver = self.nnsight_model.interleaver
         # No envoy: the spans come from the scheduler rather than from an invoke,

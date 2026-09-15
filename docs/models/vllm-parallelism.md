@@ -31,7 +31,31 @@ logits = model.logits_processor(model.lm_head, model.model.norm(h))   # [1, voca
 top1 = logits.argmax(-1).item()
 ```
 
-`pipeline_parallel_size > 1` is a different split and is not supported. Each stage holds part of the trunk while the block is written against the whole tree and sent to every worker, so a stage that does not hold a module cannot resolve it: the engine builds, and every trace on it ends in `RuntimeError: UnknownPersistentIdError: Module:model.model.layers.12.self_attn`, naming a layer on the other stage. Shard with `tensor_parallel_size`.
+## Pipeline parallelism
+
+`pipeline_parallel_size > 1` splits the trunk by layers: each stage holds a contiguous run of layers, the first stage the embeddings, the last stage the final norm, the head and the sampler. The block is written against the whole tree and every stage runs all of it. What a stage does with a module it does not hold:
+
+| use of a module on another stage | what happens |
+|---|---|
+| read `.output`, `.input`, `.inputs` | the value is pulled from the owning stage when the block uses it; `.save()` alone moves nothing, the owner's copy is what comes back |
+| write `.output`, `.input`, `.skip()` | absorbed here, applied on the owning stage |
+| `module.param("weight")` | the parameter is pulled from the owning stage's module and returned as a tensor here, each call afresh |
+| `module.weight` (the attribute) | raises, naming the owning stage; use `param("weight")` |
+| call the module, `model.model.norm(h)` | raises, naming the owning stage |
+| `.source` of the module | fails to resolve any operation |
+
+Saved values merge across stages slot by slot: a stage ships what it holds and a marker for the rest, and the client receives one whole value. `tracer.iter` steps every stage together.
+
+One ordering rule, the same one a single GPU has for reads: forcing a value from a later stage parks the block until that stage produces it, so the local layers the forward passes meanwhile are out of order for the block afterwards. Read the local values first, then force the remote ones.
+
+```python
+model = VLLM("Qwen/Qwen2.5-14B-Instruct", pipeline_parallel_size=2)
+with model.trace(prompt):
+    early = model.model.layers[3].output[0]                 # stage 0's layer, local there
+    normed = model.model.norm.output[0]                     # stage 1's, pulled where needed
+    logits = normed[-1] @ model.lm_head.param("weight").T   # the head, pulled to stage 0
+    top1 = logits.argmax(-1).save()
+```
 
 ## Mixture-of-experts models and expert parallelism
 

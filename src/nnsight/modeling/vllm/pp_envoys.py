@@ -3,10 +3,12 @@
 Every rank runs the whole intervention block against the whole tree. On a rank
 that does not hold a module, its path carries a :class:`RemoteShell`. Reads and
 writes of ``.output``, ``.input`` and ``.inputs`` cross stages through the pull
-protocol without touching the module. A call or a parameter has nothing real to
-work on here, so the shell raises and names the owning stage. The behavior
-lives on the module because a request's envoys are rebuilt on the worker
-around the modules the worker holds.
+protocol without touching the module. ``param(name)`` pulls the parameter from
+the owner's module and returns it as a real tensor on this rank. A call, or
+the parameter as a plain attribute, has nothing real to work on here, so the
+shell raises and names the owning stage. The behavior lives on the module
+because a request's envoys are rebuilt on the worker around the modules the
+worker holds.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ from typing import Any, NoReturn, Optional
 import torch
 
 from vllm.model_executor.models.utils import PPMissingLayer
+
+from .pp_listener import PARAM_MARK
 
 
 class RemoteModuleError(RuntimeError):
@@ -31,13 +35,21 @@ class RemoteShell(PPMissingLayer):
     attribute raises ``AttributeError`` as on any module.
     """
 
-    def __init__(self, meta: Optional[torch.nn.Module], path: str, owner: Optional[int], rank: int) -> None:
+    def __init__(
+        self,
+        meta: Optional[torch.nn.Module],
+        path: str,
+        owner: Optional[int],
+        rank: int,
+        listener: Any = None,
+    ) -> None:
         super().__init__()
         # Kept out of ``_modules`` so the meta copy's parameters are not ours.
         object.__setattr__(self, "_pp_meta", meta)
         self._pp_path = path
         self._pp_owner = owner
         self._pp_rank = rank
+        self._pp_listener = listener
 
     def _remote(self, use: str) -> NoReturn:
         raise RemoteModuleError(
@@ -49,6 +61,24 @@ class RemoteShell(PPMissingLayer):
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         self._remote("calling it")
 
+    def _nnsight_parameter(self, name: str) -> torch.Tensor:
+        """``param(name)``: the parameter pulled from the owner's module.
+
+        The owner's listener answers from the module itself, so the pull
+        completes in place whatever the round. Every call pulls afresh.
+        """
+        meta = self.__dict__.get("_pp_meta")
+        if meta is None or (name not in meta._parameters and name not in meta._buffers):
+            raise AttributeError(f"{self._pp_path!r} has no parameter or buffer named {name!r}")
+        from .fragments import _tp_world_size
+
+        if _tp_world_size() > 1:
+            self._remote(f"its parameter {name!r} under tensor parallelism")
+        if self._pp_listener is None:
+            self._remote(f"its parameter {name!r}")
+        pull = self._pp_listener.begin_pull(self._pp_owner, f"{self._pp_path}{PARAM_MARK}{name}", None)
+        return pull.complete()
+
     def __getattr__(self, name: str) -> Any:
         meta = self.__dict__.get("_pp_meta")
         if meta is not None and (name in meta._parameters or name in meta._buffers):
@@ -57,7 +87,11 @@ class RemoteShell(PPMissingLayer):
 
 
 def install_shells(
-    model: torch.nn.Module, meta_model: torch.nn.Module, module_map: Any, local_rank: int
+    model: torch.nn.Module,
+    meta_model: torch.nn.Module,
+    module_map: Any,
+    local_rank: int,
+    listener: Any = None,
 ) -> list[str]:
     """Replace every module of ``model`` that another stage owns with a
     :class:`RemoteShell`; return the replaced paths.
@@ -78,13 +112,15 @@ def install_shells(
             continue
         parent_name, _, attribute = name.rpartition(".")
         parent = modules[parent_name] if parent_name else model
-        shell = RemoteShell(meta_modules.get(name), path, module_map.get_owning_rank(path), local_rank)
+        shell = RemoteShell(
+            meta_modules.get(name), path, module_map.get_owning_rank(path), local_rank, listener
+        )
         setattr(parent, attribute, shell)
         installed.append(name)
     return [f"{root}.{name}" for name in installed]
 
 
-def graft_children(root: Any, meta_model: torch.nn.Module, local_rank: int) -> None:
+def graft_children(root: Any, meta_model: torch.nn.Module, local_rank: int, listener: Any = None) -> None:
     """Give every shell envoy under ``root`` the children its meta copy has,
     each wrapped as a shell, so paths under a module another stage owns
     resolve at request deserialization and answer as shells do.
@@ -99,9 +135,26 @@ def graft_children(root: Any, meta_model: torch.nn.Module, local_rank: int) -> N
                 for name, child in meta.named_children():
                     envoy._wrap_envoy(
                         name,
-                        RemoteShell(child, f"{envoy.path}.{name}", module._pp_owner, local_rank),
+                        RemoteShell(child, f"{envoy.path}.{name}", module._pp_owner, local_rank, listener),
                     )
         for child in list(envoy._children):
             graft(child)
 
     graft(root)
+
+
+def parameter_resolver(model: torch.nn.Module, root: str):
+    """The owner's side of ``param(name)``: ``(module path, name) -> tensor``
+    read from ``model``'s own modules, for the listener to answer requests."""
+    modules = {f"{root}.{name}": module for name, module in model.named_modules() if name}
+
+    def resolve(path: str, name: str) -> torch.Tensor:
+        module = modules.get(path)
+        if module is None or isinstance(module, RemoteShell):
+            raise AttributeError(f"{path!r} is not held on this rank")
+        value = getattr(module, name, None)
+        if not isinstance(value, torch.Tensor):
+            raise AttributeError(f"{path!r} has no parameter or buffer named {name!r}")
+        return value
+
+    return resolve

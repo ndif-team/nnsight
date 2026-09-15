@@ -15,6 +15,7 @@ every alias path, whichever block the rank holds first.
 
 import os
 
+import nnsight
 import pytest
 import torch
 
@@ -82,3 +83,49 @@ def test_shared_activation_module_resolves_on_every_rank(gpt2_pp2):
     with model.trace(prompt, temperature=0.0, max_tokens=1):
         total = model.lm_head.weight.float().abs().sum().save()
     assert torch.isfinite(total) and total > 0
+
+
+SMOLLM = "HuggingFaceTB/SmolLM2-135M"
+
+
+@pytest.fixture(scope="module")
+def smollm_pp2():
+    """Llama-shaped, embeddings tied by weight: the head is its own module,
+    held on the last stage only, so stage 0 sees it as a shell."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("PP=2 needs 2 GPUs")
+    if "CUDA_VISIBLE_DEVICES" not in os.environ:
+        gpus = free_gpus()
+        if len(gpus) < 2:
+            pytest.skip(f"PP=2 needs 2 free GPUs, found {gpus}")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpus[:2])
+    from nnsight.modeling.vllm import VLLM
+
+    return VLLM(SMOLLM, pipeline_parallel_size=2, gpu_memory_utilization=0.15, dispatch=True)
+
+
+def test_head_weight_reads_across_stages_and_unembeds(smollm_pp2):
+    model = smollm_pp2
+    prompt = "The Eiffel Tower is located in the city of"
+    with model.trace(prompt, temperature=0.0, max_tokens=1):
+        head = model.lm_head.param("weight")
+        tied = model.model.embed_tokens.param("weight")
+        same = torch.equal(head, tied)
+        # The norm returns (hidden, residual); indexing the element works for
+        # the real tuple and for its cross-stage stand-in alike.
+        hidden = model.model.norm.output[0]
+        lens = (hidden[-1].float() @ head.float().T).argmax(-1).save()
+        sampled = model.logits.save()
+        flag = torch.tensor(same).save()
+    assert bool(flag), "the tied head must equal the embedding table"
+    assert int(lens) == int(sampled[-1].argmax(-1))
+
+
+def test_head_weight_row_reads_every_decode_step(smollm_pp2):
+    """The generation-steering pattern: one row of the head per step."""
+    model = smollm_pp2
+    with model.trace("The Eiffel Tower is located in the city of", temperature=0.0, max_tokens=3) as tracer:
+        rows = nnsight.save([])
+        for _ in tracer.iter[:3]:
+            rows.append(float(model.lm_head.param("weight")[42].float().sum()))
+    assert len(rows) == 3 and rows[0] == rows[1] == rows[2]

@@ -81,8 +81,9 @@ def test_local_read_after_a_downstream_force_fails_fast(pp2_engine):
 
 
 def test_uses_of_a_remote_module_raise_naming_the_owner(pp2_engine):
-    """On the stage that does not hold a module, a call or a parameter raises
-    and names the owning stage; its served values still cross stages."""
+    """On the stage that does not hold a module, a call, or a parameter read as
+    an attribute, raises and names the owning stage; its served values still
+    cross stages."""
     model = pp2_engine
 
     with pytest.raises(Exception, match="lives on pipeline stage"):
@@ -94,16 +95,23 @@ def test_uses_of_a_remote_module_raise_naming_the_owner(pp2_engine):
     with pytest.raises(Exception, match="lives on pipeline stage"):
         with model.trace(PROMPT, temperature=0.0, max_tokens=1):
             _layer(model, LATE).input_layernorm.weight
-    with pytest.raises(Exception, match="lives on pipeline stage"):
-        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
-            _layer(model, LATE).mlp.down_proj.param("weight")
-    with pytest.raises(Exception, match="lives on pipeline stage"):
-        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
-            _layer(model, EARLY).mlp.down_proj.param("weight")  # the other direction: stage 1 lacks layer EARLY
     with model.trace(PROMPT, temperature=0.0, max_tokens=1):
         normed = model.model.norm.output.save()
     hidden = normed[0] if isinstance(normed, tuple) else normed
     assert torch.isfinite(hidden.float()).all()
+
+
+def test_param_pulls_a_remote_parameter_in_both_directions(pp2_engine):
+    """``param(name)`` on a module the other stage owns returns that stage's
+    tensor; the pulled copy equals the owner's own, so the merged value is the
+    same whichever rank's copy the merge keeps."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        late = _layer(model, LATE).input_layernorm.param("weight").float().abs().sum().save()
+        early = _layer(model, EARLY).input_layernorm.param("weight").float().abs().sum().save()
+    assert late > 0 and early > 0 and late != early
+    # Qwen2.5-0.5B layer 20's input norm weight, measured on one GPU.
+    assert float(late) == pytest.approx(1424.374, rel=1e-3)
 
 
 def test_skip_of_a_remote_layer_applies_on_its_owner(pp2_engine):
