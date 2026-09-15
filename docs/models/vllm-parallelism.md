@@ -44,7 +44,7 @@ top1 = logits.argmax(-1).item()
 | call the module, `model.model.norm(h)` | the module's state is pulled from the owning stage, the call runs here on it, and the state is dropped again; a module that computes from a buffer outside its state dict has to be called on its owner |
 | `.source` of the module | fails to resolve any operation |
 
-Saved values merge across stages slot by slot: a stage ships what it holds and a marker for the rest, and the client receives one whole value. `tracer.iter` steps every stage together.
+Saved values merge across stages slot by slot: a stage ships what it holds and a marker for the rest, and the client receives one whole value. `tracer.iter` steps every stage together. With tensor parallelism inside each stage, `param("weight")` gathers the pulled shards the way it gathers local ones, and a call runs the pulled shards with this stage's own collectives.
 
 One ordering rule, the same one a single GPU has for reads: forcing a value from a later stage parks the block until that stage produces it, so the local layers the forward passes meanwhile are out of order for the block afterwards. Read the local values first, then force the remote ones.
 

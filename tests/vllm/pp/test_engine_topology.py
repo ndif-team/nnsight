@@ -97,3 +97,30 @@ if __name__ == "__main__":
 def test_tp_pp_every_rank_releases_workers():
     counts = run(2, 2, "release")["counts"]
     assert len(counts) == 4 and all(count == 0 for count in counts), counts
+
+
+@needs_four_gpus
+def test_tp_pp_param_reads_match_tp_reference():
+    """A parameter pulled from the other stage and gathered across this
+    stage's TP ranks equals the TP=2 single-stage read of the same
+    parameter, on both sharding axes."""
+    reference = run(2, 1, "param_reads")
+    sharded_pipelined = run(2, 2, "param_reads")
+    for name in ("norm", "down", "qkv"):
+        assert reference[f"{name}_shape"] == sharded_pipelined[f"{name}_shape"], name
+        assert reference[f"{name}_sum"] == pytest.approx(sharded_pipelined[f"{name}_sum"], rel=1e-4), name
+    for name in ("down_row", "qkv_row"):
+        assert reference[name] == pytest.approx(sharded_pipelined[name], rel=1e-4), name
+
+
+@needs_four_gpus
+def test_tp_pp_remote_calls_match_tp_reference():
+    """A module called from the stage that does not hold it runs on the
+    owner's shards with this stage's collectives and gives the TP=2
+    single-stage value."""
+    reference = run(2, 1, "remote_calls")
+    sharded_pipelined = run(2, 2, "remote_calls")
+    for name in ("normed", "mlp"):
+        assert reference[f"{name}_shape"] == sharded_pipelined[f"{name}_shape"], name
+        similarity = cosine(reference[name], sharded_pipelined[name])
+        assert similarity > 0.999, f"{name} cosine {similarity:.6f}"

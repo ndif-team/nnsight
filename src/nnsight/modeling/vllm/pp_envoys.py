@@ -62,17 +62,16 @@ class RemoteShell(PPMissingLayer):
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Run the meta copy here on the owner's state.
 
-        The state is pulled afresh for every call and dropped after it. A
+        The state is pulled afresh for every call and dropped after it. Under
+        tensor parallelism the state is the column peer's shard and the meta
+        copy is built at the same shard shapes, so the module's own
+        collectives run in this stage's group as they do on the owner. A
         buffer the module keeps out of its state dict is not carried over, so
         a module that computes from one has to be called on its owner.
         """
         meta = self.__dict__.get("_pp_meta")
         if meta is None or self._pp_listener is None:
             self._remote("calling it")
-        from .fragments import _tp_world_size
-
-        if _tp_world_size() > 1:
-            self._remote("calling it under tensor parallelism")
         state = self._pp_listener.begin_pull(
             self._pp_owner, f"{self._pp_path}{STATE_MARK}", None
         ).complete()
@@ -92,14 +91,19 @@ class RemoteShell(PPMissingLayer):
         meta = self.__dict__.get("_pp_meta")
         if meta is None or (name not in meta._parameters and name not in meta._buffers):
             raise AttributeError(f"{self._pp_path!r} has no parameter or buffer named {name!r}")
-        from .fragments import _tp_world_size
-
-        if _tp_world_size() > 1:
-            self._remote(f"its parameter {name!r} under tensor parallelism")
         if self._pp_listener is None:
             self._remote(f"its parameter {name!r}")
         pull = self._pp_listener.begin_pull(self._pp_owner, f"{self._pp_path}{PARAM_MARK}{name}", None)
-        return pull.complete()
+        pulled = pull.complete()
+        # The pull carries this rank's column peer's shard; the meta copy's
+        # parameter carries the sharding stamps that say how to gather it.
+        from .envoys import _whole_parameter
+
+        reference = getattr(meta, name)
+        for stamp in ("output_dim", "input_dim"):
+            if hasattr(reference, stamp):
+                setattr(pulled, stamp, getattr(reference, stamp))
+        return _whole_parameter(meta, pulled)
 
     def __getattr__(self, name: str) -> Any:
         meta = self.__dict__.get("_pp_meta")

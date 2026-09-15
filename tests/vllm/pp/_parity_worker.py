@@ -200,6 +200,37 @@ def scenario_concurrent(model, args):
     }
 
 
+def scenario_param_reads(model, args):
+    """Parameters read whole through param(): the final norm's weight (last
+    stage), a row-parallel weight of a late layer, and a column-parallel
+    weight of an early layer, so under PP both directions and, under TP,
+    both sharding axes are gathered."""
+    with model.trace(args.prompt, temperature=0.0, max_tokens=1):
+        norm_w = model.model.norm.param("weight").float().save()
+        down_w = model.model.layers[LATE].mlp.down_proj.param("weight").float().save()
+        qkv_w = model.model.layers[EARLY].self_attn.qkv_proj.param("weight").float().save()
+    return {
+        "norm_shape": list(norm_w.shape), "norm_sum": float(norm_w.abs().sum()),
+        "down_shape": list(down_w.shape), "down_sum": float(down_w.abs().sum()),
+        "down_row": _flat(down_w[0, :64]),
+        "qkv_shape": list(qkv_w.shape), "qkv_sum": float(qkv_w.abs().sum()),
+        "qkv_row": _flat(qkv_w[0, :64]),
+    }
+
+
+def scenario_remote_calls(model, args):
+    """The final norm and a late MLP called on an early layer's output."""
+    with model.trace(args.prompt, temperature=0.0, max_tokens=1):
+        out = model.model.layers[EARLY].output
+        normed, _ = model.model.norm(out[0], out[1])
+        normed = normed.float().save()
+        through = model.model.layers[LATE].mlp(out[0]).float().save()
+    return {
+        "normed": _flat(normed[-1]), "normed_shape": list(normed.shape),
+        "mlp": _flat(through[-1]), "mlp_shape": list(through.shape),
+    }
+
+
 def scenario_release(model, args):
     """A trace, then every rank's count of tracked requests."""
     with model.trace(args.prompt, temperature=0.0, max_tokens=2) as tracer:
@@ -217,6 +248,8 @@ SCENARIOS = {
     "write_cross": scenario_write_cross,
     "multigen": scenario_multigen,
     "multigen_forced": scenario_multigen_forced,
+    "param_reads": scenario_param_reads,
+    "remote_calls": scenario_remote_calls,
     "concurrent": scenario_concurrent,
     "release": scenario_release,
 }

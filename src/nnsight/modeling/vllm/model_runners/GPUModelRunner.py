@@ -575,12 +575,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # tree so instrumentation registers on it. The runner serves the step
         # gate at its own boundary, once per engine step (see execute_model).
         self.nnsight_pp = get_pp_group().world_size > 1
-        # The full meta-device tree the worker built before the real groups
-        # existed (see GPUWorker), taken once here.
-        from ..workers import GPUWorker as worker_module
+        # The whole architecture on the meta device at this stage's TP size:
+        # the modules other stages hold, for ownership, shells and their
+        # children (see pp.build_meta_tree).
+        meta_model = None
+        if self.nnsight_pp:
+            from ..pp import build_meta_tree
 
-        meta_model = worker_module.PP_META_MODEL if self.nnsight_pp else None
-        worker_module.PP_META_MODEL = None
+            meta_model = build_meta_tree(self.vllm_config)
         interleaver = (
             self._build_pp_interleaver(taps, meta_model)
             if self.nnsight_pp

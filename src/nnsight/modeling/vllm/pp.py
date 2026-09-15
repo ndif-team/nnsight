@@ -17,7 +17,7 @@ workers whereas a yaml would have to exist on every node.
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import torch.nn as nn
 
@@ -210,3 +210,54 @@ class PPModuleMap:
             # Unknown module — assume local (safe default).
             return True
         return owner == local_rank
+
+
+class _SoleStage:
+    """What vLLM's model constructors read off the pipeline group, for a
+    build that holds every layer: one stage, first and last."""
+
+    rank = 0
+    rank_in_group = 0
+    world_size = 1
+    ranks = [0]
+    first_rank = 0
+    last_rank = 0
+    is_first_rank = True
+    is_last_rank = True
+
+
+def build_meta_tree(vllm_config: Any) -> nn.Module:
+    """The whole architecture on the meta device, at this stage's tensor-parallel
+    size and with every layer present.
+
+    Runs after the real groups exist, so each parallel layer is built with the
+    shard shapes this rank's own layers have. The pipeline group is stood in
+    for by a single stage for the duration of the build, so the layer loop,
+    the embeddings, the final norm and the head are all constructed. The
+    rotary cache the build leaves behind is cleared, as it is keyed by
+    parameters that only exist on the meta device.
+    """
+    import copy
+
+    from vllm.distributed import parallel_state
+    from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+    from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+
+    config = copy.deepcopy(vllm_config)
+    config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.world_size = config.parallel_config.tensor_parallel_size
+    config.load_config.device = "meta"
+    # The attention layers register themselves by name in the config's forward
+    # context, which a deep copy shares with the original; the meta build
+    # registers into a context of its own.
+    config.compilation_config.static_forward_context = {}
+    loader = DummyModelLoader(config.load_config)
+    loader.load_weights = lambda *args, **kwargs: None
+    real_pp = parallel_state._PP
+    parallel_state._PP = _SoleStage()
+    try:
+        model = loader.load_model(config, config.model_config)
+    finally:
+        parallel_state._PP = real_pp
+        _ROPE_DICT.clear()
+    return model

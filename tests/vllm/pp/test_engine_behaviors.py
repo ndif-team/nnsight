@@ -121,6 +121,20 @@ def test_calling_a_remote_module_computes_the_owner_result(pp2_engine):
     assert float(through_mlp) == pytest.approx(1853.443, rel=1e-3)
 
 
+def test_hooked_call_of_a_remote_module_gives_the_same_value(pp2_engine):
+    """``hook=True`` on a module the other stage owns runs the same local
+    call; the meta copy's internals are not part of the tree, so only the
+    call's value is observable."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        out = _layer(model, EARLY).output
+        plain, _ = model.model.norm(out[0], out[1])
+        hooked, _ = model.model.norm(out[0], out[1], hook=True)
+        same = torch.equal(plain, hooked)
+        flag = torch.tensor(same).save()
+    assert bool(flag)
+
+
 def test_skip_of_a_remote_layer_applies_on_its_owner(pp2_engine):
     """A ``.skip()`` of a layer the other stage owns is applied there: the
     logits change, and the non-owning stage absorbs the skip."""
