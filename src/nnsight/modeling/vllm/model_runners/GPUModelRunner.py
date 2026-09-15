@@ -590,16 +590,26 @@ class NNsightGPUModelRunner(GPUModelRunner):
         )
         # `get_model`, not `self.model`: under CUDA graphs vLLM has wrapped the
         # module in its graph runner, and the tree is built over the module.
+        if meta_model is not None:
+            # A module another stage owns becomes a shell before the tree is
+            # built: its served values cross stages, a call or a parameter
+            # raises naming the owner.
+            from ..pp_envoys import install_shells
+
+            install_shells(
+                self.get_model(), meta_model, interleaver.module_map, interleaver.local_rank
+            )
         self.nnsight_model: VLLM = VLLM(self.get_model(), interleaver=interleaver)
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
 
-        # Under PP, graft the meta model's children onto each PPMissingLayer
-        # stub's envoy: sub-stub paths (``model.layers.5.attn`` on a non-owning
-        # rank) then resolve at request deserialization and answer with lazies
-        # like any other remote-owned location. The meta tree was built by the
-        # worker before the real groups existed (see GPUWorker).
+        # Under PP, graft the meta model's children onto each shell's envoy:
+        # sub-paths (``model.layers.5.attn`` on a non-owning rank) then resolve
+        # at request deserialization. The meta tree was built by the worker
+        # before the real groups existed (see GPUWorker).
         if meta_model is not None:
-            self._graft_pp_missing_envoys(meta_model)
+            from ..pp_envoys import graft_children
+
+            graft_children(self.nnsight_model, meta_model, interleaver.local_rank)
 
         interleaver = self.nnsight_model.interleaver
         # No envoy: the spans come from the scheduler rather than from an invoke,
@@ -698,33 +708,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             taps=taps,
             fragments=VLLMFragments(),
         )
-
-    def _graft_pp_missing_envoys(self, meta_model: torch.nn.Module) -> None:
-        """Graft the meta model's children onto each PPMissingLayer envoy.
-
-        A stub has no children, so the envoy tree is missing every sub-module
-        of a non-local layer. ``_wrap_envoy`` builds and attaches each child
-        (recursively, via Envoy's own construction), handling shadowed names;
-        the grafted envoys wrap meta-device modules that never run; reads on
-        them resolve by ownership to lazies exactly like the stub itself.
-        """
-        from ..pp import is_pp_missing
-
-        meta_modules = {
-            f"{self.nnsight_model.path}.{name}": module
-            for name, module in meta_model.named_modules()
-        }
-
-        def graft(envoy: Any) -> None:
-            if is_pp_missing(envoy._module):
-                meta_module = meta_modules.get(envoy.path)
-                if meta_module is not None:
-                    for name, child in meta_module.named_children():
-                        envoy._wrap_envoy(name, child)
-            for child_envoy in list(envoy._children):
-                graft(child_envoy)
-
-        graft(self.nnsight_model)
 
     def _exchange_pp_module_meta(self) -> tuple:
         """Allgather per-module dtype across PP ranks AND derive ownership.

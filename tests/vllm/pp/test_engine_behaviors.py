@@ -80,6 +80,45 @@ def test_local_read_after_a_downstream_force_fails_fast(pp2_engine):
     assert torch.isfinite(total)
 
 
+def test_uses_of_a_remote_module_raise_naming_the_owner(pp2_engine):
+    """On the stage that does not hold a module, a call or a parameter raises
+    and names the owning stage; its served values still cross stages."""
+    model = pp2_engine
+
+    with pytest.raises(Exception, match="lives on pipeline stage"):
+        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+            model.model.norm(_layer(model, EARLY).output[0])
+    with pytest.raises(Exception, match="lives on pipeline stage"):
+        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+            _layer(model, LATE).mlp(_layer(model, EARLY).output[0])
+    with pytest.raises(Exception, match="lives on pipeline stage"):
+        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+            _layer(model, LATE).input_layernorm.weight
+    with pytest.raises(Exception, match="lives on pipeline stage"):
+        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+            _layer(model, LATE).mlp.down_proj.param("weight")
+    with pytest.raises(Exception, match="lives on pipeline stage"):
+        with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+            _layer(model, EARLY).mlp.down_proj.param("weight")  # the other direction: stage 1 lacks layer EARLY
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        normed = model.model.norm.output.save()
+    hidden = normed[0] if isinstance(normed, tuple) else normed
+    assert torch.isfinite(hidden.float()).all()
+
+
+def test_skip_of_a_remote_layer_applies_on_its_owner(pp2_engine):
+    """A ``.skip()`` of a layer the other stage owns is applied there: the
+    logits change, and the non-owning stage absorbs the skip."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        clean = model.logits.save()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        previous = _layer(model, LATE - 1).output
+        _layer(model, LATE).skip(previous)
+        skipped = model.logits.save()
+    assert not torch.equal(clean, skipped)
+
+
 def test_cross_stage_inputs_read_carries_the_argument_structure(pp2_engine):
     """A layer's ``.inputs`` is ``((positions, hidden, residual), {})``, int64
     beside bf16 in a nested tuple. The downstream rank pulls an upstream
