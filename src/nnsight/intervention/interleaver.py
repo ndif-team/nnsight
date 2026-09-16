@@ -484,6 +484,10 @@ class Mediator:
             if pending.event is Event.VALUE:  # serve this worker only its rows
                 served = value if batcher is None else batcher.narrow(value, self.batch_group)
                 self.pending = self.switch(served)
+                # The worker has what it asked for and has parked again; a
+                # runtime whose ranks each run this block hears about both.
+                if self.interleaver is not None:
+                    self.interleaver.served(self, provider, served)
                 # If that read bound a write-back (an eproperty whose preprocess
                 # returned a view), the worker has since edited the view — fire it
                 # and splice the mapped-back result in, exactly like a swap.
@@ -501,6 +505,8 @@ class Mediator:
                 else:
                     value = batcher.widen(value, self.batch_group, pending.value)
                 self.pending = self.switch()
+                if self.interleaver is not None:
+                    self.interleaver.served(self, provider, None, event=Event.SWAP)
             elif pending.event is Event.SKIP:  # gather per-invoke replacements
                 if batcher is None:
                     value = pending.value
@@ -509,6 +515,8 @@ class Mediator:
                         value, self.batch_group, pending.value
                     )
                 self.pending = self.switch()
+                if self.interleaver is not None:
+                    self.interleaver.served(self, provider, None, event=Event.SKIP)
             pending = self.pending
         return value
 
@@ -839,6 +847,7 @@ class Interleaver:
                 else self.batcher.narrow(value, mediator.batch_group)
             )
             cache.observe_selected(selected, served)
+            self.served(mediator, provider, served, selected=selected)
 
         # Back to the piece the model's own forward expects, carrying whatever the
         # workers left behind — so an edit to the assembled tensor reaches the
@@ -849,6 +858,28 @@ class Interleaver:
         if stopped is not None:
             raise stopped
         return value
+
+    def served(
+        self,
+        mediator: Mediator,
+        provider: str,
+        value: Any,
+        selected: Optional[tuple] = None,
+        event: Event = Event.VALUE,
+    ) -> None:
+        """A worker's request at ``provider`` was just served and it has parked again.
+
+        Called by [`Mediator.handle`][nnsight.intervention.interleaver.Mediator.handle]
+        after each of a worker's events at a visit (``event`` says which: a read
+        got ``value``, a swap or skip got nothing and ``value`` is ``None``), with
+        ``mediator.pending`` already the worker's next request; and by `handle`
+        after a cache subscribed to ``provider`` recorded ``value`` (``selected``
+        is that cache's ``(path, slot)``). A read's ``value`` is what the consumer
+        got: narrowed to the worker's rows, whole across a sharded model. Nothing
+        here; a runtime whose ranks each run the same block against a part of the
+        model overrides this to carry values to the ranks that do not hold this
+        location and to answer what the worker asks of them next.
+        """
 
     def check_dangling_mediators(self) -> None:
         """Surface any worker still parked after the run.

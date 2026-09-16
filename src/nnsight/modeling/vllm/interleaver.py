@@ -108,6 +108,13 @@ class VLLMInterleaver(Interleaver):
                 f"{missing[0]!r}. Its operations are {list(source.names)}."
             )
 
+    def started(self, mediator: Any) -> None:
+        """A worker the runner just started has parked for the first time.
+
+        Nothing on one stage. A pipeline stage answers the park here when it
+        names another stage's module (see ``pp_interleaver``).
+        """
+
     def handle(self, provider: str, value: Any) -> Any:
         # While vLLM is recording a graph, a tap's handoff is not served now but
         # registered to be replayed at this point of every later step. The runner
