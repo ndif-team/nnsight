@@ -195,6 +195,12 @@ def run_worker(scenario: str, pp: int, tp: int = 1, gpus: str = "", extra: tuple
         env["CUDA_VISIBLE_DEVICES"] = gpus
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         env["PYTHONPATH"] = os.path.join(REPO_ROOT, "src")
+        # The comparison is of values as the block read them. A value another
+        # stage sends is a copy taken then; a value saved on the stage that
+        # holds it is a view of a vLLM buffer that later layers overwrite
+        # (cosine 0.27 for a late layer, measured), so every engine keeps
+        # copies of what it reads.
+        env.setdefault("NNSIGHT_VLLM_CLONE_READS", "1")
         cmd = [sys.executable, WORKER, scenario, "--pp", str(pp), "--tp", str(tp), "--prompt", prompt, "--output", output_path, *extra]
         with open(log_path, "w") as log:
             result = subprocess.run(cmd, stdout=log, stderr=log, timeout=600, env=env, cwd=REPO_ROOT)
