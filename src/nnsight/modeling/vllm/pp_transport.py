@@ -147,8 +147,9 @@ class Link:
         # (peer, request id) -> rounds the peer has finished for it.
         self._done: dict[tuple, int] = {}
         self._next_request = 0
-        # (request id, provider) -> a parameter or state kept for the request's life.
-        self.kept: dict[tuple, Any] = {}
+        # Provider -> a parameter or module state fetched from its owner, kept
+        # for the engine's life (the owner's weights do not change).
+        self.kept: dict[str, Any] = {}
         self._out: dict[int, queue.Queue] = {peer: queue.Queue() for peer in self.peers}
         self._threads = []
         for peer in self.peers:
@@ -328,8 +329,6 @@ class Link:
                 del self._errors[key]
             for key in [key for key in self._done if key[1] == req]:
                 del self._done[key]
-        for key in [key for key in self.kept if key[0] == req]:
-            del self.kept[key]
 
     def close(self) -> None:
         """Stop the threads: each peer's receive loop is told to return, and the

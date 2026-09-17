@@ -68,8 +68,9 @@ called `param()` on the head while its own forward was running would wait on
 a worker that waits on that forward. The reply's host copy is taken on a
 stream of its own, so it does not queue behind the forward's sends. What ships
 for a call is the state, never the call's output, so the receiver computes on
-its own input; a parameter or state fetched once is kept for the rest of the
-request.
+its own input; a parameter or state is fetched once and kept for the engine's
+life, since the owner's weights do not change and the head of a 14B model is
+1.5 GB (3.1 s per fetch, measured).
 
 ## The receiver side: take
 
@@ -126,7 +127,8 @@ step.
 
 At collect, every rank drains and winds up its own mediators; rank 0 reports
 saves. Every rank holds every value the block read, so nothing is merged. The
-inbox entries and any kept state for the request are dropped.
+inbox entries for the request are dropped; fetched parameters and state
+stay for the engine's life.
 
 ## What this replaces, from pp-on-08
 

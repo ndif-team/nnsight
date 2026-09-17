@@ -7,9 +7,11 @@ interleaver without touching the module. ``param(name)`` asks the owner for the
 parameter over the link and returns it as a real tensor here. A call asks the
 owner for the module's state, runs the meta copy here with it, and drops the
 copy again, so the block gets the same result the owner computes. A parameter
-or state fetched once is kept for the rest of the request. The parameter as a
-plain attribute has nothing real to work on here, so the shell raises and names
-the owning stage. The behavior lives on the module because a request's envoys
+or state is fetched once and kept for the engine's life: the owner's weights do
+not change, and fetching the head of a 14B model again for every trace costs
+seconds each time (measured: 3.1 s per trace at PP=2). The parameter as a plain
+attribute has nothing real to work on here, so the shell raises and names the
+owning stage. The behavior lives on the module because a request's envoys
 are rebuilt on the worker around the modules the worker holds.
 """
 
@@ -18,7 +20,6 @@ from __future__ import annotations
 from typing import Any, Callable, NoReturn, Optional
 
 import torch
-from greenlet import getcurrent
 from torch.utils._pytree import tree_map
 from vllm.model_executor.models.utils import PPMissingLayer
 
@@ -67,20 +68,14 @@ class RemoteShell(PPMissingLayer):
         )
 
     def _fetch(self, provider: str) -> Any:
-        """``provider`` from the owner, kept for the rest of the current request."""
+        """``provider`` from the owner, kept on this rank for the engine's life."""
         link = self._pp_link
-        # A worker asking has a request; a call outside any trace has none and
-        # keeps nothing.
-        mediator = getattr(getcurrent(), "mediator", None)
-        req = mediator().pp_req if mediator is not None else None
-        key = (req, provider)
-        if req is not None and key in link.kept:
-            return link.kept[key]
+        if provider in link.kept:
+            return link.kept[provider]
         value = link.request(self._pp_owner, provider)
         if self._pp_device is not None:
             value = tree_map(lambda t: t.to(self._pp_device) if isinstance(t, torch.Tensor) else t, value)
-        if req is not None:
-            link.kept[key] = value
+        link.kept[provider] = value
         return value
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
