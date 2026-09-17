@@ -88,7 +88,70 @@ What the table says:
 
 ## The nnbench pass
 
-(filled in from `runs/pp-compare-{push,eager}` and `runs/pp-compare-{push,eager}-qwen`)
+The interp-workload benchmark's GPT-2 specs, three backends per branch: the
+transformers reference (`nnsight-hf`), the branch's vLLM engine in sync mode on
+one GPU, and the same engine with `pipeline_parallel_size=2`. Each branch's
+image is built from its worktree; push ran on GPUs 3 and 6, eager on 4 and 5,
+all four otherwise idle. A cell is a methodology and its realization; the
+state is the bench's verdict against the reference (`SUPPORTED` equivalent,
+`SILENTLY_WRONG` and `INVALID_REFERENCE` the sync engine's own known gaps
+against HF, `ERROR` a raise), the number the median latency in ms.
+
+| spec | workload | cell | HF reference | push, one stage | push, PP=2 | eager, one stage | eager, PP=2 |
+|---|---|---|---|---|---|---|---|
+| steering_gpt2 | batched | mode=inplace | RAN 16 | SUPPORTED 329 | SUPPORTED 432 | SUPPORTED 337 | SUPPORTED 618 |
+| steering_gpt2 | batched | mode=replace | RAN 16 | SUPPORTED 339 | SUPPORTED 473 | SUPPORTED 347 | SUPPORTED 550 |
+| steering_gpt2 | interactive | mode=inplace | RAN 12 | SUPPORTED 25 | SUPPORTED 30 | SUPPORTED 26 | SUPPORTED 35 |
+| steering_gpt2 | interactive | mode=replace | RAN 12 | SUPPORTED 27 | SUPPORTED 33 | SUPPORTED 26 | SUPPORTED 36 |
+| das_gpt2 | interactive | apply (seeded orthogonal rotation) | RAN 1224 | SILENTLY_WRONG 1329 | SILENTLY_WRONG 1394 | SILENTLY_WRONG 1490 | SILENTLY_WRONG 2696 |
+| das_gpt2 | interactive | train (24 rotation steps + held-out accuracy guard) | RAN 4577 | ERROR | ERROR | ERROR | ERROR |
+| jacobian_lens_gpt2 | interactive | transport=identity (logit-lens readout) | RAN 14 | SUPPORTED 28 | SUPPORTED 45 | SUPPORTED 28 | SUPPORTED 62 |
+| jacobian_lens_gpt2 | interactive | transport=seeded-orthogonal (the J-matmul path) | RAN 1112 | SUPPORTED 880 | SUPPORTED 101 | SUPPORTED 1825 | SUPPORTED 119 |
+| activation_patching_gpt2 | interactive | layer=3 | RAN 23 | SILENTLY_WRONG 54 | SILENTLY_WRONG 64 | SILENTLY_WRONG 53 | SILENTLY_WRONG 71 |
+| activation_patching_gpt2 | interactive | layer=9 | RAN 27 | SILENTLY_WRONG 55 | SILENTLY_WRONG 61 | SILENTLY_WRONG 53 | SILENTLY_WRONG 69 |
+| gen_steering_gpt2 | generation | bound=iter[0:N] | RAN 162 | SUPPORTED 173 | SUPPORTED 243 | SUPPORTED 183 | SUPPORTED 251 |
+| gen_steering_gpt2 | generation | bound=iter[:] | RAN 165 | SUPPORTED 179 | SUPPORTED 242 | SUPPORTED 170 | SUPPORTED 246 |
+| ablation_gpt2 | batched | target=attn | RAN 17 | SILENTLY_WRONG 372 | SILENTLY_WRONG 473 | SILENTLY_WRONG 358 | SILENTLY_WRONG 473 |
+| ablation_gpt2 | batched | target=mlp | RAN 17 | SILENTLY_WRONG 361 | SILENTLY_WRONG 472 | SILENTLY_WRONG 355 | SILENTLY_WRONG 511 |
+| ablation_gpt2 | interactive | target=attn | RAN 11 | INVALID_REFERENCE 30 | INVALID_REFERENCE 36 | INVALID_REFERENCE 30 | INVALID_REFERENCE 36 |
+| ablation_gpt2 | interactive | target=mlp | RAN 11 | INVALID_REFERENCE 29 | INVALID_REFERENCE 37 | INVALID_REFERENCE 28 | INVALID_REFERENCE 37 |
+| attribution_patching_gpt2 | interactive | residual=plain | RAN 40 | ERROR | ERROR | ERROR | ERROR |
+| gen_patching_gpt2 | generation | bound=iter[0:N] | RAN 111 | SILENTLY_WRONG 150 | SILENTLY_WRONG 205 | SILENTLY_WRONG 135 | SILENTLY_WRONG 202 |
+| gen_patching_gpt2 | generation | bound=iter[:] | RAN 113 | SILENTLY_WRONG 138 | SILENTLY_WRONG 205 | SILENTLY_WRONG 134 | SILENTLY_WRONG 199 |
+| logit_lens_gpt2 | batched | unembed=module | RAN 48 | ERROR | ERROR | ERROR | ERROR |
+| logit_lens_gpt2 | batched | unembed=weight | RAN 48 | SUPPORTED 364 | SUPPORTED 581 | SUPPORTED 375 | SUPPORTED 751 |
+| logit_lens_gpt2 | interactive | unembed=module | RAN 14 | ERROR | ERROR | ERROR | ERROR |
+| logit_lens_gpt2 | interactive | unembed=weight | RAN 15 | SUPPORTED 31 | SUPPORTED 42 | SUPPORTED 29 | SUPPORTED 63 |
+| attention_pattern_gpt2 | interactive | layers=all | ERROR | ERROR | ERROR | ERROR | ERROR |
+| jacobian_collect_gpt2 | interactive | collect (8 batched VJPs per prompt) | RAN 32647 | ERROR | ERROR | ERROR | ERROR |
+
+What the table says:
+
+- **Every PP=2 verdict equals its branch's single-stage verdict, on both
+  branches, in all 33 jobs each.** The errors are the topology-independent
+  ones recorded before: the `.source` operation names under vLLM
+  (`attention_pattern`), the head module's sampler guard (`unembed=module`),
+  and no autograd on vLLM inference tensors (`das` train, attribution
+  patching, jacobian collect). The transports change no verdict.
+- **On cells that cross stages once per trace, the two transports are within
+  noise of each other**: interactive steering, activation patching, ablation,
+  generation-time steering and patching.
+- **On cells that cross stages many times per trace, push is faster.** The
+  batched cells run 16 invokes, so 16 workers on each stage read the other
+  stage's values: batched steering costs 432 and 473 ms on push against 618
+  and 550 on eager (one stage: about 335 on both); the batched weight lens
+  581 against 751 (one stage: about 370); the interactive weight lens, which
+  reads every layer, 42 against 63 (one stage: 30). A pull is a request and a
+  reply through the owner's one receive thread, once per value per worker,
+  and those round trips add up where a push streams.
+- The seeded-orthogonal jacobian lens runs faster at PP=2 than on one stage
+  on both branches (101 and 119 ms against 880 and 1,825); the cell's own
+  compute dominates it and the split moves that compute, which is the same
+  effect on either transport and not a property of the wire.
+
+### Qwen2.5-14B-Instruct
+
+(filled in from `runs/pp-compare2-{push,eager}-qwen`)
 
 ## Verdict
 
