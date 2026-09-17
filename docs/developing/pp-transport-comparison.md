@@ -151,8 +151,74 @@ What the table says:
 
 ### Qwen2.5-14B-Instruct
 
-(filled in from `runs/pp-compare2-{push,eager}-qwen`)
+The bench's five Qwen specs, same three backends per branch, engines at
+`gpu_memory_utilization=0.5`. Stage 0 holds layers 0 to 23, stage 1 layers 24
+to 47 and the head.
+
+| spec | workload | cell | HF reference | push, one stage | push, PP=2 | eager, one stage | eager, PP=2 |
+|---|---|---|---|---|---|---|---|
+| logit_lens_qwen | interactive | unembed=module | RAN 97 | ERROR | ERROR | ERROR | ERROR |
+| logit_lens_qwen | interactive | unembed=weight | RAN 85 | SILENTLY_WRONG 156 | SILENTLY_WRONG 295 | SILENTLY_WRONG 154 | SILENTLY_WRONG 323 |
+| steering_qwen | interactive | mode=inplace | RAN 58 | SILENTLY_WRONG 60 | SILENTLY_WRONG 71 | SILENTLY_WRONG 59 | SILENTLY_WRONG 74 |
+| steering_qwen | interactive | mode=replace | RAN 59 | SILENTLY_WRONG 60 | SILENTLY_WRONG 72 | SILENTLY_WRONG 65 | SILENTLY_WRONG 76 |
+| ablation_qwen | interactive | target=attn | RAN 57 | INVALID_REFERENCE 58 | INVALID_REFERENCE 71 | INVALID_REFERENCE 52 | INVALID_REFERENCE 81 |
+| ablation_qwen | interactive | target=mlp | RAN 57 | INVALID_REFERENCE 59 | INVALID_REFERENCE 72 | INVALID_REFERENCE 58 | INVALID_REFERENCE 74 |
+| activation_patching_qwen | interactive | layer=24 | RAN 134 | SILENTLY_WRONG 142 | SILENTLY_WRONG 145 | SILENTLY_WRONG 136 | SILENTLY_WRONG 154 |
+| activation_patching_qwen | interactive | layer=8 | RAN 139 | SILENTLY_WRONG 137 | SILENTLY_WRONG 146 | SILENTLY_WRONG 137 | SILENTLY_WRONG 148 |
+| gen_steering_qwen | generation | bound=iter[0:N] | RAN 508 | SILENTLY_WRONG 350 | SILENTLY_WRONG 472 | SILENTLY_WRONG 350 | SILENTLY_WRONG 478 |
+| gen_steering_qwen | generation | bound=iter[:] | RAN 500 | SILENTLY_WRONG 357 | SILENTLY_WRONG 509 | SILENTLY_WRONG 358 | SILENTLY_WRONG 483 |
+
+Every one of these cells reads the head weight through `param("weight")`,
+which on this model is 1.5 GB. The first pass of this comparison kept a
+fetched parameter only for the request that fetched it, and every PP=2 cell
+cost about 3.5 s against 60 to 160 ms on one stage, whatever else it did
+(`runs/pp-compare-push-qwen`); a probe that timed one trace with and without
+the fetch put the fetch at 3.1 s and the rest at 59 ms. A parameter another
+stage holds does not change for the life of the engine, so both branches now
+keep it once per engine (`fix(pp): keep fetched parameters and module state
+for the engine's life`), and the table above is the pass after that change:
+the cells that read one or two layers cost 12 to 20 ms more than on one
+stage, the weight lens over all 48 layers about 140 ms more (push) or 170 ms
+more (eager), and a 16-token steered generation about 120 to 150 ms more on
+either. Verdicts are unchanged from one stage on both branches.
 
 ## Verdict
 
-(after the bench tables)
+Push.
+
+- **Correctness is the same.** Both transports pass the same suites and give
+  the same verdict as the single-stage engine on every bench cell, on GPT-2
+  and on the 14B model.
+- **Where the workload crosses stages once, they cost the same.** The
+  synthetic scan and the single-read bench cells are within noise.
+- **Where it crosses many times, push is faster:** batched steering 432 and
+  473 ms against 618 and 550, the batched weight lens 581 against 751, the
+  interactive weight lens 42 against 63 on GPT-2 and 295 against 323 on the
+  14B model. A pull is a request and a reply per value per worker through the
+  owner's receive thread; a push is one message that the owner sends as it
+  serves, and nothing waits on a round trip.
+- **Push carries less state on the owner.** Eager keeps a serving buffer
+  whose entries live until every peer has asked, holds requests that arrive
+  early, and needs a release message per request to drop the rest; push keeps
+  an outbound queue. Eager's one structural advantage, that a stale read is
+  refused from the owner's own round count with no marker on the wire, costs
+  push one small message per request per step.
+
+`pp-push` is the branch to continue on. `pp-eager` stays as the record of the
+control.
+
+## What both branches still owe
+
+- **The per-value floor.** About 9 ms per value crossed at the 0.5B size,
+  and 12 to 20 ms per cell on the 14B model, is the same on both transports:
+  a host copy on the forward thread, a pickle, two gloo messages, a view and a
+  device copy. Measuring where those milliseconds go, and an NCCL side stream
+  if the host round trip is most of it, is the next performance work.
+- **The per-step logits read** adds about 16 ms per token on both: the first
+  stage waits at each step start for a value the last stage produces at
+  sampling. Sending the sampled ids or the logits earlier in the step, or
+  letting the first stage run its next forward before the take, would take it
+  off the critical path.
+- **Tensor parallel inside a stage and PP=3** already pass the topology
+  tests on both branches (column peers, fan-out); the Ray executor's collect
+  thread and `.source` of a shell remain as recorded in the design notes.
