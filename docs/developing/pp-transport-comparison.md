@@ -100,6 +100,72 @@ lazy's cost. That was contention on the shared GPUs: the same shape on an idle
 pair, instrumented, gave 52.7 ms against 153, with the per-value costs above.
 Every number here is from the idle pair.
 
+### Reads the block only saves, and a model the GPU bounds
+
+Push gained one thing after the table above (`pp-push` from `f652c446`,
+design note section "Reads the block only saves"): a read whose value the
+block only saves is not pushed and not waited for; the stage that holds it
+saves it, and the collect fills the reader's placeholder from that copy. The
+scan gained a shape for the loop this changes most, `logits_save_steps`: each
+step's last-position logits appended to a saved list and nothing else. The
+0.5B scan is bound by CPU launch work (its PP=1 decode step is 14 ms of
+Python for 13 ms of forward), so the rerun is on Qwen2.5-14B-Instruct (48
+layers, stage 0 holds 0 to 23, `gpu_memory_utilization=0.5`, three trials),
+where a decode step is GPU work.
+
+Two runs, because no idle pair was free that night. The first is the
+quieter one: the reference on an idle GPU, PP=2 on that GPU and one carrying
+another user's job at low utilization.
+
+| shape (Qwen2.5-14B-Instruct) | PP=1 reference, idle GPU | push PP=2, one GPU shared |
+|---|---|---|
+| read 1 late layer, consumed | 43 | 59 |
+| read 12 late layers | 48 | 75 |
+| read 12 early layers | 84 | 75 |
+| save all 48 layers, unconsumed | 102 | 106 |
+| read and rewrite every layer | 67 | 129 |
+| head lens over 24 early layers | 82 | 148 |
+| plain generation, 128 tokens | 3,772 | 3,975 |
+| per-step logits read, consumed, 128 tokens | 4,290 | 5,541 |
+| per-step logits saved, 128 tokens | 3,899 | 3,280 |
+
+The second is the same code with the placeholder path on and off
+(`NNSIGHT_PP_DEFER=0`), back to back on one pair whose other tenant was at
+full utilization, so its absolute numbers are inflated and only the
+difference between its two columns is a measurement.
+
+| shape (Qwen2.5-14B-Instruct), shared pair | push PP=2 | push PP=2, `NNSIGHT_PP_DEFER=0` |
+|---|---|---|
+| read 12 late layers | 134 | 140 |
+| save all 48 layers, unconsumed | 107 | 272 |
+| plain generation, 32 tokens | 1,527 | 1,536 |
+| per-step logits read, consumed, 32 tokens | 1,903 | 1,942 |
+| per-step logits saved, 32 tokens | 1,607 | 2,005 |
+| plain generation, 128 tokens | 5,915 | 6,068 |
+| per-step logits read, consumed, 128 tokens | 8,121 | 7,555 |
+| per-step logits saved, 128 tokens | 6,332 | 7,968 |
+
+What the two tables say:
+
+- **A save-only read of the other stage costs nothing during the run.**
+  Saving all 48 layers is 4 ms over the one-GPU reference; with the
+  placeholder path off the same block takes 165 ms longer on the same pair.
+- **A per-step save of the last stage's logits no longer holds the first
+  stage.** On the quiet pair the loop that only saves the logits runs in
+  3,280 ms for 128 tokens against 3,899 on one GPU and 5,541 when the same
+  loop consumes the value (an `argmax` per step). On the shared pair the same
+  loop is 1,636 ms faster with the placeholder path than without, and lands
+  within 7 percent of plain generation, where without it it costs what the
+  consumed loop costs.
+- **A consumed read still costs a step boundary.** The consumed per-step
+  read is produced at sampling and taken at the first stage's next step
+  start; that wait is the pipeline's own boundary and is what a slow network
+  would lengthen. At 14B one late layer read costs 16 ms over the reference
+  and twelve cost 27: the cost is the wait, not the bytes (a layer output for
+  11 tokens is 110 KB).
+- **Consumed reads are unchanged by the path**, as the first three rows of
+  the second table show.
+
 ## The nnbench pass
 
 The interp-workload benchmark's GPT-2 specs, three backends per branch: the
@@ -275,9 +341,9 @@ control; `pp-on-08` as the record of what was replaced.
   now the smaller part.
 - **The per-step logits read** adds about 16 ms per token on both: the first
   stage waits at each step start for a value the last stage produces at
-  sampling. Sending the sampled ids or the logits earlier in the step, or
-  letting the first stage run its next forward before the take, would take it
-  off the critical path.
+  sampling. A read the block only saves no longer waits (push, from
+  `f652c446`); a consumed one still does. Sending the sampled ids or the
+  logits earlier in the step would take that one off the critical path.
 - **Tensor parallel inside a stage and PP=3** already pass the topology
   tests on both branches (column peers, fan-out); the Ray executor's collect
   thread and `.source` of a shell remain as recorded in the design notes.
