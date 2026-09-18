@@ -825,6 +825,36 @@ def lora_adapter(tmp_path_factory):
     return str(path)
 
 
+@pytest.fixture(scope="module")
+def tiny_peft_bundle(tmp_path_factory):
+    """A fully local base checkpoint and two adapters for env-transition tests."""
+    from peft import LoraConfig, get_peft_model
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    root = tmp_path_factory.mktemp("tiny_peft_bundle")
+    base_path = root / "base"
+    config = GPT2Config(
+        vocab_size=32,
+        n_positions=16,
+        n_embd=8,
+        n_layer=1,
+        n_head=1,
+        bos_token_id=0,
+        eos_token_id=1,
+    )
+    GPT2LMHeadModel(config).save_pretrained(base_path)
+
+    adapters = []
+    for name, rank in (("adapter_a", 2), ("adapter_b", 4)):
+        adapter_path = root / name
+        base = GPT2LMHeadModel(config)
+        lora = LoraConfig(task_type="CAUSAL_LM", target_modules=["c_attn"], r=rank)
+        get_peft_model(base, lora).save_pretrained(adapter_path)
+        adapters.append(str(adapter_path))
+
+    return str(base_path), *adapters
+
+
 @pytest.mark.skipif(not peft_installed, reason="peft is not installed")
 class TestPeft:
     def test_meta_load_grafts_adapter(self, lora_adapter):
@@ -862,6 +892,11 @@ class TestPeft:
 
         model._remoteable_set_env({"peft": lora_adapter})  # None -> X
         assert model.peft == lora_adapter and _has_lora(model)
+        assert model.base_model.model.transformer.h[0].path == (
+            "model.base_model.model.transformer.h.0"
+        )
+        assert model.base_model._children
+        assert "transformer" not in model.__dict__
 
         module_after_load = model._module
         model._remoteable_set_env({"peft": lora_adapter})  # X -> X (no-op)
@@ -873,6 +908,24 @@ class TestPeft:
         with model.trace(PROMPT):
             out = model.transformer.h[0].attn.output[0].save()
         assert out.shape[-1] == 768
+
+    @torch.no_grad()
+    def test_set_env_swap_rebuilds_paths_offline(self, tiny_peft_bundle):
+        base_path, adapter_a, adapter_b = tiny_peft_bundle
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+
+        for adapter in (adapter_a, adapter_b):
+            model._remoteable_set_env({"peft": adapter})
+            assert model.peft == adapter and _has_lora(model)
+            assert model.base_model.model.transformer.h[0].path == (
+                "model.base_model.model.transformer.h.0"
+            )
+            assert model.base_model._children
+            assert "transformer" not in model.__dict__
+
+        model._remoteable_set_env({})
+        assert model.peft is None and not _has_lora(model)
+        assert model.transformer.h[0].path == "model.transformer.h.0"
 
 
 def _hidden(block_output):
