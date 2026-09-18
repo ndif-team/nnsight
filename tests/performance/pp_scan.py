@@ -99,7 +99,7 @@ def main():
 
     from nnsight.modeling.vllm import VLLM
 
-    model = VLLM(MODEL, pipeline_parallel_size=args.pp, gpu_memory_utilization=0.25, dispatch=True)
+    model = VLLM(MODEL, pipeline_parallel_size=args.pp, gpu_memory_utilization=float(os.environ.get("PP_SCAN_GPU_MEM", "0.25")), dispatch=True)
     n_layers = len(layers_of(model))
     half = n_layers // 2
     shapes = {}
