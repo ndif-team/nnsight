@@ -233,7 +233,7 @@ def _run_save_only(rank, world, rdv):
     else with them. Neither rank waits for the other's value or sends its
     own: each binds a placeholder for the remote one and the real tensor for
     its own, in the same positions."""
-    from nnsight.modeling.vllm.pp_deferred import Deferred
+    from nnsight.modeling.vllm.pp_saved import SavedOnOwner
 
     stage = Stage(rank, world, rdv, owners=OWNERS)
     block = "kept = Kept().save()\nkept.append(model['a'].output[0])\nkept.append(model['b'].output[0])\n"
@@ -251,14 +251,14 @@ def _run_save_only(rank, world, rdv):
         # b, which the later stage owns, was answered with a placeholder at once.
         assert not mediator.alive
         kept = mediator.lcls["kept"]
-        assert torch.equal(kept[0], torch.ones(3)) and isinstance(kept[1], Deferred) and kept[1].provider == B
+        assert torch.equal(kept[0], torch.ones(3)) and isinstance(kept[1], SavedOnOwner) and kept[1].provider == B
     else:
         # a was answered with a placeholder at start; b is this rank's own.
         assert mediator.pending.provider == B
         stage.fire(B, (torch.full((3,), 2.0),))
         assert not mediator.alive
         kept = mediator.lcls["kept"]
-        assert isinstance(kept[0], Deferred) and kept[0].provider == A and torch.equal(kept[1], torch.full((3,), 2.0))
+        assert isinstance(kept[0], SavedOnOwner) and kept[0].provider == A and torch.equal(kept[1], torch.full((3,), 2.0))
     _sync()
     # Nothing crossed the wire for either read.
     assert not stage.link.has("r", 0, A) and not stage.link.has("r", 0, B)

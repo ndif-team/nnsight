@@ -2,13 +2,13 @@
 
 Every stage runs the same block, so a value that a block reads and does nothing
 with but save is saved on the stage that holds it too. Such a read needs no
-transfer while the run is on: the reading stage binds a :class:`Deferred` in
+transfer while the run is on: the reading stage binds a :class:`SavedOnOwner` in
 its place and the owning stage skips the push, and when the request's values
 are collected from every stage the placeholder is filled from the owner's copy
 of the same name (`fill_saves`).
 
 Which reads those are is decided from the block's source before it runs, the
-same way on every stage (`deferrable_lines`). The rule is conservative: a
+same way on every stage (`save_only_lines`). The rule is conservative: a
 statement that saves a read directly (``h = m.layer.output.save()``, with ``h``
 never used again), or appends one to a container the block saved and only
 appends to (``kept = nnsight.save([]); kept.append(m.layer.output[0])``).
@@ -27,7 +27,7 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 READ_ATTRS = frozenset({"output", "input", "inputs", "logits", "samples"})
 
 
-class Deferred:
+class SavedOnOwner:
     """Stands in for a value another stage holds and the block only saves.
 
     Attributes:
@@ -41,13 +41,13 @@ class Deferred:
         self.provider = provider
         self.step = step
 
-    def __getitem__(self, index: Any) -> "Deferred":
+    def __getitem__(self, index: Any) -> "SavedOnOwner":
         # The owner saves the indexed value at the same place; the index is
         # already applied there.
         return self
 
     def __repr__(self) -> str:
-        return f"Deferred({self.provider!r}, step={self.step})"
+        return f"SavedOnOwner({self.provider!r}, step={self.step})"
 
 
 def _is_read(node: ast.AST) -> bool:
@@ -116,7 +116,7 @@ def _append_only(name: str, tree: ast.AST, loads: dict) -> bool:
 
 
 @functools.lru_cache(maxsize=256)
-def deferrable_lines(source: str) -> frozenset[int]:
+def save_only_lines(source: str) -> frozenset[int]:
     """The lines of ``source`` whose statement reads a location and only saves it."""
     try:
         tree = ast.parse(source)
@@ -157,7 +157,7 @@ def deferrable_lines(source: str) -> frozenset[int]:
 def fill_saves(reports: list[dict]) -> dict:
     """One ``name -> value`` from every stage's saved names, in stage order.
 
-    The first stage that saved a name gives its value; a :class:`Deferred` in
+    The first stage that saved a name gives its value; a :class:`SavedOnOwner` in
     it (at any depth of a container) is filled from the first later stage whose
     value for that name holds a real value at the same place.
     """
@@ -167,14 +167,14 @@ def fill_saves(reports: list[dict]) -> dict:
             merged.setdefault(name, value)
     for name, value in merged.items():
         leaves, spec = tree_flatten(value)
-        if not any(isinstance(leaf, Deferred) for leaf in leaves):
+        if not any(isinstance(leaf, SavedOnOwner) for leaf in leaves):
             continue
         others = [tree_flatten(report[name])[0] for report in reports if name in report]
         for index, leaf in enumerate(leaves):
-            if not isinstance(leaf, Deferred):
+            if not isinstance(leaf, SavedOnOwner):
                 continue
             for other in others:
-                if index < len(other) and not isinstance(other[index], Deferred):
+                if index < len(other) and not isinstance(other[index], SavedOnOwner):
                     leaves[index] = other[index]
                     break
             else:

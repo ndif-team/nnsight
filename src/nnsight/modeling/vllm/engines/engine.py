@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 from vllm.v1.engine.llm_engine import LLMEngine
 
-from ..pp_deferred import fill_saves
+from ..pp_saved import fill_saves
 
 
 def merge_collected(payloads: list) -> dict:
@@ -29,7 +29,7 @@ def merge_collected(payloads: list) -> dict:
     on different devices, and under pipeline parallelism the first stage's
     copy of a read it consumed is the one it computed with. A name the first
     stage saved as a placeholder (a read it only saved, of a location another
-    stage holds; see `pp_deferred`) is filled from the stage that holds it.
+    stage holds; see `pp_saved`) is filled from the stage that holds it.
     Registered values are taken from every rank the same way, since a
     registered block runs wherever the layers it reads live.
     """

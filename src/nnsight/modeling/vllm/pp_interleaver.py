@@ -9,7 +9,7 @@ stage holds is answered in place, since that stage has already produced it; a
 worker asking for a later stage's value parks until this stage's next step,
 by which time that value exists. A read the block only saves is answered with
 a placeholder at once and never pushed; the owner's copy fills it at collect
-(see `pp_deferred`). See ``docs/developing/pp-push-design.md``.
+(see `pp_saved`). See ``docs/developing/pp-push-design.md``.
 """
 
 from __future__ import annotations
@@ -22,11 +22,12 @@ from greenlet import getcurrent
 
 from ...intervention.interleaver import Event, Mediator
 from .interleaver import VLLMInterleaver
-from .pp_deferred import Deferred, deferrable_lines
+from .pp_saved import SavedOnOwner, save_only_lines
 from .pp_transport import CACHE, VALUE, Link, RemoteError, to_host
 
-# Set to 0 to push every read, including the ones the block only saves.
-DEFER = os.environ.get("NNSIGHT_PP_DEFER", "1") != "0"
+# Set to 1 to send every saved value during the run, including the ones the
+# block never uses (the behavior before f652c446), for measurement.
+SEND_SAVED = os.environ.get("NNSIGHT_PP_SEND_SAVED", "0") != "0"
 
 
 class PPInterleaver(VLLMInterleaver):
@@ -80,7 +81,7 @@ class PPInterleaver(VLLMInterleaver):
     ) -> None:
         """Push what this stage just served, then answer what the worker asks next.
 
-        A read the block only saves (`_deferrable`) is not pushed: the peers
+        A read the block only saves (`_save_only`) is not pushed: the peers
         bound a placeholder for it, and this stage's saved copy fills it at
         collect.
         """
@@ -89,7 +90,7 @@ class PPInterleaver(VLLMInterleaver):
             # A local visit is served in the round being run, so that is the
             # step the block is at, whatever module fired.
             mediator.pp_step = self.rounds.get(key[0], 0)
-            if event is Event.VALUE and self.link.peers and not self._deferrable(mediator, line):
+            if event is Event.VALUE and self.link.peers and not self._save_only(mediator, line):
                 self.link.publish(CACHE if selected else VALUE, *key, provider, to_host(value), selected)
         if selected is None:
             self._report_stale(mediator)
@@ -117,9 +118,9 @@ class PPInterleaver(VLLMInterleaver):
         self.chase(mediator)
 
     @staticmethod
-    def _deferrable(mediator: Mediator, line: Optional[int]) -> bool:
+    def _save_only(mediator: Mediator, line: Optional[int]) -> bool:
         """Whether the request made from ``line`` of the block only saves its value."""
-        return DEFER and line is not None and mediator.source is not None and line in deferrable_lines(mediator.source)
+        return not SEND_SAVED and line is not None and mediator.source is not None and line in save_only_lines(mediator.source)
 
     # --------------------------------------------------------- the receiver
 
@@ -138,21 +139,21 @@ class PPInterleaver(VLLMInterleaver):
             mediator.pp_step = pending.iteration
         return mediator.pp_step
 
-    def _produced(self, mediator: Mediator, owner: int, final: bool, deferred: bool = False) -> bool:
+    def _produced(self, mediator: Mediator, owner: int, final: bool, save_only: bool = False) -> bool:
         """Whether ``owner`` has produced what the worker is asking for.
 
         The stages run a request's rounds in order: while this stage runs
         round ``n`` (``rounds`` forwards done here), an earlier stage has
         finished round ``n`` and a later one round ``n-1``. Once the request is
         over (``final``) every round that ran is produced everywhere, and a
-        step past the last round never will be. A ``deferred`` read needs only
+        step past the last round never will be. A save-only read needs only
         the promise of the value: a later stage runs every round this stage
         has started, so the placeholder is handed out as soon as this stage is
         at that round.
         """
         rounds = self.rounds.get(mediator.pp_req, 0)
         step = self._step(mediator)
-        if final or (owner > self.local_rank and not deferred):
+        if final or (owner > self.local_rank and not save_only):
             return step < rounds
         return step <= rounds
 
@@ -180,11 +181,11 @@ class PPInterleaver(VLLMInterleaver):
         answered now: with a placeholder when the block only saves it, else with
         the pushed item. Returns whether it was."""
         pending = mediator.pending
-        deferred = self._deferrable(mediator, mediator.line)
-        if not self._produced(mediator, owner, final, deferred):
+        save_only = self._save_only(mediator, mediator.line)
+        if not self._produced(mediator, owner, final, save_only):
             return False
-        if deferred:
-            self._hand(mediator, Deferred(pending.provider, self._step(mediator)))
+        if save_only:
+            self._hand(mediator, SavedOnOwner(pending.provider, self._step(mediator)))
         else:
             self._take(mediator, pending.provider)
         self._report_stale(mediator)

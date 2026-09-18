@@ -108,7 +108,7 @@ during the run. The stage that holds the module saves it there, and when
 the request's saved values are collected from every stage at the end, that
 stage's copy is the one returned (design note, section "Reads the block
 only saves"). A value the block uses is sent as before. Setting
-`NNSIGHT_PP_DEFER=0` disables this, so that every saved value is sent
+`NNSIGHT_PP_SEND_SAVED=1` disables this, so that every saved value is sent
 during the run as before; the last column below is that.
 
 The scan gained the shape this changes most, `logits_save_steps`: each
@@ -119,7 +119,7 @@ layers, stage 0 holds 0 to 23, `gpu_memory_utilization=0.5`, three trials),
 where a decode step is GPU work. The reference ran on an idle GPU; the two
 PP=2 columns ran back to back on an idle pair (GPUs 5 and 6).
 
-| shape (Qwen2.5-14B-Instruct) | PP=1 reference | push PP=2 | push PP=2, every saved value sent (`NNSIGHT_PP_DEFER=0`) |
+| shape (Qwen2.5-14B-Instruct) | PP=1 reference | push PP=2 | push PP=2, every saved value sent (`NNSIGHT_PP_SEND_SAVED=1`) |
 |---|---|---|---|
 | read 1 late layer, used | 43 | 52 | 56 |
 | read 12 late layers, used | 48 | 73 | 67 |

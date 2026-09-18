@@ -119,7 +119,7 @@ placeholder in its place, the owner does not push it, and at collect the
 placeholder is filled from the owner's copy of the same saved name.
 
 Which reads those are is decided from the block's source before it runs, the
-same way on every stage (`pp_deferred.deferrable_lines`), by a rule that only
+same way on every stage (`pp_saved.save_only_lines`), by a rule that only
 takes the plain forms: a statement that saves the read directly (`h =
 layer.output.save()`, `layer.output.save()`, `nnsight.save(layer.output)`)
 with the bound name never read again, or an append of the read to a container
@@ -142,7 +142,7 @@ because every rank's block bound the same names in the same order; a
 placeholder no rank filled means the owner's block did not reach that save,
 and its own error is what the client sees.
 
-`NNSIGHT_PP_DEFER=0` turns this off, for measurement.
+`NNSIGHT_PP_SEND_SAVED=1` turns this off, so every saved value is sent during the run as before, for measurement.
 
 ## Errors and the end of a request
 

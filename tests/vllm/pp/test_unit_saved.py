@@ -3,14 +3,14 @@
 import pytest
 import torch
 
-from nnsight.modeling.vllm.pp_deferred import Deferred, deferrable_lines, fill_saves
+from nnsight.modeling.vllm.pp_saved import SavedOnOwner, save_only_lines, fill_saves
 
 
 def _lines(source: str) -> set:
-    return set(deferrable_lines(source))
+    return set(save_only_lines(source))
 
 
-def test_a_read_saved_and_never_used_again_is_deferrable():
+def test_a_read_saved_and_never_used_again_is_save_only():
     assert _lines("h = model.blocks[3].output.save()\n") == {1}
     assert _lines("h = model.blocks[3].output[0].save()\n") == {1}
     assert _lines("model.blocks[3].output.save()\n") == {1}
@@ -21,7 +21,7 @@ def test_a_read_used_after_its_save_is_not():
     assert _lines("h = model.blocks[3].output.save()\nprint(h.shape)\n") == set()
 
 
-def test_an_append_to_a_saved_append_only_container_is_deferrable():
+def test_an_append_to_a_saved_append_only_container_is_save_only():
     source = (
         "kept = list().save()\n"
         "for i in range(4):\n"
@@ -54,13 +54,13 @@ def test_a_multi_line_statement_marks_every_line():
 
 
 def test_a_placeholder_survives_indexing():
-    placeholder = Deferred("model.blocks.3.output", 0)
+    placeholder = SavedOnOwner("model.blocks.3.output", 0)
     assert placeholder[0] is placeholder and placeholder[:, -1] is placeholder
 
 
 def test_fill_takes_the_first_stage_and_fills_its_placeholders():
-    a = Deferred("model.a.output", 0)
-    b = Deferred("model.b.output", 0)
+    a = SavedOnOwner("model.a.output", 0)
+    b = SavedOnOwner("model.b.output", 0)
     first = {"kept": [torch.ones(2), b, {"x": b}], "h": b, "total": 3.0}
     second = {"kept": [a, torch.zeros(2), {"x": torch.full((1,), 7.0)}], "h": torch.arange(3), "total": 4.0}
     merged = fill_saves([first, second])
@@ -72,6 +72,6 @@ def test_fill_takes_the_first_stage_and_fills_its_placeholders():
 
 
 def test_fill_reports_a_placeholder_no_stage_filled():
-    b = Deferred("model.b.output", 2)
+    b = SavedOnOwner("model.b.output", 2)
     with pytest.raises(RuntimeError, match="model.b.output"):
-        fill_saves([{"kept": [torch.ones(1), b]}, {"kept": [Deferred("model.a.output", 2)]}])
+        fill_saves([{"kept": [torch.ones(1), b]}, {"kept": [SavedOnOwner("model.a.output", 2)]}])
