@@ -147,18 +147,41 @@ What the table says:
 - **On cells that cross stages once per trace, the two transports are within
   noise of each other**: interactive steering, activation patching, ablation,
   generation-time steering and patching.
-- **On cells that cross stages many times per trace, push is faster.** The
-  batched cells run 16 invokes, so 16 workers on each stage read the other
-  stage's values: batched steering costs 432 and 473 ms on push against 618
-  and 550 on eager (one stage: about 335 on both); the batched weight lens
-  581 against 751 (one stage: about 370); the interactive weight lens, which
-  reads every layer, 42 against 63 (one stage: 30). A pull is a request and a
+- **On cells that cross stages many times per trace, push is faster on
+  most.** The batched cells run 16 invokes, so 16 workers on each stage read
+  the other stage's values. In the pass above the batched weight lens costs
+  581 ms on push against 751 on eager (one stage: about 370), the interactive
+  weight lens, which reads every layer, 42 against 63 (one stage: 30), and
+  batched steering 432 and 473 against 618 and 550. A pull is a request and a
   reply through the owner's one receive thread, once per value per worker,
   and those round trips add up where a push streams.
 - The seeded-orthogonal jacobian lens runs faster at PP=2 than on one stage
   on both branches (101 and 119 ms against 880 and 1,825); the cell's own
   compute dominates it and the split moves that compute, which is the same
   effect on either transport and not a property of the wire.
+
+Because the two passes above ran on different GPU pairs, the four specs that
+cross stages most were rerun for both branches in one run on one pair (GPUs 3
+and 4, which by then carried another user's idle allocations):
+
+| spec | workload | cell | HF reference | push, one stage | push, PP=2 | eager, one stage | eager, PP=2 |
+|---|---|---|---|---|---|---|---|
+| steering_gpt2 | batched | mode=inplace | RAN 17 | SUPPORTED 319 | SUPPORTED 643 | SUPPORTED 559 | SUPPORTED 492 |
+| steering_gpt2 | batched | mode=replace | RAN 17 | SUPPORTED 350 | SUPPORTED 445 | SUPPORTED 494 | SUPPORTED 467 |
+| steering_gpt2 | interactive | mode=inplace | RAN 12 | SUPPORTED 28 | SUPPORTED 43 | SUPPORTED 26 | SUPPORTED 32 |
+| steering_gpt2 | interactive | mode=replace | RAN 12 | SUPPORTED 27 | SUPPORTED 43 | SUPPORTED 25 | SUPPORTED 43 |
+| logit_lens_gpt2 | batched | unembed=weight | RAN 49 | SUPPORTED 383 | SUPPORTED 567 | SUPPORTED 366 | SUPPORTED 807 |
+| logit_lens_gpt2 | interactive | unembed=weight | RAN 14 | SUPPORTED 23 | SUPPORTED 50 | SUPPORTED 30 | SUPPORTED 61 |
+| das_gpt2 | interactive | apply (seeded orthogonal rotation) | RAN 1047 | SILENTLY_WRONG 1477 | SILENTLY_WRONG 1796 | SILENTLY_WRONG 1558 | SILENTLY_WRONG 2030 |
+| jacobian_lens_gpt2 | interactive | transport=identity (logit-lens readout) | RAN 13 | SUPPORTED 33 | SUPPORTED 48 | SUPPORTED 25 | SUPPORTED 66 |
+| jacobian_lens_gpt2 | interactive | transport=seeded-orthogonal (the J-matmul path) | RAN 1104 | SUPPORTED 1300 | SUPPORTED 99 | SUPPORTED 1042 | SUPPORTED 121 |
+
+The ordering holds on the lens and patching cells (weight lens 567 against
+807 batched, 50 against 61 interactive; the identity jacobian lens 48 against
+66; the DAS rotation 1,796 against 2,030) and is inside the batched steering
+cells' own spread (643 and 445 against 492 and 467; their one-stage medians
+moved by 200 ms between passes). Differences under about 20 percent on a
+batched cell are within what one pass resolves.
 
 ### Qwen2.5-14B-Instruct
 
