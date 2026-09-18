@@ -100,54 +100,58 @@ lazy's cost. That was contention on the shared GPUs: the same shape on an idle
 pair, instrumented, gave 52.7 ms against 153, with the per-value costs above.
 Every number here is from the idle pair.
 
-### Reads the block only saves, and a model the GPU bounds
+### Saved values that the block never uses, measured on a 14B model
 
-Push gained one thing after the table above (`pp-push` from `f652c446`,
-design note section "Reads the block only saves"): a read whose value the
-block only saves is not pushed and not waited for; the stage that holds it
-saves it, and the collect fills the reader's placeholder from that copy. The
-scan gained a shape for the loop this changes most, `logits_save_steps`: each
+Since `f652c446`, a value that the block reads from a module on the other
+stage and does nothing with but `.save()` is not sent between the stages
+during the run. The stage that holds the module saves it there, and when
+the request's saved values are collected from every stage at the end, that
+stage's copy is the one returned (design note, section "Reads the block
+only saves"). A value the block uses is sent as before. Setting
+`NNSIGHT_PP_DEFER=0` disables this, so that every saved value is sent
+during the run as before; the last column below is that.
+
+The scan gained the shape this changes most, `logits_save_steps`: each
 step's last-position logits appended to a saved list and nothing else. The
 0.5B scan is bound by CPU launch work (its PP=1 decode step is 14 ms of
 Python for 13 ms of forward), so the rerun is on Qwen2.5-14B-Instruct (48
 layers, stage 0 holds 0 to 23, `gpu_memory_utilization=0.5`, three trials),
 where a decode step is GPU work. The reference ran on an idle GPU; the two
-PP=2 columns ran back to back on an idle pair (GPUs 5 and 6), the same code
-with the placeholder path on and off (`NNSIGHT_PP_DEFER=0`).
+PP=2 columns ran back to back on an idle pair (GPUs 5 and 6).
 
-| shape (Qwen2.5-14B-Instruct) | PP=1 reference | push PP=2 | push PP=2, `NNSIGHT_PP_DEFER=0` |
+| shape (Qwen2.5-14B-Instruct) | PP=1 reference | push PP=2 | push PP=2, every saved value sent (`NNSIGHT_PP_DEFER=0`) |
 |---|---|---|---|
-| read 1 late layer, consumed | 43 | 52 | 56 |
-| read 12 late layers | 48 | 73 | 67 |
-| read 12 early layers | 84 | 73 | 64 |
-| save all 48 layers, unconsumed | 102 | 104 | 172 |
+| read 1 late layer, used | 43 | 52 | 56 |
+| read 12 late layers, used | 48 | 73 | 67 |
+| read 12 early layers, used | 84 | 73 | 64 |
+| save all 48 layer outputs, never used | 102 | 104 | 172 |
 | read and rewrite every layer | 67 | 121 | 139 |
 | head lens over 24 early layers | 82 | 134 | 134 |
 | plain generation, 32 tokens | 982 | 711 | 724 |
-| per-step logits read, consumed, 32 tokens | 1,030 | 1,447 | 1,414 |
-| per-step logits saved, 32 tokens | 1,078 | 1,059 | 1,536 |
+| use the logits every step (`argmax`), 32 tokens | 1,030 | 1,447 | 1,414 |
+| save the logits every step, 32 tokens | 1,078 | 1,059 | 1,536 |
 | plain generation, 128 tokens | 3,772 | 3,162 | 2,814 |
-| per-step logits read, consumed, 128 tokens | 4,290 | 5,460 | 5,221 |
-| per-step logits saved, 128 tokens | 3,899 | 3,610 | 5,860 |
+| use the logits every step (`argmax`), 128 tokens | 4,290 | 5,460 | 5,221 |
+| save the logits every step, 128 tokens | 3,899 | 3,610 | 5,860 |
 
 What the table says:
 
-- **A save-only read of the other stage costs nothing during the run.**
-  Saving all 48 layers is 2 ms over the one-GPU reference with the
-  placeholder path and 70 ms over it without.
-- **A per-step save of the last stage's logits no longer holds the first
-  stage.** The loop that only saves the logits runs in 3,610 ms for 128
-  tokens against 3,899 on one GPU and 5,860 with the path off, where it
-  costs what the consumed loop costs (5,460). Over 128 steps the path is
-  worth 2.2 s, about 18 ms per token.
-- **A consumed read still costs a step boundary.** The consumed per-step
-  read is produced at sampling and taken at the first stage's next step
-  start; that wait is the pipeline's own boundary and is what a slow network
-  would lengthen. At 14B one late layer read costs about 10 ms over the
-  reference and twelve about 25: the cost is the wait, not the bytes (a
-  layer output for 11 tokens is 110 KB).
-- **Consumed reads are unchanged by the path**: the read rows agree within
-  their spread.
+- **Saving a value from the other stage costs nothing during the run.**
+  Saving all 48 layer outputs takes 2 ms more than on one GPU; when every
+  saved value is sent during the run it takes 70 ms more.
+- **Saving the logits every step no longer makes the first stage wait.**
+  That loop takes 3,610 ms for 128 tokens, against 3,899 on one GPU and
+  5,860 when the logits are sent every step. Over 128 steps the saving is
+  2.2 s, about 18 ms per token.
+- **Using a value from the other stage still costs one pipeline step.**
+  The logits are produced when the last stage samples, and the first stage
+  can only continue at its next step start once they arrive. That is the
+  pipeline's own step boundary, and a slower network would lengthen it. At
+  14B, using one late layer output costs about 10 ms over the reference and
+  twelve about 25 ms: the cost is the wait, not the bytes (a layer output
+  for 11 tokens is 110 KB).
+- **Values the block uses are sent either way**, so the read rows agree
+  within their spread.
 - **Plain generation is faster at PP=2 than on one GPU at 14B too** (2.8 to
   3.2 s against 3.8 for 128 tokens): the two stages' forwards overlap under
   vLLM's async scheduling, as measured at 0.5B.
@@ -327,9 +331,10 @@ control; `pp-on-08` as the record of what was replaced.
   now the smaller part.
 - **The per-step logits read** adds about 16 ms per token on both: the first
   stage waits at each step start for a value the last stage produces at
-  sampling. A read the block only saves no longer waits (push, from
-  `f652c446`); a consumed one still does. Sending the sampled ids or the
-  logits earlier in the step would take that one off the critical path.
+  sampling. Since `f652c446` on push, a value the block only saves is not
+  sent during the run and the first stage does not wait for it; a value the
+  block uses still waits. Sending the sampled ids or the logits earlier in
+  the step would remove that wait too.
 - **Tensor parallel inside a stage and PP=3** already pass the topology
   tests on both branches (column peers, fan-out); the Ray executor's collect
   thread and `.source` of a shell remain as recorded in the design notes.
