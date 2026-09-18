@@ -111,60 +111,46 @@ step's last-position logits appended to a saved list and nothing else. The
 0.5B scan is bound by CPU launch work (its PP=1 decode step is 14 ms of
 Python for 13 ms of forward), so the rerun is on Qwen2.5-14B-Instruct (48
 layers, stage 0 holds 0 to 23, `gpu_memory_utilization=0.5`, three trials),
-where a decode step is GPU work.
+where a decode step is GPU work. The reference ran on an idle GPU; the two
+PP=2 columns ran back to back on an idle pair (GPUs 5 and 6), the same code
+with the placeholder path on and off (`NNSIGHT_PP_DEFER=0`).
 
-Two runs, because no idle pair was free that night. The first is the
-quieter one: the reference on an idle GPU, PP=2 on that GPU and one carrying
-another user's job at low utilization.
+| shape (Qwen2.5-14B-Instruct) | PP=1 reference | push PP=2 | push PP=2, `NNSIGHT_PP_DEFER=0` |
+|---|---|---|---|
+| read 1 late layer, consumed | 43 | 52 | 56 |
+| read 12 late layers | 48 | 73 | 67 |
+| read 12 early layers | 84 | 73 | 64 |
+| save all 48 layers, unconsumed | 102 | 104 | 172 |
+| read and rewrite every layer | 67 | 121 | 139 |
+| head lens over 24 early layers | 82 | 134 | 134 |
+| plain generation, 32 tokens | 982 | 711 | 724 |
+| per-step logits read, consumed, 32 tokens | 1,030 | 1,447 | 1,414 |
+| per-step logits saved, 32 tokens | 1,078 | 1,059 | 1,536 |
+| plain generation, 128 tokens | 3,772 | 3,162 | 2,814 |
+| per-step logits read, consumed, 128 tokens | 4,290 | 5,460 | 5,221 |
+| per-step logits saved, 128 tokens | 3,899 | 3,610 | 5,860 |
 
-| shape (Qwen2.5-14B-Instruct) | PP=1 reference, idle GPU | push PP=2, one GPU shared |
-|---|---|---|
-| read 1 late layer, consumed | 43 | 59 |
-| read 12 late layers | 48 | 75 |
-| read 12 early layers | 84 | 75 |
-| save all 48 layers, unconsumed | 102 | 106 |
-| read and rewrite every layer | 67 | 129 |
-| head lens over 24 early layers | 82 | 148 |
-| plain generation, 128 tokens | 3,772 | 3,975 |
-| per-step logits read, consumed, 128 tokens | 4,290 | 5,541 |
-| per-step logits saved, 128 tokens | 3,899 | 3,280 |
-
-The second is the same code with the placeholder path on and off
-(`NNSIGHT_PP_DEFER=0`), back to back on one pair whose other tenant was at
-full utilization, so its absolute numbers are inflated and only the
-difference between its two columns is a measurement.
-
-| shape (Qwen2.5-14B-Instruct), shared pair | push PP=2 | push PP=2, `NNSIGHT_PP_DEFER=0` |
-|---|---|---|
-| read 12 late layers | 134 | 140 |
-| save all 48 layers, unconsumed | 107 | 272 |
-| plain generation, 32 tokens | 1,527 | 1,536 |
-| per-step logits read, consumed, 32 tokens | 1,903 | 1,942 |
-| per-step logits saved, 32 tokens | 1,607 | 2,005 |
-| plain generation, 128 tokens | 5,915 | 6,068 |
-| per-step logits read, consumed, 128 tokens | 8,121 | 7,555 |
-| per-step logits saved, 128 tokens | 6,332 | 7,968 |
-
-What the two tables say:
+What the table says:
 
 - **A save-only read of the other stage costs nothing during the run.**
-  Saving all 48 layers is 4 ms over the one-GPU reference; with the
-  placeholder path off the same block takes 165 ms longer on the same pair.
+  Saving all 48 layers is 2 ms over the one-GPU reference with the
+  placeholder path and 70 ms over it without.
 - **A per-step save of the last stage's logits no longer holds the first
-  stage.** On the quiet pair the loop that only saves the logits runs in
-  3,280 ms for 128 tokens against 3,899 on one GPU and 5,541 when the same
-  loop consumes the value (an `argmax` per step). On the shared pair the same
-  loop is 1,636 ms faster with the placeholder path than without, and lands
-  within 7 percent of plain generation, where without it it costs what the
-  consumed loop costs.
+  stage.** The loop that only saves the logits runs in 3,610 ms for 128
+  tokens against 3,899 on one GPU and 5,860 with the path off, where it
+  costs what the consumed loop costs (5,460). Over 128 steps the path is
+  worth 2.2 s, about 18 ms per token.
 - **A consumed read still costs a step boundary.** The consumed per-step
   read is produced at sampling and taken at the first stage's next step
   start; that wait is the pipeline's own boundary and is what a slow network
-  would lengthen. At 14B one late layer read costs 16 ms over the reference
-  and twelve cost 27: the cost is the wait, not the bytes (a layer output for
-  11 tokens is 110 KB).
-- **Consumed reads are unchanged by the path**, as the first three rows of
-  the second table show.
+  would lengthen. At 14B one late layer read costs about 10 ms over the
+  reference and twelve about 25: the cost is the wait, not the bytes (a
+  layer output for 11 tokens is 110 KB).
+- **Consumed reads are unchanged by the path**: the read rows agree within
+  their spread.
+- **Plain generation is faster at PP=2 than on one GPU at 14B too** (2.8 to
+  3.2 s against 3.8 for 128 tokens): the two stages' forwards overlap under
+  vLLM's async scheduling, as measured at 0.5B.
 
 ## The nnbench pass
 
