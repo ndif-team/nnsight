@@ -713,6 +713,12 @@ class TransformersModel(HuggingFaceModel):
                 and value is not self
                 and value._module not in submodules
             }
+            # The new wrapper may retain the base model as one of its descendants
+            # (PEFT does). Remove the old tree's registrations before rebuilding,
+            # or those modules resolve to envoys carrying their pre-wrap paths and
+            # the new wrapper's subtree is never constructed.
+            for old_module in submodules:
+                self.interleaver.envoys.pop(id(old_module), None)
             for name, value in list(self.__dict__.items()):
                 if isinstance(value, Envoy) and value is not self:
                     del self.__dict__[name]
