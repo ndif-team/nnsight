@@ -39,52 +39,63 @@ feature set was about 3,084 lines.
 
 ## Synthetic scan
 
-`tests/performance/pp_scan.py`: one engine over
-Qwen2.5-0.5B, `gpu_memory_utilization=0.25`, one prompt of 11 tokens, five
-timed trials per shape after one warmup, median wall time in milliseconds.
-PP=2 ran on GPUs 0 and 1 (shared with another user's idle processes), the
-PP=1 reference on GPU 6 alone. Stage 0 holds layers 0 to 11, stage 1 holds 12
-to 23. "late" reads are of stage 1's layers (stage 0 waits for them at its
-next step), "early" reads of stage 0's (stage 1 takes them in place).
+`tests/performance/pp_scan.py`: one engine over Qwen2.5-0.5B,
+`gpu_memory_utilization=0.25`, one prompt of 11 tokens, five timed trials per
+shape after one warmup, median wall time in milliseconds. The three
+transports and the single-stage reference ran one after another on the same
+two GPUs (3 and 4), so the columns are comparable. The lazy column is
+pp-on-08 at its head `02e77669`, the branch the two new ones replace. Stage 0
+holds layers 0 to 11, stage 1 holds 12 to 23. "late" reads are of stage 1's
+layers (stage 0 waits for them at its next step), "early" reads of stage 0's
+(stage 1 takes them in place).
 
-| shape | PP=1 reference | push PP=2 | eager PP=2 |
-|---|---|---|---|
-| read 1 late layer, consumed | 33 | 48 | 49 |
-| read 1 early layer, consumed | 35 | 51 | 42 |
-| read 4 late layers | 33 | 80 | 77 |
-| read 4 early layers | 35 | 82 | 83 |
-| read 8 late layers | 34 | 119 | 113 |
-| read 8 early layers | 32 | 116 | 120 |
-| read 12 late layers | 34 | 153 | 158 |
-| read 12 early layers | 35 | 156 | 153 |
-| save all 24 layers, unconsumed | 43 | 331 | 336 |
-| read and rewrite every layer | 38 | 219 | 227 |
-| head lens over 12 early layers (`param()` once, `norm` call per layer) | 37 | 161 | 165 |
-| plain generation, 32 tokens | 436 | 388 | 350 |
-| per-step logits read, 32 tokens | 484 | 974 | 970 |
-| plain generation, 128 tokens | 1,753 | 1,452 | 1,260 |
-| per-step logits read, 128 tokens | 1,847 | 3,968 | 3,893 |
+| shape | PP=1 reference | push PP=2 | eager PP=2 | lazy PP=2 |
+|---|---|---|---|---|
+| read 1 late layer, consumed | 27 | 36 | 35 | 39 |
+| read 1 early layer, consumed | 24 | 39 | 39 | 40 |
+| read 4 late layers | 24 | 40 | 44 | 37 |
+| read 4 early layers | 30 | 36 | 46 | 44 |
+| read 8 late layers | 31 | 41 | 54 | 44 |
+| read 8 early layers | 23 | 42 | 53 | 49 |
+| read 12 late layers | 25 | 44 | 60 | 46 |
+| read 12 early layers | 27 | 47 | 63 | 59 |
+| save all 24 layers, unconsumed | 45 | 66 | 94 | 56 |
+| read and rewrite every layer | 38 | 62 | 94 | 74 |
+| head lens over 12 early layers (`param()` once, `norm` call per layer) | 37 | 57 | 69 | 80 |
+| plain generation, 32 tokens | 443 | 383 | 318 | 300 |
+| per-step logits read, 32 tokens | 471 | 815 | 867 | fails |
+| plain generation, 128 tokens | 1,796 | 1,457 | 1,147 | 1,168 |
+| per-step logits read, 128 tokens | 1,860 | 3,384 | 3,505 | fails |
 
 What the table says:
 
-- **Push and eager are within noise of each other on every shape.** The
-  request leg of a pull costs nothing measurable next to the transfer itself,
-  and neither does push's inbox.
-- **The cost is per value crossed, about 9 ms each at this size**, the same in
-  both directions: 12 reads add 120 ms over the reference on either branch.
-  Both branches move the same bytes over the same gloo group with the same
-  codec, so this is the shared floor: host copy on the forward thread, pickle,
-  two gloo messages, a host-side view, a copy to the device. Where those 9 ms
-  go is the next measurement, on both branches alike.
-- **Saving unconsumed values costs the same as consuming them** (24 saves, 331
-  ms). This is the one case the lazy tensor of pp-on-08 avoided; it is one
-  transfer per saved layer, and the value goes to the client anyway.
-- **A per-step read of the last stage's logits adds about 16 ms per token**
-  on both branches: the value is produced at sampling, and the first stage
-  waits for it at its next step start, so the transfer sits on the critical
-  path of the pipeline once per step.
-- **Plain generation is faster at PP=2 than on one GPU** on both branches, as
-  it was on pp-on-08: the transport costs nothing when nothing crosses.
+- **Push and lazy cost the same on reads; eager costs more.** Twelve late
+  reads add about 20 ms over the reference on push and lazy and 35 on eager;
+  saving all 24 layers unconsumed adds 21 (push), 11 (lazy) and 49 (eager);
+  rewriting every layer adds 24, 36 and 56. A pull is a request and a reply
+  per value, and the reply waits on the owner's receive thread; a push is one
+  message the owner sends as it serves. Lazy's one saving, that an unconsumed
+  save ships nothing, shows in the save-all row and is worth 10 ms here.
+- **A value crossed costs about 1.5 ms on push.** Measured inside the engine
+  on this shape: the host copy at serve takes 0.08 ms, the take on the other
+  stage 0.15 ms including the device copy and the greenlet switch, and the
+  wire alone (two gloo ranks on CPU) moves a burst of 12 such values in 5.5
+  ms. What remains is the pipeline itself: a value of a later stage is taken
+  at the first stage's next step.
+- **A per-step read of the last stage's logits adds about 12 ms per token**
+  on push and eager: the value is produced at sampling, and the first stage
+  waits for it at its next step start, on the critical path once per step.
+  The lazy branch cannot run this shape: the owning stage raises its own
+  out-of-order error (`forward already ran past 'model.logits.i0' with no
+  worker reading it`).
+- **Plain generation is faster at PP=2 than on one GPU** on all three: the
+  transport costs nothing when nothing crosses.
+
+A first version of this table, measured on GPUs shared with another user's
+processes, showed push and eager at 9 ms per value crossed and three times
+lazy's cost. That was contention on the shared GPUs: the same shape on an idle
+pair, instrumented, gave 52.7 ms against 153, with the per-value costs above.
+Every number here is from the idle pair.
 
 ## The nnbench pass
 
