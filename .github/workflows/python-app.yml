@@ -19,16 +19,29 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
-      # Both ends of the advertised range. `pyproject.toml` claims 3.10 through
-      # 3.14, and a single 3.12 job cannot see a break that only the newest one
-      # has: #698 was exactly that -- PEP 649 gives every `def` an extra
-      # `__annotate__` symtable child on 3.14, which silently disabled the
-      # payload scope filter, and the two tests that covered it were failing on
-      # 3.14 while CI stayed green. 3.11 and 3.13 are left out rather than
-      # guessed at; add them once someone has run the suite there.
+      # Every version `pyproject.toml` advertises. A single job cannot see a
+      # break that only one interpreter has: #698 was exactly that -- PEP 649
+      # gives every `def` an extra `__annotate__` symtable child on 3.14, which
+      # silently disabled the payload scope filter, and the two tests that
+      # covered it were failing on 3.14 while CI stayed green.
+      #
+      # 3.10, 3.11 and 3.13 were previously left out rather than guessed at.
+      # The suite has now been run on each, one worktree, torch 2.14.0 and
+      # transformers 5.17.0 throughout, `--ignore=tests/vllm --ignore=tests/tp`:
+      #
+      #   3.10.21   1057 passed, 13 skipped, 1 xfailed, 0 failed
+      #   3.11.15   1060 passed, 10 skipped, 1 xfailed, 0 failed
+      #   3.13.12   1060 passed, 10 skipped, 1 xfailed, 0 failed
+      #   3.14.3    1060 passed, 10 skipped, 1 xfailed, 0 failed
+      #
+      # 3.10 runs three fewer because of the `same_line_lambdas` skip in
+      # test_serialization.py -- same-signature lambdas on one line need
+      # `code.co_positions`, which is 3.11+. That is the only difference, and
+      # it is already declared in the test. 3.10 is the advertised floor and
+      # had never been exercised before this.
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
