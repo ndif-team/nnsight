@@ -43,25 +43,24 @@ def merge_collected(payloads: list) -> dict:
                 request_id,
                 {"saves": {}, "error": None, "registered": {}, "sequences": {}},
             )
-            report = reports.setdefault(request_id, {"saves": [], "sequences": {}})
+            report = reports.setdefault(request_id, {"saves": [], "registered": [], "sequences": {}})
             report["saves"].append(entry.get("saves") or {})
-            for name, value in (entry.get("registered") or {}).items():
-                into["registered"].setdefault(name, value)
+            report["registered"].append(entry.get("registered") or {})
             for index, sequence in (entry.get("sequences") or {}).items():
-                target = into["sequences"].setdefault(
-                    index, {"saves": {}, "registered": {}}
-                )
-                report["sequences"].setdefault(index, []).append(sequence.get("saves") or {})
-                for name, value in (sequence.get("registered") or {}).items():
-                    target["registered"].setdefault(name, value)
+                into["sequences"].setdefault(index, {"saves": {}, "registered": {}})
+                per_index = report["sequences"].setdefault(index, {"saves": [], "registered": []})
+                per_index["saves"].append(sequence.get("saves") or {})
+                per_index["registered"].append(sequence.get("registered") or {})
             if into["error"] is None:
                 into["error"] = entry.get("error")
     for request_id, report in reports.items():
         into = merged[request_id]
         try:
             into["saves"] = fill_saves(report["saves"])
-            for index, saves in report["sequences"].items():
-                into["sequences"][index]["saves"] = fill_saves(saves)
+            into["registered"] = fill_saves(report["registered"])
+            for index, per_index in report["sequences"].items():
+                into["sequences"][index]["saves"] = fill_saves(per_index["saves"])
+                into["sequences"][index]["registered"] = fill_saves(per_index["registered"])
         except RuntimeError as error:
             # A placeholder nobody filled: the stage holding the location did
             # not reach that save. Its own error says why; failing that, this.

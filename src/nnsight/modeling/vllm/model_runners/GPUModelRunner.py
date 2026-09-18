@@ -220,6 +220,7 @@ class Requests:
                 if wanted is not None and name is not None and name not in wanted:
                     continue
                 copy = Mediator(template.code, template.glbls, dict(template.lcls))
+                copy.source = template.source
                 copy.presaved = set(template.presaved)
                 request.copies[registration_id] = copy
             if "nnsight_mediator" in extra_args:
