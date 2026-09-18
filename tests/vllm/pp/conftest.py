@@ -27,6 +27,9 @@ def pp2_engine():
         if len(gpus) < 2:
             pytest.skip(f"PP=2 needs 2 free GPUs, found {gpus}")
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpus[:2])
+    # A saved value is a view of the engine's buffer on the stage that holds
+    # it, as on one GPU; the tests compare saved values, so every read is a copy.
+    os.environ.setdefault("NNSIGHT_VLLM_CLONE_READS", "1")
     from nnsight.modeling.vllm import VLLM
 
     return VLLM(MODEL, pipeline_parallel_size=2, gpu_memory_utilization=0.12, dispatch=True)

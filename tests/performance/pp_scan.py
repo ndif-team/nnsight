@@ -53,6 +53,19 @@ def shape_logits_steps(model, steps):
     return run
 
 
+def shape_logits_save_steps(model, steps):
+    """Each step's last-position logits saved and nothing else: a read the
+    block only saves, which the push transport answers without a transfer."""
+    def run():
+        with model.trace(PROMPT, temperature=0.0, max_tokens=steps, ignore_eos=True) as tracer:
+            kept = list().save()
+            for _ in tracer.iter[:steps]:
+                kept.append(model.logits[-1])
+        return len(kept)
+
+    return run
+
+
 def shape_write_each(model, n_layers):
     def run():
         with model.trace(PROMPT, temperature=0.0, max_tokens=1):
@@ -112,6 +125,7 @@ def main():
     for steps in (32, 128):
         shapes[f"plain_gen_{steps}"] = shape_plain(model, steps)
         shapes[f"logits_steps_{steps}"] = shape_logits_steps(model, steps)
+        shapes[f"logits_save_steps_{steps}"] = shape_logits_save_steps(model, steps)
     if args.only:
         wanted = args.only.split(",")
         shapes = {name: shape for name, shape in shapes.items() if name in wanted}

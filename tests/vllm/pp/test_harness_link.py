@@ -205,3 +205,65 @@ def _run_rounds(rank, world, rdv):
 
 def test_a_per_step_read_follows_the_rounds():
     run_two_ranks(_run_rounds)
+
+
+class _Kept(list):
+    """A list whose ``save`` is its own, so the block can say ``.save()`` on
+    a rank with no trace open."""
+
+    def save(self):
+        return self
+
+
+class _Reads:
+    """``.output`` reads a location through the mediator, as an envoy does."""
+
+    def __init__(self, provider):
+        self.provider = provider
+
+    @property
+    def output(self):
+        from nnsight.intervention.interleaver import Mediator
+
+        return Mediator.value(self.provider)
+
+
+def _run_save_only(rank, world, rdv):
+    """The block appends ``a`` and ``b`` to a saved container and does nothing
+    else with them. Neither rank waits for the other's value or sends its
+    own: each binds a placeholder for the remote one and the real tensor for
+    its own, in the same positions."""
+    from nnsight.modeling.vllm.pp_deferred import Deferred
+
+    stage = Stage(rank, world, rdv, owners=OWNERS)
+    block = "kept = Kept().save()\nkept.append(model['a'].output[0])\nkept.append(model['b'].output[0])\n"
+    stage_globals = {"Kept": _Kept, "model": {"a": _Reads(A), "b": _Reads(B)}}
+    mediator = stage.mediator(block, start=False)
+    mediator.glbls.update(stage_globals)
+    mediator.lcls.update(stage_globals)
+    mediator.start(stage.interleaver)
+    stage.interleaver.started(mediator)
+    stage.interleaver.mediators.append(mediator)
+    stage.interleaver.reindex()
+    if rank == 0:
+        assert mediator.pending.provider == A
+        stage.fire(A, (torch.ones(3),))
+        # b, which the later stage owns, was answered with a placeholder at once.
+        assert not mediator.alive
+        kept = mediator.lcls["kept"]
+        assert torch.equal(kept[0], torch.ones(3)) and isinstance(kept[1], Deferred) and kept[1].provider == B
+    else:
+        # a was answered with a placeholder at start; b is this rank's own.
+        assert mediator.pending.provider == B
+        stage.fire(B, (torch.full((3,), 2.0),))
+        assert not mediator.alive
+        kept = mediator.lcls["kept"]
+        assert isinstance(kept[0], Deferred) and kept[0].provider == A and torch.equal(kept[1], torch.full((3,), 2.0))
+    _sync()
+    # Nothing crossed the wire for either read.
+    assert not stage.link.has("r", 0, A) and not stage.link.has("r", 0, B)
+    stage.close()
+
+
+def test_a_save_only_read_binds_a_placeholder_and_sends_nothing():
+    run_two_ranks(_run_save_only)

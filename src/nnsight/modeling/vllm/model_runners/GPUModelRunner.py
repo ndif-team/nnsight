@@ -910,13 +910,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
                         # step's last snapshot.
                         requests.record(request.mediator)
 
-        # Every rank ran the block and so has workers to wind up, but only one
-        # rank's values are wanted: the reads are gathered, so every rank holds
-        # the same ones. Only the *reporting* is gated — an early return here
-        # once left every other rank's workers in place for the life of the
-        # engine. Registered values are answered from every rank, since a
-        # registered block runs wherever the layers it reads live.
-        reporting = get_pp_group().rank == 0
+        # Every rank ran the block and reports what it saved; the engine keeps
+        # the first rank's value of each name and fills a placeholder in it (a
+        # read the block only saved, of a location another stage holds) from
+        # that stage's copy (see engine.merge_collected).
         taps = self.nnsight_model.interleaver.taps
         saved = _saves()
         for request in list(requests.requests.values()):
@@ -954,8 +951,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # location the model never reached — its deferred error.
                     requests.finish_dangling(mediator, taps)
                 values = request.saves()
-                if reporting:
-                    sequence["saves"] = values
+                sequence["saves"] = values
                 if done:
                     # Drop this request's saved values from the thread-local set
                     # as they leave: it is keyed by object id, so a finished
@@ -963,7 +959,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # request's values and mistaken for saved.
                     for value in values.values():
                         saved.discard(id(value))
-            if reporting and entry["error"] is None:
+            if entry["error"] is None:
                 entry["error"] = request.deferred()
             if done and not request.copies:
                 requests.requests.pop(request.id, None)

@@ -345,3 +345,68 @@ def test_every_rank_releases_finished_workers(pp2_engine):
     assert len(hs) == 3
     counts = model.vllm_entrypoint.llm_engine.collective_rpc("nnsight_request_count")
     assert len(counts) == 2 and all(count == 0 for count in counts), counts
+
+
+# ---------------------------------------------------------------------------
+# Reads the block only saves: no transfer during the run, filled at collect
+# ---------------------------------------------------------------------------
+
+
+def test_save_only_reads_of_both_stages_come_back_filled(pp2_engine):
+    """A read that is only saved is bound to a placeholder on the stage that
+    does not hold it and filled from the holding stage's copy at collect, in
+    both directions; the values equal the ones a consumed read carries over."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        early = _layer(model, EARLY).output[0].save()
+        late = _layer(model, LATE).output[0].save()
+        logits = model.logits.save()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        early_used = _layer(model, EARLY).output[0].clone().save()
+        late_used = _layer(model, LATE).output[0].clone().save()
+    for value in (early, late, logits):
+        assert isinstance(value, torch.Tensor), type(value)
+    assert torch.equal(early.cpu(), early_used.cpu())
+    assert torch.equal(late.cpu(), late_used.cpu())
+    assert model.tokenizer.decode(logits[-1].argmax(dim=-1)).strip() == "Paris"
+
+
+def test_per_step_saves_of_the_last_stage_logits_complete(pp2_engine):
+    """A loop that only saves each step's logits is not held at any step
+    start; every step's value is filled at collect."""
+    model = pp2_engine
+    t0 = time.time()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=5, ignore_eos=True) as tracer:
+        steps = nnsight.save([])
+        for _ in tracer.iter[:5]:
+            steps.append(model.logits[-1])
+    assert len(steps) == 5 and time.time() - t0 < STALL_BOUND_S
+    assert all(isinstance(step, torch.Tensor) for step in steps)
+    assert model.tokenizer.decode(steps[0].argmax(dim=-1)).strip() == "Paris"
+
+
+def test_save_only_loop_past_generation_end_keeps_reached_steps(pp2_engine):
+    """A save-only loop asking for more steps than the run makes keeps the
+    reached steps on every stage alike, so every placeholder is filled."""
+    model = pp2_engine
+    t0 = time.time()
+    with model.trace(PROMPT, temperature=0.0, max_tokens=4) as tracer:
+        hs = nnsight.save([])
+        for _ in tracer.iter[:8]:
+            hs.append(_layer(model, LATE).output[0])
+    assert len(hs) == 4 and time.time() - t0 < STALL_BOUND_S
+    assert all(isinstance(h, torch.Tensor) for h in hs)
+
+
+def test_a_save_only_read_beside_a_consumed_one_keeps_both_right(pp2_engine):
+    """The saved read is not pushed and the consumed one is; the pushed items
+    for the location are still taken in order."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=2, ignore_eos=True) as tracer:
+        kept = nnsight.save([])
+        sums = nnsight.save([])
+        for _ in tracer.iter[:2]:
+            kept.append(_layer(model, LATE).output[0])
+            sums.append(float(_layer(model, LATE).output[1].float().sum()))
+    assert len(kept) == 2 and len(sums) == 2
+    assert all(isinstance(h, torch.Tensor) for h in kept)

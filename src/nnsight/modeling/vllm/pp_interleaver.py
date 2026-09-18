@@ -7,11 +7,14 @@ what its workers ask of other stages is taken from the link's inbox, in the
 order they ask (`chase`, `serve`). A worker asking for a value an earlier
 stage holds is answered in place, since that stage has already produced it; a
 worker asking for a later stage's value parks until this stage's next step,
-by which time that value exists. See ``docs/developing/pp-push-design.md``.
+by which time that value exists. A read the block only saves is answered with
+a placeholder at once and never pushed; the owner's copy fills it at collect
+(see `pp_deferred`). See ``docs/developing/pp-push-design.md``.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any, Iterable, Optional
 
 import torch
@@ -19,7 +22,11 @@ from greenlet import getcurrent
 
 from ...intervention.interleaver import Event, Mediator
 from .interleaver import VLLMInterleaver
+from .pp_deferred import Deferred, deferrable_lines
 from .pp_transport import CACHE, VALUE, Link, RemoteError, to_host
+
+# Set to 0 to push every read, including the ones the block only saves.
+DEFER = os.environ.get("NNSIGHT_PP_DEFER", "1") != "0"
 
 
 class PPInterleaver(VLLMInterleaver):
@@ -69,14 +76,20 @@ class PPInterleaver(VLLMInterleaver):
         value: Any,
         selected: Optional[tuple] = None,
         event: Event = Event.VALUE,
+        line: Optional[int] = None,
     ) -> None:
-        """Push what this stage just served, then answer what the worker asks next."""
+        """Push what this stage just served, then answer what the worker asks next.
+
+        A read the block only saves (`_deferrable`) is not pushed: the peers
+        bound a placeholder for it, and this stage's saved copy fills it at
+        collect.
+        """
         key = self._key(mediator)
         if self.owner(provider) is None:
             # A local visit is served in the round being run, so that is the
             # step the block is at, whatever module fired.
             mediator.pp_step = self.rounds.get(key[0], 0)
-            if event is Event.VALUE and self.link.peers:
+            if event is Event.VALUE and self.link.peers and not self._deferrable(mediator, line):
                 self.link.publish(CACHE if selected else VALUE, *key, provider, to_host(value), selected)
         if selected is None:
             self._report_stale(mediator)
@@ -103,6 +116,11 @@ class PPInterleaver(VLLMInterleaver):
         """A worker has started and parked for the first time."""
         self.chase(mediator)
 
+    @staticmethod
+    def _deferrable(mediator: Mediator, line: Optional[int]) -> bool:
+        """Whether the request made from ``line`` of the block only saves its value."""
+        return DEFER and line is not None and mediator.source is not None and line in deferrable_lines(mediator.source)
+
     # --------------------------------------------------------- the receiver
 
     def _step(self, mediator: Mediator) -> int:
@@ -120,18 +138,21 @@ class PPInterleaver(VLLMInterleaver):
             mediator.pp_step = pending.iteration
         return mediator.pp_step
 
-    def _produced(self, mediator: Mediator, owner: int, final: bool) -> bool:
+    def _produced(self, mediator: Mediator, owner: int, final: bool, deferred: bool = False) -> bool:
         """Whether ``owner`` has produced what the worker is asking for.
 
         The stages run a request's rounds in order: while this stage runs
         round ``n`` (``rounds`` forwards done here), an earlier stage has
         finished round ``n`` and a later one round ``n-1``. Once the request is
         over (``final``) every round that ran is produced everywhere, and a
-        step past the last round never will be.
+        step past the last round never will be. A ``deferred`` read needs only
+        the promise of the value: a later stage runs every round this stage
+        has started, so the placeholder is handed out as soon as this stage is
+        at that round.
         """
         rounds = self.rounds.get(mediator.pp_req, 0)
         step = self._step(mediator)
-        if final or owner > self.local_rank:
+        if final or (owner > self.local_rank and not deferred):
             return step < rounds
         return step <= rounds
 
@@ -151,30 +172,50 @@ class PPInterleaver(VLLMInterleaver):
             if pending.event in (Event.SWAP, Event.SKIP):
                 mediator.pending = mediator.switch()
                 continue
-            if pending.event is not Event.VALUE or not self._produced(mediator, owner, final):
+            if pending.event is not Event.VALUE or not self._answer(mediator, owner, final):
                 return
+
+    def _answer(self, mediator: Mediator, owner: int, final: bool) -> bool:
+        """Answer the worker's pending read of ``owner``'s location if it can be
+        answered now: with a placeholder when the block only saves it, else with
+        the pushed item. Returns whether it was."""
+        pending = mediator.pending
+        deferred = self._deferrable(mediator, mediator.line)
+        if not self._produced(mediator, owner, final, deferred):
+            return False
+        if deferred:
+            self._hand(mediator, Deferred(pending.provider, self._step(mediator)))
+        else:
             self._take(mediator, pending.provider)
-            self._report_stale(mediator)
+        self._report_stale(mediator)
+        return True
 
     def _take(self, mediator: Mediator, provider: str) -> None:
         """Hand the worker the next pushed item for ``provider``, or the owner's failure."""
         key = self._key(mediator)
         owner, step = self.owner(provider), self._step(mediator)
+        try:
+            value = self.link.take(*key, provider, owner, step)
+        except RemoteError as error:
+            self._hand(mediator, error)
+            return
+        self._hand(
+            mediator,
+            torch.utils._pytree.tree_map(lambda t: t.to(self.device) if isinstance(t, torch.Tensor) else t, value),
+        )
+
+    def _hand(self, mediator: Mediator, value: Any) -> None:
+        """Resume the worker with ``value`` (thrown into it when it is a RemoteError)."""
         mediator.worker.parent = getcurrent()
         # A pinned step relaxes on its first hit, as it does when a local visit
         # serves it, so the step's later requests follow the model.
         if mediator.iteration:
             mediator.iteration = None
         try:
-            try:
-                value = self.link.take(*key, provider, owner, step)
-            except RemoteError as error:
-                mediator.pending = mediator.worker.throw(error)
-                return
-            value = torch.utils._pytree.tree_map(
-                lambda t: t.to(self.device) if isinstance(t, torch.Tensor) else t, value
-            )
-            mediator.pending = mediator.switch(value)
+            if isinstance(value, RemoteError):
+                mediator.pending = mediator.worker.throw(value)
+            else:
+                mediator.pending = mediator.switch(value)
         except Exception as exception:
             # The block raised on the way: deferred to its own request, as a
             # raise out of a module's handoff is (see Interleaver.handle).
@@ -199,10 +240,8 @@ class PPInterleaver(VLLMInterleaver):
             if not mediator.alive or (pending := mediator.pending) is None or pending.provider is None:
                 continue
             owner = self.owner(pending.provider)
-            if owner is None or pending.event is not Event.VALUE or not self._produced(mediator, owner, final):
+            if owner is None or pending.event is not Event.VALUE or not self._answer(mediator, owner, final):
                 continue
-            self._take(mediator, pending.provider)
-            self._report_stale(mediator)
             self.chase(mediator, final)
 
     def finished(self, req: str) -> None:

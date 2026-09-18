@@ -17,7 +17,8 @@ A message is a header of two int64 (metadata bytes, tensor bytes) and one
 uint8 blob: a pickle of the envelope with every tensor replaced by a
 :class:`_Slot`, then the tensors' raw bytes at aligned offsets. Two messages
 because a gloo receive needs its size first; the tensors are viewed in place
-over the blob on arrival.
+over the blob on arrival. A sender that finds several envelopes queued sends
+them as one message, so a step's values cost one round trip on a slow link.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ ROUND = "round"  # the owner has run this many rounds of the request; earlier va
 REQUEST = "request"  # a parameter or state read, answered from the module
 REPLY = "reply"
 STOP = "stop"
+BATCH = "batch"  # several envelopes in one message
 
 
 class _Slot:
@@ -181,11 +183,17 @@ class Link:
     def _send_loop(self, peer: int) -> None:
         out = self._out[peer]
         while True:
-            envelope = out.get()
+            envelopes = [out.get()]
+            while True:
+                try:
+                    envelopes.append(out.get_nowait())
+                except queue.Empty:
+                    break
+            envelope = envelopes[0] if len(envelopes) == 1 else {"kind": BATCH, "items": envelopes}
             header, blob = encode(envelope)
             dist.send(header, group=self.group, group_dst=peer, tag=_TAG)
             dist.send(blob, group=self.group, group_dst=peer, tag=_TAG)
-            if envelope["kind"] == STOP:
+            if any(item["kind"] == STOP for item in envelopes):
                 return
 
     # ------------------------------------------------------------------- in
@@ -198,13 +206,19 @@ class Link:
             blob = torch.empty(_aligned(meta_nbytes) + data_nbytes, dtype=torch.uint8)
             dist.recv(blob, group=self.group, group_src=peer, tag=_TAG)
             envelope = decode(blob, meta_nbytes)
-            kind = envelope["kind"]
-            if kind == STOP:
-                return
-            if kind == REQUEST:
-                self._answer(peer, envelope)
-                continue
-            with self._condition:
+            for item in envelope["items"] if envelope["kind"] == BATCH else (envelope,):
+                if self._file(peer, item):
+                    return
+
+    def _file(self, peer: int, envelope: dict) -> bool:
+        """File one arrived envelope; True when it was the stop."""
+        kind = envelope["kind"]
+        if kind == STOP:
+            return True
+        if kind == REQUEST:
+            self._answer(peer, envelope)
+            return False
+        with self._condition:
                 if kind in (VALUE, CACHE):
                     key = (envelope["req"], envelope["ordinal"])
                     provider = envelope["provider"] if kind == VALUE else CACHE
@@ -216,6 +230,7 @@ class Link:
                 elif kind == REPLY:
                     self._replies[envelope["id"]] = (envelope["ok"], envelope["value"])
                 self._condition.notify_all()
+        return False
 
     def _answer(self, peer: int, envelope: dict) -> None:
         """Answer a parameter or state request from this rank's modules.

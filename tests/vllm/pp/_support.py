@@ -152,6 +152,7 @@ class Stage:
         from nnsight.intervention.interleaver import Mediator
 
         mediator = Mediator(compile(block, f"<pp-harness-{req_id}>", "exec"), {"Mediator": Mediator, "torch": torch}, {})
+        mediator.source = block
         mediator.pp_req, mediator.pp_ordinal, mediator.pp_announced, mediator.pp_step = req_id, ordinal, False, 0
         if start:
             mediator.start(self.interleaver)

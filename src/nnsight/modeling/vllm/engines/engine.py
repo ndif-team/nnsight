@@ -18,22 +18,23 @@ from typing import Any, Optional
 
 from vllm.v1.engine.llm_engine import LLMEngine
 
+from ..pp_deferred import fill_saves
+
 
 def merge_collected(payloads: list) -> dict:
     """Combine what each rank returned from ``collect_nnsight``.
 
-    Not "take the first non-empty": a trace's values come from the rank holding
-    the sampled output, while a registered block's come from whichever rank ran
-    the layers it read — under pipeline parallelism those are different ranks,
-    and taking one would silently drop the other.
-
-    Where two ranks did report the same name — tensor parallelism, where every
-    rank runs the block and each gathers the same whole value — the earliest
-    rank's wins. They are equal, but they are on different devices, and a value
-    whose device depended on which rank answered last would be a confusing thing
-    to hand back next to a traced one.
+    Every rank runs the block and reports what it saved. The earliest rank's
+    value of a name wins: under tensor parallelism the ranks hold equal values
+    on different devices, and under pipeline parallelism the first stage's
+    copy of a read it consumed is the one it computed with. A name the first
+    stage saved as a placeholder (a read it only saved, of a location another
+    stage holds; see `pp_deferred`) is filled from the stage that holds it.
+    Registered values are taken from every rank the same way, since a
+    registered block runs wherever the layers it reads live.
     """
     merged: dict[str, dict] = {}
+    reports: dict[str, dict] = {}
     for payload in payloads or ():
         if payload is None:
             continue
@@ -42,18 +43,30 @@ def merge_collected(payloads: list) -> dict:
                 request_id,
                 {"saves": {}, "error": None, "registered": {}, "sequences": {}},
             )
-            into["saves"].update(entry.get("saves") or {})
+            report = reports.setdefault(request_id, {"saves": [], "sequences": {}})
+            report["saves"].append(entry.get("saves") or {})
             for name, value in (entry.get("registered") or {}).items():
                 into["registered"].setdefault(name, value)
             for index, sequence in (entry.get("sequences") or {}).items():
                 target = into["sequences"].setdefault(
                     index, {"saves": {}, "registered": {}}
                 )
-                target["saves"].update(sequence.get("saves") or {})
+                report["sequences"].setdefault(index, []).append(sequence.get("saves") or {})
                 for name, value in (sequence.get("registered") or {}).items():
                     target["registered"].setdefault(name, value)
             if into["error"] is None:
                 into["error"] = entry.get("error")
+    for request_id, report in reports.items():
+        into = merged[request_id]
+        try:
+            into["saves"] = fill_saves(report["saves"])
+            for index, saves in report["sequences"].items():
+                into["sequences"][index]["saves"] = fill_saves(saves)
+        except RuntimeError as error:
+            # A placeholder nobody filled: the stage holding the location did
+            # not reach that save. Its own error says why; failing that, this.
+            if into["error"] is None:
+                into["error"] = {"type_name": "RuntimeError", "message": str(error), "traceback": "", "is_control_flow": False}
     return merged
 
 

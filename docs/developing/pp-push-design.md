@@ -49,9 +49,11 @@ the forward thread (a copy taken on another thread orders behind vLLM's own
 NCCL sends and deadlocks the pipeline) and appends
 `(request, worker ordinal, provider, value)` to a queue drained by one sender
 thread per peer. The sender serializes each item and sends it over a gloo
-group. The wire format is a header of two integers and one byte blob: a
-pickle of the envelope with tensors replaced by slots, followed by the raw
-tensor bytes at aligned offsets, viewed in place on arrival.
+group; when it finds several items queued it sends them as one message, so
+the values of one step cost one round trip on a slow link. The wire format is
+a header of two integers and one byte blob: a pickle of the envelope with
+tensors replaced by slots, followed by the raw tensor bytes at aligned
+offsets, viewed in place on arrival.
 
 Logits and samples exist on the last stage and pass through the same `handle`
 by way of their eproperties, so they are pushed the same way. After a stage
@@ -108,6 +110,40 @@ visits.
 A swap or skip on a shell is absorbed: the runner resumes the mediator at
 once, since the owner applies the same line and nothing has to come back.
 
+## Reads the block only saves
+
+A read whose value the block does nothing with but save is saved on the stage
+that holds it too, by the same line of the same block. So it does not have to
+cross the wire while the run is on: the stage that does not hold it binds a
+placeholder in its place, the owner does not push it, and at collect the
+placeholder is filled from the owner's copy of the same saved name.
+
+Which reads those are is decided from the block's source before it runs, the
+same way on every stage (`pp_deferred.deferrable_lines`), by a rule that only
+takes the plain forms: a statement that saves the read directly (`h =
+layer.output.save()`, `layer.output.save()`, `nnsight.save(layer.output)`)
+with the bound name never read again, or an append of the read to a container
+the block saved and only ever appends to (`kept = nnsight.save([])` then
+`kept.append(layer.output[0])`). The read may be subscripted with constants;
+its base may not contain another read; a statement of any other shape is a
+consumed read and crosses the wire. Every request made from a block line
+carries that line (`Mediator.line`, read off the worker's frame when it parks),
+so the owner's `served` knows which serve not to push, and the receiver's
+`chase` and `serve` know which request to answer with a placeholder. The
+placeholder is handed out as soon as this stage is at the read's step: a later
+stage runs every round this stage has started, so a first-stage block that
+saves the last stage's logits every step is never held at a step start.
+
+Collect then comes from every rank: each reports what its block saved, the
+engine keeps the first rank's value of each name, and any placeholder in it
+(at any depth of a container) is filled from the first later rank whose value
+for that name holds a real value at the same position. The position is enough
+because every rank's block bound the same names in the same order; a
+placeholder no rank filled means the owner's block did not reach that save,
+and its own error is what the client sees.
+
+`NNSIGHT_PP_DEFER=0` turns this off, for measurement.
+
 ## Errors and the end of a request
 
 A block that raises does so on every rank at the same line, since every rank
@@ -125,10 +161,10 @@ A blocking take carries a deadline and raises naming the location and the
 owner if it expires; it exists to turn a hang into an error, not as a protocol
 step.
 
-At collect, every rank drains and winds up its own mediators; rank 0 reports
-saves. Every rank holds every value the block read, so nothing is merged. The
-inbox entries for the request are dropped; fetched parameters and state
-stay for the engine's life.
+At collect, every rank drains and winds up its own mediators and reports its
+saves; the first rank's value of a name wins and a placeholder in it is
+filled from its owner (above). The inbox entries for the request are dropped;
+fetched parameters and state stay for the engine's life.
 
 ## What this replaces, from pp-on-08
 
@@ -138,7 +174,7 @@ stay for the engine's life.
 | `intercept` seam in `Mediator.event`, `STEP_GATE` in `tracer.iter` | one `served` seam, called from `Mediator.handle` |
 | request/reply listener, reply pool, waiter pool, parked requests, publish buffer and its lifetime, drain barrier, error replies, passed-latch, occurrence tagging | one sender thread and one receive thread per peer, ordered inboxes, a request/reply for parameters and state only |
 | upstream/downstream round clocks (`opened`, `rounds`) | a per-request round count and the block's own step |
-| per-stage save shipping, `merge_saved`, sentinels, overshoot trim, divergence tripwire | rank 0 reports |
+| per-stage save shipping, `merge_saved`, sentinels, overshoot trim, divergence tripwire | every rank reports; the first rank's value of a name wins, a placeholder in it is filled from its owner by position |
 
 ## Limits and later work
 
