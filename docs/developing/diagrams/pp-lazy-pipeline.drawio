@@ -1,0 +1,91 @@
+<mxfile host="app.diagrams.net" version="24.0.0">
+  <diagram id="pp-lazy" name="lazy pull (pp-on-08)">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="960">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="Lazy pull (pp-on-08): a remote read returns a proxy; first use pulls over a request/reply listener" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1000" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s0" value="Stage 0 (reader side shown)" style="swimlane;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="70" width="620" height="840" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_fwd" value="forward thread&#xa;module controller → Interleaver.handle → Mediator.handle&#xa;Mediator.event consults intercept() BEFORE parking" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="s0">
+          <mxGeometry x="20" y="50" width="280" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_worker" value="worker greenlet (the block)&#xa;a remote read returns a LazyRemoteTensor at once: no park, no traffic&#xa;keeps running to its local reads" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="s0">
+          <mxGeometry x="330" y="50" width="270" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_lazy" value="LazyRemoteTensor&#xa;arithmetic, indexing, __torch_function__, save() → sentinel&#xa;first consumption → materialize: park on a synthetic pull location&#xa;(inside torch's dispatcher: needs the C thread-local-state swap)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="s0">
+          <mxGeometry x="330" y="170" width="270" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_intercept" value="intercept() at the pull park&#xa;upstream owner and round opened → begin_pull + complete in place&#xa;downstream owner → begin_pull now, keep the park, record in _pulls" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="s0">
+          <mxGeometry x="20" y="170" width="280" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_pull" value="begin_pull: one 256-byte request on TAG_REQUEST&#xa;+ a waiter-pool thread posted for the reply (header → blob) → CPU value" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="s0">
+          <mxGeometry x="20" y="320" width="280" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_serve" value="serve_pulls (forward thread) at: step start (blocking, produced rounds only),&#xa;step end (non-blocking), sample_tokens, _sample, collect (finalize)&#xa;pull.complete() → device → mediator.switch(value)&#xa;round clocks: opened / rounds per request decide &quot;produced&quot;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="s0">
+          <mxGeometry x="20" y="440" width="280" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_gate" value="STEP_GATE: a tracer.iter body that never parks is paced by a gate location served once per step" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="s0">
+          <mxGeometry x="330" y="320" width="270" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_collect" value="collect: strip_saves → sentinels for lazies; every stage's TP-0 ships its saves;&#xa;engine merge_saved unions slots, drops sentinels, trims overshoot, divergence tripwire" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="s0">
+          <mxGeometry x="330" y="440" width="270" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_listener" value="listener thread (owner side of this rank)&#xa;request → buffer hit: reply-pool thread sends header + blob&#xa;→ miss and round passed: error reply (&quot;ran past&quot;) → else park the request&#xa;finalize: drain barrier across ranks, then clear_buffer(request)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="s0">
+          <mxGeometry x="20" y="600" width="280" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_buffer" value="pull buffer (owner side)&#xa;(provider.i{visit}, request) → host clone, published at the hook for served visits;&#xa;parked requests dispatched on publish" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="s0">
+          <mxGeometry x="330" y="600" width="270" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="s0_note" value="A save() of a remote value ships nothing: the sentinel is filled from the owner's copy at merge. Everything consumed is pulled by request/reply. Parameters: param() pulls the whole matrix per call, kept nowhere." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="s0">
+          <mxGeometry x="20" y="750" width="580" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s1" value="Stage 1 (owner side shown, symmetric)" style="swimlane;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="720" y="70" width="620" height="840" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1_fwd" value="forward thread → handle → publish(provider, value, served)&#xa;host clone per served visit into the pull buffer, dispatch parked requests" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="s1">
+          <mxGeometry x="20" y="50" width="280" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1_worker" value="worker greenlet (the same block)&#xa;its own reads of stage 0 are lazies, forced in place (upstream)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="s1">
+          <mxGeometry x="330" y="50" width="270" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1_buffer" value="pull buffer" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="s1">
+          <mxGeometry x="20" y="180" width="280" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1_listener" value="listener thread → reply pool (32) → header + blob on a per-pull response tag&#xa;parked requests wait for publish; passed rounds get error replies" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="s1">
+          <mxGeometry x="20" y="330" width="280" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1_serve" value="serve_pulls at its own serve points; sample_tokens serves logits through the eproperty; per-request round clocks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="s1">
+          <mxGeometry x="330" y="180" width="270" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1_shell" value="RemoteShell (stage 0's modules): param() / call via the listener's PARAM_MARK / STATE_MARK requests" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;dashed=1;" vertex="1" parent="s1">
+          <mxGeometry x="330" y="330" width="270" height="100" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e1" style="endArrow=classic;html=1;" edge="1" parent="s0" source="s0_fwd" target="s0_worker"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e2" style="endArrow=classic;html=1;" edge="1" parent="s0" source="s0_worker" target="s0_lazy"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e3" style="endArrow=classic;html=1;" edge="1" parent="s0" source="s0_lazy" target="s0_intercept"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e4" style="endArrow=classic;html=1;" edge="1" parent="s0" source="s0_intercept" target="s0_pull"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e5" style="endArrow=classic;html=1;" edge="1" parent="s0" source="s0_pull" target="s0_serve"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e5l" value="waiter completes; serve point switches the worker" style="text;html=1;fontSize=10;" vertex="1" parent="s0"><mxGeometry x="60" y="405" width="240" height="20" as="geometry"/></mxCell>
+        <mxCell id="e6" style="endArrow=classic;html=1;" edge="1" parent="s0" source="s0_serve" target="s0_worker"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e7" style="endArrow=classic;html=1;" edge="1" parent="s0" source="s0_fwd" target="s0_buffer"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e8" style="endArrow=classic;html=1;" edge="1" parent="s0" source="s0_buffer" target="s0_listener"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="f1" style="endArrow=classic;html=1;" edge="1" parent="s1" source="s1_fwd" target="s1_buffer"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="f2" style="endArrow=classic;html=1;" edge="1" parent="s1" source="s1_buffer" target="s1_listener"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="f3" style="endArrow=classic;html=1;" edge="1" parent="s1" source="s1_fwd" target="s1_worker"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="x1" value="request (256 B, TAG_REQUEST) →" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#9673a6;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="s0_pull" target="s1_listener"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="x2" value="← reply: header [status, meta, data] + blob on the pull's own tag" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#9673a6;exitX=0;exitY=0.7;entryX=1;entryY=0.7;" edge="1" parent="1" source="s1_listener" target="s0_pull"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="x3" value="vLLM's own pipeline: intermediate tensors (NCCL), sampled ids through the engine core" style="endArrow=classic;html=1;dashed=1;strokeColor=#666666;exitX=1;exitY=0.25;entryX=0;entryY=0.25;" edge="1" parent="1" source="s0_fwd" target="s1_fwd"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
