@@ -1,4 +1,4 @@
-# Pipeline parallelism: push against eager pull
+# Pipeline parallelism: push, eager pull, and the lazy branch
 
 Two transports for the value a block reads from a module another pipeline
 stage holds, built from scratch on dev `a8ee9378` and sharing everything else
@@ -7,7 +7,10 @@ stage holds, built from scratch on dev `a8ee9378` and sharing everything else
 sends a value to every other stage as the owner serves it to its own copy of
 the block (`docs/developing/pp-push-design.md`); `pp-eager` files it on the
 owner and a reader asks for it once the owner has produced it
-(`docs/developing/pp-eager-design.md`). This note is the measurement.
+(`docs/developing/pp-eager-design.md`). Both are measured against the branch
+they replace, `pp-on-08` at `02e77669`, whose reads return a lazy proxy that
+pulls on first use over a request/reply protocol (called "lazy" below). This
+note is the measurement.
 
 ## Correctness: the same suites, both green
 
@@ -162,26 +165,34 @@ What the table says:
 
 Because the two passes above ran on different GPU pairs, the four specs that
 cross stages most were rerun for both branches in one run on one pair (GPUs 3
-and 4, which by then carried another user's idle allocations):
+and 4, which by then carried another user's idle allocations), and the lazy
+branch on the same pair right after:
 
-| spec | workload | cell | HF reference | push, one stage | push, PP=2 | eager, one stage | eager, PP=2 |
-|---|---|---|---|---|---|---|---|
-| steering_gpt2 | batched | mode=inplace | RAN 17 | SUPPORTED 319 | SUPPORTED 643 | SUPPORTED 559 | SUPPORTED 492 |
-| steering_gpt2 | batched | mode=replace | RAN 17 | SUPPORTED 350 | SUPPORTED 445 | SUPPORTED 494 | SUPPORTED 467 |
-| steering_gpt2 | interactive | mode=inplace | RAN 12 | SUPPORTED 28 | SUPPORTED 43 | SUPPORTED 26 | SUPPORTED 32 |
-| steering_gpt2 | interactive | mode=replace | RAN 12 | SUPPORTED 27 | SUPPORTED 43 | SUPPORTED 25 | SUPPORTED 43 |
-| logit_lens_gpt2 | batched | unembed=weight | RAN 49 | SUPPORTED 383 | SUPPORTED 567 | SUPPORTED 366 | SUPPORTED 807 |
-| logit_lens_gpt2 | interactive | unembed=weight | RAN 14 | SUPPORTED 23 | SUPPORTED 50 | SUPPORTED 30 | SUPPORTED 61 |
-| das_gpt2 | interactive | apply (seeded orthogonal rotation) | RAN 1047 | SILENTLY_WRONG 1477 | SILENTLY_WRONG 1796 | SILENTLY_WRONG 1558 | SILENTLY_WRONG 2030 |
-| jacobian_lens_gpt2 | interactive | transport=identity (logit-lens readout) | RAN 13 | SUPPORTED 33 | SUPPORTED 48 | SUPPORTED 25 | SUPPORTED 66 |
-| jacobian_lens_gpt2 | interactive | transport=seeded-orthogonal (the J-matmul path) | RAN 1104 | SUPPORTED 1300 | SUPPORTED 99 | SUPPORTED 1042 | SUPPORTED 121 |
+| spec | workload | cell | HF reference | push, one stage | push, PP=2 | eager, one stage | eager, PP=2 | lazy, one stage | lazy, PP=2 |
+|---|---|---|---|---|---|---|---|---|---|
+| steering_gpt2 | batched | mode=inplace | RAN 17 | SUPPORTED 319 | SUPPORTED 643 | SUPPORTED 559 | SUPPORTED 492 | SUPPORTED 337 | SUPPORTED 517 |
+| steering_gpt2 | batched | mode=replace | RAN 17 | SUPPORTED 350 | SUPPORTED 445 | SUPPORTED 494 | SUPPORTED 467 | SUPPORTED 343 | SUPPORTED 508 |
+| steering_gpt2 | interactive | mode=inplace | RAN 12 | SUPPORTED 28 | SUPPORTED 43 | SUPPORTED 26 | SUPPORTED 32 | SUPPORTED 26 | SUPPORTED 35 |
+| steering_gpt2 | interactive | mode=replace | RAN 12 | SUPPORTED 27 | SUPPORTED 43 | SUPPORTED 25 | SUPPORTED 43 | SUPPORTED 27 | SUPPORTED 39 |
+| logit_lens_gpt2 | batched | unembed=weight | RAN 49 | SUPPORTED 383 | SUPPORTED 567 | SUPPORTED 366 | SUPPORTED 807 | SUPPORTED 405 | SUPPORTED 781 |
+| logit_lens_gpt2 | interactive | unembed=weight | RAN 14 | SUPPORTED 23 | SUPPORTED 50 | SUPPORTED 30 | SUPPORTED 61 | SUPPORTED 31 | SUPPORTED 57 |
+| das_gpt2 | interactive | apply (seeded orthogonal rotation) | RAN 1047 | SILENTLY_WRONG 1477 | SILENTLY_WRONG 1796 | SILENTLY_WRONG 1558 | SILENTLY_WRONG 2030 | SILENTLY_WRONG 2112 | SILENTLY_WRONG 1532 |
+| jacobian_lens_gpt2 | interactive | transport=identity (logit-lens readout) | RAN 13 | SUPPORTED 33 | SUPPORTED 48 | SUPPORTED 25 | SUPPORTED 66 | SUPPORTED 27 | SUPPORTED 56 |
+| jacobian_lens_gpt2 | interactive | transport=seeded-orthogonal (the J-matmul path) | RAN 1104 | SUPPORTED 1300 | SUPPORTED 99 | SUPPORTED 1042 | SUPPORTED 121 | SUPPORTED 1555 | SUPPORTED 117 |
 
-The ordering holds on the lens and patching cells (weight lens 567 against
-807 batched, 50 against 61 interactive; the identity jacobian lens 48 against
-66; the DAS rotation 1,796 against 2,030) and is inside the batched steering
-cells' own spread (643 and 445 against 492 and 467; their one-stage medians
-moved by 200 ms between passes). Differences under about 20 percent on a
-batched cell are within what one pass resolves.
+The lazy branch's full GPT-2 pass (`runs/pp-compare2-lazy`, GPUs 5 and 6)
+gives the same verdict as its single stage on every cell, like the other two;
+another user's job arrived on those GPUs partway through it, so its later
+specs are not quoted, and the table above is its measurement.
+
+The ordering on the cells that read every layer holds across the three: the
+batched weight lens costs 567 ms on push, 781 on lazy and 807 on eager (one
+stage: about 390); the interactive weight lens 50, 57 and 61 (one stage: about
+28); the identity jacobian lens 48, 56 and 66. The batched steering cells are
+inside their own spread (push 643 and 445, eager 492 and 467, lazy 517 and
+508; their one-stage medians moved by 200 ms between passes), and the DAS
+rotation's one-stage numbers vary as much as its PP=2 ones. Differences under
+about 20 percent on a batched cell are within what one pass resolves.
 
 ### Qwen2.5-14B-Instruct
 
@@ -216,38 +227,52 @@ stage, the weight lens over all 48 layers about 140 ms more (push) or 170 ms
 more (eager), and a 16-token steered generation about 120 to 150 ms more on
 either. Verdicts are unchanged from one stage on both branches.
 
+The lazy branch keeps no fetched parameter at all, by its own design note
+("a remote parameter read moves the whole matrix; read a head once per
+trace"), so every one of these cells pays the 1.5 GB fetch per trace on it:
+the weight lens costs 3,669 ms at PP=2 against 161 on one stage, steering 3,507 and
+3,302 against 60 (`runs/pp-compare2-lazy-qwen`, GPUs 5 and 6). Its remaining
+14B jobs did not start: another user's job took those GPUs' memory partway
+through the pass and vLLM's memory profiler refused to build the engine.
+
 ## Verdict
 
 Push.
 
-- **Correctness is the same.** Both transports pass the same suites and give
-  the same verdict as the single-stage engine on every bench cell, on GPT-2
-  and on the 14B model.
-- **Where the workload crosses stages once, they cost the same.** The
-  synthetic scan and the single-read bench cells are within noise.
-- **Where it crosses many times, push is faster:** batched steering 432 and
-  473 ms against 618 and 550, the batched weight lens 581 against 751, the
-  interactive weight lens 42 against 63 on GPT-2 and 295 against 323 on the
-  14B model. A pull is a request and a reply per value per worker through the
-  owner's receive thread; a push is one message that the owner sends as it
-  serves, and nothing waits on a round trip.
-- **Push carries less state on the owner.** Eager keeps a serving buffer
-  whose entries live until every peer has asked, holds requests that arrive
-  early, and needs a release message per request to drop the rest; push keeps
-  an outbound queue. Eager's one structural advantage, that a stale read is
-  refused from the owner's own round count with no marker on the wire, costs
-  push one small message per request per step.
+- **Correctness is the same across the three.** Push, eager and lazy pass
+  the same engine suites and give the same verdict as the single-stage engine
+  on every bench cell, on GPT-2 and on the 14B model. One shape the lazy
+  branch cannot run at all: a `tracer.iter` body that reads the last stage's
+  logits every step fails on the owning stage with its own out-of-order error.
+- **Where the workload crosses stages once, all three cost the same.** The
+  synthetic scan's single-read shapes and the single-read bench cells are
+  within noise.
+- **Where it crosses many times, push and lazy cost the same and eager
+  more:** twelve late-layer reads add about 20 ms on push and lazy and 35 on
+  eager; the batched weight lens costs 567, 781 and 807 ms; the interactive
+  one 50, 57 and 61. A pull is a request and a reply per value per worker
+  through the owner's receive thread; a push is one message the owner sends
+  as it serves, and nothing waits on a round trip. Lazy's one saving, that an
+  unconsumed save ships nothing, is worth 10 ms on the save-all shape and
+  nothing on the bench, whose saved values go to the client anyway.
+- **Push is the smallest.** Push carries an outbound queue and a per-worker
+  inbox; eager a serving buffer whose entries live until every peer has asked,
+  held requests and a release message per request; lazy a proxy type with
+  its own tensor semantics, a request/reply listener with pools, a C
+  extension to park inside torch's dispatcher, round clocks and a sentinel
+  merge, at 3,084 source lines against push's 1,304, and it fetches a
+  parameter again on every trace.
 
 `pp-push` is the branch to continue on. `pp-eager` stays as the record of the
-control.
+control; `pp-on-08` as the record of what was replaced.
 
 ## What both branches still owe
 
-- **The per-value floor.** About 9 ms per value crossed at the 0.5B size,
-  and 12 to 20 ms per cell on the 14B model, is the same on both transports:
-  a host copy on the forward thread, a pickle, two gloo messages, a view and a
-  device copy. Measuring where those milliseconds go, and an NCCL side stream
-  if the host round trip is most of it, is the next performance work.
+- **The per-value cost** is about 1.5 ms on push at the 0.5B size (host copy
+  0.08 ms, take 0.15 ms, the wire under 0.5 ms in a burst), and 12 to 20 ms
+  per cell on the 14B model. What is left is the pipeline's own step
+  boundary; an NCCL side stream would shave the host round trip, which is
+  now the smaller part.
 - **The per-step logits read** adds about 16 ms per token on both: the first
   stage waits at each step start for a value the last stage produces at
   sampling. Sending the sampled ids or the logits earlier in the step, or
