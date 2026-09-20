@@ -75,3 +75,8 @@ def test_fill_reports_a_placeholder_no_stage_filled():
     b = SavedOnOwner("model.b.output", 2)
     with pytest.raises(RuntimeError, match="model.b.output"):
         fill_saves([{"kept": [torch.ones(1), b]}, {"kept": [SavedOnOwner("model.a.output", 2)]}])
+
+
+def test_a_line_shared_by_two_statements_is_not_marked():
+    assert _lines("h = model.blocks[3].output.save(); s = float(model.blocks[4].output[0].sum())\n") == set()
+    assert _lines("h = model.blocks[3].output.save()\ns = float(model.blocks[4].output[0].sum())\n") == {1}

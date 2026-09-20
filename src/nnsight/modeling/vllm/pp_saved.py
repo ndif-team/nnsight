@@ -124,6 +124,15 @@ def save_only_lines(source: str) -> frozenset[int]:
         return frozenset()
     loads = _loads(tree)
     lines: set[int] = set()
+    # A read is looked up by the line it was made from, so a line shared by
+    # two statements (``a = x.output.save(); s = y.output.sum()``) is never
+    # marked: the second statement's read would otherwise be taken as saved.
+    shared: set[int] = set()
+    seen: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.stmt) and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.For, ast.While, ast.If, ast.With, ast.Try)):
+            for line in range(node.lineno, node.end_lineno + 1):
+                (shared if line in seen else seen).add(line)
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
             continue
@@ -149,7 +158,7 @@ def save_only_lines(source: str) -> frozenset[int]:
             ):
                 # kept.append(<read>), kept saved and only appended to
                 read = _read_of(node.value.args[0])
-        if read is not None:
+        if read is not None and not any(line in shared for line in range(node.lineno, node.end_lineno + 1)):
             lines.update(range(node.lineno, node.end_lineno + 1))
     return frozenset(lines)
 

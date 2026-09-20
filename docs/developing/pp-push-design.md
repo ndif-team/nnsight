@@ -126,7 +126,9 @@ with the bound name never read again, or an append of the read to a container
 the block saved and only ever appends to (`kept = nnsight.save([])` then
 `kept.append(layer.output[0])`). The read may be subscripted with constants;
 its base may not contain another read; a statement of any other shape is a
-consumed read and crosses the wire. Every request made from a block line
+consumed read and crosses the wire, and so is any statement on a line it
+shares with another statement, since reads are matched to the rule by line.
+Every request made from a block line
 carries that line (`Mediator.line`, read off the worker's frame when it parks),
 so the owner's `served` knows which serve not to push, and the receiver's
 `chase` and `serve` know which request to answer with a placeholder. The
