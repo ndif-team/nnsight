@@ -1,0 +1,326 @@
+<mxfile host="app.diagrams.net" version="24.0.0">
+
+  <diagram id="compare" name="compare">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900">
+      <root>
+        <mxCell id="c0"/>
+        <mxCell id="c1" parent="c0"/>
+
+        <mxCell id="ctitle" value="Three ways to carry a value between pipeline stages" style="text;html=1;fontSize=17;fontStyle=1;align=left;" vertex="1" parent="c1">
+          <mxGeometry x="40" y="18" width="900" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="csub" value="Every stage runs the whole block, so every stage asks for the same locations in the same order. Only a read of a module another stage holds has to cross. Green is the behavior to want, red the one to avoid. Pages 2 to 4 draw each data path." style="text;html=1;fontSize=11;align=left;whiteSpace=wrap;" vertex="1" parent="c1">
+          <mxGeometry x="40" y="46" width="1270" height="34" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="h0" value="" style="rounded=0;fillColor=none;strokeColor=none;" vertex="1" parent="c1"><mxGeometry x="40" y="92" width="280" height="40" as="geometry"/></mxCell>
+        <mxCell id="h1" value="push&#xa;pp-push" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=12;" vertex="1" parent="c1"><mxGeometry x="320" y="92" width="330" height="40" as="geometry"/></mxCell>
+        <mxCell id="h2" value="eager pull&#xa;pp-eager" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=12;" vertex="1" parent="c1"><mxGeometry x="650" y="92" width="330" height="40" as="geometry"/></mxCell>
+        <mxCell id="h3" value="lazy pull&#xa;pp-on-08, the branch replaced" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=12;" vertex="1" parent="c1"><mxGeometry x="980" y="92" width="330" height="40" as="geometry"/></mxCell>
+
+        <mxCell id="a1" value="How a read of another stage reaches the block" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="132" width="280" height="54" as="geometry"/></mxCell>
+        <mxCell id="b1" value="the owner sends it as it serves its own copy of the block; the reader takes it from an inbox" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="132" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="d1" value="the reader asks for it; the owner answers from a buffer it filed the value in" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="132" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="e1" value="the read returns a proxy; the proxy asks the owner the first time the block uses the value" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="132" width="330" height="54" as="geometry"/></mxCell>
+
+        <mxCell id="a2" value="Messages per value crossed" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="186" width="280" height="44" as="geometry"/></mxCell>
+        <mxCell id="b2" value="one, and a step's values queued together go in one message" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="186" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="d2" value="two: the request and the reply, both through one receive thread" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="186" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="e2" value="two, or none when the block never uses the value" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="186" width="330" height="44" as="geometry"/></mxCell>
+
+        <mxCell id="a3" value="When the owner copies the value for the peers" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="230" width="280" height="44" as="geometry"/></mxCell>
+        <mxCell id="b3" value="before its own block is resumed with it" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="230" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="d3" value="after its block has run on to its next read" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="230" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="e3" value="after the whole visit to the module is finished" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="230" width="330" height="44" as="geometry"/></mxCell>
+
+        <mxCell id="a4" value="A block that changes the value in place&#xa;(vLLM's fused norm writes into its inputs)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="274" width="280" height="54" as="geometry"/></mxCell>
+        <mxCell id="b4" value="the peers get the value as it was handed and apply the same change themselves. Measured: the saved value equals the single-stage run" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="274" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="d4" value="the peers get the changed tensor and change it again. Measured: the saved layer output comes back at cosine 0.549 of the single-stage run, with no error" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="274" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="e4" value="copied at the same late point, but the saves are merged from every stage and the owning stage&apos;s copy is right, so this probe passes" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="274" width="330" height="54" as="geometry"/></mxCell>
+
+        <mxCell id="a5" value="What the owner holds" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="328" width="280" height="44" as="geometry"/></mxCell>
+        <mxCell id="b5" value="an outbound queue the sender drains at once" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="328" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="d5" value="one entry per value until every peer has taken it, with a countdown per entry" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="328" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="e5" value="a publish buffer keyed by location, occurrence and request, with its own lifetime rules" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="328" width="330" height="44" as="geometry"/></mxCell>
+
+        <mxCell id="a6" value="What the reader holds" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="372" width="280" height="44" as="geometry"/></mxCell>
+        <mxCell id="b6" value="an inbox: request and worker, then location, then arrival order" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="372" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="d6" value="nothing" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="372" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="e6" value="the proxy, and the pulled value once it is used" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="372" width="330" height="44" as="geometry"/></mxCell>
+
+        <mxCell id="a7" value="A value the block only saves and never uses" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="416" width="280" height="54" as="geometry"/></mxCell>
+        <mxCell id="b7" value="not sent: the reader binds a marker, the owner saves its copy, the marker is filled at collect" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="416" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="d7" value="sent like any other read" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="416" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="e7" value="not sent: the proxy is never dereferenced, which is what the proxy was for" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="416" width="330" height="54" as="geometry"/></mxCell>
+
+        <mxCell id="a8" value="tracer.cache() observations" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="470" width="280" height="44" as="geometry"/></mxCell>
+        <mxCell id="b8" value="not sent: each stage's cache keeps its own modules, unioned by path at collect" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="470" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="d8" value="sent, one message per observation" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="470" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="e8" value="sent, one message per observation" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="470" width="330" height="44" as="geometry"/></mxCell>
+
+        <mxCell id="a9" value="param() and calling another stage's module" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="514" width="280" height="54" as="geometry"/></mxCell>
+        <mxCell id="b9" value="request and reply, answered off the forward. The head is fetched at load and kept; everything else lives while the requests that used it run" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="514" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="d9" value="request and reply; whatever is fetched is kept for the life of the engine" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="514" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="e9" value="request and reply, once per trace: a 14B head costs 3 seconds every trace" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="514" width="330" height="54" as="geometry"/></mxCell>
+
+        <mxCell id="a10" value="Where the request's saved values come from" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="568" width="280" height="54" as="geometry"/></mxCell>
+        <mxCell id="b10" value="every stage reports; the last stage's copy of the block wins, since it is the one that always runs to the end" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="568" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="d10" value="the first stage only, which has pulled everything it read" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="568" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="e10" value="every stage, merged by name with sentinels for the slots a stage did not fill" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="568" width="330" height="54" as="geometry"/></mxCell>
+
+        <mxCell id="a11" value="What keeps the stages in step" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="622" width="280" height="54" as="geometry"/></mxCell>
+        <mxCell id="b11" value="a count of the rounds each stage has run, and one small marker per round on the wire so a wait for a value that will never come ends" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="622" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="d11" value="the same round count; a refusal is sent when the owner is asked for a round it has finished" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="622" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="e11" value="two round clocks per stage pair, a gate location inserted into every iteration, and a drain barrier" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="622" width="330" height="54" as="geometry"/></mxCell>
+
+        <mxCell id="a12" value="What it needs from nnsight's core" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="676" width="280" height="54" as="geometry"/></mxCell>
+        <mxCell id="b12" value="two calls around one hand-over of a value to the block, and the block line each read came from" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="676" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="d12" value="one call after the hand-over" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="676" width="330" height="54" as="geometry"/></mxCell>
+        <mxCell id="e12" value="a hook inside the request path, a gate inside the iteration construct, and a C extension that swaps thread-local state" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="676" width="330" height="54" as="geometry"/></mxCell>
+
+        <mxCell id="a13" value="Source added over dev a8ee9378" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;fontStyle=1;fontSize=11;" vertex="1" parent="c1"><mxGeometry x="40" y="730" width="280" height="44" as="geometry"/></mxCell>
+        <mxCell id="b13" value="1,761 lines, 13 files" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="320" y="730" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="d13" value="1,315 lines, 11 files, without the save rule and the per-request lifetimes" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="650" y="730" width="330" height="44" as="geometry"/></mxCell>
+        <mxCell id="e13" value="3,034 lines, 17 files" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=10;" vertex="1" parent="c1"><mxGeometry x="980" y="730" width="330" height="44" as="geometry"/></mxCell>
+
+        <mxCell id="cfoot" value="Every row was read off the code, and every number in it measured. The row that decides correctness is the fourth: a block that reads a layer and then calls a norm that writes into its input. On Qwen2.5-0.5B at two stages, push and lazy return what one stage returns and eager returns a different tensor with no error. GPT-2 does not show it, since its norm is out of place." style="text;html=1;fontSize=11;align=left;whiteSpace=wrap;" vertex="1" parent="c1">
+          <mxGeometry x="40" y="786" width="1270" height="34" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram id="push" name="push">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900">
+      <root>
+        <mxCell id="p0"/>
+        <mxCell id="p1" parent="p0"/>
+
+        <mxCell id="ptitle" value="Push: the owner sends a value as it hands it to its own copy of the block" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="p1">
+          <mxGeometry x="40" y="18" width="900" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="psub" value="Numbers follow one value: stage 1's block reads layer 2, which stage 0 holds. The same path carries stage 1's layers, its logits and its sampled ids the other way." style="text;html=1;fontSize=11;align=left;whiteSpace=wrap;" vertex="1" parent="p1">
+          <mxGeometry x="40" y="44" width="1000" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ps0" value="Stage 0 — layers 0 to 11 and the embeddings" style="swimlane;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="p1">
+          <mxGeometry x="40" y="76" width="620" height="700" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_fwd" value="forward thread&#xa;the module controller reaches layer 2 and offers the value" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="ps0">
+          <mxGeometry x="20" y="50" width="270" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_serving" value="1. serving()&#xa;copy the value to the host now, before the block runs on it&#xa;skipped when the block only saves this read" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="ps0">
+          <mxGeometry x="20" y="150" width="270" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_worker" value="2. the block is resumed with the value&#xa;it may change it in place; the copy above is already taken" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="ps0">
+          <mxGeometry x="330" y="50" width="270" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_served" value="3. served()&#xa;the block has parked again: note which round it is at, answer what it asks next" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="ps0">
+          <mxGeometry x="330" y="160" width="270" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_queue" value="outbound queue, one per peer" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ps0">
+          <mxGeometry x="30" y="270" width="250" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_sender" value="4. sender thread&#xa;takes everything queued, pickles the envelope with the tensors as raw bytes, sends one header and one blob" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="ps0">
+          <mxGeometry x="20" y="370" width="270" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_after" value="after the forward, a stage before the last closes its step: snapshot the saved names, count the round, send the round marker" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="ps0">
+          <mxGeometry x="330" y="270" width="270" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_shell" value="shells for layers 12 to 23, the norm and the head&#xa;a read parks like a local one; a write is absorbed, the owner runs the same line&#xa;param() and a call ask the owner over the wire" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;dashed=1;fontSize=11;" vertex="1" parent="ps0">
+          <mxGeometry x="330" y="390" width="270" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_inbox" value="inbox: request and worker, then location, in arrival order" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ps0">
+          <mxGeometry x="30" y="500" width="250" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps0_note" value="The other direction: stage 0's block reads layer 20, which stage 1 holds, and parks. Stage 1 runs that layer a step later, so stage 0 takes the value at the start of its next step. In the request's last round there is no next step, and the value is not taken here at all: stage 1's copy of the block has it and that copy is where the saved values come from." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="ps0">
+          <mxGeometry x="20" y="600" width="580" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ps1" value="Stage 1 — layers 12 to 23, the norm, the head and the sampler" style="swimlane;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="p1">
+          <mxGeometry x="700" y="76" width="620" height="700" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps1_recv" value="5. receive thread&#xa;a value goes into the inbox; a round marker records how far the peer has got; a refusal ends a wait; a parameter request is answered off the forward" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="ps1">
+          <mxGeometry x="20" y="50" width="280" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps1_inbox" value="inbox" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ps1">
+          <mxGeometry x="340" y="60" width="250" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps1_worker" value="6. the block reads layer 2 and parks&#xa;the k-th read of a location takes the k-th value filed for it: both stages read in the same order" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="ps1">
+          <mxGeometry x="340" y="190" width="250" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps1_take" value="7. taken in place, inside stage 1's own forward&#xa;an earlier stage finished this round before this one started it, so the value is there or moments away" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="ps1">
+          <mxGeometry x="20" y="190" width="280" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps1_serve" value="at the start of each step: resume any worker whose value has been produced since" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="ps1">
+          <mxGeometry x="20" y="320" width="280" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps1_sample" value="the last stage samples: logits and sampled ids are served to the block and pushed the same way, then the step closes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="ps1">
+          <mxGeometry x="340" y="320" width="250" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps1_shell" value="shells for layers 0 to 11 and the embeddings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;dashed=1;fontSize=11;" vertex="1" parent="ps1">
+          <mxGeometry x="340" y="420" width="250" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps1_collect" value="8. collect, at the end of the request&#xa;every stage reports what its block saved. The last stage's copy wins; a marker in it, left by a read the block only saved, is filled from the stage that holds that module; the stages' caches are unioned by module path. Nothing here resumes a block, so it is safe on the thread Ray's executor calls it from." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="ps1">
+          <mxGeometry x="20" y="500" width="570" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps1_note" value="Weights: the head is fetched onto every stage once at load, before vLLM measures memory. Any other parameter or module state is fetched when a block first asks and dropped when the last request using it finishes. A call runs the owner's state through the local copy of the module without touching that copy." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="ps1">
+          <mxGeometry x="20" y="620" width="570" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="pe1" style="endArrow=classic;html=1;" edge="1" parent="ps0" source="ps0_fwd" target="ps0_serving"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pe2" style="endArrow=classic;html=1;" edge="1" parent="ps0" source="ps0_fwd" target="ps0_worker"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pe3" style="endArrow=classic;html=1;" edge="1" parent="ps0" source="ps0_serving" target="ps0_queue"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pe4" style="endArrow=classic;html=1;" edge="1" parent="ps0" source="ps0_queue" target="ps0_sender"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pe5" style="endArrow=classic;html=1;" edge="1" parent="ps0" source="ps0_worker" target="ps0_served"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pe6" style="endArrow=classic;html=1;dashed=1;" edge="1" parent="ps0" source="ps0_shell" target="ps0_inbox"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="pf1" style="endArrow=classic;html=1;" edge="1" parent="ps1" source="ps1_recv" target="ps1_inbox"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pf2" style="endArrow=classic;html=1;" edge="1" parent="ps1" source="ps1_inbox" target="ps1_take"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pf3" style="endArrow=classic;html=1;" edge="1" parent="ps1" source="ps1_take" target="ps1_worker"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="pf4" style="endArrow=classic;html=1;" edge="1" parent="ps1" source="ps1_serve" target="ps1_worker"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="px1" value="one message: the value, and whatever else was queued for this peer" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#9673a6;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=11;" edge="1" parent="p1" source="ps0_sender" target="ps1_recv"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="px2" value="vLLM's own pipeline: the hidden states, by NCCL, which nnsight does not touch" style="endArrow=classic;html=1;dashed=1;strokeColor=#666666;exitX=1;exitY=0.2;entryX=0;entryY=0.1;fontSize=11;" edge="1" parent="p1" source="ps0_fwd" target="ps1_worker"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram id="eager" name="eager pull">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="760">
+      <root>
+        <mxCell id="g0"/>
+        <mxCell id="g1" parent="g0"/>
+
+        <mxCell id="gtitle" value="Eager pull: the owner files what it served; the reader asks for it and waits" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="g1">
+          <mxGeometry x="40" y="18" width="900" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="gsub" value="The same value as on the push page: stage 1's block reads layer 2, which stage 0 holds. Built as the control for the comparison, and left where it was." style="text;html=1;fontSize=11;align=left;whiteSpace=wrap;" vertex="1" parent="g1">
+          <mxGeometry x="40" y="44" width="1000" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="gs0" value="Stage 0 — the owner of layer 2" style="swimlane;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="g1">
+          <mxGeometry x="40" y="76" width="620" height="560" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs0_fwd" value="forward thread reaches layer 2 and serves the value to its own block" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="gs0">
+          <mxGeometry x="20" y="50" width="270" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs0_worker" value="1. the block runs on the value, on to its next read" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="gs0">
+          <mxGeometry x="330" y="50" width="270" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs0_served" value="2. served()&#xa;only now is the value copied to the host and filed, so a change the block made in place is in the copy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="gs0">
+          <mxGeometry x="330" y="150" width="270" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs0_file" value="serving buffer&#xa;one entry per value, with a countdown of the peers that have still to take it" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="gs0">
+          <mxGeometry x="30" y="160" width="260" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs0_listen" value="4. receive thread&#xa;answers the request from the buffer, or refuses when the round it names is already finished here, or holds the request until the value is filed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="gs0">
+          <mxGeometry x="20" y="290" width="580" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs0_note" value="Every value the block reads is filed, whether or not another stage will ask for it, and an entry is dropped when every peer has taken it or when the request ends. One receive thread answers every peer, so a burst of reads is served one at a time: on the twelve-layer read that is where the extra time over push goes." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="gs0">
+          <mxGeometry x="20" y="400" width="580" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs0_note2" value="Saved values go home from stage 0 alone, which has pulled everything its block read." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="gs0">
+          <mxGeometry x="20" y="480" width="580" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="gs1" value="Stage 1 — the reader" style="swimlane;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="g1">
+          <mxGeometry x="700" y="76" width="620" height="560" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs1_worker" value="3. the block reads layer 2 and parks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="gs1">
+          <mxGeometry x="330" y="50" width="250" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs1_ask" value="the forward thread sends a request naming the request, the worker, the location and the round, then blocks on the reply" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="gs1">
+          <mxGeometry x="20" y="50" width="280" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs1_reply" value="5. the reply arrives and the block is resumed&#xa;nothing is kept: the next read of the same location asks again" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="gs1">
+          <mxGeometry x="20" y="180" width="280" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs1_shell" value="shells, as on the push page" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;dashed=1;fontSize=11;" vertex="1" parent="gs1">
+          <mxGeometry x="330" y="180" width="250" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs1_note" value="A read of a later stage's value still waits for that stage's next step, as it does under push: the pipeline's own boundary, not the transport's. What differs is the round trip per value and the buffer the owner has to keep." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="gs1">
+          <mxGeometry x="20" y="300" width="560" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="gs1_note2" value="At the end of a request the reader takes the cache observations it is owed, and a worker still parked on the last round's value is resumed at collect, on whatever thread collect runs on." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="gs1">
+          <mxGeometry x="20" y="390" width="560" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="gx1" value="request" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#9673a6;exitX=0;exitY=0.4;entryX=1;entryY=0.3;fontSize=11;" edge="1" parent="g1" source="gs1_ask" target="gs0_listen"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="gx2" value="reply, carrying the value" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#9673a6;exitX=1;exitY=0.7;entryX=0;entryY=0.7;fontSize=11;" edge="1" parent="g1" source="gs0_listen" target="gs1_reply"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ge1" style="endArrow=classic;html=1;" edge="1" parent="gs0" source="gs0_fwd" target="gs0_worker"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ge2" style="endArrow=classic;html=1;" edge="1" parent="gs0" source="gs0_worker" target="gs0_served"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ge3" style="endArrow=classic;html=1;" edge="1" parent="gs0" source="gs0_served" target="gs0_file"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ge4" style="endArrow=classic;html=1;" edge="1" parent="gs0" source="gs0_file" target="gs0_listen"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="gf1" style="endArrow=classic;html=1;" edge="1" parent="gs1" source="gs1_worker" target="gs1_ask"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="gf2" style="endArrow=classic;html=1;" edge="1" parent="gs1" source="gs1_reply" target="gs1_worker"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram id="lazy" name="lazy pull">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="760">
+      <root>
+        <mxCell id="l0"/>
+        <mxCell id="l1" parent="l0"/>
+
+        <mxCell id="ltitle" value="Lazy pull: the read returns a proxy, and the value crosses only if the block uses it" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="l1">
+          <mxGeometry x="40" y="18" width="900" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="lsub" value="The branch the other two replace. Its one saving, that an unused value never moves, is the idea the push branch keeps by deciding the same thing from the block's source instead of at runtime." style="text;html=1;fontSize=11;align=left;whiteSpace=wrap;" vertex="1" parent="l1">
+          <mxGeometry x="40" y="44" width="1050" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ls0" value="Stage 0 — the owner of layer 2" style="swimlane;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="l1">
+          <mxGeometry x="40" y="76" width="620" height="560" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls0_fwd" value="forward thread reaches layer 2, serves every worker parked there, then finishes the visit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="ls0">
+          <mxGeometry x="20" y="50" width="270" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls0_pub" value="1. publish, after the visit&#xa;one host copy per request, keyed by location, occurrence and request; later than either other design, so an in-place change is in the copy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="ls0">
+          <mxGeometry x="330" y="50" width="270" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls0_buf" value="publish buffer" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ls0">
+          <mxGeometry x="30" y="170" width="260" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls0_listen" value="3. listener thread&#xa;answers a pull from the buffer, parks the pull when the value has not been published yet, and dispatches it when it is" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="ls0">
+          <mxGeometry x="20" y="270" width="580" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls0_extra" value="Around this sit the parts the other two designs do without: two round clocks per stage pair, a gate location inserted into every iteration of a loop so the stages cannot drift, a drain barrier at the end of a request, and a C extension that swaps thread-local state so a pull can run while the block is suspended." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="ls0">
+          <mxGeometry x="20" y="380" width="580" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls0_note" value="Saved values come home from every stage and are merged by name, with a sentinel marking a slot a stage did not fill." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="ls0">
+          <mxGeometry x="20" y="470" width="580" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ls1" value="Stage 1 — the reader" style="swimlane;horizontal=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="l1">
+          <mxGeometry x="700" y="76" width="620" height="560" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls1_read" value="2. the block reads layer 2&#xa;it is handed a proxy at once and runs on" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="ls1">
+          <mxGeometry x="20" y="50" width="280" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls1_proxy" value="the proxy stands in for a tensor everywhere torch dispatches&#xa;saved and never used: nothing crosses&#xa;used: it pulls, and the block waits there" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="ls1">
+          <mxGeometry x="330" y="50" width="270" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls1_pull" value="4. the pull: a request and a reply, the value placed on this stage's device" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="ls1">
+          <mxGeometry x="20" y="180" width="280" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls1_cost" value="What the proxy costs: it has to behave like a tensor under every operation the block might apply, and where it does not the failure is obscure. A read of a later stage's value can also be answered out of the forward's order, which is what the other two designs gave up to keep the single-GPU rule." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="ls1">
+          <mxGeometry x="20" y="290" width="580" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ls1_fail" value="Measured limits: a per-step read of the logits ends the run with an out-of-order error from the owning stage, and a parameter is fetched once per trace, which on a 14B head is three seconds each time." style="text;html=1;whiteSpace=wrap;fontSize=11;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="ls1">
+          <mxGeometry x="20" y="390" width="580" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="lx1" value="pull, on first use" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#9673a6;exitX=0;exitY=0.4;entryX=1;entryY=0.3;fontSize=11;" edge="1" parent="l1" source="ls1_pull" target="ls0_listen"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="lx2" value="reply" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#9673a6;exitX=1;exitY=0.7;entryX=0;entryY=0.8;fontSize=11;" edge="1" parent="l1" source="ls0_listen" target="ls1_pull"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="le1" style="endArrow=classic;html=1;" edge="1" parent="ls0" source="ls0_fwd" target="ls0_pub"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="le2" style="endArrow=classic;html=1;" edge="1" parent="ls0" source="ls0_pub" target="ls0_buf"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="le3" style="endArrow=classic;html=1;" edge="1" parent="ls0" source="ls0_buf" target="ls0_listen"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="lf1" style="endArrow=classic;html=1;" edge="1" parent="ls1" source="ls1_read" target="ls1_proxy"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="lf2" style="endArrow=classic;html=1;" edge="1" parent="ls1" source="ls1_proxy" target="ls1_pull"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+</mxfile>

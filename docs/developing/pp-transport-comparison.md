@@ -1,44 +1,81 @@
 # Pipeline parallelism: push, eager pull, and the lazy branch
 
-Two transports for the value a block reads from a module another pipeline
-stage holds, built from scratch on dev `a8ee9378` and sharing everything else
-(shells for the modules a stage does not hold, the ownership map, the
-`Interleaver.served` seam, the runner wiring, the test suite). `pp-push`
-sends a value to every other stage as the owner serves it to its own copy of
-the block (`docs/developing/pp-push-design.md`); `pp-eager` files it on the
-owner and a reader asks for it once the owner has produced it
-(`docs/developing/pp-eager-design.md`). Both are measured against the branch
-they replace, `pp-on-08` at `02e77669`, whose reads return a lazy proxy that
-pulls on first use over a request/reply protocol (called "lazy" below). This
-note is the measurement.
+Three ways to carry the value a block reads from a module another pipeline
+stage holds. `pp-push` sends a value to every other stage as the owner hands
+it to its own copy of the block (`docs/developing/pp-push-design.md`);
+`pp-eager` files it on the owner and a reader asks for it once the owner has
+produced it (`docs/developing/pp-eager-design.md`); `pp-on-08` at `02e77669`,
+the branch the other two replace, returns a proxy that pulls the first time
+the block uses the value ("lazy" below). The two new ones were built from
+scratch on dev `a8ee9378` and share everything around the transport: the
+shells for modules a stage does not hold, the ownership map, the runner
+wiring and the test suite. `docs/developing/diagrams/pp-transports.drawio`
+draws all three and puts their differences on one page.
 
-## Correctness: the same suites, both green
+This note is the measurement. Read the correctness section first: the three
+are no longer equivalent there.
+
+## Correctness
+
+### The suites
 
 | suite | push | eager |
 |---|---|---|
-| two-rank gloo harness, codec, shells, ownership (CPU) | 39 | 36 |
-| core suite, non-vLLM (CPU) | 894 | 894 |
-| single-rank vLLM tracing, requests, registration (1 GPU) | 119 | 119 |
-| engine behaviors, Qwen2.5-0.5B PP=2 | 20 | 20 |
-| parity and topology: PP=1 reference, PP=2, PP=3, TP=2 x PP=2 | 18 | 18 |
+| two-rank gloo harness, codec, shells, ownership, the save rule (CPU) | 146 | 36 |
+| single-rank vLLM tracing, requests, registration (1 GPU) | 122 | 119 |
+| engine behaviors, Qwen2.5-0.5B PP=2 | 26 | 20 |
+| the same over Ray's executor, PP=2 | 3 | none |
+| parity, topology and architectures: PP=1 reference, PP=2, PP=3, TP=2 x PP=2 | 23 | 18 |
 
-The harness counts differ because each branch tests its own wire (a held
-request has no push counterpart; an error item has no pull counterpart).
+Push's counts are the larger ones because the suite grew with the branch:
+the save rule, the Ray file and the architectures are new since the eager
+branch was measured. The eager column is that branch as it stands, unchanged
+since the comparison was first written.
+
+### A value the block changes in place
+
+A block that reads a layer and then calls the model's own final norm on it
+is ordinary (it is how a logit lens is written), and on a Qwen-family model
+that norm writes into its input. The three transports do not agree on what
+the other stage then holds.
+
+The probe: read layer 20, keep a copy of it, call `model.model.norm` on it,
+save both. Qwen2.5-0.5B, one stage against two, the saved values compared.
+
+| | the saved layer output, two stages vs one |
+|---|---|
+| push | equal |
+| lazy | equal |
+| eager | cosine 0.549, and bit-identical to the tensor *after* the norm ran |
+
+Eager returns the normalized tensor to a caller who asked for the layer
+output, with no error. The cause is the point at which the owner copies a
+value for its peers: eager copies it in the seam that fires after its own
+block has run on, by which time the norm has overwritten it. Push copied at
+the same late point until `54e43fd2`, where the copy moved to just before the
+block is resumed; the topology suite caught it at cosine 0.976 and the probe
+above is what the move fixed. Lazy copies late as well and passes this probe
+for a different reason: it merges saved values from every stage, and the
+stage that owns the layer saved a correct copy of its own.
+
+GPT-2 does not show any of this, since its final norm is an ordinary
+`LayerNorm` that returns a new tensor. Every GPT-2 bench pass below therefore
+agrees across the three.
 
 ## Size
 
-Source delta against dev, `src/` only, 11 files each:
+Source delta against dev `a8ee9378`, `src/` only:
 
-| | push | eager |
-|---|---|---|
-| lines added | 1,304 | 1,321 |
-| transport file | 341 | 371 |
-| interleaver file | 211 | 199 |
+| | push | eager | lazy |
+|---|---|---|---|
+| lines added | 1,761 | 1,315 | 3,034 |
+| files touched | 13 | 11 | 17 |
 
-Shared between them: ownership map and meta tree (227), shells (221), the
-`param()` seam (30 in core, 75 in the vLLM envoys, 16 in the transformers
-envoys), the runner (157), the core seam (31). pp-on-08's delta for the same
-feature set was about 3,084 lines.
+Push is the largest of the two new ones now, and it was the smaller one when
+the comparison was written. The 450 lines it has gained since are the rule
+that decides which reads never have to cross, the per-request lifetime of a
+fetched weight, and the collect that works on the thread Ray's executor calls
+it from. Eager has none of those and would grow by about as much to get them.
 
 ## Synthetic scan
 
@@ -100,7 +137,7 @@ lazy's cost. That was contention on the shared GPUs: the same shape on an idle
 pair, instrumented, gave 52.7 ms against 153, with the per-value costs above.
 Every number here is from the idle pair.
 
-### Saved values that the block never uses, measured on a 14B model
+### Saved values that the block never uses, and the weights, on a 14B model
 
 Since `f652c446`, a value that the block reads from a module on the other
 stage and does nothing with but `.save()` is not sent between the stages
@@ -156,7 +193,58 @@ What the table says:
   3.2 s against 3.8 for 128 tokens): the two stages' forwards overlap under
   vLLM's async scheduling, as measured at 0.5B.
 
+The head's weight is the other 14B measurement. A block that reads it through
+`param("weight")` and multiplies by it, at two stages, takes 59 and 64 ms on
+its second and third trace, where fetching the head per trace cost 3.1 s: the
+copy every stage takes at load is what removes that. Saving the head instead
+of only reading it costs tens of seconds, because 1.45 GiB is then pickled and
+carried to the client; sending it from every stage made that worse, and an
+earlier stage now sends its saves only when the last stage's copy needs them
+(`a439176a`).
+
 ## The nnbench pass
+
+### All three in one run
+
+The five interp-workload specs that cross stages most, with all three
+transports and a single-stage baseline in one run on one GPU pair, so the
+columns are comparable to each other (`runs/pp-compare4`, GPT-2, GPUs 2 and
+3, the push image rebuilt from `54e43fd2`). The machine carried another
+user's jobs throughout, at load average 50 to 400, so read the ordering
+rather than the absolute numbers. Median latency in ms.
+
+| workload and cell | HF reference | push, one stage | push, PP=2 | eager, PP=2 | lazy, PP=2 |
+|---|---|---|---|---|---|
+| weight lens, batched | 48 | 723 | 778 | 1,150 | 1,150 |
+| weight lens, interactive | 14 | 33 | 76 | 112 | 65 |
+| jacobian lens, identity readout | 14 | 30 | 45 | 63 | 51 |
+| jacobian lens, seeded orthogonal | 815 | 962 | 101 | 124 | 112 |
+| steering, batched, in place | 15 | 567 | 618 | 638 | 779 |
+| steering, batched, replace | 16 | 569 | 637 | 715 | 764 |
+| steering, interactive, in place | 12 | 24 | 30 | 33 | 39 |
+| steering, interactive, replace | 11 | 34 | 28 | 37 | 51 |
+| DAS, apply a rotation | 2,732 | 2,861 | 2,305 | 2,265 | 1,730 |
+| steering under generation, bounded loop | 163 | 174 | 263 | 252 | 190 |
+| steering under generation, open loop | 160 | 175 | 238 | 251 | 194 |
+
+Every backend's verdict on every cell equals the single-stage verdict: 40
+cells supported, 12 errors and 4 marked silently wrong, and each of those is
+the same on one stage as on two, so none of them is the transport's doing.
+The errors are the ones recorded before (the head module's sampler guard, no
+autograd on vLLM inference tensors); the DAS rotation is marked wrong on the
+single-stage engine too.
+
+The cells that read every layer keep the ordering the earlier passes found:
+the batched weight lens costs 778 ms on push against 1,150 on eager and on
+lazy, the interactive one 76 against 112 and 65, the identity jacobian lens
+45 against 63 and 51. Where a trace crosses once per invoke the three are
+within their spread. Generation is the one place lazy leads (190 and 194 ms
+against push's 263 and 238), which is where its unconsumed reads pay off.
+
+GPT-2's final norm returns a new tensor, so the correctness difference in the
+section above cannot appear in any of these cells.
+
+### The earlier passes, one branch at a time
 
 The interp-workload benchmark's GPT-2 specs, three backends per branch: the
 transformers reference (`nnsight-hf`), the branch's vLLM engine in sync mode on
@@ -295,46 +383,59 @@ through the pass and vLLM's memory profiler refused to build the engine.
 
 Push.
 
-- **Correctness is the same across the three.** Push, eager and lazy pass
-  the same engine suites and give the same verdict as the single-stage engine
-  on every bench cell, on GPT-2 and on the 14B model. One shape the lazy
-  branch cannot run at all: a `tracer.iter` body that reads the last stage's
-  logits every step fails on the owning stage with its own out-of-order error.
-- **Where the workload crosses stages once, all three cost the same.** The
-  synthetic scan's single-read shapes and the single-read bench cells are
-  within noise.
-- **Where it crosses many times, push and lazy cost the same and eager
-  more:** twelve late-layer reads add about 20 ms on push and lazy and 35 on
-  eager; the batched weight lens costs 567, 781 and 807 ms; the interactive
-  one 50, 57 and 61. A pull is a request and a reply per value per worker
-  through the owner's receive thread; a push is one message the owner sends
-  as it serves, and nothing waits on a round trip. Lazy's one saving, that an
-  unconsumed save ships nothing, is worth 10 ms on the save-all shape and
-  nothing on the bench, whose saved values go to the client anyway.
-- **Push is the smallest.** Push carries an outbound queue and a per-worker
-  inbox; eager a serving buffer whose entries live until every peer has asked,
-  held requests and a release message per request; lazy a proxy type with
-  its own tensor semantics, a request/reply listener with pools, a C
-  extension to park inside torch's dispatcher, round clocks and a sentinel
-  merge, at 3,084 source lines against push's 1,304, and it fetches a
-  parameter again on every trace.
+- **Only push returns the right value when the block changes a value in
+  place.** The probe in the correctness section reads a layer and calls the
+  model's own norm on it, which is how a lens is written; on eager the saved
+  layer output comes back as the normalized tensor, at cosine 0.549 of the
+  single-stage run and with no error. Push copies a value for its peers
+  before its own block can touch it, which is the only point at which the
+  copy is what the block was handed. Lazy passes that probe because it merges
+  saves from every stage, but it copies at the same late point.
+- **Where a trace crosses stages once, the three cost the same.** The
+  synthetic scan's single-read shapes and the bench's interactive steering,
+  patching and ablation cells are within their spread.
+- **Where it crosses many times, push is the fastest.** The batched weight
+  lens costs 778 ms on push against 1,150 on eager and lazy; the interactive
+  one 76 against 112 and 65; twelve late-layer reads add about 20 ms on push
+  and lazy and 35 on eager. A pull is a request and a reply per value through
+  the owner's one receive thread; a push is one message the owner sends as it
+  serves.
+- **Push is the only one that does not send a value the block never uses.**
+  It decides that from the block's source before the run, where lazy decides
+  it at runtime with a proxy and eager does not decide it at all: saving all
+  48 layers of the 14B model costs 2 ms over one stage on push and 70 ms
+  when the same code sends them.
+- **Push keeps the least.** An outbound queue and a per-worker inbox, against
+  eager's serving buffer with a countdown per entry, and lazy's proxy type,
+  listener pools, round clocks, iteration gate, C extension and sentinel
+  merge at 3,034 source lines. Weights are the other half of keeping: push
+  fetches the head once at load and drops everything else when the requests
+  that used it end; eager keeps whatever it fetched for the life of the
+  engine; lazy fetches again on every trace, which on a 14B head is three
+  seconds each time.
 
 `pp-push` is the branch to continue on. `pp-eager` stays as the record of the
-control; `pp-on-08` as the record of what was replaced.
+control; `pp-on-08` as the record of what was replaced. Neither is worth
+fixing for the in-place defect unless one of them is to be used.
 
-## What both branches still owe
+## What push still owes
 
-- **The per-value cost** is about 1.5 ms on push at the 0.5B size (host copy
-  0.08 ms, take 0.15 ms, the wire under 0.5 ms in a burst), and 12 to 20 ms
-  per cell on the 14B model. What is left is the pipeline's own step
-  boundary; an NCCL side stream would shave the host round trip, which is
-  now the smaller part.
-- **The per-step logits read** adds about 16 ms per token on both: the first
-  stage waits at each step start for a value the last stage produces at
-  sampling. Since `f652c446` on push, a value the block only saves is not
-  sent during the run and the first stage does not wait for it; a value the
-  block uses still waits. Sending the sampled ids or the logits earlier in
-  the step would remove that wait too.
-- **Tensor parallel inside a stage and PP=3** already pass the topology
-  tests on both branches (column peers, fan-out); the Ray executor's collect
-  thread and `.source` of a shell remain as recorded in the design notes.
+- **A saved value still travels home whole.** Saving the 14B head costs tens
+  of seconds because 1.45 GiB is pickled and carried to the client. An
+  earlier stage now sends its saves only when the last stage's copy needs
+  them, which halves that traffic at two stages, but nothing shrinks the
+  value itself.
+- **The per-value cost** is about 1.5 ms at the 0.5B size (host copy 0.08 ms,
+  take 0.15 ms, the wire under 0.5 ms in a burst). A fetch over gloo moves
+  about 1 GB/s on one machine: one socket stream through host memory, with a
+  page-faulting copy at each end. A GPU-to-GPU transfer for the head's one
+  fetch at load is the change to make if that matters.
+- **A consumed read of a later stage still waits** for that stage's next
+  step, about 16 ms per token at 0.5B and 10 to 25 ms per read at 14B. That
+  is the pipeline's own boundary. Sending the sampled ids or the logits
+  earlier in the step would remove it for the logits case.
+- **Data parallelism is derived but not run.** The link's groups come from
+  each rank's own pipeline group, which is right for every replica, and no
+  data-parallel engine has been started to confirm it.
+- **`.source` of a shell** resolves no operation, as recorded in the design
+  note.

@@ -2,7 +2,9 @@
 
 How a block written against the whole model runs on a vLLM engine whose layers
 are split across pipeline stages, on the `pp-push` branch. This note is the
-design; the code follows it.
+design; the code follows it. `diagrams/pp-transports.drawio` draws the data
+path on its "push" page, and compares it with the other two transports on the
+first.
 
 ## The two facts the design rests on
 
