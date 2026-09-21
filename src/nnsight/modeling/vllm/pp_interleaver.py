@@ -85,7 +85,14 @@ class PPInterleaver(VLLMInterleaver):
         the block only saves (`_save_only`) is not pushed: the peers bound a
         marker for it, and this stage's saved copy fills it at collect.
         """
-        if self.owner(provider) is None and self.link.peers and not self._save_only(mediator, line):
+        if self.owner(provider) is not None:
+            return
+        if self._save_only(mediator, line):
+            # The peers bound a marker for this read and will need this stage's
+            # saved copy to fill it, so this worker's saves have to go home from
+            # here as well as from the last stage (see the runner's collect).
+            mediator.pp_fills = True
+        elif self.link.peers:
             self.link.publish(VALUE, *self._key(mediator), provider, to_host(value))
 
     def served(
@@ -101,9 +108,11 @@ class PPInterleaver(VLLMInterleaver):
 
         A cache observation (``selected``) is not pushed: each stage's cache
         keeps what its own modules produced, and the caches are unioned at
-        collect.
+        collect, so this stage's saves have to go home for that too.
         """
         if selected is not None:
+            if self.owner(provider) is None:
+                mediator.pp_fills = True
             return
         if self.owner(provider) is None:
             # A local visit is served in the round being run, so that is the

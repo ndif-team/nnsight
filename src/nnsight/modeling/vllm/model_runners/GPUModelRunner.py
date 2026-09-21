@@ -233,6 +233,9 @@ class Requests:
                 mediator.pp_ordinal = ordinal
                 mediator.pp_announced = False
                 mediator.pp_step = 0
+                # Whether this stage served a read the block only saves, and so
+                # holds a value the other stages left a marker for.
+                mediator.pp_fills = False
 
     def refuse_chunked(self, spans: list[tuple[str, int]], states: dict) -> None:
         """Give a request whose prompt this step only partly prefills its error, not a worker.
@@ -669,6 +672,19 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if isinstance(module, ParallelLMHead) and isinstance(local.get(name), RemoteShell):
                 local[name]._fetch(f"{root}.{name}{PARAM_MARK}weight")
 
+    def _reports_saves(self, mediator: Any) -> bool:
+        """Whether this stage's copy of the block has to send its saved values home.
+
+        The last stage always does: its copy runs to the end, and the engine
+        keeps its value of every name. An earlier stage's copy is wanted only
+        for the markers in that one, which stand for reads the block only saves
+        of modules this stage holds; a stage that served none of those can add
+        nothing, and sending its saves anyway means pickling every saved tensor
+        a second time and carrying it to the engine, which for a saved 14B head
+        is 1.45 GiB and tens of seconds.
+        """
+        return not self.nnsight_pp or get_pp_group().is_last_rank or bool(mediator.pp_fills)
+
     def _parked_on_later_stage(self, mediator: Any) -> bool:
         """Whether a finished request's worker is parked on a later stage's
         value. On a stage before the last that is the ordinary end of a block
@@ -994,7 +1010,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # Still parked when its request finished: waiting on a
                     # location the model never reached — its deferred error.
                     requests.finish_dangling(mediator, taps, quiet=self._parked_on_later_stage(mediator))
-                values = request.saves()
+                values = request.saves() if self._reports_saves(mediator) else {}
                 sequence["saves"] = values
                 if done:
                     # Drop this request's saved values from the thread-local set
