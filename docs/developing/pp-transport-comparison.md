@@ -244,6 +244,63 @@ against push's 263 and 238), which is where its unconsumed reads pay off.
 GPT-2's final norm returns a new tensor, so the correctness difference in the
 section above cannot appear in any of these cells.
 
+### The HF column against the vLLM columns
+
+The `nnsight-hf` column runs transformers in the process that runs the block;
+the vLLM columns run an engine whose core is another process. Read against
+each other they mix nnsight's integration cost with four mismatches, each
+priced on its own on GPT-2 (`runs/aligned-columns`, and a probe that runs one
+cell per configuration, reading one block's output unless said otherwise;
+median ms):
+
+| mismatch | aligned by | size |
+|---|---|---|
+| engine core in its own process | `nnsight-vllm-push-sync-inproc` (`VLLM_ENABLE_V1_MULTIPROCESSING=0`) | 3.5 ms per trace (17.4 against 13.9); 8 ms across 16 requests in one trace with nothing read (24.7 against 16.4); about 1 ms per MB saved |
+| precision, HF fp32 against vLLM bf16 | `nnsight-hf-bf16` (`HFBackend` takes `dtype`), and vLLM run at fp32 | 0 on HF (10.9 against 11.8); 6 ms across 16 prompts on vLLM (100.5 against 93.9) |
+| library versions, torch 2.11 and transformers 5.12 against 2.10 and 5.5 | HF run inside the vLLM image | 0 (11.7 against 10.9) |
+| peak memory read in the client process | `Backend.peak`: read where the model lives, as growth over the timed trials | every vLLM cell read 1 to 21 MB; the interactive lens now reads 12 MB on both stacks, the batched one 145 against 571 |
+
+One mismatch cannot be aligned toward vLLM. HF's batched cell is one padded
+forward over the 16 prompts (12.7 ms as one invoke, 14.7 as 16 invokes);
+`model.trace([16 prompts])` on the vLLM sync engine raises `Multiple prompts
+per invoke are not supported`, since one invoke is one request by design, so
+vLLM's batched cell is 16 requests however it is written.
+
+With those aligned, what remains is the collect path, and the process
+boundary is the smaller part of it. A request whose block saved anything
+costs about 4 ms with the engine in the same process (bare 9.8, one read
+13.9, against HF's 10.9 either way): its saves are pickled in the worker and
+handed through `collective_rpc` wherever the engine is. The bytes cost more
+than the count. Sixteen prompts each saving what the batched lens saves, 12
+layers of last-token logits in fp32 (2.4 MB per prompt, 39 MB per call), take
+289 ms across the socket, 236 in-process and 43 on HF, against 94, 81 and 15
+when each saves one small tensor: about 4 ms per MB in-process, 5 across the
+socket. For the bench's batched weight lens, 625 ms against HF's 47, the probe
+accounts for about 420 of the 578 ms: 25 for the 16 request lifecycles, 69
+for their collects, 195 for the 39 MB saved, 128 for twelve reads per request
+(twelve reads in one trace cost 8 ms more than one). The rest, and the
+batched steering cells at 531 ms for 16 requests that each save one row of
+logits, is not attributed by these probes; cause not determined.
+
+The aligned bench columns, same GPU, verdicts identical between the two vLLM
+columns and HF bf16 supported on every cell against the fp32 oracle:
+
+| cell | HF fp32 | HF bf16 | vLLM, engine in its own process | vLLM, engine in-process |
+|---|---|---|---|---|
+| weight lens, interactive | 15 | 14 | 30 | 19 |
+| weight lens, batched | 47 | 38 | 625 | 605 |
+| steering, interactive, in place | 12 | 12 | 29 | 17 |
+| steering, interactive, replace | 12 | 12 | 30 | 16 |
+| steering, batched, in place | 17 | 15 | 531 | 510 |
+| steering, batched, replace | 16 | 15 | 535 | 516 |
+| steering under generation, bounded | 259 | 256 | 284 | 286 |
+| steering under generation, open | 246 | 239 | 278 | 270 |
+
+So the HF column is the oracle and what a local script costs, and a latency
+ratio against it is a ratio against a different shape unless read with the
+sizes above. None of this touches the transport comparison: push, eager and
+lazy share image, shape and precision.
+
 ### The earlier passes, one branch at a time
 
 The interp-workload benchmark's GPT-2 specs, three backends per branch: the
