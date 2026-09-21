@@ -503,6 +503,10 @@ class Mediator:
             line = self.line
             if pending.event is Event.VALUE:  # serve this worker only its rows
                 served = value if batcher is None else batcher.narrow(value, self.batch_group)
+                # What the worker is about to get, seen before it gets it: the
+                # block may change it in place before it parks again.
+                if self.interleaver is not None:
+                    self.interleaver.serving(self, provider, served, line=line)
                 self.pending = self.switch(served)
                 # The worker has what it asked for and has parked again; a
                 # runtime whose ranks each run this block hears about both.
@@ -878,6 +882,24 @@ class Interleaver:
         if stopped is not None:
             raise stopped
         return value
+
+    def serving(
+        self,
+        mediator: Mediator,
+        provider: str,
+        value: Any,
+        line: Optional[int] = None,
+    ) -> None:
+        """A worker's read at ``provider`` is about to be served ``value``.
+
+        Called by [`Mediator.handle`][nnsight.intervention.interleaver.Mediator.handle]
+        right before the worker is resumed with ``value`` (narrowed to its rows,
+        whole across a sharded model); ``line`` is the block line the read was
+        made from, when known. This is the moment ``value`` is what the worker
+        asked for: once resumed, the block may modify it in place before it
+        parks again, so a runtime that carries the value to other ranks copies
+        it here. Nothing here in the base.
+        """
 
     def served(
         self,

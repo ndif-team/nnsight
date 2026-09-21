@@ -43,7 +43,6 @@ _ALIGN = 64
 _TAG = 0
 
 VALUE = "value"  # a block's read, served on the owner
-CACHE = "cache"  # a cache's observation, recorded on the owner
 ERROR = "error"  # the owner's block failed, or never served this value
 ROUND = "round"  # the owner has run this many rounds of the request; earlier values are all sent
 REQUEST = "request"  # a parameter or state read, answered from the module
@@ -114,6 +113,46 @@ class RemoteError(RuntimeError):
     """A peer reported that a value will not come, and why."""
 
 
+class Kept:
+    """Values fetched from other stages and held on this one.
+
+    A value fetched while a request's block runs is held while any request
+    that used it runs and dropped when the last of them finishes
+    (`release`); a value fetched outside any request, the head at load, is
+    held for the engine's life.
+    """
+
+    def __init__(self) -> None:
+        self.values: dict[str, Any] = {}
+        self.users: dict[str, set] = {}
+        self.pinned: set = set()
+
+    def __contains__(self, provider: str) -> bool:
+        return provider in self.values
+
+    def get(self, provider: str, req: Optional[str]) -> Any:
+        """The kept value, now also used by ``req``."""
+        if req is not None and provider not in self.pinned:
+            self.users.setdefault(provider, set()).add(req)
+        return self.values[provider]
+
+    def put(self, provider: str, value: Any, req: Optional[str]) -> None:
+        self.values[provider] = value
+        if req is None:
+            self.pinned.add(provider)
+            self.users.pop(provider, None)
+        else:
+            self.users.setdefault(provider, set()).add(req)
+
+    def release(self, req: str) -> None:
+        """``req`` is over: drop what only it was using."""
+        for provider in [provider for provider, reqs in self.users.items() if req in reqs]:
+            self.users[provider].discard(req)
+            if not self.users[provider]:
+                del self.users[provider]
+                del self.values[provider]
+
+
 class Link:
     """This rank's end of the wire to every other stage.
 
@@ -149,9 +188,8 @@ class Link:
         # (peer, request id) -> rounds the peer has finished for it.
         self._done: dict[tuple, int] = {}
         self._next_request = 0
-        # Provider -> a parameter or module state fetched from its owner, kept
-        # for the engine's life (the owner's weights do not change).
-        self.kept: dict[str, Any] = {}
+        # Parameters and module states fetched from their owners (see Kept).
+        self.kept = Kept()
         self._out: dict[int, queue.Queue] = {peer: queue.Queue() for peer in self.peers}
         self._threads = []
         for peer in self.peers:
@@ -162,9 +200,9 @@ class Link:
 
     # ------------------------------------------------------------------ out
 
-    def publish(self, kind: str, req: str, ordinal: int, provider: str, value: Any, selected: Any = None) -> None:
+    def publish(self, kind: str, req: str, ordinal: int, provider: str, value: Any) -> None:
         """Send ``value`` (already on the host) to every peer, filed under the worker and provider."""
-        envelope = {"kind": kind, "req": req, "ordinal": ordinal, "provider": provider, "value": value, "selected": selected}
+        envelope = {"kind": kind, "req": req, "ordinal": ordinal, "provider": provider, "value": value}
         for peer in self.peers:
             self._out[peer].put(envelope)
 
@@ -219,10 +257,9 @@ class Link:
             self._answer(peer, envelope)
             return False
         with self._condition:
-                if kind in (VALUE, CACHE):
+                if kind == VALUE:
                     key = (envelope["req"], envelope["ordinal"])
-                    provider = envelope["provider"] if kind == VALUE else CACHE
-                    self._inbox.setdefault(key, {}).setdefault(provider, deque()).append(envelope)
+                    self._inbox.setdefault(key, {}).setdefault(envelope["provider"], deque()).append(envelope)
                 elif kind == ERROR:
                     self._errors.setdefault((envelope["req"], envelope["ordinal"]), {})[envelope["provider"]] = envelope["message"]
                 elif kind == ROUND:
@@ -306,17 +343,6 @@ class Link:
                     )
                 self._condition.wait(remaining)
 
-    def take_cache(self, req: str, ordinal: int) -> list[dict]:
-        """Every cache observation that has arrived for the worker, in order;
-        each carries ``provider``, ``selected`` and ``value``."""
-        with self._condition:
-            items = self._inbox.get((req, ordinal), {}).get(CACHE)
-            if not items:
-                return []
-            taken = list(items)
-            items.clear()
-            return taken
-
     def request(self, peer: int, provider: str, timeout: Optional[float] = None) -> Any:
         """Ask ``peer`` for ``provider`` (a parameter or a module's state) and wait for it."""
         with self._condition:
@@ -344,6 +370,7 @@ class Link:
                 del self._errors[key]
             for key in [key for key in self._done if key[1] == req]:
                 del self._done[key]
+            self.kept.release(req)
 
     def close(self) -> None:
         """Stop the threads: each peer's receive loop is told to return, and the

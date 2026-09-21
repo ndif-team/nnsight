@@ -17,6 +17,19 @@ from typing import Any, Optional
 import torch.nn as nn
 
 
+def pipeline_columns(gathered: list) -> list:
+    """The distinct pipeline groups of the whole world, each a tuple of global
+    ranks, in a fixed order every rank agrees on.
+
+    ``gathered`` is every rank's own ``get_pp_group().ranks``, collected with
+    one all-gather over the default world group. Under data parallelism the
+    world holds several engine replicas, each with its own pipeline groups,
+    and their ranks do not start at zero; reading the groups off vLLM instead
+    of counting ranks keeps the link's groups right for every replica.
+    """
+    return sorted({tuple(int(rank) for rank in column) for column in gathered})
+
+
 def derive_owners(per_rank_meta: list) -> dict:
     """Reduce per-rank real-module lists to a ``path → owning stage`` map.
 

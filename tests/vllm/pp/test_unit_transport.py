@@ -6,7 +6,7 @@ from collections import namedtuple
 import pytest
 import torch
 
-from nnsight.modeling.vllm.pp_transport import decode, encode, to_host
+from nnsight.modeling.vllm.pp_transport import Kept, decode, encode, to_host
 
 Pair = namedtuple("Pair", "hidden residual")
 
@@ -59,3 +59,18 @@ def test_to_host_copies_every_tensor_and_keeps_the_structure():
 def test_a_leaf_that_cannot_be_pickled_fails_before_anything_is_sent():
     with pytest.raises((pickle.PicklingError, AttributeError, TypeError)):
         encode({"value": lambda: None})
+
+
+def test_kept_values_live_with_their_requests_unless_pinned():
+    kept = Kept()
+    kept.put("model.lm_head.param.weight", "head", None)     # at load, no request: pinned
+    kept.put("model.norm.state", "norm", "r1")
+    assert kept.get("model.norm.state", "r2") == "norm"       # r2 now uses it too
+    kept.release("r1")
+    assert "model.norm.state" in kept                          # r2 still runs
+    kept.release("r2")
+    assert "model.norm.state" not in kept
+    kept.release("r3")                                         # a request that kept nothing
+    assert kept.get("model.lm_head.param.weight", "r4") == "head"
+    kept.release("r4")
+    assert "model.lm_head.param.weight" in kept                # pinned: outlives every request

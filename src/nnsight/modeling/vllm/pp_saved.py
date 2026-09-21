@@ -4,8 +4,8 @@ Every stage runs the same block, so a value that a block reads and does nothing
 with but save is saved on the stage that holds it too. Such a read needs no
 transfer while the run is on: the reading stage binds a :class:`SavedOnOwner` in
 its place and the owning stage skips the push, and when the request's values
-are collected from every stage the placeholder is filled from the owner's copy
-of the same name (`fill_saves`).
+are collected from every stage the marker is filled from the owner's copy of
+the same name (`fill_saves`).
 
 Which reads those are is decided from the block's source before it runs, the
 same way on every stage (`save_only_lines`). The rule is conservative: a
@@ -21,7 +21,6 @@ import ast
 import functools
 from typing import Any, Optional
 
-from torch.utils._pytree import tree_flatten, tree_unflatten
 
 # The envoy properties a read is made through.
 READ_ATTRS = frozenset({"output", "input", "inputs", "logits", "samples"})
@@ -164,32 +163,57 @@ def save_only_lines(source: str) -> frozenset[int]:
 
 
 def fill_saves(reports: list[dict]) -> dict:
-    """One ``name -> value`` from every stage's saved names, in stage order.
+    """One ``name -> value`` from every stage's saved names.
 
-    The first stage that saved a name gives its value; a :class:`SavedOnOwner` in
-    it (at any depth of a container) is filled from the first later stage whose
-    value for that name holds a real value at the same place.
+    ``reports`` are the stages' saved names in stage order. The last stage's
+    value of a name wins: its copy of the block is the one that runs to the
+    end (a later stage's values arrive on it before its forward, and its own
+    values are local). A :class:`SavedOnOwner` in it is a read of a location
+    another stage holds; the source rule puts one in exactly two places, as a
+    name's whole value or as one item of a saved list, and each is filled
+    from the first other stage, later stages first, that has a real value
+    there. A saved ``tracer.cache()`` holds what each stage's own modules
+    produced, so the stages' caches are unioned by module path.
     """
+    from ...intervention.cache import Cache, CacheView
+
+    def cache_of(value: Any) -> Optional[Cache]:
+        # tracer.cache() hands the block a CacheView over its Cache.
+        if isinstance(value, CacheView):
+            return value._cache
+        return value if isinstance(value, Cache) else None
+
+    ordered = list(reversed(reports))
     merged: dict[str, Any] = {}
-    for report in reports:
+    for report in ordered:
         for name, value in report.items():
             merged.setdefault(name, value)
     for name, value in merged.items():
-        leaves, spec = tree_flatten(value)
-        if not any(isinstance(leaf, SavedOnOwner) for leaf in leaves):
-            continue
-        others = [tree_flatten(report[name])[0] for report in reports if name in report]
-        for index, leaf in enumerate(leaves):
-            if not isinstance(leaf, SavedOnOwner):
-                continue
+        others = [report[name] for report in ordered if name in report]
+        cache = cache_of(value)
+        if cache is not None:
             for other in others:
-                if index < len(other) and not isinstance(other[index], SavedOnOwner):
-                    leaves[index] = other[index]
-                    break
-            else:
-                raise RuntimeError(
-                    f"{name!r} holds {leaf}, which no stage saved a value for: "
-                    "the block did not reach that save on the stage holding the location"
-                )
-        merged[name] = tree_unflatten(leaves, spec)
+                other_cache = cache_of(other)
+                if other_cache is not None:
+                    for path, entries in other_cache.entries.items():
+                        cache.entries.setdefault(path, entries)
+        elif isinstance(value, SavedOnOwner):
+            merged[name] = _real(name, value, others)
+        elif isinstance(value, list) and any(isinstance(item, SavedOnOwner) for item in value):
+            merged[name] = [
+                _real(name, item, [other[index] for other in others if isinstance(other, list) and index < len(other)])
+                if isinstance(item, SavedOnOwner)
+                else item
+                for index, item in enumerate(value)
+            ]
     return merged
+
+
+def _real(name: str, marker: SavedOnOwner, candidates: list) -> Any:
+    for candidate in candidates:
+        if not isinstance(candidate, SavedOnOwner):
+            return candidate
+    raise RuntimeError(
+        f"{name!r} holds {marker}, which no stage saved a value for: "
+        "the block did not reach that save on the stage holding the location"
+    )

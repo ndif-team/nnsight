@@ -12,6 +12,7 @@ from nnsight.modeling.vllm.pp_envoys import (
     graft_children,
     install_shells,
 )
+from nnsight.modeling.vllm.pp_transport import Kept
 
 
 class Block(torch.nn.Module):
@@ -64,7 +65,7 @@ def test_a_call_without_a_link_raises_naming_the_owner(stage0):
     assert model.blocks[0](torch.zeros(1, 4)).shape == (1, 4)
 
 
-def test_a_call_runs_the_owner_state_here_and_drops_it():
+def test_a_call_runs_the_owner_state_here_without_touching_the_meta_copy():
     module_map = PPModuleMap(2)
     module_map.set_derived_owners({"blocks.0": 0, "blocks.1": 1, "norm": 1})
     owner = Stack()  # what stage 1 holds
@@ -73,13 +74,46 @@ def test_a_call_runs_the_owner_state_here_and_drops_it():
     install_shells(local, meta, module_map, 0, link)
     model = NNsight(local)
     graft_children(model, meta, 0, link)
+    copy = model.norm._module._pp_meta
+    copy.weight.output_dim = 0  # what vLLM stamps on a sharded parameter
+    before = {name: (id(t), t.device, dict(vars(t))) for name, t in list(copy.named_parameters()) + list(copy.named_buffers())}
     x = torch.randn(2, 4)
     expected = owner.norm(x)
     got = model.norm(x)
     assert torch.allclose(got, expected)
     assert link.requests[-1] == (1, "model.norm.state")
-    # The meta copy is back on the meta device once the call has returned.
-    assert all(p.device.type == "meta" for p in model.norm._module._pp_meta.parameters())
+    # The same parameter objects, on the same device, with the same attributes.
+    after = {name: (id(t), t.device, dict(vars(t))) for name, t in list(copy.named_parameters()) + list(copy.named_buffers())}
+    assert after == before
+
+
+def test_param_after_a_call_still_carries_the_sharding_stamp():
+    module_map = PPModuleMap(2)
+    module_map.set_derived_owners({"blocks.0": 0, "blocks.1": 1, "norm": 1})
+    owner = Stack()
+    local, meta = Stack(), Stack()
+    meta.norm.weight.output_dim = 0
+    link = _FakeLink(state_of=owner.norm)
+    install_shells(local, meta, module_map, 0, link)
+    model = NNsight(local)
+    graft_children(model, meta, 0, link)
+    model.norm(torch.randn(2, 4))
+    pulled = model.norm.param("weight")
+    assert pulled.output_dim == 0
+
+
+def test_a_fetch_outside_any_request_is_kept_for_the_engine():
+    module_map = PPModuleMap(2)
+    module_map.set_derived_owners({"blocks.0": 0, "blocks.1": 1, "norm": 1})
+    local, meta = Stack(), Stack()
+    link = _FakeLink()
+    install_shells(local, meta, module_map, 0, link)
+    model = NNsight(local)
+    graft_children(model, meta, 0, link)
+    model.norm.param("weight")
+    model.norm.param("weight")
+    assert len(link.requests) == 1  # answered from the kept copy the second time
+    assert "model.norm.param.weight" in link.kept.pinned
 
 
 def test_a_parameter_raises_by_attribute_and_by_param(stage0):
@@ -99,7 +133,7 @@ class _FakeLink:
 
     def __init__(self, state_of=None):
         self.requests = []
-        self.kept = {}
+        self.kept = Kept()
         self.state_of = state_of
 
     def request(self, owner, provider):

@@ -178,7 +178,10 @@ def test_a_read_the_owner_ran_past_fails_the_waiting_peer():
 
 def _run_rounds(rank, world, rdv):
     """A per-step read of the later stage's value across three rounds: each
-    round's value is taken at the next round's start, the last at collect."""
+    round's value is taken at the next round's start. The last round's is not
+    taken on the earlier stage, which has no step left to take it at; the
+    later stage's copy of the block, which has every value, completes and is
+    the one collected from."""
     stage = Stage(rank, world, rdv, owners=OWNERS)
     # Each read pinned to its step, as ``tracer.iter`` pins it.
     block = (
@@ -193,13 +196,15 @@ def _run_rounds(rank, world, rdv):
             stage.interleaver.serve([mediator])
             assert mediator.alive and mediator.pending.provider == B
             stage.interleaver.rounds["r"] = step + 1
-        stage.interleaver.serve([mediator], final=True)
-        assert not mediator.alive and mediator.lcls["vals"] == [0.0, 3.0, 6.0]
+        # No fourth step start comes: the request is over.
+        assert mediator.alive and mediator.pending.provider == B and mediator.lcls["vals"] == [0.0, 3.0]
+        _sync()
     else:
         mediator = stage.mediator(block)
         for step in range(3):
             stage.fire(B, torch.full((3,), float(step)))
         assert not mediator.alive and mediator.lcls["vals"] == [0.0, 3.0, 6.0]
+        _sync()
     stage.close()
 
 
@@ -267,3 +272,34 @@ def _run_save_only(rank, world, rdv):
 
 def test_a_save_only_read_binds_a_placeholder_and_sends_nothing():
     run_two_ranks(_run_save_only)
+
+
+def _run_inplace(rank, world, rdv):
+    """The owner's block changes the value in place right after reading it
+    (as vLLM's fused norm does to its inputs). The peer must get the value as
+    it was handed, before that change."""
+    stage = Stage(rank, world, rdv, owners=OWNERS)
+    block = (
+        "a = Mediator.value('model.a.output')\n"
+        "a.add_(100.0)\n"
+        "b = Mediator.value('model.b.output')\n"
+        "total = float(a.sum() + b.sum())\n"
+    )
+    if rank == 0:
+        mediator = stage.mediator(block)
+        stage.fire(A, torch.ones(3))
+        assert mediator.pending.provider == B
+        _sync()
+    else:
+        mediator = stage.mediator(block)
+        # a arrived as it was handed on stage 0: ones, then this block's own add_.
+        assert mediator.pending.provider == B
+        assert torch.equal(mediator.lcls["a"], torch.full((3,), 101.0))
+        stage.fire(B, torch.zeros(3))
+        assert not mediator.alive and mediator.lcls["total"] == 303.0
+        _sync()
+    stage.close()
+
+
+def test_a_value_is_pushed_as_handed_before_the_block_changes_it():
+    run_two_ranks(_run_inplace)

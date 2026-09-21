@@ -5,14 +5,16 @@ that does not hold a module, its path carries a :class:`RemoteShell`. Reads and
 writes of ``.output``, ``.input`` and ``.inputs`` cross stages through the
 interleaver without touching the module. ``param(name)`` asks the owner for the
 parameter over the link and returns it as a real tensor here. A call asks the
-owner for the module's state, runs the meta copy here with it, and drops the
-copy again, so the block gets the same result the owner computes. A parameter
-or state is fetched once and kept for the engine's life: the owner's weights do
-not change, and fetching the head of a 14B model again for every trace costs
-seconds each time (measured: 3.1 s per trace at PP=2). The parameter as a plain
-attribute has nothing real to work on here, so the shell raises and names the
-owning stage. The behavior lives on the module because a request's envoys
-are rebuilt on the worker around the modules the worker holds.
+owner for the module's state and runs the meta copy's forward on it through
+``torch.func.functional_call``, so the block gets the same result the owner
+computes and the copy is not touched. A fetched parameter or state is kept
+while the requests that used it run and dropped when they finish; the head's
+weight is fetched once at load and kept for the engine's life, since it is the
+one large weight blocks read across stages (1.45 GiB and 3 s per fetch at
+14B). The parameter as a plain attribute has nothing real to work on here, so
+the shell raises and names the owning stage. The behavior lives on the module
+because a request's envoys are rebuilt on the worker around the modules the
+worker holds.
 """
 
 from __future__ import annotations
@@ -68,35 +70,43 @@ class RemoteShell(PPMissingLayer):
         )
 
     def _fetch(self, provider: str) -> Any:
-        """``provider`` from the owner, kept on this rank for the engine's life."""
+        """``provider`` from the owner, kept on this rank (see `Kept`): for the
+        request whose block asked, or for the engine's life when asked outside
+        any request, as the head is at load."""
+        from ...intervention.interleaver import Mediator
+
+        try:
+            req = Mediator.current(provider).pp_req
+        except ValueError:
+            # No block is running: asked at load, or from a plain call.
+            req = None
         link = self._pp_link
         if provider in link.kept:
-            return link.kept[provider]
+            return link.kept.get(provider, req)
         value = link.request(self._pp_owner, provider)
         if self._pp_device is not None:
             value = tree_map(lambda t: t.to(self._pp_device) if isinstance(t, torch.Tensor) else t, value)
-        link.kept[provider] = value
+        link.kept.put(provider, value, req)
         return value
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        """Run the meta copy here on the owner's state.
+        """Run the meta copy's forward here on the owner's state.
 
-        Under tensor parallelism the state is the column peer's shard and the
-        meta copy is built at the same shard shapes, so the module's own
-        collectives run in this stage's group as they do on the owner. A
-        buffer the module keeps out of its state dict is not carried over, so
-        a module that computes from one has to be called on its owner.
+        ``functional_call`` runs the forward with the state's tensors standing
+        in for the copy's parameters and buffers for this call only; the
+        copy's own parameter objects, and whatever vLLM stamped on them, are
+        left as they are. Under tensor parallelism the state is the column
+        peer's shard and the meta copy is built at the same shard shapes, so
+        the module's own collectives run in this stage's group as they do on
+        the owner. A buffer the module keeps out of its state dict is not
+        carried over, so a module that computes from one has to be called on
+        its owner.
         """
         meta = self.__dict__.get("_pp_meta")
         if meta is None or self._pp_link is None:
             self._remote("calling it")
         state = self._fetch(f"{self._pp_path}{STATE_MARK}")
-        meta.to_empty(device=self._pp_device or "cpu")
-        try:
-            meta.load_state_dict(state)
-            return meta(*args, **kwargs)
-        finally:
-            meta.to_empty(device="meta")
+        return torch.func.functional_call(meta, state, args, kwargs)
 
     def _nnsight_parameter(self, name: str) -> torch.Tensor:
         """``param(name)``: the parameter fetched from the owner's module."""

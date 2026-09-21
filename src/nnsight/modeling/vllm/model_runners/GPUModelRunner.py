@@ -32,7 +32,7 @@ import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from ....intervention.interleaver import Mediator
@@ -152,10 +152,6 @@ class Requests:
         self.counts: dict[str, int] = {}
         # Rows in this step's batch, for `unflatten`.
         self.nrows = 0
-        # What to do for a finished request's workers before they are wound
-        # up: nothing on one stage; a pipeline stage answers what they were
-        # still waiting on from later stages (see the runner's load_model).
-        self.finalize = lambda mediators: None
 
     def register(
         self,
@@ -415,7 +411,6 @@ class Requests:
         for request in self.requests.values():
             if not request.copies or not request.named(finished):
                 continue
-            self.finalize(list(request.copies.values()))
             for registration_id, mediator in request.copies.items():
                 if registration_id not in self.templates:
                     continue
@@ -575,6 +570,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # from its own modules.
             graft_children(self.nnsight_model, meta_model, interleaver.local_rank, interleaver.link, interleaver.device)
             interleaver.link.resolver = resolver(self.get_model(), interleaver.module_map.root_path)
+            self._replicate_heads(interleaver, meta_model)
 
         interleaver = self.nnsight_model.interleaver
         # No envoy: the spans come from the scheduler rather than from an invoke,
@@ -586,10 +582,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_requests = Requests()
         self._pipeline_scheduled: list = []
-        if self.nnsight_pp:
-            # A finished request's workers may still wait on a later stage's
-            # last values; those are taken before the workers are wound up.
-            self.nnsight_requests.finalize = lambda mediators: interleaver.serve(mediators, final=True)
         # The map that resolves a serialized request's persistent ids (the interleaver,
         # every module, the tokenizer) back to this worker's objects. The tree is fixed
         # after load, so build it once here rather than walk it every step in `add`.
@@ -609,7 +601,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         """
         import torch.distributed as dist
 
-        from ..pp import PPModuleMap, build_meta_tree, derive_owners, is_pp_missing, stub_rank_gated_modules
+        from ..pp import PPModuleMap, build_meta_tree, derive_owners, is_pp_missing, pipeline_columns, stub_rank_gated_modules
         from ..pp_envoys import install_shells
         from ..pp_interleaver import PPInterleaver
         from ..pp_transport import Link
@@ -634,17 +626,64 @@ class NNsightGPUModelRunner(GPUModelRunner):
         module_map = PPModuleMap(world)
         module_map.set_derived_owners(owners)
 
-        tp = get_tp_group().world_size
+        # The stages of one engine replica form a pipeline group per
+        # tensor-parallel column. Each rank knows its own; gathering them
+        # across the whole world names every replica's columns, so the link's
+        # groups are right under data parallelism too (new_group is
+        # collective, so every rank creates every column and keeps its own).
+        gathered: list = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered, list(pp_group.ranks))
         group = None
-        for offset in range(tp):
-            column = [stage * tp + offset for stage in range(world)]
-            created = dist.new_group(ranks=column, backend="gloo")
+        for column in pipeline_columns(gathered):
+            created = dist.new_group(ranks=list(column), backend="gloo")
             if dist.get_rank() in column:
                 group = created
         device = torch.device(f"cuda:{torch.cuda.current_device()}")
         link = Link(group, local, world)
         install_shells(model, meta_model, module_map, local, link, device)
         return PPInterleaver(module_map, link, local, device, taps=taps, fragments=VLLMFragments()), meta_model
+
+    def _replicate_heads(self, interleaver: Any, meta_model: torch.nn.Module) -> None:
+        """Fetch the language-model head's weight onto every stage that does
+        not hold it, once, at load.
+
+        It is the one large weight blocks read across stages (1.45 GiB and
+        3 s per fetch at 14B), and it is the same for every request, so it is
+        kept for the engine's life; fetched here, inside ``load_model``, it is
+        counted when vLLM measures memory and sizes its KV cache. A model
+        whose head is tied to its embedding holds the weight on every stage
+        already and has no shell for it, so nothing is fetched. Every other
+        fetched value lives only as long as the requests that use it.
+        """
+        import torch.distributed as dist
+        from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+        from ..pp_envoys import PARAM_MARK, RemoteShell
+
+        # A request is answered by its owner's resolver; wait until every
+        # stage has set one.
+        dist.barrier(group=get_pp_group().cpu_group)
+        local = dict(self.get_model().named_modules())
+        root = interleaver.module_map.root_path
+        for name, module in meta_model.named_modules():
+            if isinstance(module, ParallelLMHead) and isinstance(local.get(name), RemoteShell):
+                local[name]._fetch(f"{root}.{name}{PARAM_MARK}weight")
+
+    def _parked_on_later_stage(self, mediator: Any) -> bool:
+        """Whether a finished request's worker is parked on a later stage's
+        value. On a stage before the last that is the ordinary end of a block
+        which read a later stage's value in the request's last round: there
+        is no step left here to take it at, and the last stage's copy of the
+        block, which reached that line, is the one the request's values and
+        errors are collected from. Such a worker is wound up quietly."""
+        if not self.nnsight_pp or get_pp_group().is_last_rank:
+            return False
+        pending = mediator.pending
+        if pending is None or pending.provider is None:
+            return False
+        interleaver = self.nnsight_model.interleaver
+        owner = interleaver.owner(pending.provider)
+        return owner is not None and owner > interleaver.local_rank
 
     def _pipeline_workers(self, request_ids: Any) -> list:
         """The workers of the named requests that this engine carries."""
@@ -748,9 +787,29 @@ class NNsightGPUModelRunner(GPUModelRunner):
             self.nnsight_requests.unflatten(self.nnsight_model)
             if self.nnsight_pp:
                 self._pipeline_announce_failures()
-                # The round is closed at sampling (see sample_tokens).
                 self._pipeline_scheduled = list(scheduled)
+                # A stage before the last publishes everything it will for
+                # this step during its forward, and under the Ray executor
+                # it never runs sample_tokens, so its step closes here.
+                if not get_pp_group().is_last_rank:
+                    self._close_step()
         return output
+
+    def _close_step(self) -> None:
+        """The step's blocks have run as far as this step takes them: snapshot
+        their saves on this thread (see Requests.record_saves), and under
+        pipeline parallelism count one more round of each request run, which
+        tells a later serve which parked reads are answerable, and tell the
+        peers, so one still waiting for a value of this round that never came
+        stops waiting. Called after the forward on a stage before the last and
+        after sampling on the last stage and on a single stage."""
+        self.nnsight_requests.record_saves()
+        if self.nnsight_pp:
+            interleaver = self.nnsight_model.interleaver
+            for req_id in self._pipeline_scheduled:
+                interleaver.rounds[req_id] = interleaver.rounds.get(req_id, 0) + 1
+                interleaver.link.done(req_id, interleaver.rounds[req_id])
+            self._pipeline_scheduled = []
 
     def sample_tokens(self, *args: Any, **kwargs: Any) -> Any:
         if self.execute_model_state is not None:
@@ -775,20 +834,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 )
 
         output = super().sample_tokens(*args, **kwargs)
-        # Sampling closes the step: every block that was going to finish this step has,
-        # whether it read activations, logits, or samples. Capture all their saves now,
-        # in one pass, still on the workers' own thread (see Requests.record_saves).
-        self.nnsight_requests.record_saves()
-        if self.nnsight_pp:
-            # One more round of each request done here: the count is what
-            # tells a later serve which parked reads are answerable, and the
-            # peers hear it so one still waiting for a value of this round
-            # that never came stops waiting.
-            interleaver = self.nnsight_model.interleaver
-            for req_id in self._pipeline_scheduled:
-                interleaver.rounds[req_id] = interleaver.rounds.get(req_id, 0) + 1
-                interleaver.link.done(req_id, interleaver.rounds[req_id])
-            self._pipeline_scheduled = []
+        # Sampling closes the step on the stage that samples: every block that
+        # was going to finish this step has, whether it read activations,
+        # logits, or samples. A stage before the last closed its step after its
+        # forward (see execute_model).
+        if not self.nnsight_pp or get_pp_group().is_last_rank:
+            self._close_step()
         return output
 
     def _sample(self, *args: Any, **kwargs: Any) -> Any:
@@ -900,21 +951,13 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # collect never reads an empty shelf for a request that is over.
         if finished:
             requests.harvest(finished)
-            if self.nnsight_pp:
-                # The last round's values from later stages are produced by
-                # now; a finished request's workers still parked on them are
-                # resumed before they are wound up below.
-                for request in requests.requests.values():
-                    if request.named(finished) and request.mediator is not None:
-                        self.nnsight_model.interleaver.serve([request.mediator], final=True)
-                        # The block may have bound what it saved after the
-                        # step's last snapshot.
-                        requests.record(request.mediator)
 
         # Every rank ran the block and reports what it saved; the engine keeps
-        # the first rank's value of each name and fills a placeholder in it (a
-        # read the block only saved, of a location another stage holds) from
-        # that stage's copy (see engine.merge_collected).
+        # the last rank's value of each name and fills a marker in it (a read
+        # the block only saved, of a location another stage holds) from that
+        # stage's copy (see engine.merge_collected). Nothing here touches a
+        # greenlet or the saved-id set: both belong to the forward thread, and
+        # under the Ray executor this runs on another one.
         taps = self.nnsight_model.interleaver.taps
         saved = _saves()
         for request in list(requests.requests.values()):
@@ -950,7 +993,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 if done:
                     # Still parked when its request finished: waiting on a
                     # location the model never reached — its deferred error.
-                    requests.finish_dangling(mediator, taps)
+                    requests.finish_dangling(mediator, taps, quiet=self._parked_on_later_stage(mediator))
                 values = request.saves()
                 sequence["saves"] = values
                 if done:

@@ -12,6 +12,7 @@ import pytest
 import torch.nn as nn
 
 from nnsight.modeling.vllm.pp import (
+    pipeline_columns,
     PPModuleMap,
     derive_owners,
     is_pp_missing,
@@ -127,3 +128,15 @@ class TestIsPPMissing:
         assert not is_pp_missing(nn.Linear(2, 2))
 
 
+
+
+
+def test_pipeline_columns_come_from_each_rank_s_own_group():
+    """One replica of TP=2 x PP=2, then two such replicas side by side in one
+    world: the second replica's ranks do not start at zero, and its columns
+    are read off what vLLM gave each rank rather than counted."""
+    one = [[0, 2], [1, 3], [0, 2], [1, 3]]
+    assert pipeline_columns(one) == [(0, 2), (1, 3)]
+    two = one + [[4, 6], [5, 7], [4, 6], [5, 7]]
+    assert pipeline_columns(two) == [(0, 2), (1, 3), (4, 6), (5, 7)]
+    assert pipeline_columns([[0, 1, 2]] * 3) == [(0, 1, 2)]

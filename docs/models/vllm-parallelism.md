@@ -39,12 +39,12 @@ top1 = logits.argmax(-1).item()
 |---|---|
 | read `.output`, `.input`, `.inputs` | the block waits for the value; the owning stage sends it as its own copy of the block reads it |
 | write `.output`, `.input`, `.skip()` | absorbed here, applied on the owning stage |
-| `module.param("weight")` | the parameter is fetched from the owning stage's module once and kept on this stage for the life of the engine |
+| `module.param("weight")` | the head's weight is on every stage from load; any other parameter is fetched from the owning stage when a request first reads it and dropped when that request finishes |
 | `module.weight` (the attribute) | raises, naming the owning stage; use `param("weight")` |
-| call the module, `model.model.norm(h)` | the module's state is fetched from the owning stage, the call runs here on it; a module that computes from a buffer outside its state dict has to be called on its owner |
+| call the module, `model.model.norm(h)` | the module's state is fetched from the owning stage for the request and the call runs here on it; a module that computes from a buffer outside its state dict has to be called on its owner |
 | `.source` of the module | fails to resolve any operation |
 
-A read the block only saves (`h = layer.output.save()` with `h` not used again, or `kept.append(layer.output[0])` into a saved list the block only appends to) is not sent at all: the stage holding the module saves it there, and the saved value comes back from that stage at the end of the request. Every other read of another stage's module is sent as a copy taken as the block read it. A value saved on the stage that holds its module is a view of the engine's buffer, as on one GPU, so the "clone what you keep" rule of [vllm.md](vllm.md) applies to it and `NNSIGHT_VLLM_CLONE_READS` covers every stage alike. `tracer.iter` steps every stage together.
+Saved values are collected from the last stage, whose copy of the block always runs to the end, and from the other stages for what only they hold. A read the block only saves (`h = layer.output.save()` with `h` not used again, or `kept.append(layer.output[0])` into a saved list the block only appends to) is not sent at all: the stage holding the module saves it there, and the saved value comes back from that stage at the end of the request. Every other read of another stage's module is sent as a copy taken as the block read it. A value saved on the stage that holds its module is a view of the engine's buffer, as on one GPU, so the "clone what you keep" rule of [vllm.md](vllm.md) applies to it and `NNSIGHT_VLLM_CLONE_READS` covers every stage alike. `tracer.iter` steps every stage together.
 
 The ordering rule is the one a single GPU has: a read parks the block until the model reaches the location, so a location the forward passes meanwhile is out of order afterwards. On a later stage this means a read of a later stage's value parks the block until that stage runs, and the local layers passed in the meantime cannot be read after it. Read the local values first.
 

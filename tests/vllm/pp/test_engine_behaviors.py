@@ -35,12 +35,13 @@ def test_cross_stage_reads_and_logits(pp2_engine):
         late = _layer(model, LATE).output.save()
         logits = model.logits.save()
 
-    # Layer outputs are (hidden, residual) tuples; every slot is a real tensor
-    # after the merge (a sentinel would mean a stage's contribution was dropped).
+    # Layer outputs are (hidden, residual) tuples on this model, and come back
+    # as such from either stage, every slot a real tensor.
     for name, value in (("early", early), ("late", late)):
-        hidden = value[0] if isinstance(value, tuple) else value
-        assert isinstance(hidden, torch.Tensor), (name, type(value))
-        assert torch.isfinite(hidden.float()).all(), name
+        assert isinstance(value, tuple) and len(value) == 2, (name, type(value))
+        for slot in value:
+            assert isinstance(slot, torch.Tensor), (name, type(slot))
+            assert torch.isfinite(slot.float()).all(), name
     assert isinstance(logits, torch.Tensor) and logits.shape[-1] > 100_000 // 2
     assert model.tokenizer.decode(logits[-1].argmax(dim=-1)).strip() == "Paris"
 
@@ -410,3 +411,28 @@ def test_a_save_only_read_beside_a_consumed_one_keeps_both_right(pp2_engine):
             sums.append(float(_layer(model, LATE).output[1].float().sum()))
     assert len(kept) == 2 and len(sums) == 2
     assert all(isinstance(h, torch.Tensor) for h in kept)
+
+
+def test_a_save_only_read_of_inputs_keeps_the_argument_structure(pp2_engine):
+    """A layer's ``.inputs``, saved and not used, is filled from the stage that
+    holds the layer with its whole ``((positions, hidden, residual), {})``."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        early = _layer(model, EARLY).inputs.save()
+        late = _layer(model, LATE).inputs.save()
+    for structure in (early, late):
+        (positions, hidden, residual), kwargs = structure
+        assert positions.dtype == torch.int64 and positions.tolist() == list(range(positions.shape[0]))
+        assert hidden.dtype == torch.bfloat16 and residual.shape == hidden.shape and kwargs == {}
+
+
+def test_a_used_read_of_the_last_stage_in_the_last_round_is_collected_from_that_stage(pp2_engine):
+    """The first stage's copy of the block cannot take a later stage's value of
+    the request's last round; the last stage's copy computes the line and the
+    value comes home from it, with no error."""
+    model = pp2_engine
+    with model.trace(PROMPT, temperature=0.0, max_tokens=1):
+        total = float(_layer(model, LATE).output[0].float().sum()).save()
+        logits = model.logits.save()
+    assert isinstance(total, float) and total == total  # a number, not NaN
+    assert model.tokenizer.decode(logits[-1].argmax(dim=-1)).strip() == "Paris"
