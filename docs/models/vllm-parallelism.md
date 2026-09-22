@@ -39,7 +39,7 @@ top1 = logits.argmax(-1).item()
 |---|---|
 | read `.output`, `.input`, `.inputs` | the block waits for the value; the owning stage sends it as its own copy of the block reads it |
 | write `.output`, `.input`, `.skip()` | absorbed here, applied on the owning stage |
-| `module.param("weight")` | the head's weight is on every stage from load; any other parameter is fetched from the owning stage when a request first reads it and dropped when that request finishes |
+| `module.param("weight")` | the head's parameters are on every stage from load, under whatever names the checkpoint gives them; any other parameter is fetched from the owning stage when a request first reads it and dropped when that request finishes |
 | `module.weight` (the attribute) | raises, naming the owning stage; use `param("weight")` |
 | call the module, `model.model.norm(h)` | the module's state is fetched from the owning stage for the request and the call runs here on it; a module that computes from a buffer outside its state dict has to be called on its owner |
 | `.source` of the module | fails to resolve any operation |

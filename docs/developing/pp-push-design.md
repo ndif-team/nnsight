@@ -90,7 +90,10 @@ and no longer. The head's weight is the one large weight blocks read across
 stages (1.45 GiB and 3 s per fetch at 14B, measured) and it is the same for
 every request, so every stage that does not hold the head fetches it once at
 load, inside `load_model`, and keeps it for the engine's life; fetched there,
-it is counted when vLLM measures memory and sizes its KV cache. A model whose
+it is counted when vLLM measures memory and sizes its KV cache. What is
+fetched is the head's whole state, since its parameter names depend on the
+checkpoint (`weight` unquantized, `qweight` and `scales` when quantization
+covers the head), and `param(name)` is answered from it. A model whose
 head is tied to its embedding holds the weight on every stage already and
 fetches nothing. Every other fetched parameter or state is tagged with the
 requests whose blocks used it and dropped when the last of them finishes,

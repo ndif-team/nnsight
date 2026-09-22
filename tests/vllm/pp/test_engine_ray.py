@@ -16,7 +16,7 @@ import nnsight
 import pytest
 import torch
 
-from _support import EARLY, LATE, PROMPT, free_gpus
+from _support import EARLY, LATE, PROMPT, PROMPT_B, free_gpus
 
 pytest.importorskip("vllm")
 pytest.importorskip("ray")
@@ -72,3 +72,20 @@ def test_per_step_used_reads_of_the_last_stage_come_home_over_ray(pp2_ray_engine
         for _ in tracer.iter[:3]:
             sums.append(float(model.model.layers[LATE].output[0].float().sum()))
     assert len(sums) == 3 and all(isinstance(s, float) for s in sums)
+
+
+def test_a_registered_blocks_saves_come_home_over_ray(pp2_ray_engine):
+    """A registered block's saved values arrive under the Ray executor, for a
+    module on each stage, on every request it ran on."""
+    model = pp2_ray_engine
+    with model.edit() as (tracer, registration):
+        upstream = model.model.layers[EARLY].output[0].save()
+        downstream = model.model.layers[LATE].output[0].save()
+    try:
+        outputs = model.generate([PROMPT, PROMPT_B], max_tokens=2, temperature=0.0, ignore_eos=True)
+        for output in outputs:
+            for name in ("upstream", "downstream"):
+                assert isinstance(output.saves[name], torch.Tensor), (name, output.saves)
+                assert output.saves[name].shape[0] == len(output.prompt_token_ids)
+    finally:
+        registration.clear()

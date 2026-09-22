@@ -116,6 +116,47 @@ def test_a_fetch_outside_any_request_is_kept_for_the_engine():
     assert "model.norm.param.weight" in link.kept.pinned
 
 
+class PackedHead(torch.nn.Module):
+    """A head stored the way a quantized checkpoint stores one: packed
+    integers and scales, and no ``weight``."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("qweight", torch.arange(8, dtype=torch.int32).reshape(2, 4))
+        self.scales = torch.nn.Parameter(torch.full((4,), 0.5), requires_grad=False)
+
+
+class PackedStack(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.trunk = torch.nn.Linear(4, 4)
+        self.output_projection = PackedHead()
+
+
+def test_a_head_kept_by_its_state_answers_param_under_its_own_names():
+    """The head is fetched at load as its whole state, since its parameter names
+    depend on the checkpoint; ``param`` is answered from it, and a name the
+    head does not have raises instead of asking the owner."""
+    module_map = PPModuleMap(2)
+    module_map.set_derived_owners({"trunk": 0, "output_projection": 1})
+    owner = PackedStack()
+    owner.output_projection.qweight += 100
+    local, meta = PackedStack(), PackedStack()
+    link = _FakeLink(state_of=owner.output_projection)
+    install_shells(local, meta, module_map, 0, link)
+    model = NNsight(local)
+    graft_children(model, meta, 0, link)
+
+    model.output_projection._module._fetch("model.output_projection.state")  # as at load
+
+    assert torch.equal(model.output_projection.param("qweight"), owner.output_projection.qweight)
+    assert torch.equal(model.output_projection.param("scales"), owner.output_projection.scales)
+    assert link.requests == [(1, "model.output_projection.state")]
+    assert "model.output_projection.state" in link.kept.pinned
+    with pytest.raises(AttributeError, match="weight"):
+        model.output_projection.param("weight")
+
+
 def test_a_parameter_raises_by_attribute_and_by_param(stage0):
     model, _ = stage0
     with pytest.raises(RemoteModuleError, match="weight"):

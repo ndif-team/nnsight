@@ -4,12 +4,13 @@ Every rank runs the whole intervention block against the whole tree. On a rank
 that does not hold a module, its path carries a :class:`RemoteShell`. Reads and
 writes of ``.output``, ``.input`` and ``.inputs`` cross stages through the
 interleaver without touching the module. ``param(name)`` asks the owner for the
-parameter over the link and returns it as a real tensor here. A call asks the
-owner for the module's state and runs the meta copy's forward on it through
+parameter over the link and returns it as a real tensor here, or takes it from
+the module's state when that is already kept. A call asks the owner for the
+module's state and runs the meta copy's forward on it through
 ``torch.func.functional_call``, so the block gets the same result the owner
 computes and the copy is not touched. A fetched parameter or state is kept
 while the requests that used it run and dropped when they finish; the head's
-weight is fetched once at load and kept for the engine's life, since it is the
+state is fetched once at load and kept for the engine's life, since it is the
 one large weight blocks read across stages (1.45 GiB and 3 s per fetch at
 14B). The parameter as a plain attribute has nothing real to work on here, so
 the shell raises and names the owning stage. The behavior lives on the module
@@ -115,7 +116,15 @@ class RemoteShell(PPMissingLayer):
             raise AttributeError(f"{self._pp_path!r} has no parameter or buffer named {name!r}")
         if self._pp_link is None:
             self._remote(f"its parameter {name!r}")
-        pulled = self._fetch(f"{self._pp_path}{PARAM_MARK}{name}")
+        # A state already kept here (the head's, fetched at load, or a call's
+        # earlier in this request) holds the parameter; asking the owner again
+        # would move the same bytes twice. A buffer kept out of the state dict
+        # is not in it and is asked for by name.
+        state = f"{self._pp_path}{STATE_MARK}"
+        if state in self._pp_link.kept and name in (held := self._fetch(state)):
+            pulled = held[name]
+        else:
+            pulled = self._fetch(f"{self._pp_path}{PARAM_MARK}{name}")
         # The fetch carries this rank's column peer's shard; the meta copy's
         # parameter carries the sharding stamps that say how to gather it.
         from .envoys import _whole_parameter
