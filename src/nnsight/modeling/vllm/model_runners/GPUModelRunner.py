@@ -1029,13 +1029,17 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # Still parked when its request finished: waiting on a
                     # location the model never reached — its deferred error.
                     requests.finish_dangling(mediator, taps, quiet=self._parked_on_later_stage(mediator))
-                values = request.saves() if self._reports_saves(mediator) else {}
-                sequence["saves"] = values
+                values = request.saves()
+                # Whether they are sent decides only what goes out; the ids
+                # below are cleared either way.
+                sequence["saves"] = values if self._reports_saves(mediator) else {}
                 if done:
                     # Drop this request's saved values from the thread-local set
                     # as they leave: it is keyed by object id, so a finished
                     # request's ids left behind could be reused by a later
-                    # request's values and mistaken for saved.
+                    # request's values and mistaken for saved. That includes
+                    # a stage that does not send them: a resident parameter it
+                    # saved is the same object when a later block reads it.
                     for value in values.values():
                         saved.discard(id(value))
             if entry["error"] is None:

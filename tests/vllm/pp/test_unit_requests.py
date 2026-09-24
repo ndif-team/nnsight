@@ -1,7 +1,10 @@
 """The request table's two exits: what a finished request's registered block
-saved, and what the engine let go of when the request left."""
+saved, and what the engine let go of when the request left; and what collect
+clears when a request's saves leave."""
 
+import pickle
 import threading
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,8 +12,12 @@ import torch
 pytest.importorskip("vllm")
 
 from nnsight.intervention.interleaver import Mediator
-from nnsight.modeling.vllm.model_runners.GPUModelRunner import Request, Requests
-from nnsight.tracing.tracer import mark
+from nnsight.modeling.vllm.model_runners.GPUModelRunner import (
+    NNsightGPUModelRunner,
+    Request,
+    Requests,
+)
+from nnsight.tracing.tracer import _saves, mark
 
 
 def _registered(requests, request_id, registration_id, lcls):
@@ -53,3 +60,24 @@ def test_a_request_that_leaves_through_harvest_is_released():
 
     assert request.id not in requests.requests
     assert released == [request.id]
+
+
+def test_a_stage_that_does_not_send_its_saves_still_clears_their_ids():
+    """An earlier stage whose saves the engine does not need sends none home,
+    but its saved ids are still dropped: a resident parameter it saved is the
+    same object when a later block on this stage reads it without saving."""
+    runner = object.__new__(NNsightGPUModelRunner)
+    runner.nnsight_requests = Requests()
+    runner.nnsight_model = SimpleNamespace(interleaver=SimpleNamespace(taps=frozenset()))
+    runner._reports_saves = lambda mediator: False  # a stage before the last, nothing to fill
+    runner._parked_on_later_stage = lambda mediator: False
+    down_proj_weight = torch.zeros(3)  # stands in for a parameter the engine keeps resident
+    request = Request("probe-0000abcd")
+    request.mediator = Mediator(compile("pass", "<traced>", "exec"), {}, {"down_w": mark(down_proj_weight)})
+    request.mediator.nnsight_saved = {"down_w"}
+    runner.nnsight_requests.requests[request.id] = request
+
+    collected = pickle.loads(runner.collect_nnsight([request.id], [request.id]))
+
+    assert collected["probe"]["saves"] == {}
+    assert id(down_proj_weight) not in _saves()
