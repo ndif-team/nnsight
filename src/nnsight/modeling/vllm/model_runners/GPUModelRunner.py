@@ -238,9 +238,9 @@ class Requests:
                 mediator.pp_ordinal = ordinal
                 mediator.pp_announced = False
                 mediator.pp_step = 0
-                # Whether this stage served a read the block only saves, and so
-                # holds a value the other stages left a marker for.
-                mediator.pp_fills = False
+                # Whether this stage holds something of the worker's that only
+                # it can report: a cache observed here.
+                mediator.pp_reports = False
 
     def refuse_chunked(self, spans: list[tuple[str, int]], states: dict) -> None:
         """Give a request whose prompt this step only partly prefills its error, not a worker.
@@ -573,6 +573,19 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # (see pp_interleaver.py). Built before the tree, which instruments it.
         self.nnsight_pp = get_pp_group().world_size > 1
         if self.nnsight_pp:
+            if not self.use_async_scheduling:
+                # The later stages' values go back through the scheduler on
+                # this engine (see pp_scheduler); the scheduler has to be ours.
+                from ..pp_scheduler import NNsightScheduler
+
+                configured = self.vllm_config.scheduler_config.get_scheduler_cls()
+                if not issubclass(configured, NNsightScheduler):
+                    raise RuntimeError(
+                        f"pipeline parallelism without async scheduling needs scheduler_cls="
+                        f"{NNsightScheduler.__module__}.{NNsightScheduler.__name__}, which carries "
+                        f"the later stages' values back to the earlier ones; the engine was built "
+                        f"with {configured.__module__}.{configured.__name__}"
+                    )
             interleaver, meta_model = self._pipeline_interleaver(taps)
         else:
             interleaver, meta_model = VLLMInterleaver(taps, fragments=VLLMFragments()), None
@@ -694,15 +707,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
     def _reports_saves(self, mediator: Any) -> bool:
         """Whether this stage's copy of the block has to send its saved values home.
 
-        The last stage always does: its copy runs to the end, and the engine
-        keeps its value of every name. An earlier stage's copy is wanted only
-        for the markers in that one, which stand for reads the block only saves
-        of modules this stage holds; a stage that served none of those can add
-        nothing, and sending its saves anyway means pickling every saved tensor
-        a second time and carrying it to the engine, which for a saved 14B head
-        is 1.45 GiB and tens of seconds.
+        The last stage always does: every value the block reads reaches it, so
+        its copy runs to the end holding all of them, and the engine keeps its
+        value of every name. An earlier stage's copy is wanted only for what
+        stays where it was made, a cache that observed this stage's modules;
+        a stage with none of those can add nothing, and sending its saves
+        anyway means pickling every saved tensor a second time and carrying
+        it to the engine.
         """
-        return not self.nnsight_pp or get_pp_group().is_last_rank or bool(mediator.pp_fills)
+        return not self.nnsight_pp or get_pp_group().is_last_rank or bool(mediator.pp_reports)
 
     def _parked_on_later_stage(self, mediator: Any) -> bool:
         """Whether a finished request's worker is parked on a later stage's
@@ -727,17 +740,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
     def _pipeline_announce_failures(self) -> None:
         """Tell the other stages about workers that failed here, once each, so
-        a peer waiting on such a worker's values stops waiting."""
-        link = self.nnsight_model.interleaver.link
+        a peer's copy waiting on such a worker's values fails where it failed."""
+        interleaver = self.nnsight_model.interleaver
         for request in self.nnsight_requests.requests.values():
             for mediator in request.workers():
                 if mediator.exception is not None and not mediator.pp_announced:
                     mediator.pp_announced = True
-                    link.fail(
-                        mediator.pp_req,
-                        mediator.pp_ordinal,
-                        None,
-                        f"the block failed on stage {self.nnsight_model.interleaver.local_rank}: "
+                    interleaver.failed(
+                        mediator,
+                        f"the block failed on stage {interleaver.local_rank}: "
                         f"{type(mediator.exception).__name__}: {mediator.exception}",
                     )
 
@@ -807,8 +818,18 @@ class NNsightGPUModelRunner(GPUModelRunner):
         interleaver = self.nnsight_model.interleaver
         scheduled = scheduler_output.num_scheduled_tokens
         if self.nnsight_pp:
-            # A request running this step has had its previous round produced
-            # on every later stage; its workers parked on those values are
+            from ..pp_transport import unpack
+
+            # The earlier stages' values for this step came with its activations.
+            if intermediate_tensors is not None:
+                interleaver.receive(unpack(intermediate_tensors.tensors), forward=True)
+            # Where the engine returns its sampled tokens through the scheduler,
+            # the later stages' values for the previous step come the same way
+            # (see pp_scheduler); otherwise they arrived after sampling.
+            if not self.use_async_scheduling:
+                interleaver.receive(scheduler_output.nnsight_backward, forward=False)
+            # A request running this step has had its previous step's values
+            # from the later stages arrive; its workers parked on those are
             # resumed now, before the forward.
             interleaver.serve(self._pipeline_workers(scheduled))
         # The scheduler picks this step's requests partway through the forward, so
@@ -823,27 +844,32 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if self.nnsight_pp:
                 self._pipeline_announce_failures()
                 self._pipeline_scheduled = list(scheduled)
-                # A stage before the last publishes everything it will for
+                # A stage before the last has served everything it will for
                 # this step during its forward, and under the Ray executor
-                # it never runs sample_tokens, so its step closes here.
+                # it never runs sample_tokens, so its step closes here, and
+                # what it served leaves with the activations.
                 if not get_pp_group().is_last_rank:
                     self._close_step()
+                    from vllm.sequence import IntermediateTensors
+
+                    from ..pp_transport import pack
+
+                    if isinstance(output, IntermediateTensors):
+                        output.tensors.update(pack(interleaver.flush_forward()))
         return output
 
     def _close_step(self) -> None:
         """The step's blocks have run as far as this step takes them: snapshot
         their saves on this thread (see Requests.record_saves), and under
         pipeline parallelism count one more round of each request run, which
-        tells a later serve which parked reads are answerable, and tell the
-        peers, so one still waiting for a value of this round that never came
-        stops waiting. Called after the forward on a stage before the last and
-        after sampling on the last stage and on a single stage."""
+        tells a later serve which parked reads are answerable. Called after
+        the forward on a stage before the last and after sampling on the last
+        stage and on a single stage."""
         self.nnsight_requests.record_saves()
         if self.nnsight_pp:
             interleaver = self.nnsight_model.interleaver
             for req_id in self._pipeline_scheduled:
                 interleaver.rounds[req_id] = interleaver.rounds.get(req_id, 0) + 1
-                interleaver.link.done(req_id, interleaver.rounds[req_id])
             self._pipeline_scheduled = []
 
     def sample_tokens(self, *args: Any, **kwargs: Any) -> Any:
@@ -869,12 +895,52 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 )
 
         output = super().sample_tokens(*args, **kwargs)
+        if self.nnsight_pp:
+            output = self._pipeline_exchange_after_sampling(output)
         # Sampling closes the step on the stage that samples: every block that
         # was going to finish this step has, whether it read activations,
         # logits, or samples. A stage before the last closed its step after its
         # forward (see execute_model).
         if not self.nnsight_pp or get_pp_group().is_last_rank:
             self._close_step()
+        return output
+
+    def _pipeline_exchange_after_sampling(self, output: Any) -> Any:
+        """Carry the last stage's values for this step back to the earlier ones,
+        the way the engine carries the sampled tokens.
+
+        Under async scheduling every stage runs this right after vLLM's own
+        broadcast of the sampled tokens: the last stage broadcasts what it
+        served this step and a mark per request that the step is done, and
+        the earlier stages file it before their next forward, which is when a
+        worker parked on one of those values is resumed. Where the engine
+        returns the sampled tokens through the scheduler instead (the Ray
+        executor), the stages before the last never run this, so the last
+        stage puts the same entries on its output, on the host, and the
+        scheduler carries them to every stage with the request's next step
+        (see `pp_scheduler`).
+        """
+        from ..pp_transport import pack, to_host, unpack
+
+        pp = get_pp_group()
+        interleaver = self.nnsight_model.interleaver
+        last = pp.world_size - 1
+        if self.use_async_scheduling:
+            if pp.is_last_rank:
+                pp.broadcast_tensor_dict(pack(interleaver.flush_backward(self._pipeline_scheduled)), src=last)
+            else:
+                interleaver.receive(unpack(pp.broadcast_tensor_dict(None, src=last)), forward=False)
+        elif pp.is_last_rank:
+            from vllm.v1.outputs import ModelRunnerOutput
+
+            entries = to_host(interleaver.flush_backward(self._pipeline_scheduled))
+            if entries:
+                if not isinstance(output, ModelRunnerOutput):
+                    raise NotImplementedError(
+                        f"the last stage's step produced {type(output).__name__}, which cannot carry "
+                        "the stage's values to the scheduler; only ModelRunnerOutput can"
+                    )
+                output.nnsight_backward = entries
         return output
 
     def _sample(self, *args: Any, **kwargs: Any) -> Any:

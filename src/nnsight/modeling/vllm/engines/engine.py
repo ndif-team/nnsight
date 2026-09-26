@@ -18,19 +18,49 @@ from typing import Any, Optional
 
 from vllm.v1.engine.llm_engine import LLMEngine
 
-from ..pp_saved import fill_saves
+
+def merge_saves(reports: list[dict]) -> dict:
+    """One dict of saved values from the ranks' reports, the last rank's first.
+
+    The last rank's value of a name wins: under pipeline parallelism every
+    value the block reads reaches the last stage, whose copy of the block
+    runs to the end holding all of them, and under tensor parallelism the
+    ranks hold equal values. A cache is the one thing that stays where it was
+    made, each stage's holding what its own modules produced, so a name bound
+    to a cache is the union of the ranks' entries by module path.
+    """
+    from ....intervention.cache import Cache, CacheView
+
+    def cache_of(value: Any) -> Optional[Cache]:
+        # tracer.cache() hands the block a CacheView over its Cache.
+        if isinstance(value, CacheView):
+            return value._cache
+        return value if isinstance(value, Cache) else None
+
+    ordered = list(reversed(reports))
+    merged: dict[str, Any] = {}
+    for report in ordered:
+        for name, value in report.items():
+            merged.setdefault(name, value)
+    for name, value in merged.items():
+        cache = cache_of(value)
+        if cache is None:
+            continue
+        for report in ordered:
+            other = cache_of(report.get(name))
+            if other is not None and other is not cache:
+                for path, entries in other.entries.items():
+                    cache.entries.setdefault(path, entries)
+    return merged
 
 
 def merge_collected(payloads: list) -> dict:
     """Combine what each rank returned from ``collect_nnsight``.
 
-    Every rank runs the block and reports what it saved. The last rank's
-    value of a name wins: under pipeline parallelism the last stage's copy of
-    the block is the one that runs to the end, and under tensor parallelism
-    the ranks hold equal values. A marker in it (a read the block only saved,
-    of a location another stage holds; see `pp_saved`) is filled from the
-    stage that holds it. Registered values and errors are taken the same way,
-    the last rank's first.
+    Every rank runs the block and reports what it saved, or nothing when it
+    has nothing only it holds (see the runner's ``_reports_saves``). Saves,
+    registered values and errors are taken the last rank's first
+    (`merge_saves`).
     """
     merged: dict[str, dict] = {}
     reports: dict[str, dict] = {}
@@ -54,17 +84,11 @@ def merge_collected(payloads: list) -> dict:
     for request_id, report in reports.items():
         into = merged[request_id]
         into["error"] = next((error for error in reversed(report["errors"]) if error is not None), None)
-        try:
-            into["saves"] = fill_saves(report["saves"])
-            into["registered"] = fill_saves(report["registered"])
-            for index, per_index in report["sequences"].items():
-                into["sequences"][index]["saves"] = fill_saves(per_index["saves"])
-                into["sequences"][index]["registered"] = fill_saves(per_index["registered"])
-        except RuntimeError as error:
-            # A marker nobody filled: the stage holding the location did not
-            # reach that save. Its own error says why; failing that, this.
-            if into["error"] is None:
-                into["error"] = {"type_name": "RuntimeError", "message": str(error), "traceback": "", "is_control_flow": False}
+        into["saves"] = merge_saves(report["saves"])
+        into["registered"] = merge_saves(report["registered"])
+        for index, per_index in report["sequences"].items():
+            into["sequences"][index]["saves"] = merge_saves(per_index["saves"])
+            into["sequences"][index]["registered"] = merge_saves(per_index["registered"])
     return merged
 
 

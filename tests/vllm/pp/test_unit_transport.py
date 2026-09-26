@@ -1,4 +1,4 @@
-"""The wire codec, in one process."""
+"""What a step's entries look like on vLLM's transfers, and the reply wire's codec, in one process."""
 
 import pickle
 from collections import namedtuple
@@ -6,41 +6,69 @@ from collections import namedtuple
 import pytest
 import torch
 
-from nnsight.modeling.vllm.pp_transport import Kept, decode, encode, to_host
+from nnsight.modeling.vllm.pp_transport import (
+    ERROR,
+    META,
+    VALUE,
+    Kept,
+    Link,
+    decode,
+    encode,
+    pack,
+    to_host,
+    unpack,
+)
 
 Pair = namedtuple("Pair", "hidden residual")
 
 
-def roundtrip(envelope):
-    header, blob = encode(envelope)
-    assert header.dtype == torch.int64 and blob.dtype == torch.uint8
-    return decode(blob, int(header[0]))
+def test_entries_ride_a_tensor_dict_and_leave_it_as_they_found_it():
+    """Every tensor becomes a key of its own, since the transfer sends tensors
+    directly and pickles the rest; unpacking removes all of them, so the
+    dictionary is again what vLLM expects."""
+    activations = {"hidden_states": torch.zeros(4, 8), "residual": torch.ones(4, 8)}
+    served = Pair(torch.arange(6, dtype=torch.int64).reshape(2, 3), torch.full((3,), 1.5, dtype=torch.bfloat16))
+    entries = [
+        (VALUE, 0, "req-a", 0, "model.decoder_blocks.3.output", served),
+        (VALUE, 0, "req-a", 1, "model.decoder_blocks.3.output", [torch.zeros(0), None, {"n": 2}]),
+        (ERROR, 0, "req-b", 0, None, "the block failed on stage 0"),
+    ]
+    payload = pack(entries)
+    assert META in payload and sum(1 for key in payload if key.startswith("nnsight.t")) == 3
+    assert all(isinstance(payload[key], torch.Tensor) for key in payload if key != META)
+
+    activations.update(payload)
+    back = unpack(activations)
+    assert set(activations) == {"hidden_states", "residual"}
+    assert len(back) == 3
+    kind, stage, req, ordinal, provider, value = back[0]
+    assert (kind, stage, req, ordinal, provider) == (VALUE, 0, "req-a", 0, "model.decoder_blocks.3.output")
+    assert isinstance(value, Pair) and torch.equal(value.hidden, served.hidden)
+    assert value.residual.dtype == torch.bfloat16 and torch.equal(value.residual, served.residual)
+    assert back[1][5][0].shape == (0,) and back[1][5][1] is None and back[1][5][2] == {"n": 2}
+    assert back[2] == entries[2]
 
 
-def test_tensors_of_several_dtypes_ride_beside_plain_leaves():
-    value = (
-        torch.arange(6, dtype=torch.int64).reshape(2, 3),
-        None,
-        {"h": torch.full((5,), 1.5, dtype=torch.bfloat16), "n": 3, "s": "text"},
-        [torch.zeros(0), torch.tensor(True)],
-    )
-    back = roundtrip({"kind": "value", "value": value})["value"]
-    assert torch.equal(back[0], value[0]) and back[1] is None
-    assert back[2]["h"].dtype == torch.bfloat16 and torch.equal(back[2]["h"], value[2]["h"])
-    assert back[2]["n"] == 3 and back[2]["s"] == "text"
-    assert back[3][0].shape == (0,) and back[3][1].item() is True
+def test_a_dict_without_entries_unpacks_to_none_of_them():
+    activations = {"hidden_states": torch.zeros(2)}
+    assert unpack(activations) == [] and set(activations) == {"hidden_states"}
 
 
-def test_a_namedtuple_keeps_its_type_and_fields():
-    value = Pair(torch.ones(2, 2), torch.full((2, 2), 2.0))
-    back = roundtrip({"value": value})["value"]
-    assert isinstance(back, Pair) and torch.equal(back.residual, value.residual)
-
-
-def test_a_non_contiguous_tensor_arrives_whole():
+def test_a_non_contiguous_tensor_arrives_whole_over_the_reply_wire():
     value = torch.arange(12, dtype=torch.float32).reshape(3, 4).t()
-    back = roundtrip({"value": value})["value"]
+    header, blob = encode({"value": value})
+    back = decode(blob, int(header[0]))["value"]
     assert back.shape == (4, 3) and torch.equal(back, value)
+
+
+def test_a_decoded_tensor_owns_its_storage():
+    """A reply's tensors are copied out of the message, so a value kept for a
+    request's life does not keep the whole message with it."""
+    header, blob = encode({"small": torch.ones(1), "large": torch.zeros(4096)})
+    envelope = decode(blob, int(header[0]))
+    small = envelope["small"]
+    assert small.untyped_storage().nbytes() == small.numel() * small.element_size()
+    assert small.untyped_storage().data_ptr() != blob.untyped_storage().data_ptr()
 
 
 def test_an_empty_envelope_has_no_data_region():
@@ -59,6 +87,16 @@ def test_to_host_copies_every_tensor_and_keeps_the_structure():
 def test_a_leaf_that_cannot_be_pickled_fails_before_anything_is_sent():
     with pytest.raises((pickle.PicklingError, AttributeError, TypeError)):
         encode({"value": lambda: None})
+
+
+def test_a_reply_nobody_waits_for_is_dropped():
+    """A waiter that timed out is gone from the waiting set, so its reply,
+    arriving later with a whole module state, is not kept."""
+    link = Link(None, 0, 1)  # one rank: no peers, no threads
+    link._waiting.add(7)
+    link._file_reply(7, True, {"weight": torch.ones(2)})
+    link._file_reply(8, True, {"weight": torch.zeros(4096)})
+    assert set(link._replies) == {7}
 
 
 def test_kept_values_live_with_their_requests_unless_pinned():

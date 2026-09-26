@@ -1,8 +1,10 @@
-"""Two gloo ranks over the real link and interleaver, no vLLM engine.
+"""Two gloo ranks over the real reply wire and interleaver, no vLLM engine.
 
 Each test spawns two ranks that run ``_run_<name>(rank, world, rdv)``: the
-wire (values, requests, failures) and then the interleaver on a block both
-ranks run, where one rank's local read is the other's remote one.
+reply wire for parameters, then the interleaver on a block both ranks run,
+where one rank's local read is the other's remote one. A step's entries move
+between the ranks with ``Stage.exchange``, the way the engine's own
+transfers carry them: forward from the earlier rank, backward from the later.
 """
 
 import pytest
@@ -17,32 +19,8 @@ def _sync():
 
 
 # ---------------------------------------------------------------------------
-# The wire
+# The reply wire
 # ---------------------------------------------------------------------------
-
-
-def _run_value(rank, world, rdv):
-    from nnsight.modeling.vllm.pp_transport import VALUE
-
-    stage = Stage(rank, world, rdv)
-    value = (torch.arange(6, dtype=torch.int64).reshape(2, 3), None, {"h": torch.full((4,), 1.5, dtype=torch.bfloat16)})
-    if rank == 0:
-        stage.link.publish(VALUE, "r", 0, "model.a.output", value)
-        stage.link.publish(VALUE, "r", 0, "model.a.output", (torch.zeros(1),))
-        stage.link.publish(VALUE, "r", 1, "model.a.output", torch.ones(2))
-    else:
-        first = stage.link.take("r", 0, "model.a.output")
-        assert torch.equal(first[0], value[0]) and first[1] is None and torch.equal(first[2]["h"], value[2]["h"])
-        second = stage.link.take("r", 0, "model.a.output")
-        assert torch.equal(second[0], torch.zeros(1))
-        other = stage.link.take("r", 1, "model.a.output")
-        assert torch.equal(other, torch.ones(2))
-        assert not stage.link.has("r", 0, "model.a.output")
-    stage.close()
-
-
-def test_values_arrive_per_worker_in_order():
-    run_two_ranks(_run_value)
 
 
 def _run_request(rank, world, rdv):
@@ -69,27 +47,6 @@ def test_a_parameter_request_is_answered_from_the_owner():
     run_two_ranks(_run_request)
 
 
-def _run_failure(rank, world, rdv):
-    from nnsight.modeling.vllm.pp_transport import RemoteError
-
-    stage = Stage(rank, world, rdv)
-    if rank == 0:
-        stage.link.fail("r", 0, "model.a.output", "ran past it")
-        stage.link.fail("s", 0, None, "the block failed")
-    else:
-        with pytest.raises(RemoteError, match="ran past it"):
-            stage.link.take("r", 0, "model.a.output")
-        with pytest.raises(RemoteError, match="the block failed"):
-            stage.link.take("s", 0, "model.anything.output")
-        with pytest.raises(RemoteError, match="nothing came"):
-            stage.link.take("t", 0, "model.a.output", timeout=0.2)
-    stage.close()
-
-
-def test_a_failure_ends_the_wait_for_that_worker():
-    run_two_ranks(_run_failure)
-
-
 # ---------------------------------------------------------------------------
 # The interleaver: one block, both ranks
 # ---------------------------------------------------------------------------
@@ -100,25 +57,29 @@ A, B = "model.a.output", "model.b.output"
 
 def _run_read_both(rank, world, rdv):
     """Rank 0 holds ``a``, rank 1 holds ``b``. The block reads ``a`` then ``b``:
-    on rank 1 ``a`` is taken in place at start; on rank 0 ``b`` parks and is
-    taken once rank 0 is past the round."""
+    on rank 1 ``a`` is taken in place at start, from the step's payload; on
+    rank 0 ``b`` parks and is taken once rank 1's payload for the step is back."""
     stage = Stage(rank, world, rdv, owners=OWNERS)
     block = "a = Mediator.value('model.a.output'); b = Mediator.value('model.b.output'); total = float(a.sum() + b.sum())"
     if rank == 0:
         mediator = stage.mediator(block)
         assert mediator.pending.provider == A
         stage.fire(A, torch.ones(3))
-        # Served a, pushed it, and parked on b, which the later stage owns.
+        # Served a, and parked on b, which the later stage owns.
         assert mediator.pending.provider == B
+        stage.exchange(src=0)
         stage.interleaver.rounds["r"] = 1
+        stage.exchange(src=1, reqs=("r",))
         stage.interleaver.serve([mediator])
         assert not mediator.alive and mediator.lcls["total"] == 3 + 6
     else:
+        stage.exchange(src=0)
         mediator = stage.mediator(block)
         # Taken a in place at start; parked on its own b.
         assert mediator.pending.provider == B
         stage.fire(B, torch.full((3,), 2.0))
         assert not mediator.alive and mediator.lcls["total"] == 3 + 6
+        stage.exchange(src=1, reqs=("r",))
     stage.close()
 
 
@@ -135,15 +96,19 @@ def _run_write_absorbed(rank, world, rdv):
         assert mediator.pending.provider == A
         assert torch.equal(stage.fire(A, torch.ones(3)), torch.zeros(3))
         assert mediator.pending.provider == B
+        stage.exchange(src=0)
         stage.interleaver.rounds["r"] = 1
+        stage.exchange(src=1, reqs=("r",))
         stage.interleaver.serve([mediator])
         assert mediator.lcls["got"] == 5.0
     else:
+        stage.exchange(src=0)
         mediator = stage.mediator(block)
         # The swap was absorbed at start; the block is at b.
         assert mediator.pending.provider == B
         stage.fire(B, torch.full((3,), 5.0 / 3))
         assert mediator.lcls["got"] == pytest.approx(5.0)
+        stage.exchange(src=1, reqs=("r",))
     stage.close()
 
 
@@ -151,37 +116,65 @@ def test_a_write_to_the_other_stage_is_absorbed():
     run_two_ranks(_run_write_absorbed)
 
 
-def _run_stale(rank, world, rdv):
+def _run_not_served(rank, world, rdv):
     """Rank 0's block reads b (later stage) then a (its own, already passed):
-    rank 0 stays parked on a, as one GPU would, and tells rank 1, whose block
-    is waiting on a in place, that a will not come."""
+    rank 0 stays parked on a, as one GPU would. Rank 1's block waits on a in
+    place; the step's payload from rank 0 has no a for it, so it fails there
+    and then, with no waiting."""
     stage = Stage(rank, world, rdv, owners=OWNERS)
     block = "b = Mediator.value('model.b.output'); a = Mediator.value('model.a.output'); total = float(a.sum())"
     if rank == 0:
         mediator = stage.mediator(block)
         stage.fire(A, torch.ones(3))  # nobody parked here; the visit passes
+        stage.exchange(src=0)
         stage.interleaver.rounds["r"] = 1
+        stage.exchange(src=1, reqs=("r",))
         stage.interleaver.serve([mediator])
         assert mediator.alive and mediator.pending.provider == A
     else:
+        stage.exchange(src=0)
+        stage.interleaver.defer_exceptions = True
         mediator = stage.mediator(block)
         assert mediator.pending.provider == B
-        stage.interleaver.defer_exceptions = True
         stage.fire(B, torch.ones(3))
-        assert mediator.exception is not None and "ran past" in str(mediator.exception)
+        assert mediator.exception is not None and "served nothing for it" in str(mediator.exception)
+        stage.exchange(src=1, reqs=("r",))
     stage.close()
 
 
-def test_a_read_the_owner_ran_past_fails_the_waiting_peer():
-    run_two_ranks(_run_stale)
+def test_a_read_the_owner_ran_past_fails_the_waiting_peer_at_once():
+    run_two_ranks(_run_not_served)
+
+
+def _run_failed_block(rank, world, rdv):
+    """Rank 0's copy of the block fails before serving anything. Rank 1's
+    copy, waiting on a in place, is told so by the step's payload."""
+    stage = Stage(rank, world, rdv, owners=OWNERS)
+    block = "a = Mediator.value('model.a.output'); total = float(a.sum())"
+    if rank == 0:
+        stage.interleaver.defer_exceptions = True
+        mediator = stage.mediator(block)
+        mediator.exception = RuntimeError("boom")
+        stage.interleaver.failed(mediator, "the block failed on stage 0: RuntimeError: boom")
+        stage.exchange(src=0)
+    else:
+        stage.exchange(src=0)
+        stage.interleaver.defer_exceptions = True
+        mediator = stage.mediator(block)
+        assert mediator.exception is not None and "failed on stage 0" in str(mediator.exception)
+    stage.close()
+
+
+def test_a_failed_copy_fails_the_peers_copy_waiting_on_it():
+    run_two_ranks(_run_failed_block)
 
 
 def _run_rounds(rank, world, rdv):
     """A per-step read of the later stage's value across three rounds: each
-    round's value is taken at the next round's start. The last round's is not
-    taken on the earlier stage, which has no step left to take it at; the
-    later stage's copy of the block, which has every value, completes and is
-    the one collected from."""
+    round's value is taken at the next round's start, once that round's
+    payload is back. The last round's is not taken on the earlier stage,
+    which has no step left to take it at; the later stage's copy of the
+    block, which has every value, completes and is the one collected from."""
     stage = Stage(rank, world, rdv, owners=OWNERS)
     # Each read pinned to its step, as ``tracer.iter`` pins it.
     block = (
@@ -196,6 +189,7 @@ def _run_rounds(rank, world, rdv):
             stage.interleaver.serve([mediator])
             assert mediator.alive and mediator.pending.provider == B
             stage.interleaver.rounds["r"] = step + 1
+            stage.exchange(src=1, reqs=("r",))
         # No fourth step start comes: the request is over.
         assert mediator.alive and mediator.pending.provider == B and mediator.lcls["vals"] == [0.0, 3.0]
         _sync()
@@ -203,6 +197,7 @@ def _run_rounds(rank, world, rdv):
         mediator = stage.mediator(block)
         for step in range(3):
             stage.fire(B, torch.full((3,), float(step)))
+            stage.exchange(src=1, reqs=("r",))
         assert not mediator.alive and mediator.lcls["vals"] == [0.0, 3.0, 6.0]
         _sync()
     stage.close()
@@ -210,68 +205,6 @@ def _run_rounds(rank, world, rdv):
 
 def test_a_per_step_read_follows_the_rounds():
     run_two_ranks(_run_rounds)
-
-
-class _Kept(list):
-    """A list whose ``save`` is its own, so the block can say ``.save()`` on
-    a rank with no trace open."""
-
-    def save(self):
-        return self
-
-
-class _Reads:
-    """``.output`` reads a location through the mediator, as an envoy does."""
-
-    def __init__(self, provider):
-        self.provider = provider
-
-    @property
-    def output(self):
-        from nnsight.intervention.interleaver import Mediator
-
-        return Mediator.value(self.provider)
-
-
-def _run_save_only(rank, world, rdv):
-    """The block appends ``a`` and ``b`` to a saved container and does nothing
-    else with them. Neither rank waits for the other's value or sends its
-    own: each binds a placeholder for the remote one and the real tensor for
-    its own, in the same positions."""
-    from nnsight.modeling.vllm.pp_saved import SavedOnOwner
-
-    stage = Stage(rank, world, rdv, owners=OWNERS)
-    block = "kept = Kept().save()\nkept.append(model['a'].output[0])\nkept.append(model['b'].output[0])\n"
-    stage_globals = {"Kept": _Kept, "model": {"a": _Reads(A), "b": _Reads(B)}}
-    mediator = stage.mediator(block, start=False)
-    mediator.glbls.update(stage_globals)
-    mediator.lcls.update(stage_globals)
-    mediator.start(stage.interleaver)
-    stage.interleaver.started(mediator)
-    stage.interleaver.mediators.append(mediator)
-    stage.interleaver.reindex()
-    if rank == 0:
-        assert mediator.pending.provider == A
-        stage.fire(A, (torch.ones(3),))
-        # b, which the later stage owns, was answered with a placeholder at once.
-        assert not mediator.alive
-        kept = mediator.lcls["kept"]
-        assert torch.equal(kept[0], torch.ones(3)) and isinstance(kept[1], SavedOnOwner) and kept[1].provider == B
-    else:
-        # a was answered with a placeholder at start; b is this rank's own.
-        assert mediator.pending.provider == B
-        stage.fire(B, (torch.full((3,), 2.0),))
-        assert not mediator.alive
-        kept = mediator.lcls["kept"]
-        assert isinstance(kept[0], SavedOnOwner) and kept[0].provider == A and torch.equal(kept[1], torch.full((3,), 2.0))
-    _sync()
-    # Nothing crossed the wire for either read.
-    assert not stage.link.has("r", 0, A) and not stage.link.has("r", 0, B)
-    stage.close()
-
-
-def test_a_save_only_read_binds_a_placeholder_and_sends_nothing():
-    run_two_ranks(_run_save_only)
 
 
 def _run_inplace(rank, world, rdv):
@@ -289,8 +222,10 @@ def _run_inplace(rank, world, rdv):
         mediator = stage.mediator(block)
         stage.fire(A, torch.ones(3))
         assert mediator.pending.provider == B
+        stage.exchange(src=0)
         _sync()
     else:
+        stage.exchange(src=0)
         mediator = stage.mediator(block)
         # a arrived as it was handed on stage 0: ones, then this block's own add_.
         assert mediator.pending.provider == B
@@ -301,5 +236,30 @@ def _run_inplace(rank, world, rdv):
     stage.close()
 
 
-def test_a_value_is_pushed_as_handed_before_the_block_changes_it():
+def test_a_value_travels_as_handed_before_the_block_changes_it():
     run_two_ranks(_run_inplace)
+
+
+def _run_finished_forgets(rank, world, rdv):
+    """A value the earlier stage's copy never takes, a later-stage value of
+    the request's last round, leaves with the request."""
+    stage = Stage(rank, world, rdv, owners=OWNERS)
+    block = "b = Mediator.value('model.b.output'); total = float(b.sum())"
+    if rank == 0:
+        mediator = stage.mediator(block)
+        stage.interleaver.rounds["r"] = 1
+        stage.exchange(src=1, reqs=("r",))
+        assert ("r", 0) in stage.interleaver.inbox and stage.interleaver.arrived == {"r": 1}
+        stage.interleaver.finished("r")
+        assert not stage.interleaver.inbox and not stage.interleaver.arrived and not stage.interleaver.rounds
+        assert mediator.alive  # reported at the request's end, quietly, as the runner does
+    else:
+        mediator = stage.mediator(block)
+        stage.fire(B, torch.ones(3))
+        assert not mediator.alive
+        stage.exchange(src=1, reqs=("r",))
+    stage.close()
+
+
+def test_what_a_finished_request_left_is_forgotten_with_it():
+    run_two_ranks(_run_finished_forgets)

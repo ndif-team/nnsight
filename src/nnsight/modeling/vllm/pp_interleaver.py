@@ -2,32 +2,35 @@
 
 Every stage runs the whole block. This interleaver serves the modules the
 stage holds as any interleaver does, and for the rest: what its own workers
-are served here is pushed to the other stages as it happens (`served`), and
-what its workers ask of other stages is taken from the link's inbox, in the
-order they ask (`chase`, `serve`). A worker asking for a value an earlier
-stage holds is answered in place, since that stage has already produced it; a
-worker asking for a later stage's value parks until this stage's next step,
-by which time that value exists. A read the block only saves is answered with
-a marker at once and never pushed; the owner's copy fills it at collect (see
-`pp_saved`). See ``docs/developing/pp-push-design.md``.
+are served here goes into the step's outbox (`serving`) and rides vLLM's own
+transfers to the other stages (see `pp_transport`), and what its workers ask
+of other stages is taken from the inbox those transfers fill, in the order
+they ask (`chase`, `serve`). A worker asking for an earlier stage's value is
+answered in place, since that stage's step, and its payload, came before this
+one; a worker asking for a later stage's value parks until that stage's
+values for the step arrive, which is before this stage's next step. Nothing
+is waited for beyond that: a value missing from a step's payload was not
+served in that step, and the worker is told so.
 """
 
 from __future__ import annotations
 
-import os
+from collections import deque
 from typing import Any, Iterable, Optional
 
 import torch
 from greenlet import getcurrent
+from torch.utils._pytree import tree_map
 
 from ...intervention.interleaver import Event, Mediator
 from .interleaver import VLLMInterleaver
-from .pp_saved import SavedOnOwner, save_only_lines
-from .pp_transport import VALUE, Link, RemoteError, to_host
+from .pp_transport import ERROR, VALUE, Link, RemoteError
 
-# Set to 1 to send every saved value during the run, including the ones the
-# block never uses (the behavior before f652c446), for measurement.
-SEND_SAVED = os.environ.get("NNSIGHT_PP_SEND_SAVED", "0") != "0"
+ROUND = "round"  # the last stage has run this step for the request; its values for it are in this payload
+
+
+def _clone(value: Any) -> Any:
+    return tree_map(lambda t: t.detach().clone() if isinstance(t, torch.Tensor) else t, value)
 
 
 class PPInterleaver(VLLMInterleaver):
@@ -35,10 +38,11 @@ class PPInterleaver(VLLMInterleaver):
 
     Attributes:
         module_map: Which stage holds each module path.
-        link: The wire to the other stages.
+        link: The request-and-reply wire to the other stages, for parameters and state.
         local_rank: This stage.
         device: Where a taken value is placed before the worker gets it.
         rounds: Request id -> how many forwards this stage has run for it.
+        arrived: Request id -> how many of its steps the later stages' values have arrived for.
     """
 
     def __init__(
@@ -56,6 +60,15 @@ class PPInterleaver(VLLMInterleaver):
         self.local_rank = local_rank
         self.device = device
         self.rounds: dict[str, int] = {}
+        self.arrived: dict[str, int] = {}
+        # This step's entries for the other stages, and the ones that arrived
+        # from earlier stages this step, which the stages after this one need too.
+        self.outbox: list[tuple] = []
+        self.relayed: list[tuple] = []
+        # (request id, worker ordinal) -> provider -> what arrived for it, in order.
+        self.inbox: dict[tuple, dict[str, deque]] = {}
+        # (request id, worker ordinal) -> provider (or None for the whole block) -> why it will not come.
+        self.errors: dict[tuple, dict[Optional[str], str]] = {}
 
     # ---------------------------------------------------------------- where
 
@@ -77,23 +90,18 @@ class PPInterleaver(VLLMInterleaver):
         value: Any,
         line: Optional[int] = None,
     ) -> None:
-        """Push what this stage is about to serve its worker.
+        """Put what this stage is about to serve its worker in the step's outbox.
 
-        Copied to the host now, before the worker gets it: the block may change
-        the value in place before it parks again (vLLM's fused norm writes into
-        its inputs), and the peers must get what the worker was handed. A read
-        the block only saves (`_save_only`) is not pushed: the peers bound a
-        marker for it, and this stage's saved copy fills it at collect.
+        Copied now, before the worker gets it: the block may change the value
+        in place before it parks again (vLLM's fused norm writes into its
+        inputs), and the peers must get what the worker was handed.
         """
-        if self.owner(provider) is not None:
-            return
-        if self._save_only(mediator, line):
-            # The peers bound a marker for this read and will need this stage's
-            # saved copy to fill it, so this worker's saves have to go home from
-            # here as well as from the last stage (see the runner's collect).
-            mediator.pp_fills = True
-        elif self.link.peers:
-            self.link.publish(VALUE, *self._key(mediator), provider, to_host(value))
+        if self.owner(provider) is None and self.link.peers:
+            self.outbox.append((VALUE, self.local_rank, *self._key(mediator), provider, _clone(value)))
+
+    def failed(self, mediator: Mediator, message: str) -> None:
+        """This worker will serve nothing more: tell the peers' copies waiting on it."""
+        self.outbox.append((ERROR, self.local_rank, *self._key(mediator), None, message))
 
     def served(
         self,
@@ -106,46 +114,58 @@ class PPInterleaver(VLLMInterleaver):
     ) -> None:
         """The worker has parked again: note the step, then answer what it asks next.
 
-        A cache observation (``selected``) is not pushed: each stage's cache
-        keeps what its own modules produced, and the caches are unioned at
-        collect, so this stage's saves have to go home for that too.
+        A cache observation (``selected``) stays where it was made: each
+        stage's cache keeps what its own modules produced, and the caches are
+        unioned at collect, so this stage's saves go home for that.
         """
         if selected is not None:
             if self.owner(provider) is None:
-                mediator.pp_fills = True
+                mediator.pp_reports = True
             return
         if self.owner(provider) is None:
             # A local visit is served in the round being run, so that is the
             # step the block is at, whatever module fired.
             mediator.pp_step = self.rounds.get(mediator.pp_req, 0)
-        self._report_stale(mediator)
         self.chase(mediator)
-
-    def _report_stale(self, mediator: Mediator) -> None:
-        """A worker asking for a local visit the forward already made will never
-        be served; tell the peers waiting on it, so they fail where it failed
-        rather than at their deadline. The worker itself stays parked and is
-        reported when its request ends, as it is on one GPU."""
-        pending = mediator.pending
-        if pending is None or pending.event is not Event.VALUE or pending.provider is None:
-            return
-        if self.owner(pending.provider) is not None or pending.iteration is None:
-            return
-        if pending.iteration < mediator.occurrence(pending.provider):
-            self.link.fail(
-                *self._key(mediator),
-                pending.provider,
-                f"'{pending}' was requested but the model already ran past it",
-            )
 
     def started(self, mediator: Mediator) -> None:
         """A worker has started and parked for the first time."""
         self.chase(mediator)
 
-    @staticmethod
-    def _save_only(mediator: Mediator, line: Optional[int]) -> bool:
-        """Whether the request made from ``line`` of the block only saves its value."""
-        return not SEND_SAVED and line is not None and mediator.source is not None and line in save_only_lines(mediator.source)
+    # ------------------------------------------------------------- the wire
+
+    def flush_forward(self) -> list[tuple]:
+        """The entries for the next stage: this step's, and the earlier stages'
+        that arrived this step, which the stages after this one have not seen."""
+        entries = self.outbox + self.relayed
+        self.outbox, self.relayed = [], []
+        return entries
+
+    def flush_backward(self, reqs: Iterable[str]) -> list[tuple]:
+        """The last stage's entries for the earlier ones after a step: what it
+        and the stages between served, and a mark per request that the step
+        is done, so a worker waiting for a value of it stops waiting."""
+        entries = self.outbox + self.relayed + [(ROUND, self.local_rank, req, 0, None, None) for req in reqs]
+        self.outbox, self.relayed = [], []
+        return entries
+
+    def receive(self, entries: list[tuple], forward: bool) -> None:
+        """File a payload's entries. Forward, the ones from earlier stages are
+        this stage's and are kept for the stages after it; backward, the ones
+        from later stages. Each value is filed once whichever way it came."""
+        for entry in entries:
+            kind, stage, req, ordinal, provider, payload = entry
+            if (stage < self.local_rank) != forward or stage == self.local_rank:
+                continue
+            key = (req, ordinal)
+            if kind == VALUE:
+                self.inbox.setdefault(key, {}).setdefault(provider, deque()).append(payload)
+            elif kind == ERROR:
+                self.errors.setdefault(key, {})[provider] = payload
+            elif kind == ROUND:
+                self.arrived[req] = self.arrived.get(req, 0) + 1
+            if forward:
+                self.relayed.append(entry)
 
     # --------------------------------------------------------- the receiver
 
@@ -164,33 +184,25 @@ class PPInterleaver(VLLMInterleaver):
             mediator.pp_step = pending.iteration
         return mediator.pp_step
 
-    def _produced(self, mediator: Mediator, owner: int, save_only: bool = False) -> bool:
-        """Whether ``owner`` has produced what the worker is asking for.
+    def _produced(self, mediator: Mediator, owner: int) -> bool:
+        """Whether ``owner``'s values for the step the worker is at are here.
 
-        The stages run a request's rounds in order: while this stage runs
-        round ``n`` (``rounds`` forwards done here), an earlier stage has
-        finished round ``n`` and a later one round ``n-1``. A save-only read
-        needs only the promise of the value: a later stage runs every round
-        this stage has started, so the marker is handed out as soon as this
-        stage is at that round. A later stage's value of the request's last
-        round is never taken here: there is no step left to take it at, and
-        the last stage's copy of the block, which has every value, is the one
-        the request's saves are collected from.
+        An earlier stage's values for a step arrive with the step, before this
+        stage's forward; a later stage's arrive after that stage's forward of
+        the step, before this stage's next one, and `arrived` counts them.
         """
-        rounds = self.rounds.get(mediator.pp_req, 0)
         step = self._step(mediator)
-        if owner > self.local_rank and not save_only:
-            return step < rounds
-        return step <= rounds
+        if owner > self.local_rank:
+            return step < self.arrived.get(mediator.pp_req, 0)
+        return step <= self.rounds.get(mediator.pp_req, 0)
 
     def chase(self, mediator: Mediator) -> None:
         """Answer the worker's requests for other stages' modules as far as possible now.
 
         A write to another stage's module is absorbed (the owner applies the
-        same line). A read is taken from the inbox in place when the owner has
-        produced it (see `_produced`), which for an earlier stage's value in
-        the round being run is always; otherwise the worker stays parked for
-        `serve` to answer at a later step.
+        same line). A read is answered from the inbox once the owner's values
+        for that step are here (see `_produced`); otherwise the worker stays
+        parked for `serve` to answer at a later step.
         """
         while mediator.alive and (pending := mediator.pending) is not None and pending.provider is not None:
             owner = self.owner(pending.provider)
@@ -199,37 +211,28 @@ class PPInterleaver(VLLMInterleaver):
             if pending.event in (Event.SWAP, Event.SKIP):
                 mediator.pending = mediator.switch()
                 continue
-            if pending.event is not Event.VALUE or not self._answer(mediator, owner):
+            if pending.event is not Event.VALUE or not self._produced(mediator, owner):
                 return
+            self._take(mediator, owner)
 
-    def _answer(self, mediator: Mediator, owner: int) -> bool:
-        """Answer the worker's pending read of ``owner``'s location if it can be
-        answered now: with a marker when the block only saves it, else with
-        the pushed item. Returns whether it was."""
-        pending = mediator.pending
-        save_only = self._save_only(mediator, mediator.line)
-        if not self._produced(mediator, owner, save_only):
-            return False
-        if save_only:
-            self._hand(mediator, SavedOnOwner(pending.provider, self._step(mediator)))
-        else:
-            self._take(mediator, pending.provider)
-        self._report_stale(mediator)
-        return True
-
-    def _take(self, mediator: Mediator, provider: str) -> None:
-        """Hand the worker the next pushed item for ``provider``, or the owner's failure."""
+    def _take(self, mediator: Mediator, owner: int) -> None:
+        """Hand the worker the next item filed for its read, or why there is none."""
+        provider = mediator.pending.provider
         key = self._key(mediator)
-        owner, step = self.owner(provider), self._step(mediator)
-        try:
-            value = self.link.take(*key, provider, owner, step)
-        except RemoteError as error:
-            self._hand(mediator, error)
+        items = self.inbox.get(key, {}).get(provider)
+        if items:
+            value = items.popleft()
+            self._hand(mediator, tree_map(lambda t: t.to(self.device) if isinstance(t, torch.Tensor) else t, value))
             return
-        self._hand(
-            mediator,
-            torch.utils._pytree.tree_map(lambda t: t.to(self.device) if isinstance(t, torch.Tensor) else t, value),
-        )
+        errors = self.errors.get(key, {})
+        message = errors.get(provider, errors.get(None))
+        if message is None:
+            message = (
+                f"'{provider}' was requested at step {self._step(mediator)} of request "
+                f"{mediator.pp_req!r}, but stage {owner} served nothing for it in that step: "
+                "its copy of the block did not reach that read, or the model ran past it"
+            )
+        self._hand(mediator, RemoteError(message))
 
     def _hand(self, mediator: Mediator, value: Any) -> None:
         """Resume the worker with ``value`` (thrown into it when it is a RemoteError)."""
@@ -252,7 +255,7 @@ class PPInterleaver(VLLMInterleaver):
             mediator.pending = None
 
     def serve(self, mediators: Iterable[Mediator]) -> None:
-        """Resume workers parked on other stages' values that are now produced.
+        """Resume workers parked on other stages' values that have arrived.
 
         Called at the start of a step for the workers of the requests it runs.
         """
@@ -260,11 +263,17 @@ class PPInterleaver(VLLMInterleaver):
             if not mediator.alive or (pending := mediator.pending) is None or pending.provider is None:
                 continue
             owner = self.owner(pending.provider)
-            if owner is None or pending.event is not Event.VALUE or not self._answer(mediator, owner):
+            if owner is None or pending.event is not Event.VALUE or not self._produced(mediator, owner):
                 continue
+            self._take(mediator, owner)
             self.chase(mediator)
 
     def finished(self, req: str) -> None:
-        """Forget a request: its rounds here and everything the link filed for it."""
+        """Forget a request: its rounds here, what was filed for it, and what was kept for it."""
         self.rounds.pop(req, None)
+        self.arrived.pop(req, None)
+        for key in [key for key in self.inbox if key[0] == req]:
+            del self.inbox[key]
+        for key in [key for key in self.errors if key[0] == req]:
+            del self.errors[key]
         self.link.drop(req)

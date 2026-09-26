@@ -6,6 +6,12 @@ design; the code follows it. `diagrams/pp-transports.drawio` draws the data
 path on its "push" page, and compares it with the other two transports on the
 first.
 
+On the `pp-inband` branch the wire this note describes, the gloo channel with
+its queue, inbox, round markers and timeouts, is replaced by the engine's own
+per-step transfers, and the save-only analysis is removed with it. The two
+facts below and the shells still hold; the rest of the data path is described
+in `pp-inband-design.md`.
+
 ## The two facts the design rests on
 
 **Every rank runs the whole block.** A request carries one mediator; every

@@ -1,24 +1,18 @@
 """The wire between pipeline stages.
 
-One :class:`Link` per rank carries three kinds of traffic to and from every
-other stage: values a stage's block was served (pushed by the owner as its
-forward serves them, taken by the peers' blocks in the order they ask), a
-block's failure (so a peer waiting on that block's values stops waiting), and
-parameter or state reads answered from the owner's modules by a thread that
-never touches the forward.
+A value a block reads on one stage reaches the others on the transfers vLLM
+already makes every step. Forward, it rides the tensor dictionary each stage
+hands the next (`pack` puts a step's entries into that dictionary, `unpack`
+takes them out before vLLM sees it). Backward, from the last stage to the
+earlier ones, it rides the broadcast the last stage makes right after sampling,
+where vLLM returns the sampled tokens the same way. Either way an entry exists
+for one step and arrives with that step, so nothing is waited for: a value that
+is not in the step's payload was not served, and the block is told so at once.
 
-Per peer there is one sender thread draining an outbound queue and one receive
-thread filing what arrives. Greenlets are switched only from the forward
-thread, so the receive thread files items in an inbox and the forward thread
-takes them; blocking on the inbox from the forward thread is safe because
-nothing a peer sends waits on this rank's forward.
-
-A message is a header of two int64 (metadata bytes, tensor bytes) and one
-uint8 blob: a pickle of the envelope with every tensor replaced by a
-:class:`_Slot`, then the tensors' raw bytes at aligned offsets. Two messages
-because a gloo receive needs its size first; the tensors are viewed in place
-over the blob on arrival. A sender that finds several envelopes queued sends
-them as one message, so a step's values cost one round trip on a slow link.
+Parameter and state reads are the one traffic a step cannot carry: a block
+asks for them in the middle of a forward and needs the answer to go on. `Link`
+answers those from the owner's modules by a thread that never touches the
+forward, request and reply over a gloo group, one message each way.
 """
 
 from __future__ import annotations
@@ -28,15 +22,14 @@ import pickle
 import queue
 import threading
 import time
-from collections import deque
 from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
 from torch.utils._pytree import tree_map
 
-# What a stage waits at most for a value a peer is bound to produce; expiry
-# turns a hang into an error naming the value and its owner.
+# What a stage waits at most for a parameter or state reply; expiry turns a
+# hang into an error naming the value and its owner.
 TIMEOUT_S = float(os.environ.get("NNSIGHT_PP_TIMEOUT", 60.0))
 
 _ALIGN = 64
@@ -44,16 +37,73 @@ _TAG = 0
 
 VALUE = "value"  # a block's read, served on the owner
 ERROR = "error"  # the owner's block failed, or never served this value
-ROUND = "round"  # the owner has run this many rounds of the request; earlier values are all sent
 REQUEST = "request"  # a parameter or state read, answered from the module
 REPLY = "reply"
 STOP = "stop"
-BATCH = "batch"  # several envelopes in one message
+
+META = "nnsight.meta"  # the key a step's entries ride under in a tensor dictionary
+_TENSOR = "nnsight.t"  # prefix of the keys their tensors ride under
+
+
+# ---------------------------------------------------------------- a step's entries
+
+
+class _Ref:
+    """Stands in for a tensor inside an entry while it rides as its own key."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+
+
+def pack(entries: list[tuple]) -> dict[str, Any]:
+    """A tensor dictionary carrying ``entries``, for a transfer that takes one.
+
+    Each entry is ``(kind, stage, req, ordinal, provider, payload)``: the
+    value a stage served (``VALUE``, payload the value) or why one will not
+    come (``ERROR``, payload the message). Every tensor in a payload becomes
+    a key of its own, since the transfers send the dictionary's tensors
+    directly and pickle everything else.
+    """
+    tensors: dict[str, torch.Tensor] = {}
+
+    def to_ref(leaf: Any) -> Any:
+        if not isinstance(leaf, torch.Tensor):
+            return leaf
+        key = f"{_TENSOR}{len(tensors)}"
+        tensors[key] = leaf.detach().contiguous()
+        return _Ref(key)
+
+    meta = [(kind, stage, req, ordinal, provider, tree_map(to_ref, payload)) for kind, stage, req, ordinal, provider, payload in entries]
+    return {META: meta, **tensors}
+
+
+def unpack(tensor_dict: dict[str, Any]) -> list[tuple]:
+    """The entries `pack` put in ``tensor_dict``, removed from it.
+
+    Removed, so the dictionary is what its transfer's owner expects again:
+    vLLM copies every key of an arrived dictionary into a buffer of its own.
+    """
+    meta = tensor_dict.pop(META, None)
+    if meta is None:
+        return []
+
+    def from_ref(leaf: Any) -> Any:
+        return tensor_dict.pop(leaf.key) if isinstance(leaf, _Ref) else leaf
+
+    return [(kind, stage, req, ordinal, provider, tree_map(from_ref, payload)) for kind, stage, req, ordinal, provider, payload in meta]
+
+
+def to_host(value: Any) -> Any:
+    """``value`` with every tensor copied to the host, on the calling thread's stream."""
+    return tree_map(lambda t: t.detach().to("cpu", copy=True) if isinstance(t, torch.Tensor) else t, value)
+
+
+# ------------------------------------------------------ parameter and state replies
 
 
 class _Slot:
     """A tensor's dtype, shape and byte range in the blob, standing in for it
-    inside the pickled envelope."""
+    inside the pickled envelope of a reply."""
 
     def __init__(self, dtype: torch.dtype, shape: tuple, offset: int, nbytes: int) -> None:
         self.dtype = dtype
@@ -67,7 +117,12 @@ def _aligned(nbytes: int) -> int:
 
 
 def encode(envelope: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(header, blob)`` for ``envelope``; every tensor in it must be on the host."""
+    """``(header, blob)`` for ``envelope``; every tensor in it must be on the host.
+
+    A gloo receive needs its size first, so the header carries the two
+    lengths; the blob is the pickled envelope with every tensor replaced by a
+    `_Slot`, then the tensors' bytes at aligned offsets.
+    """
     slots: list = []
 
     def to_slot(leaf: Any) -> Any:
@@ -92,21 +147,17 @@ def encode(envelope: dict) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def decode(blob: torch.Tensor, meta_nbytes: int) -> dict:
-    """The envelope back, its tensors viewed over ``blob`` in place."""
+    """The envelope back, each tensor copied out of ``blob`` into storage of its own,
+    so a value that is kept does not keep the whole message with it."""
     envelope = pickle.loads(blob[:meta_nbytes].numpy().tobytes())
     data = blob[_aligned(meta_nbytes) :]
 
     def from_slot(leaf: Any) -> Any:
         if not isinstance(leaf, _Slot):
             return leaf
-        return data[leaf.offset : leaf.offset + leaf.nbytes].view(leaf.dtype).reshape(leaf.shape)
+        return data[leaf.offset : leaf.offset + leaf.nbytes].clone().view(leaf.dtype).reshape(leaf.shape)
 
     return tree_map(from_slot, envelope)
-
-
-def to_host(value: Any) -> Any:
-    """``value`` with every tensor copied to the host, on the calling thread's stream."""
-    return tree_map(lambda t: t.detach().to("cpu", copy=True) if isinstance(t, torch.Tensor) else t, value)
 
 
 class RemoteError(RuntimeError):
@@ -154,7 +205,7 @@ class Kept:
 
 
 class Link:
-    """This rank's end of the wire to every other stage.
+    """This rank's end of the request-and-reply wire to every other stage.
 
     Args:
         group: The gloo process group the stages share; ranks are group ranks.
@@ -162,7 +213,7 @@ class Link:
         world: The group's size.
         resolver: ``provider -> value`` answering parameter and state requests
             from this rank's own modules, or ``None`` on a rank that answers none.
-        timeout: Seconds a take or request waits before raising.
+        timeout: Seconds a request waits before raising.
     """
 
     def __init__(
@@ -180,13 +231,10 @@ class Link:
         self.resolver = resolver
         self.timeout = timeout
         self._condition = threading.Condition()
-        # (request id, worker ordinal) -> provider -> what arrived for it, in order.
-        self._inbox: dict[tuple, dict[str, deque]] = {}
-        # (request id, worker ordinal) -> provider (or None for the whole block) -> why.
-        self._errors: dict[tuple, dict[Optional[str], str]] = {}
+        # Ids someone is still waiting for; a reply to any other id is dropped
+        # as it arrives, so a waiter that gave up leaves nothing behind.
+        self._waiting: set[int] = set()
         self._replies: dict[int, tuple[bool, Any]] = {}
-        # (peer, request id) -> rounds the peer has finished for it.
-        self._done: dict[tuple, int] = {}
         self._next_request = 0
         # Parameters and module states fetched from their owners (see Kept).
         self.kept = Kept()
@@ -198,83 +246,54 @@ class Link:
                 thread.start()
                 self._threads.append(thread)
 
-    # ------------------------------------------------------------------ out
-
-    def publish(self, kind: str, req: str, ordinal: int, provider: str, value: Any) -> None:
-        """Send ``value`` (already on the host) to every peer, filed under the worker and provider."""
-        envelope = {"kind": kind, "req": req, "ordinal": ordinal, "provider": provider, "value": value}
-        for peer in self.peers:
-            self._out[peer].put(envelope)
-
-    def done(self, req: str, rounds: int) -> None:
-        """Tell every peer this stage has finished ``rounds`` rounds of the request,
-        so a peer waiting for a value of an earlier round that never came stops
-        waiting. Sent after the round's last publish, on the same queue."""
-        for peer in self.peers:
-            self._out[peer].put({"kind": ROUND, "req": req, "rounds": rounds})
-
-    def fail(self, req: str, ordinal: int, provider: Optional[str], message: str) -> None:
-        """Tell every peer that this worker's ``provider`` (or, with ``None``, anything of it) will not come."""
-        for peer in self.peers:
-            self._out[peer].put({"kind": ERROR, "req": req, "ordinal": ordinal, "provider": provider, "message": message})
+    # Each loop handles one message per call of a method, so what a message
+    # referenced is released when the method returns, before the loop blocks
+    # for the next one; a thread waiting for a message holds none.
 
     def _send_loop(self, peer: int) -> None:
-        out = self._out[peer]
-        while True:
-            envelopes = [out.get()]
-            while True:
-                try:
-                    envelopes.append(out.get_nowait())
-                except queue.Empty:
-                    break
-            envelope = envelopes[0] if len(envelopes) == 1 else {"kind": BATCH, "items": envelopes}
-            header, blob = encode(envelope)
-            dist.send(header, group=self.group, group_dst=peer, tag=_TAG)
-            dist.send(blob, group=self.group, group_dst=peer, tag=_TAG)
-            if any(item["kind"] == STOP for item in envelopes):
-                return
+        while not self._send_next(peer):
+            pass
 
-    # ------------------------------------------------------------------- in
+    def _send_next(self, peer: int) -> bool:
+        envelope = self._out[peer].get()
+        header, blob = encode(envelope)
+        dist.send(header, group=self.group, group_dst=peer, tag=_TAG)
+        dist.send(blob, group=self.group, group_dst=peer, tag=_TAG)
+        return envelope["kind"] == STOP
 
     def _recv_loop(self, peer: int) -> None:
-        while True:
-            header = torch.empty(2, dtype=torch.int64)
-            dist.recv(header, group=self.group, group_src=peer, tag=_TAG)
-            meta_nbytes, data_nbytes = (int(n) for n in header)
-            blob = torch.empty(_aligned(meta_nbytes) + data_nbytes, dtype=torch.uint8)
-            dist.recv(blob, group=self.group, group_src=peer, tag=_TAG)
-            envelope = decode(blob, meta_nbytes)
-            for item in envelope["items"] if envelope["kind"] == BATCH else (envelope,):
-                if self._file(peer, item):
-                    return
+        while not self._recv_next(peer):
+            pass
 
-    def _file(self, peer: int, envelope: dict) -> bool:
-        """File one arrived envelope; True when it was the stop."""
+    def _recv_next(self, peer: int) -> bool:
+        header = torch.empty(2, dtype=torch.int64)
+        dist.recv(header, group=self.group, group_src=peer, tag=_TAG)
+        meta_nbytes, data_nbytes = (int(n) for n in header)
+        blob = torch.empty(_aligned(meta_nbytes) + data_nbytes, dtype=torch.uint8)
+        dist.recv(blob, group=self.group, group_src=peer, tag=_TAG)
+        envelope = decode(blob, meta_nbytes)
         kind = envelope["kind"]
         if kind == STOP:
             return True
         if kind == REQUEST:
             self._answer(peer, envelope)
-            return False
-        with self._condition:
-                if kind == VALUE:
-                    key = (envelope["req"], envelope["ordinal"])
-                    self._inbox.setdefault(key, {}).setdefault(envelope["provider"], deque()).append(envelope)
-                elif kind == ERROR:
-                    self._errors.setdefault((envelope["req"], envelope["ordinal"]), {})[envelope["provider"]] = envelope["message"]
-                elif kind == ROUND:
-                    self._done[(peer, envelope["req"])] = envelope["rounds"]
-                elif kind == REPLY:
-                    self._replies[envelope["id"]] = (envelope["ok"], envelope["value"])
-                self._condition.notify_all()
+        elif kind == REPLY:
+            self._file_reply(envelope["id"], envelope["ok"], envelope["value"])
         return False
+
+    def _file_reply(self, request_id: int, ok: bool, value: Any) -> None:
+        """Hand a reply to its waiter, or drop it when nobody is waiting any more."""
+        with self._condition:
+            if request_id in self._waiting:
+                self._replies[request_id] = (ok, value)
+                self._condition.notify_all()
 
     def _answer(self, peer: int, envelope: dict) -> None:
         """Answer a parameter or state request from this rank's modules.
 
         Runs on the receive thread. The host copy goes on a stream of its own:
-        on the forward's stream it would queue behind the forward's own sends,
-        which wait on the peer whose forward is waiting on this reply.
+        on the forward's stream it would queue behind the forward's own work,
+        which may be waiting on the peer whose forward is waiting on this reply.
         """
         reply = {"kind": REPLY, "id": envelope["id"]}
         try:
@@ -292,85 +311,33 @@ class Link:
             reply.update(ok=False, value=f"{type(exception).__name__}: {exception}")
         self._out[peer].put(reply)
 
-    # ------------------------------------------------------------ the forward
-
-    def has(self, req: str, ordinal: int, provider: str) -> bool:
-        """Whether an item for the worker's ``provider`` has arrived (or an error for it)."""
-        with self._condition:
-            return self._ready(req, ordinal, provider) is not None
-
-    def _ready(self, req: str, ordinal: int, provider: str) -> Optional[Any]:
-        key = (req, ordinal)
-        errors = self._errors.get(key)
-        if errors and (provider in errors or None in errors):
-            return errors.get(provider, errors.get(None))
-        items = self._inbox.get(key, {}).get(provider)
-        return items[0] if items else None
-
-    def take(
-        self,
-        req: str,
-        ordinal: int,
-        provider: str,
-        owner: Optional[int] = None,
-        step: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> Any:
-        """The next item the worker was pushed for ``provider``, waiting for it.
-
-        Raises :class:`RemoteError` when the owner reported the value will not
-        come; when ``owner`` and ``step`` are given and the owner has finished
-        that step of the request without sending it (its forward ran past the
-        location before the block asked); and after ``timeout`` seconds.
-        """
-        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
-        with self._condition:
-            while True:
-                ready = self._ready(req, ordinal, provider)
-                if isinstance(ready, str):
-                    raise RemoteError(ready)
-                if ready is not None:
-                    return self._inbox[(req, ordinal)][provider].popleft()["value"]
-                if owner is not None and step is not None and self._done.get((owner, req), 0) > step:
-                    raise RemoteError(
-                        f"'{provider}.i{step}' was requested but the model already ran past it"
-                    )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RemoteError(
-                        f"stage {self.rank} waited {self.timeout:.0f}s for {provider!r} of "
-                        f"request {req!r} and nothing came from its owner"
-                    )
-                self._condition.wait(remaining)
-
     def request(self, peer: int, provider: str, timeout: Optional[float] = None) -> Any:
         """Ask ``peer`` for ``provider`` (a parameter or a module's state) and wait for it."""
         with self._condition:
             request_id = self._next_request
             self._next_request += 1
-        self._out[peer].put({"kind": REQUEST, "id": request_id, "provider": provider})
-        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
-        with self._condition:
-            while request_id not in self._replies:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RemoteError(f"stage {self.rank} waited {self.timeout:.0f}s for {provider!r} from stage {peer}")
-                self._condition.wait(remaining)
-            ok, value = self._replies.pop(request_id)
+            self._waiting.add(request_id)
+        try:
+            self._out[peer].put({"kind": REQUEST, "id": request_id, "provider": provider})
+            deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
+            with self._condition:
+                while request_id not in self._replies:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RemoteError(f"stage {self.rank} waited {self.timeout:.0f}s for {provider!r} from stage {peer}")
+                    self._condition.wait(remaining)
+                ok, value = self._replies.pop(request_id)
+        finally:
+            with self._condition:
+                self._waiting.discard(request_id)
+                self._replies.pop(request_id, None)
         if not ok:
             raise RemoteError(f"stage {peer} could not answer {provider!r}: {value}")
         return value
 
     def drop(self, req: str) -> None:
-        """Forget everything filed or kept for a finished request."""
-        with self._condition:
-            for key in [key for key in self._inbox if key[0] == req]:
-                del self._inbox[key]
-            for key in [key for key in self._errors if key[0] == req]:
-                del self._errors[key]
-            for key in [key for key in self._done if key[1] == req]:
-                del self._done[key]
-            self.kept.release(req)
+        """Forget what was kept for a finished request."""
+        self.kept.release(req)
 
     def close(self) -> None:
         """Stop the threads: each peer's receive loop is told to return, and the

@@ -427,11 +427,22 @@ class VLLM(Remotable):
                 taps.append(f"model.{name}.source.{op}.{side}" if sourced else f"model.{name}.{side}")
         return tuple(taps)
 
+    _SCHEDULER_CLS = "nnsight.modeling.vllm.pp_scheduler.NNsightScheduler"
+
+    def _pipeline_kwargs(self, kwargs: dict) -> dict:
+        """Under pipeline parallelism, the scheduler that carries the later
+        stages' values back to the earlier ones where the engine returns its
+        sampled tokens through the scheduler (see `pp_scheduler`)."""
+        if kwargs.get("pipeline_parallel_size", 1) > 1:
+            kwargs.setdefault("scheduler_cls", self._SCHEDULER_CLS)
+        return kwargs
+
     def _load_sync(self, repo_id: str, **kwargs: Any) -> Any:
         from vllm import LLM
 
         from .engines.engine import NNsightLLMEngine
 
+        kwargs = self._pipeline_kwargs(kwargs)
         llm = LLM(
             repo_id,
             worker_cls=self._WORKER_CLS,
@@ -452,6 +463,7 @@ class VLLM(Remotable):
         # AsyncLLM runs its own output-handler loop rather than a synchronous
         # step(), so saves are collected by the streaming backend instead (see
         # nnsight.modeling.vllm.async_backend), and no engine subclass is needed.
+        kwargs = self._pipeline_kwargs(kwargs)
         engine_args = AsyncEngineArgs(
             model=repo_id,
             worker_cls=self._WORKER_CLS,

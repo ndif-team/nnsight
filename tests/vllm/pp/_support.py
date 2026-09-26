@@ -167,6 +167,20 @@ class Stage:
         self.interleaver.reindex()
         return result
 
+    def exchange(self, src: int, reqs: tuple = ()) -> None:
+        """Carry the step's entries from ``src`` to the other rank, as the
+        engine's transfers do: forward from the earlier rank with the
+        activations, backward from the later one after sampling, with a mark
+        per request in ``reqs`` that the step is done. Both ranks call it."""
+        if self.rank == src:
+            entries = self.interleaver.flush_forward() if src == 0 else self.interleaver.flush_backward(reqs)
+        else:
+            entries = None
+        box = [entries]
+        dist.broadcast_object_list(box, src=src)
+        if self.rank != src:
+            self.interleaver.receive(box[0], forward=src < self.rank)
+
     def close(self) -> None:
         """Stop both ranks' link threads before the interpreter exits."""
         dist.barrier()
