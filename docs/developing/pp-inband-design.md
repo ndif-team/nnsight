@@ -123,6 +123,34 @@ harness over the reply wire with entries exchanged by the same rules, the
 request table), and the PP=2 engine behavior suite, 26 of 26, on the
 multiprocess executor.
 
+## Measured against push at 7B
+
+Qwen2.5-7B-Instruct, bfloat16, PP=2 on the same two A100s for both branches,
+`gpu_memory_utilization=0.3`, one PP=1 engine of the same build as the
+reference. "long" is a 512-token prompt. Median of 5 calls after 2 warmups, ms.
+
+| block | pp-push, PP=2 | pp-inband, PP=2 | PP=1 |
+|---|---|---|---|
+| empty body, 6-token prompt | 24.6 | 24.9 | 20.8 |
+| empty body, long | 48.8 | 50.0 | 48.2 |
+| one read on each stage, cloned and saved, long | 102.3 | 82.3 | 86.7 |
+| a last-stage read used (`float(...sum())`), long | 64.8 | 57.9 | 57.0 |
+| 16 invokes, each saving a read on each stage, long | 1,546.6 | 1,532.0 | 1,270.4 |
+| 8 decode steps each using the last stage's logits, 6-token prompt | 221.7 | 228.9 | 162.3 |
+
+Six values saved at PP=2 equal the PP=1 run's bit for bit on both branches
+(`torch.equal`, max absolute difference 0): a first-stage layer output, a
+last-stage one, the logits, a first-stage output read and then changed in
+place by the next layer's fused norm called through the block, that norm's
+output, and the sum of the last stage's logits at each of four decode steps.
+
+The two rows that cross stages once per trace are where the channel's cost
+was: 20 ms and 7 ms per trace on push, within the PP=1 spread on in-band.
+The decode loop, whose every step crosses backward, costs 7 ms more over
+eight steps than push, the broadcast being one collective per step where
+push's sender ran in the background; both are 60 ms over PP=1 across the
+eight steps, which is the step boundary itself.
+
 ## Costs and limits
 
 - Under tensor parallelism vLLM splits any sent tensor whose element count
