@@ -187,6 +187,11 @@ model.trace(input_ids=ids, attention_mask=mask)         # keyword tensors
 model.trace(**model.tokenizer("hi", return_tensors="pt"))  # unpacked encoding
 ```
 
+Encodings retain `token_type_ids`, explicit `position_ids`, and `labels`. Token
+labels are padded with `-100` so added padding does not contribute to the loss;
+per-example labels retain their batch dimension. Supplied positions take
+precedence over the mask-derived positions used for left padding.
+
 Chat messages are detected and templated automatically (as `Pipeline.__call__` would):
 
 ```python
