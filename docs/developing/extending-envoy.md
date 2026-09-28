@@ -79,7 +79,7 @@ def heads(self, value):
     return x.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
 
 @heads.transform
-def heads(self, value):
+def heads(self, value, raw):
     b, nh, s, hd = value.shape
     return ((value.transpose(1, 2).reshape(b, s, nh * hd),), {})   # repack
 ```
@@ -100,8 +100,11 @@ Two more callbacks refine the descriptor:
   preprocess. When the preprocess returns a reshaped/sliced view, in-place edits to
   it are invisible to the model (which still holds the original); the transform maps
   the edited view back to the model's layout and fires once, after the block is done
-  with the read, splicing the result in like a swap. `eproperty.py`'s module
-  docstring carries the canonical per-head example.
+  with the read, splicing the result in like a swap. It takes `(self, view, raw)`,
+  the raw being the value as served: that is how a view that is a copy of one
+  element of a tuple gets the rest of the tuple back, since a transform cannot read
+  the location itself, firing on the model side after the read. `eproperty.py`'s
+  module docstring carries the canonical per-head example and the tuple one.
 
 ## How `.output` already works
 

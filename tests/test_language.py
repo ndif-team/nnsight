@@ -30,9 +30,22 @@ class Heads(Envoy):
         return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
 
     @heads.transform
-    def heads(self, value):
+    def heads(self, value, raw):
         b, nh, s, hd = value.shape
         return value.transpose(1, 2).reshape(b, s, nh * hd)
+
+
+class HiddenCopy(Envoy):
+    """A copy of the first element of a tuple output; the transform rebuilds the
+    tuple around the edited copy from the raw served value."""
+
+    @eproperty(key="output")
+    def hidden(self, value):
+        return value[0].clone()
+
+    @hidden.transform
+    def hidden(self, edited, raw):
+        return (edited.clone(), *raw[1:])
 
 
 @pytest.fixture(scope="module")
@@ -1080,3 +1093,23 @@ class TestCustomEnvoys:
             heads_model.transformer.h[0].mlp.heads[:, 5] = 0  # zero head 5
             edited = heads_model.output.logits.save()
         assert not torch.allclose(base, edited)
+
+    @torch.no_grad()
+    def test_transform_with_raw_rebuilds_a_tuple(self):
+        """The transform's raw argument: a copied element of a tuple output is
+        written back into the tuple, and the copy stays the user's."""
+        from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True, envoys={GPT2Attention: HiddenCopy}
+        )
+        with model.trace("hello world"):
+            base = model.output.logits.save()
+        with model.trace("hello world"):
+            model.transformer.h[0].attn.hidden[:] = 0
+            kept = model.transformer.h[0].attn.hidden.save()
+            out = model.transformer.h[0].attn.output.save()
+            edited = model.output.logits.save()
+        assert not torch.allclose(base, edited)
+        assert torch.equal(kept, torch.zeros_like(kept))
+        assert isinstance(out, tuple) and torch.equal(out[0], torch.zeros_like(out[0]))

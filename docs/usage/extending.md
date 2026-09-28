@@ -237,6 +237,8 @@ eproperties can share a key to give different views of one location (that's how
   hands back a reshaped/sliced view, in-place edits to it are invisible to the model
   (which still holds the original), so a transform maps the edited view back to the
   model's layout. It fires once, after the read, and is spliced in like a swap.
+  It takes `(self, view, raw)`: the edited view and the value as served, so a
+  view that is one element of a container can rebuild it.
 - `.provide(obj, value)` — serves the value from the model side (via
   `interleaver.handle`), resuming a worker parked on that location. Call it from your
   runtime where the value is produced.
@@ -271,7 +273,7 @@ class Heads(Envoy):
         return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
 
     @heads.transform
-    def heads(self, value):                     # write the edited heads back
+    def heads(self, value, raw):                # write the edited heads back
         b, nh, s, hd = value.shape
         return value.transpose(1, 2).reshape(b, s, nh * hd)
 
