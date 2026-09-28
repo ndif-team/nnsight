@@ -16,7 +16,8 @@ served and returns what the user reads, so an identity view is just
   preprocess hands back a reshaped/sliced *view*, the user's in-place edits to it
   are invisible to the model (which still holds the original). A transform maps the
   edited view back to the model's layout; it fires once, after the block is done
-  with that read, and the result is spliced in as if swapped.
+  with that read, and the result is spliced in as if swapped. It receives the
+  edited view and the raw served value: ``transform(self, view, raw)``.
 
     class Heads(Envoy):
         @eproperty(key="output")
@@ -25,7 +26,7 @@ served and returns what the user reads, so an identity view is just
             return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
 
         @heads.transform
-        def heads(self, value):                     # write the edited heads back
+        def heads(self, value, raw):                # write the edited heads back
             b, nh, s, hd = value.shape
             return value.transpose(1, 2).reshape(b, s, nh * hd)
 
@@ -44,9 +45,25 @@ pair, the same value ``.inputs`` gives you, so the example above written against
         ...
 
     @heads.transform
-    def heads(self, value):
+    def heads(self, value, raw):
         ...
         return ((flat,), {})
+
+``raw`` is the value as served, before preprocess. A transform that hands
+back a *copy* of one element of a container — a block that returns
+``(hidden_states, present)``, read as a clone of ``hidden_states`` so a saved
+read cannot be mutated later — needs it to rebuild the container around the
+edited copy: the other elements are not in the view, and a transform cannot
+read the location itself, since it fires on the model side, after the read,
+where nothing is parked there::
+
+    @eproperty(key="output")
+    def hidden(self, value):
+        return value[0].clone()
+
+    @hidden.transform
+    def hidden(self, edited, raw):
+        return (edited.clone(), *raw[1:])
 
 One failure mode is worth knowing before you meet it: an `eproperty` is a
 ``property``, and a ``property`` getter that raises `AttributeError` falls through
@@ -139,7 +156,12 @@ class eproperty(property):
         return self
 
     def transform(self, func: Callable) -> "eproperty":
-        """Register the write-back for an edited preprocess view (see class doc)."""
+        """Register the write-back for an edited preprocess view (see class doc).
+
+        ``func(self, view, raw)``: the edited view, and the value as served
+        before preprocess, for a view that is one element of a container the
+        write-back has to rebuild.
+        """
         self._transform = func
         return self
 
@@ -151,14 +173,15 @@ class eproperty(property):
         if obj is None:
             return self
         location = self._location(obj)
-        value = Mediator.value(location)
-        if self._preprocess is not None:
-            value = self._preprocess(obj, value)
+        raw = Mediator.value(location)
+        value = self._preprocess(obj, raw) if self._preprocess is not None else raw
         if self._transform is not None:
             # Bind the (about-to-be-returned) view into the write-back now, so the
             # user's in-place edits are visible when the mediator fires it after
-            # this read — see Mediator.handle.
-            Mediator.current(location).transform = partial(self._transform, obj, value)
+            # this read — see Mediator.handle. The raw served value rides along:
+            # this is the only chance to hand it over, since the transform fires
+            # where the location can't be read.
+            Mediator.current(location).transform = partial(self._transform, obj, value, raw)
         return value
 
     def __set__(self, obj: IEnvoy, value: Any) -> None:

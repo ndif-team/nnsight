@@ -196,7 +196,7 @@ class ProjHeads(Envoy):
         return x.view(b, s, self.n_heads, d // self.n_heads)
 
     @heads.transform
-    def heads(self, value):                        # repack into (args, kwargs)
+    def heads(self, value, raw):                   # repack into (args, kwargs)
         b, s, n, head_dim = value.shape
         return ((value.reshape(b, s, n * head_dim),), {})
 
@@ -259,7 +259,7 @@ class Heads(Envoy):
         return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
 
     @heads.transform
-    def heads(self, value):                     # write the edited view back
+    def heads(self, value, raw):                # write the edited view back
         b, nh, s, hd = value.shape
         return value.transpose(1, 2).reshape(b, s, nh * hd)
 ```
