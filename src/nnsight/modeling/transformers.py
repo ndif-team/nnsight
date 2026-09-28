@@ -1180,10 +1180,15 @@ class TransformersModel(HuggingFaceModel):
         ]
         if len(items) == 1:
             return dict(items[0])
-        from transformers.pipelines.base import pad_collate_fn
+        from transformers.pipelines.base import _pad, pad_collate_fn
 
         feature = self.feature_extractor or self.image_processor
-        return dict(pad_collate_fn(self.tokenizer, feature)(items))
+        encoding = dict(pad_collate_fn(self.tokenizer, feature)(items))
+        if "labels" in encoding and self.tokenizer is not None:
+            # Pipeline collation pads unknown fields with zero, which is a valid
+            # target class/token. Added label positions must be ignored by the loss.
+            encoding["labels"] = _pad(items, "labels", -100, self.tokenizer.padding_side)
+        return encoding
 
     @staticmethod
     def _is_opaque(data: Any, kwargs: dict) -> bool:
@@ -1255,33 +1260,37 @@ class TransformersModel(HuggingFaceModel):
         return False
 
     def _encode_pretokenized(self, data: Any, kwargs: dict) -> tuple:
-        """A pre-tokenized invoke -> (per-row ``{input_ids, attention_mask}`` items,
-        forward kwargs).
+        """Split a text encoding into rows, retaining its model-input fields.
 
-        Only plain token ids reach here — a multimodal encoding is opaque and passes
-        through untouched — so every row is split to one ``[1, L]`` item for padding.
+        Sequence fields keep a leading singleton batch dimension for padding.
+        Labels may instead be one scalar per example; their rank distinguishes
+        those from per-token targets when the rows are collated.
         """
         if data is None:
-            ids, masks = kwargs.get("input_ids"), kwargs.get("attention_mask")
-            forward = {k: v for k, v in kwargs.items() if k not in self._TEXT_KEYS}
+            encoding = kwargs
         elif hasattr(data, "get") and not isinstance(data, (list, tuple, torch.Tensor)):
-            ids, masks = data["input_ids"], data.get("attention_mask")
-            forward = dict(kwargs)
+            encoding = {**dict(data), **kwargs}
         else:
-            ids, masks = data, None
-            forward = dict(kwargs)
+            encoding = {"input_ids": data, **kwargs}
 
-        id_rows = self._as_sequences(ids)
-        mask_rows = self._as_sequences(masks) if masks is not None else None
+        forward = {k: v for k, v in encoding.items() if k not in self._TEXT_KEYS}
         items = []
-        for index, sequence in enumerate(id_rows):
+        for sequence in self._as_sequences(encoding["input_ids"]):
             input_ids = torch.tensor(sequence).unsqueeze(0)
-            mask = (
-                torch.tensor(mask_rows[index]).unsqueeze(0)
-                if mask_rows is not None
-                else torch.ones_like(input_ids)
-            )
-            items.append({"input_ids": input_ids, "attention_mask": mask})
+            items.append({"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)})
+
+        for key in ("attention_mask", "token_type_ids", "position_ids", "labels"):
+            value = encoding.get(key)
+            if value is None:
+                continue
+            rows = list(value) if key == "labels" else self._as_sequences(value)
+            # HF broadcasts shared segment/position ids across a batch.
+            if key in {"token_type_ids", "position_ids"} and len(rows) == 1:
+                rows = rows * len(items)
+            if len(rows) != len(items):
+                raise ValueError(f"{key} has {len(rows)} rows, but input_ids has {len(items)}")
+            for item, row in zip(items, rows):
+                item[key] = torch.as_tensor(row).unsqueeze(0)
         return items, forward
 
     @staticmethod
@@ -1308,9 +1317,10 @@ class TransformersModel(HuggingFaceModel):
         model (GPT-2 family) would mispredict a short prompt padded up to a longer
         one. Deriving ``position_ids`` from the attention mask keeps every real token
         at its true 0-based position. Only applied to a genuinely left-padded,
-        text-only batch: an *unpadded* batch needs no correction (caught by
-        ``mask.all()``), a right-padded (encoder) batch is already correct, and a
-        multimodal model derives its own positions from the image-expanded sequence.
+        text-only batch without explicit positions: an *unpadded* batch needs no
+        correction (caught by ``mask.all()``), a right-padded (encoder) batch is
+        already correct, and a multimodal model derives its own positions from
+        the image-expanded sequence.
         Row count is deliberately not part of this test -- a single padded row needs
         the correction just as much as a padded batch does, and gating on
         ``shape[0] > 1`` made the same prompt answer differently depending on whether
@@ -1324,7 +1334,8 @@ class TransformersModel(HuggingFaceModel):
         if detect_fake_mode() is not None:
             return
         if (
-            not isinstance(mask, torch.Tensor)
+            "position_ids" in encoding
+            or not isinstance(mask, torch.Tensor)
             or mask.dim() != 2
             or bool(mask.all())
             or getattr(self.tokenizer, "padding_side", None) != "left"
