@@ -1095,6 +1095,57 @@ class TestCustomEnvoys:
         assert not torch.allclose(base, edited)
 
     @torch.no_grad()
+    def test_a_repeated_read_is_the_same_view(self, heads_model):
+        """``x[...] += f(x)`` reads twice; both reads are the view the write-back carries."""
+        mlp = heads_model.transformer.h[0].mlp
+        with heads_model.trace("hello world"):
+            first = mlp.heads
+            same = nnsight.save(mlp.heads is first)
+            first[:, 5] *= 2
+            once = heads_model.output.logits.save()
+        with heads_model.trace("hello world"):
+            mlp.heads[:, 5] += mlp.heads[:, 5]
+            twice = heads_model.output.logits.save()
+        with heads_model.trace("hello world"):
+            base = heads_model.output.logits.save()
+        assert same and torch.equal(once, twice) and not torch.allclose(base, once)
+
+    @torch.no_grad()
+    def test_an_edit_by_the_last_statement_goes_back(self, heads_model):
+        """The block ends without another request; the write-back is flushed at its end."""
+        seen = []
+        handle = heads_model._module.lm_head.register_forward_hook(lambda module, args, out: seen.append(out.clone()))
+        try:
+            with heads_model.trace("hello world"):
+                pass
+            with heads_model.trace("hello world"):
+                heads_model.transformer.h[0].mlp.heads[:, 5] = 0
+        finally:
+            handle.remove()
+        assert len(seen) == 2 and not torch.allclose(seen[0], seen[1])
+
+    @torch.no_grad()
+    def test_another_view_of_the_location_is_its_own(self, heads_model):
+        """The memo is per eproperty: ``.output`` after ``.heads`` is the model's tensor, not the heads view."""
+        mlp = heads_model.transformer.h[0].mlp
+        with heads_model.trace("hello world"):
+            heads = mlp.heads
+            out = mlp.output
+            shapes = nnsight.save((heads.ndim, out.ndim, out is heads))
+        assert shapes == (4, 3, False)
+
+    @torch.no_grad()
+    def test_a_view_is_read_anew_on_every_step(self, heads_model):
+        """One view a step and nothing else between: each step's is the next call's, not the last view."""
+        mlp = heads_model.transformer.h[0].mlp
+        with heads_model.generate("hello world", max_new_tokens=3, min_new_tokens=3, do_sample=False) as tracer:
+            views = nnsight.save([])
+            for step in tracer.iter[:3]:
+                views.append(mlp.heads)
+        assert [v.shape[2] for v in views[1:]] == [1, 1] and views[0].shape[2] > 1
+        assert not torch.equal(views[1], views[2])
+
+    @torch.no_grad()
     def test_transform_with_raw_rebuilds_a_tuple(self):
         """The transform's raw argument: a copied element of a tuple output is
         written back into the tuple, and the copy stays the user's."""

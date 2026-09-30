@@ -109,9 +109,11 @@ def output(self, value):                 # identity view of the module's output
 A third callback, `.transform`, is the write-back half of a *reshaping* preprocess.
 When a preprocess returns a reshaped/sliced view (e.g. a per-head split), in-place
 edits to that view are invisible to the model, so a `@output.transform` maps the
-edited view back to the model's layout; it fires once, after the block is done with
-the read, and its result is spliced in like a swap. The base `.input`/`.output` are
-identity views and register none — see the per-head example in `eproperty.py`.
+edited view back to the model's layout, and its result is swapped in when the block
+next asks the model for anything, or at the end of the block. Until then a second read
+of the value is the same view, so `x.heads[:, 5] += f(x.heads)` edits one tensor. It
+fires whether or not the view was edited. The base `.input`/`.output` are identity
+views and register none — see the per-head example in `eproperty.py`.
 
 Accessing an eproperty **outside a trace** raises (`Mediator`):
 
