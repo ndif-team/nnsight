@@ -1116,7 +1116,7 @@ class Envoy:
                     and attr.name not in seen
                 ):
                     seen.add(attr.name)
-                    eproperty_lines.append(f"({attr.name}): {attr.description}")
+                    eproperty_lines.append(str(attr))
 
         lines = extra_lines + child_lines + eproperty_lines
 
