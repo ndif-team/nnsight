@@ -5,10 +5,16 @@ name: Tests
 
 on:
   push:
-    # Development happens on the release branch, so it has to be listed here or
-    # nothing tests it: a `pull_request` run only ever tests the PR head, never
-    # the merge that lands it, and never a commit pushed straight to the branch.
-    branches: ["main", "0.8"]
+    # Every branch development lands on has to be listed here or nothing tests
+    # it: a `pull_request` run only ever tests the PR head, never the merge that
+    # lands it, and never a commit pushed straight to the branch.
+    #
+    # `dev` needs naming again. It was listed until the 0.8 rewrite merged into
+    # it (a8ee9378), which brought 0.8's copy of this file across and with it
+    # 0.8's shorter list. Development has since moved back to `dev`, so its HEAD
+    # currently carries no check runs at all. `0.8` stays listed: it is frozen
+    # now, but a push to it should still be tested if one comes.
+    branches: ["main", "dev", "0.8"]
   pull_request:
 
 permissions:
