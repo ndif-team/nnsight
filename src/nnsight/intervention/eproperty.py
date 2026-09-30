@@ -165,6 +165,20 @@ class eproperty(property):
         self._transform = func
         return self
 
+    def __str__(self) -> str:
+        """The line an envoy's repr shows for this value: ``(name) -> ReturnType: description``.
+
+        The return type is the preprocess stub's return annotation when it has
+        one, as written (a ``from __future__ import annotations`` module gives
+        the alias name, ``Residual``; a class gives its ``__name__``); an
+        unannotated or ``Any`` stub shows no arrow.
+        """
+        hint = getattr(self._preprocess, "__annotations__", {}).get("return")
+        if hint is not None and not isinstance(hint, str):
+            hint = getattr(hint, "__name__", repr(hint))
+        typed = f" -> {hint}" if hint and hint != "Any" else ""
+        return f"({self.name}){typed}: {self.description}"
+
     def _location(self, obj: IEnvoy) -> str:
         path = getattr(obj, "path", "")
         return f"{path}.{self.key}" if path else self.key

@@ -196,7 +196,8 @@ value is computed — in the vLLM model runner,
 `tracer.result` is the same pattern with no `description` and a bare `"result"`
 location — `Envoy.interleave` serves it with `handle("result", result)` after the
 forward. A `description` is what surfaces an eproperty in the Envoy repr tree as
-`(logits): pre-sampling logits for this step`; `.input`/`.output` carry none, so they
+`(logits): pre-sampling logits for this step`, with the stub's return annotation
+after an arrow when it has one (`(logits) -> Logits: ...`); `.input`/`.output` carry none, so they
 stay hidden.
 
 ## Shared modules

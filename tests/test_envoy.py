@@ -843,3 +843,32 @@ class TestRenameByClass:
             through_alias = model.blocks[0].linear_attn.output.save()
             through_name = model.blocks[2].mixer.output.save()
         assert through_alias.shape == (2, 8) and through_name.shape == (2, 8)
+
+
+class TestEpropertyRepr:
+    """An eproperty with a description is one line of the repr; its stub's return annotation follows an arrow."""
+
+    def test_annotated_stub_shows_its_return_type(self):
+        from nnsight.intervention.eproperty import eproperty
+
+        @eproperty(description="the block's output as a tensor")
+        def typed(self, value) -> torch.Tensor:
+            return value
+
+        @eproperty(description="whatever comes out")
+        def untyped(self, value):
+            return value
+
+        assert str(typed) == "(typed) -> Tensor: the block's output as a tensor"
+        assert str(untyped) == "(untyped): whatever comes out"
+
+    def test_repr_line_is_the_eproperty_str(self):
+        from nnsight.intervention.eproperty import eproperty
+
+        class Typed(Envoy):
+            @eproperty(description="a view")
+            def view(self, value) -> torch.Tensor:
+                return value
+
+        envoy = Typed(torch.nn.Linear(2, 2))
+        assert "(view) -> Tensor: a view" in repr(envoy)
