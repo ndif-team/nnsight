@@ -759,3 +759,87 @@ class TestMultipleWrappers:
         with w2.trace(x):
             a2 = w2.a.output.save()
         assert torch.allclose(a1, a2)
+
+
+class Scan(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
+class Attn(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
+class MixerBlock(nn.Module):
+    """One child under one native name, of a class that varies per block."""
+
+    def __init__(self, mixer):
+        super().__init__()
+        self.norm = nn.LayerNorm(8)
+        self.mixer = mixer
+
+    def forward(self, x):
+        return x + self.mixer(self.norm(x))
+
+
+class Hybrid(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList([MixerBlock(Scan()), MixerBlock(Attn()), MixerBlock(Scan())])
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+class TwoNorms(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.a = nn.LayerNorm(8)
+        self.b = nn.LayerNorm(8)
+
+    def forward(self, x):
+        return self.b(self.a(x))
+
+
+class TestRenameByClass:
+    def test_a_class_key_binds_where_one_child_is_of_that_class(self):
+        model = Envoy(Hybrid(), rename={Scan: "linear_attn", Attn: "self_attn"})
+        assert model.blocks[0].linear_attn is model.blocks[0].mixer
+        assert model.blocks[2].linear_attn is model.blocks[2].mixer
+        assert model.blocks[1].self_attn is model.blocks[1].mixer
+        assert "linear_attn" not in model.blocks[1].__dict__ and "self_attn" not in model.blocks[0].__dict__
+        assert model.get("blocks.1.self_attn") is model.blocks[1].mixer
+
+    def test_it_is_recorded_as_an_alias_of_the_child_name(self):
+        model = Envoy(Hybrid(), rename={Scan: "linear_attn"})
+        assert model.blocks[0]._aliases["linear_attn"] == "mixer"
+        assert "(linear_attn/mixer):" in repr(model.blocks[0])
+        assert "(mixer):" in repr(model.blocks[1])
+
+    def test_a_class_key_can_take_several_aliases_and_mix_with_paths(self):
+        model = Envoy(Hybrid(), rename={Scan: ["linear_attn", "ssm"], "norm": "input_layernorm", "blocks": "layers"})
+        assert model.blocks[0].ssm is model.blocks[0].linear_attn is model.blocks[0].mixer
+        assert model.layers[0].input_layernorm is model.blocks[0].norm
+
+    def test_two_matching_children_is_an_error(self):
+        with pytest.raises(ValueError, match="matches 2 children of `model` \\(a, b\\)"):
+            Envoy(TwoNorms(), rename={nn.LayerNorm: "norm"})
+
+    def test_the_alias_serves_the_child(self):
+        model = Envoy(Hybrid(), rename={Scan: "linear_attn"})
+        x = torch.randn(2, 8)
+        with model.trace(x):
+            through_alias = model.blocks[0].linear_attn.output.save()
+            through_name = model.blocks[2].mixer.output.save()
+        assert through_alias.shape == (2, 8) and through_name.shape == (2, 8)

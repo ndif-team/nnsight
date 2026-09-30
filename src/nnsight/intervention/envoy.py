@@ -136,7 +136,7 @@ class Envoy:
         module: torch.nn.Module,
         path: str = "model",
         interleaver: Interleaver | None = None,
-        rename: dict[str, str | list[str]] | None = None,
+        rename: dict[str | type, str | list[str]] | None = None,
         envoys: dict | None = None,
     ) -> None:
         self._module = module
@@ -273,6 +273,15 @@ class Envoy:
         leading dot is a no-op — path components are matched by name (an empty
         first component is skipped, mirroring `nnsight.util.fetch_attr`).
 
+        A key may also be a module *class*: ``{Mamba2Mixer: "linear_attn"}``
+        binds the alias on every envoy that has exactly one direct child whose
+        module is an instance of that class, pointing at that child. This is
+        for a tree that holds different modules under one native name (a
+        hybrid's ``mixer``: a Mamba-2 mixer on one block, an attention on the
+        next), where the standard name follows what the block holds and no
+        name-keyed entry can say so. Two matching children on one envoy is an
+        error, not a guess.
+
         A key that does not resolve here is skipped, not an error: one ``rename``
         is meant to be reusable across architectures that spell the same module
         differently (``{"attn": "att", "self_attn": "att"}``), and on any given
@@ -293,14 +302,29 @@ class Envoy:
         """
         if not self._rename:
             return
-        for path, aliases in self._rename.items():
-            path = path.lstrip(".")
-            try:
-                target = self.get(path)
-            except AttributeError:
-                continue
-            if not isinstance(target, Envoy):
-                continue
+        for key, aliases in self._rename.items():
+            if isinstance(key, type):
+                matches = [
+                    (name, child) for name, child in self._child_map.items()
+                    if isinstance(child._module, key)
+                ]
+                if len(matches) > 1:
+                    raise ValueError(
+                        f"`rename` key {key.__name__} matches {len(matches)} children of "
+                        f"`{self.path}` ({', '.join(name for name, _ in matches)}); a class "
+                        f"key binds only where one child is of that class. Key those by name."
+                    )
+                if not matches:
+                    continue
+                path, target = matches[0]
+            else:
+                path = key.lstrip(".")
+                try:
+                    target = self.get(path)
+                except AttributeError:
+                    continue
+                if not isinstance(target, Envoy):
+                    continue
             for alias in [aliases] if isinstance(aliases, str) else aliases:
                 # Already pointing at this very envoy: nothing is displaced.
                 # Covers a key aliased to its own name (``{"attn": "attn"}``,

@@ -48,7 +48,7 @@ with model.trace("Hello"):
 
 ## Forms of `rename` keys and values
 
-`rename` is `dict[str, str | list[str]]`. The behavior depends on the **key**
+`rename` is `dict[str | type, str | list[str]]`. The behavior depends on the **key**
 shape:
 
 | Key form | Behavior |
@@ -56,6 +56,7 @@ shape:
 | **Single component** (`"mlp"`) | Binds wherever it resolves — every block that has an `mlp` child gets the alias. |
 | **Dotted path** (`"transformer.h"`, `"transformer.h.3.mlp"`) | Mounts that subtree on the **root** envoy under the alias name. |
 | **Leading dot** (`".h"`) | The dot is a no-op; the path resolves relative to each envoy, so the alias binds on whichever envoy has that child (e.g. `model.transformer.layers`, not `model.layers`). |
+| **Module class** (`Mamba2Mixer`) | Binds on every envoy that has exactly one direct child of that class, pointing at that child, whatever its native name. Two matching children on one envoy raise; none is skipped. |
 
 | Value form | Behavior |
 |------------|----------|
@@ -80,7 +81,20 @@ g.my_mlp is g.transformer.h[3].mlp                          # True
 # leading dot: binds where it resolves (under transformer), not on the root
 g = TransformersModel("openai-community/gpt2", dispatch=True, rename={".h": "layers"})
 g.transformer.layers[0] is g.transformer.h[0]              # True
+
+# a class key: the alias follows what each block holds, not what it is called
+from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
+g = TransformersModel("openai-community/gpt2", dispatch=True, rename={GPT2Attention: "self_attn"})
+g.transformer.h[0].self_attn is g.transformer.h[0].attn    # True
 ```
+
+A class key is for a tree that keeps different modules under one native name: a
+hybrid whose every block has a `mixer` that is a state-space mixer on one block
+and an attention on the next. `{Mamba2Mixer: "linear_attn", NemotronHAttention:
+"self_attn"}` gives each block the standard name for what it holds, which no
+name-keyed entry can express. A class that matches two direct children of one
+envoy (both norms of a Llama block are `LlamaRMSNorm`) is an error rather than a
+guess; key those by name.
 
 ## Repr shows aliases
 
