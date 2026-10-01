@@ -112,3 +112,20 @@ def test_kept_values_live_with_their_requests_unless_pinned():
     assert kept.get("model.lm_head.param.weight", "r4") == "head"
     kept.release("r4")
     assert "model.lm_head.param.weight" in kept                # pinned: outlives every request
+
+
+def test_the_last_stage_sends_back_only_what_the_earlier_stages_lack():
+    """The last of three stages got stage 0's and stage 1's entries forward.
+    Stage 1's are needed back on stage 0; stage 0's are needed by no one
+    before it, so they are not sent back to the stage that made them."""
+    from nnsight.modeling.vllm.pp_interleaver import ROUND, PPInterleaver
+
+    last = PPInterleaver(None, Link(None, 0, 1), 2, torch.device("cpu"))
+    first = (VALUE, 0, "req-a", 0, "model.decoder_blocks.1.output", torch.ones(2))
+    middle = (VALUE, 1, "req-a", 0, "model.decoder_blocks.5.output", torch.zeros(2))
+    last.receive([first, middle], forward=True)
+    last.outbox.append((VALUE, 2, "req-a", 0, "model.output_projection.output", torch.full((2,), 3.0)))
+
+    sent = last.flush_backward(["req-a"])
+    assert [(kind, stage) for kind, stage, *_ in sent] == [(VALUE, 2), (VALUE, 1), (ROUND, 2)]
+    assert last.flush_backward([]) == []

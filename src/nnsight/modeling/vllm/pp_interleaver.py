@@ -144,8 +144,13 @@ class PPInterleaver(VLLMInterleaver):
     def flush_backward(self, reqs: Iterable[str]) -> list[tuple]:
         """The last stage's entries for the earlier ones after a step: what it
         and the stages between served, and a mark per request that the step
-        is done, so a worker waiting for a value of it stops waiting."""
-        entries = self.outbox + self.relayed + [(ROUND, self.local_rank, req, 0, None, None) for req in reqs]
+        is done, so a worker waiting for a value of it stops waiting.
+
+        A stage's entry is needed backward only by the stages before it, so
+        the first stage's, which every later stage got forward, stay here.
+        """
+        between = [entry for entry in self.relayed if entry[1] > 0]
+        entries = self.outbox + between + [(ROUND, self.local_rank, req, 0, None, None) for req in reqs]
         self.outbox, self.relayed = [], []
         return entries
 

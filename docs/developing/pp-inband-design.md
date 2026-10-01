@@ -56,7 +56,10 @@ reaches stage 2 by being re-sent from stage 1 with stage 1's own.
 this step. Under async scheduling every stage runs `sample_tokens`, so the
 last stage broadcasts the outbox and the `ROUND` marks on the pipeline group
 (`broadcast_tensor_dict`) right after vLLM's own token broadcast, and the
-earlier stages receive it at the same point. Under sync scheduling the
+earlier stages receive it at the same point. The broadcast carries the
+entries of the stages between as well, which the stages before them lack,
+but not the first stage's, which every later stage already got forward.
+Under sync scheduling the
 stages before the last never run `sample_tokens`, so the last stage puts the
 same entries, on the host, on its `ModelRunnerOutput`; `NNsightScheduler`
 (`pp_scheduler.py`, installed through vLLM's `scheduler_cls`) keeps them by
