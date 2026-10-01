@@ -102,6 +102,13 @@ DiffusionModel(REPO, torch_dtype=torch.float16, dispatch=True).unet.dtype   # to
 DiffusionModel(REPO, dtype=torch.float16, dispatch=True).unet.dtype         # torch.float32
 ```
 
+Placement follows diffusers too, and is the reverse of `TransformersModel`: `device_map="cuda"` puts the pipeline on the GPU, and `device=` is accepted and ignored. With neither, the pipeline loads on CPU.
+
+```python
+DiffusionModel(REPO, device_map="cuda", dispatch=True).unet.device   # cuda:0
+DiffusionModel(REPO, device="cuda", dispatch=True).unet.device       # cpu
+```
+
 ## Canonical pattern
 
 `.trace()` and `.generate()` both run the **whole pipeline**, and `model.output` (like `tracer.result`) is the pipeline's return object (with `.images`).

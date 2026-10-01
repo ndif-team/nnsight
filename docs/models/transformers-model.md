@@ -51,6 +51,8 @@ holds for `dispatch=True` and for a lazy model dispatched on first use. Check wi
 | `device_map="cuda"` / `device_map="auto"` | `cuda:0` |
 | `device_map=` dict naming two or more devices | as mapped (the pipeline leaves a multi-device model where it is) |
 
+`DiffusionModel` loads through diffusers instead and works the other way round: there `device_map="cuda"` places the pipeline and `device=` is ignored (see [diffusion-model.md](diffusion-model.md)).
+
 Inferring the task asks the Hub for the checkpoint's metadata, and a fully cached
 checkpoint does not change that. Under `HF_HUB_OFFLINE=1` the first form raises
 `RuntimeError: You cannot infer task automatically within 'pipeline' when using
