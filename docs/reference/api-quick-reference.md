@@ -21,7 +21,7 @@ All are subclasses of `Envoy` (the tree node type). `NNsight` is the thin, named
 | `LanguageModel` | `from nnsight import LanguageModel` | **Deprecated** — warns on construction. Use `TransformersModel(repo_id, task="text-generation")`. |
 | `VisionLanguageModel` | `from nnsight import VisionLanguageModel` | **Deprecated** — warns on construction. Use `TransformersModel(repo_id, task="image-text-to-text")`. |
 
-Common constructor kwargs (via `HuggingFaceModel` / `Meta`): `dispatch=False` (load real weights now vs lazily on first run), `device_map=`, `revision=`, `rename=`. `TransformersModel` also takes `task=`, `tokenizer=`, `processor=`, `image_processor=`, `feature_extractor=`, `peft=<adapter repo_id>`.
+Common constructor kwargs (via `HuggingFaceModel` / `Meta`): `dispatch=False` (load real weights now vs lazily on first run), `device=` (the one device to load onto: `"cpu"`, `"cuda:1"`, `0`; default the first accelerator), `device_map=` (spread across devices: `"auto"`, a dict; `device_map="cpu"` still lands on the GPU, see [Choosing a device](../models/transformers-model.md#choosing-a-device)), `revision=`, `rename=`. `TransformersModel` also takes `task=`, `tokenizer=`, `processor=`, `image_processor=`, `feature_extractor=`, `peft=<adapter repo_id>`.
 
 ## Run methods
 

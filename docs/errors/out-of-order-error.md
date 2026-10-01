@@ -168,6 +168,13 @@ So, for an out-of-order loop body:
 | bounded, stops **short** of the run's last step (`iter[1:3]` over 4 steps) | **silent** — writes land one step late, trailing code runs |
 | open (`iter[1:]`, `tracer.all()`) | warns; writes land one step late and the last is dropped |
 
+One exception to the first row: a `.source` op whose module's `.source` is first
+touched inside the loop shifts even at step 0. `attn.output[0]` read before
+`attn.source.attention_interface_1.output` in `for step in tracer.iter[:4]` gives
+the op's steps 1–3, one entry short, and ends with the "never reached" warning.
+Touching `attn.source` before the trace restores the raise. See
+[../gotchas/iteration.md](../gotchas/iteration.md).
+
 The silent row — and the fact that a warning is easy to miss — is why an
 intervention inside a loop deserves a check rather than a clean exit. Read a
 location you edited back in a second invoke and compare it against a no-write

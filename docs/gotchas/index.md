@@ -32,6 +32,7 @@ This folder is the failure-mode reference. Each doc covers one cluster of relate
 - Loop form is `for step in tracer.iter[...]:`; the `with tracer.iter[...]:` form is deprecated and warns.
 - Unbounded `tracer.iter[:]` (and `tracer.all()`) drops **all** code after the loop — the worker unwinds at the final dangling step (a warning, not an error). There is no `default_all`. Bound the loop or use a separate empty `tracer.invoke()` for trailing code.
 - `.next()` does not exist. `tracer.iter[N]` targets the `(N+1)`-th occurrence of a location.
+- A wrong-order read inside a loop can return the next step's value instead of raising: past step 0 for any location, and at step 0 too for a `.source` op first touched inside the loop.
 
 ### [cross-invoke.md](cross-invoke.md)
 - A value produced *inside* one invoke needs `tracer.barrier(n)` to reach another (same or different module) — all invoke workers start together, so the consumer runs before the producer binds it (`NameError`).

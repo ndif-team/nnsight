@@ -195,6 +195,13 @@ with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
 An op that fires once per forward is indexed per generation step; an op that loops
 within one forward (e.g. an MoE expert loop) is indexed per fire.
 
+Read ops before the module output that contains them. When the loop is the first
+place a module's `.source` is touched, an op read after `attn.output` does not
+raise: it binds to the op's next call, so the list holds steps 1, 2, … and comes
+up one short. Touching `attn.source` before the trace makes that read raise
+`OutOfOrderError` instead. See
+[../gotchas/iteration.md](../gotchas/iteration.md).
+
 ## Values that aren't calls: a loop's running state
 
 A recurrent kernel carries its state through a Python loop as a product, never as
