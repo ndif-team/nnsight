@@ -355,7 +355,7 @@ Aliases are honored in `tracer.cache()` keys too (`tests/test_language.py`).
 
 ## Dispatch behavior
 
-- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device. The Envoy tree is fully usable for writing intervention code.
+- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device. The Envoy tree is fully usable for writing intervention code. The config it is built from takes the same load kwargs the real load's config does — `attn_implementation`, `experts_implementation`, `dtype`, overrides of config attributes — so `model.config` says before dispatch what it will say after; placement kwargs (`device_map`, `max_memory`, ...) wait for dispatch.
 - `dispatch=True`: real weights load during `__init__`.
 - First `trace`/`generate`/`pipe` auto-dispatches if needed (`mixins/meta.py`, `Meta.interleave`). `scan` does **not** dispatch.
 - Call `model.dispatch()` to force loading.

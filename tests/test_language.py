@@ -816,6 +816,35 @@ class TestScan:
         )
         assert all(p.dtype == torch.float16 for p in model._module.parameters())
 
+    @pytest.mark.parametrize(
+        "repo, key",
+        [
+            ("hf-internal-testing/tiny-random-MixtralForCausalLM", "experts_implementation"),
+            ("gpt2", "attn_implementation"),
+        ],
+    )
+    def test_implementation_kwargs_reach_the_meta_config(self, repo, key):
+        """An `*_implementation=` load kwarg is on the meta model's config.
+
+        The real load stores it on the config; the meta build must agree, so
+        that what the lazy model reports before dispatch is what it runs after.
+        """
+        model = TransformersModel(repo, task="text-generation", **{key: "eager"})
+        assert model.dispatched is False
+        assert getattr(model._module.config, f"_{key}") == "eager"
+        model.dispatch()
+        assert getattr(model._module.config, f"_{key}") == "eager"
+
+    def test_meta_config_unchanged_without_config_kwargs(self):
+        """Placement kwargs are still dropped, and leave the config as it was."""
+        plain = TransformersModel("gpt2", task="text-generation")
+        placed = TransformersModel(
+            "gpt2", task="text-generation", device_map="cpu", max_memory={"cpu": "1GB"}
+        )
+        assert placed.dispatched is False
+        assert placed._module.config.to_dict() == plain._module.config.to_dict()
+        assert placed._module.config._attn_implementation == plain._module.config._attn_implementation
+
 
 def _has_lora(model) -> bool:
     return any("lora" in name.lower() for name, _ in model._module.named_modules())
