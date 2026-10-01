@@ -99,8 +99,13 @@ Two more callbacks refine the descriptor:
 - `@name.transform` (`eproperty.py`) — the write-back half of a *reshaping*
   preprocess. When the preprocess returns a reshaped/sliced view, in-place edits to
   it are invisible to the model (which still holds the original); the transform maps
-  the edited view back to the model's layout and fires once, after the block is done
-  with the read, splicing the result in like a swap. It takes `(self, view, raw)`,
+  the edited view back to the model's layout. The read binds a `WriteBack`
+  (`eproperty.py`) on the mediator, a swap the worker has not issued yet;
+  `Mediator.flush` issues it when the worker next moves on (its next request, in
+  `Mediator.event`, or the end of its block), tagged with the occurrence the view
+  was read at. Until then a repeated read of the value is answered with the view it
+  holds, so a statement that reads twice edits one tensor. It takes
+  `(self, view, raw)`,
   the raw being the value as served: that is how a view that is a copy of one
   element of a tuple gets the rest of the tuple back, since a transform cannot read
   the location itself, firing on the model side after the read. `eproperty.py`'s

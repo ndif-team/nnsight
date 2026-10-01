@@ -15,9 +15,13 @@ served and returns what the user reads, so an identity view is just
 * [`transform`][nnsight.intervention.eproperty.eproperty.transform] — the write-back half of `preprocess`. When
   preprocess hands back a reshaped/sliced *view*, the user's in-place edits to it
   are invisible to the model (which still holds the original). A transform maps the
-  edited view back to the model's layout; it fires once, after the block is done
-  with that read, and the result is spliced in as if swapped. It receives the
-  edited view and the raw served value: ``transform(self, view, raw)``.
+  edited view back to the model's layout, and the result is swapped in when the
+  block next asks the model for anything, or at the end of the block. It receives
+  the edited view and the raw served value: ``transform(self, view, raw)``. Until
+  it fires, a second read of the value is the same view, so
+  ``x.heads[:, 5] += f(x.heads)``, which reads twice, edits one tensor. It fires
+  whether or not the view was edited, so it must be an identity on an unedited
+  view.
 
     class Heads(Envoy):
         @eproperty(key="output")
@@ -75,9 +79,42 @@ swallowed and resurfaces as ``'Heads' object (nor its module) has attribute
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Callable, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, NamedTuple, Optional, Protocol, runtime_checkable
 
 from .interleaver import Interleaver, Mediator
+
+
+class WriteBack(NamedTuple):
+    """An eproperty view the worker is holding, to be swapped back into the model.
+
+    Bound by a read whose preprocess handed the worker a view of the served
+    value (see [`transform`][nnsight.intervention.eproperty.eproperty.transform]). It is a swap the worker has not issued
+    yet: [`Mediator.flush`][nnsight.intervention.interleaver.Mediator.flush]
+    issues it the moment the worker moves on, on its next request or at the end
+    of its block, tagged with the occurrence the view was read at so it lands on
+    that visit whatever step the worker has moved to since. Until then a repeated
+    read of the same value is answered with ``view``, so an edit to either is the
+    edit that goes back.
+
+    Attributes:
+        fn: Maps the edited view back into the model's layout; ``fn()``.
+        view: What the worker is holding.
+        eproperty: The descriptor that handed it out; another view of the same
+            location is not this one.
+        location: Where it was read.
+        occurrence: Which visit of ``location`` it was read at.
+    """
+
+    fn: Callable[[], Any]
+    view: Any
+    eproperty: Any
+    location: str
+    occurrence: Optional[int]
+
+    @property
+    def key(self) -> tuple[Any, str, Optional[int]]:
+        """What a read has to match to be answered with ``view``."""
+        return (self.eproperty, self.location, self.occurrence)
 
 
 @runtime_checkable
@@ -160,7 +197,9 @@ class eproperty(property):
 
         ``func(self, view, raw)``: the edited view, and the value as served
         before preprocess, for a view that is one element of a container the
-        write-back has to rebuild.
+        write-back has to rebuild. The result is swapped in when the block next
+        asks the model for anything, or at the end of the block, edited or
+        not; a repeated read before then is answered with the same view.
         """
         self._transform = func
         return self
@@ -187,15 +226,26 @@ class eproperty(property):
         if obj is None:
             return self
         location = self._location(obj)
+        if self._transform is not None:
+            # A write-back bound by an earlier read of this value is still
+            # waiting: answer with the view it holds, so an edit to either is the
+            # edit that goes back (``x.heads[:, 5] += f(x.heads)`` reads twice).
+            # Another view of the same location, or a read pinned to another
+            # step (``tracer.iter``), is not it and goes to the model.
+            mediator = Mediator.current(location)
+            occurrence = mediator.wanted(location)
+            waiting = mediator.transform
+            if waiting is not None and waiting.key == (self, location, occurrence):
+                return waiting.view
         raw = Mediator.value(location)
         value = self._preprocess(obj, raw) if self._preprocess is not None else raw
         if self._transform is not None:
             # Bind the (about-to-be-returned) view into the write-back now, so the
-            # user's in-place edits are visible when the mediator fires it after
-            # this read — see Mediator.handle. The raw served value rides along:
-            # this is the only chance to hand it over, since the transform fires
-            # where the location can't be read.
-            Mediator.current(location).transform = partial(self._transform, obj, value, raw)
+            # user's in-place edits are in it when the worker next moves on and
+            # flushes it — see Mediator.flush. The raw served value rides along:
+            # this is the only chance to hand it over, since the write-back is
+            # mapped where the location can't be read.
+            mediator.transform = WriteBack(partial(self._transform, obj, value, raw), value, self, location, occurrence)
         return value
 
     def __set__(self, obj: IEnvoy, value: Any) -> None:
