@@ -450,21 +450,30 @@ class Tracer:
         return self
 
     def parse(self, source: str, lineno: int) -> ast.With | ast.AsyncWith | None:
-        """Find the ``with``/``async with`` node that starts on ``lineno``.
+        """Find the ``with``/``async with`` node entered from ``lineno``.
 
         Returns the matching AST node, or ``None`` if there's no ``with``
         statement there (the call site isn't a trace block).
 
+        Python 3.12+ enters each item from the line its context expression starts
+        on, which in a parenthesized or backslash-continued header is below the
+        ``with`` keyword; earlier versions enter every item from the ``with``
+        line. So a node matches on either its own line or one of its items'.
+
         Parsing the whole file is O(its AST) and dominates a cold capture, so try
         slicing just the block out first (`_parse_block`); parse the whole
-        file only if the slice can't be isolated cleanly.
+        file only if the slice can't be isolated cleanly — which an item line
+        below the ``with`` never can be, so those sites always parse the file.
         """
         node = self._parse_block(source, lineno)
         if node is not None:
             return node
         tree = ast.parse(source)
         for node in ast.walk(tree):
-            if isinstance(node, (ast.With, ast.AsyncWith)) and node.lineno == lineno:
+            if isinstance(node, (ast.With, ast.AsyncWith)) and (
+                node.lineno == lineno
+                or any(item.context_expr.lineno == lineno for item in node.items)
+            ):
                 return node
         return None
 

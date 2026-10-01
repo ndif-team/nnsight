@@ -123,7 +123,9 @@ once and cached in `SOURCES`. It handles three contexts:
 ### Parse
 
 `Tracer.parse(source, lineno)` (`tracer.py`) finds the `ast.With` /
-`ast.AsyncWith` node that starts on `lineno`. It first tries `_parse_block`
+`ast.AsyncWith` node entered from `lineno`: the `with` line on Python 3.10/3.11,
+the line the tracer's own item starts on from 3.12, which in a parenthesized or
+backslash-continued header sits below the `with`. It first tries `_parse_block`
 (`tracer.py`), which slices just the block out by indentation and bracket
 depth, dedents it to column 0, parses that, and shifts line numbers back. Getting
 the slice bound wrong is mostly safe: too much just parses trailing statements (the
