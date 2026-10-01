@@ -100,8 +100,9 @@ _PERSISTENT = {
     "pipeline": "Pipeline",
 }
 
-# Architecture-shaping kwargs the meta build forwards to AutoModel.from_config.
-# The meta build reconstructs structure only, so weight/placement kwargs
+# Kwargs the meta build forwards to AutoModel.from_config itself. Everything that
+# belongs on the config reaches it through AutoConfig instead (see _load_meta);
+# the meta build reconstructs structure only, so weight/placement kwargs
 # (device_map, max_memory, ...) are dropped — they're meaningless on meta tensors,
 # and from_config forwards unknown kwargs to the model __init__, which rejects them.
 # trust_remote_code is the important one: it decides which class (and thus module
@@ -447,9 +448,9 @@ class TransformersModel(HuggingFaceModel):
         # an architecture kwarg and would be dropped) still reaches the build.
         kwargs = resolve_load_kwargs(kwargs, quantize=False)
 
-        # Only architecture-shaping kwargs reach the meta build (see
-        # _META_MODEL_KWARGS); AutoConfig.from_pretrained tolerates extras but
-        # from_config does not, and placement kwargs don't apply to meta tensors.
+        # Only the kwargs in _META_MODEL_KWARGS reach from_config;
+        # AutoConfig.from_pretrained tolerates extras but from_config does not,
+        # and placement kwargs don't apply to meta tensors.
         #
         # `dtype="auto"` is dropped: it means "read the dtype off the checkpoint
         # weights", which only from_pretrained can do — there are none on meta.
@@ -459,18 +460,33 @@ class TransformersModel(HuggingFaceModel):
         # `config.dtype` and hand from_config the same string by default. What
         # remains is the checkpoint's own declared dtype — which is what "auto"
         # resolves to first anyway.
-        arch = {
+        kwargs = {
             k: v
             for k, v in kwargs.items()
-            if k in _META_MODEL_KWARGS
-            and not (k in ("dtype", "torch_dtype") and v == "auto")
+            if not (k in ("dtype", "torch_dtype") and v == "auto")
         }
+        arch = {k: v for k, v in kwargs.items() if k in _META_MODEL_KWARGS}
 
         # pipeline can't from_config, so resolve the task's model classes and
         # build the meta model ourselves, then wrap it in a meta pipeline.
         self.task = self.task or get_task(repo_id)
         _, targeted, _ = check_task(self.task)
-        config = AutoConfig.from_pretrained(repo_id, revision=self.revision, **arch)
+
+        # The config takes every kwarg, and keeps the ones it owns, the same split
+        # from_pretrained makes (`return_unused_kwargs=True`): the implementation
+        # selectors (`attn_implementation`, `experts_implementation`, and whatever
+        # transformers adds next), `dtype`, and overrides of config attributes. So
+        # the meta model is built from the same config the real load will use.
+        # The rest (placement, model __init__ kwargs) comes back unused and is
+        # dropped. `quantization_config` is held back: from_pretrained takes it
+        # before the config does and merges it with a pre-quantized checkpoint's
+        # own, so letting the config claim it would overwrite that on meta.
+        config, _ = AutoConfig.from_pretrained(
+            repo_id,
+            revision=self.revision,
+            return_unused_kwargs=True,
+            **{k: v for k, v in kwargs.items() if k != "quantization_config"},
+        )
 
         error = None
         for auto in targeted["pt"]:
