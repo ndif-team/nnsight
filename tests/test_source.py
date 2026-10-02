@@ -13,6 +13,36 @@ from nnsight.intervention.interleaver import OutOfOrderError
 from nnsight.intervention.source import STATE, Controller, SourceNotAvailable
 
 
+def _torch_compile_available() -> bool:
+    """Whether `torch.compile` can wrap a module in this interpreter.
+
+    Builds that predate a Python release refuse at wrap time rather than
+    degrading -- torch 2.9.1 on 3.14 raises `RuntimeError: torch.compile is not
+    supported on Python 3.14+` from `torch.compile` itself. `torch` is unpinned
+    in `pyproject.toml`, so an older-but-permitted torch on the newest
+    interpreter is a legitimate install, and CI's 3.14 job passes only because
+    it resolves the latest wheel.
+
+    Keyed on the capability rather than a (python, torch) version pair, so it
+    comes back on its own once the installed torch grows support, and only the
+    documented refusal is swallowed -- any other error from `torch.compile`
+    still fails the test.
+    """
+    try:
+        torch.compile(nn.Identity(), backend="eager")
+    except RuntimeError as error:
+        if "torch.compile is not supported" in str(error):
+            return False
+        raise
+    return True
+
+
+needs_torch_compile = pytest.mark.skipif(
+    not _torch_compile_available(),
+    reason="this torch build does not support torch.compile on this Python",
+)
+
+
 class MLP(nn.Module):
     def __init__(self):
         super().__init__()
@@ -740,6 +770,7 @@ class TestInstall:
         assert torch.allclose(out, expected)
         assert torch.allclose(model(x), expected)
 
+    @needs_torch_compile
     def test_compiled_module_still_runs(self, x):
         # torch.compile's OptimizedModule keeps its forward on the instance too.
         compiled = torch.compile(MLP(), backend="eager")
