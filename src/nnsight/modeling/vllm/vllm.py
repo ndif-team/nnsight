@@ -876,6 +876,10 @@ class VLLM(Remotable):
         params = SamplingParams(**kwargs)
         if edits is not None:
             params.extra_args = {**(params.extra_args or {}), "nnsight_edits": edits}
+        # An installed edit reads these requests like a trace does, so they skip
+        # the prefix cache for the same reason a trace's do (see `_prepare`).
+        if self._installed_edits and hasattr(params, "skip_reading_prefix_cache"):
+            params.skip_reading_prefix_cache = True
 
         prompts = inputs[0] if len(inputs) == 1 else list(inputs)
         if self._async_engine:

@@ -147,9 +147,11 @@ sync-looking call would leave every edit in place and say nothing.
 - Keep tracing for one-off experiments, and whenever you want the values pushed
   back into your own variables.
 
-> **Prefix caching must be off — for an edit.** A prefix-cached token is served
-> from the KV cache without a forward pass, so no hook fires and an installed
-> block sees a short activation with no error. A trace asks for its own request
-> to be recomputed and so needs nothing; an edit rides requests it did not create
-> and cannot ask. Build with `enable_prefix_caching=False` — editing an engine
+> **Prefix caching — for requests nnsight did not submit.** A prefix-cached token
+> is served from the KV cache without a forward pass, so no hook fires and an
+> installed block sees a short activation with no error. A trace and
+> `model.generate` ask for their requests to be recomputed and so need nothing;
+> an edit also rides requests submitted another way (`model.vllm_entrypoint.generate`,
+> an OpenAI-API client) and cannot ask for those. Build with
+> `enable_prefix_caching=False` when an edit has to see them — editing an engine
 > that has it on warns.

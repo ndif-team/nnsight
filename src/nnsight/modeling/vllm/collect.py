@@ -60,3 +60,25 @@ def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
         for name, value in shared.items():
             mediator.lcls[name] = value
     return shared
+
+
+def compact(value):
+    """``value`` with every tensor that views a larger storage replaced by a copy of itself.
+
+    A block's reads are rows narrowed out of the whole step's buffers, and
+    pickling a tensor writes its entire storage: a save from one request would
+    otherwise carry every request's rows home, which across a few hundred
+    invokes runs to gigabytes. Walks dicts, lists and tuples, which is how the
+    collected payload and most saves are built; anything else goes as it is.
+    """
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        if value.untyped_storage().nbytes() > value.numel() * value.element_size():
+            return value.clone()
+        return value
+    if type(value) is dict:
+        return {key: compact(item) for key, item in value.items()}
+    if type(value) in (list, tuple):
+        return type(value)(compact(item) for item in value)
+    return value

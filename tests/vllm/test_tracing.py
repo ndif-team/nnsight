@@ -13,6 +13,17 @@ import torch
 pytest.importorskip("vllm")
 
 
+@pytest.fixture(scope="module")
+def vllm_gpt2_float32():
+    """gpt2 in float32. In half precision the sampler takes a float32 copy of the
+    logits before it scales them, which hides whether a saved read is its own."""
+    from nnsight.modeling.vllm import VLLM
+
+    if torch.cuda.device_count() < 1:
+        pytest.skip("vLLM tests need a GPU")
+    return VLLM("gpt2", gpu_memory_utilization=0.1, dtype="float32", dispatch=True)
+
+
 class TestLogits:
     @torch.no_grad()
     def test_single_logit(self, vllm_gpt2, ET_prompt):
@@ -29,6 +40,38 @@ class TestLogits:
             logits = vllm_gpt2.logits.save()
 
         assert torch.all(logits == 0)
+
+    @torch.no_grad()
+    def test_saved_logits_are_not_scaled_by_the_sampler(self, vllm_gpt2_float32, ET_prompt):
+        # The sampler divides its logits by the temperature in place.
+        model = vllm_gpt2_float32
+        with model.trace(ET_prompt, temperature=0.5, max_tokens=1, seed=0):
+            logits = model.logits.save()
+            copy = model.logits.clone().save()
+
+        assert torch.equal(logits, copy)
+
+    @torch.no_grad()
+    def test_an_inplace_logits_edit_reaches_the_sampler(self, vllm_gpt2, ET_prompt):
+        token = 1234
+        with vllm_gpt2.trace(ET_prompt, temperature=0.5, max_tokens=1, seed=0) as tracer:
+            vllm_gpt2.logits[:, token] = 1e4
+            result = tracer.result.save()
+
+        assert result.outputs[0].token_ids[0] == token
+
+    @torch.no_grad()
+    def test_a_save_ships_only_its_own_rows(self, vllm_gpt2):
+        # A block's reads are views into the whole step's buffers; a save from
+        # one invoke must not carry the others' rows home with it.
+        with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+            for i in range(4):
+                with tracer.invoke(f"Prompt number {i} is about"):
+                    hidden = vllm_gpt2.transformer.h[3].output.save()
+                    logits = vllm_gpt2.logits.save()
+
+        for value in (*hidden, *logits):
+            assert value.untyped_storage().nbytes() == value.numel() * value.element_size()
 
 
 class TestGeneration:

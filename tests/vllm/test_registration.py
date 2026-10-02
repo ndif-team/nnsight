@@ -276,6 +276,27 @@ class TestResult:
         assert first.prompt != second.prompt
 
 
+class TestPrefixCaching:
+    @torch.no_grad()
+    def test_generate_recomputes_a_cached_prefix(self, vllm_gpt2):
+        # vllm_gpt2 caches prefixes: B's first 48 tokens are A's.
+        prefix = "Once upon a time in a small village by the sea there lived " * 4
+        a, b = prefix + "an old fisherman", prefix + "a young baker"
+        vllm_gpt2.generate(a, max_tokens=1, temperature=0.0)
+        assert vllm_gpt2.generate(b, max_tokens=1, temperature=0.0)[0].num_cached_tokens > 0
+
+        with pytest.warns(UserWarning, match="prefix caching"):
+            with vllm_gpt2.edit() as (tracer, registration):
+                rows = nnsight.save(vllm_gpt2.transformer.h[5].output.shape[0])
+        try:
+            output = vllm_gpt2.generate(b, max_tokens=1, temperature=0.0)[0]
+        finally:
+            registration.clear()
+
+        assert output.num_cached_tokens == 0
+        assert output.saves["rows"] == len(output.prompt_token_ids)
+
+
 class TestNamedEdits:
     """``model.edit(name=...)`` and the ``edits=[...]`` request argument.
 

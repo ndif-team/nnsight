@@ -18,7 +18,7 @@ Example:
     >>> with model.edit() as (tracer, edit):                    # doctest: +SKIP
     ...     hidden = model.model.layers[16].output[0].save()
     >>>
-    >>> outputs = model.vllm_entrypoint.generate(prompts, sampling)  # doctest: +SKIP
+    >>> outputs = model.generate(prompts, max_tokens=8)          # doctest: +SKIP
     >>> outputs[5].saves["hidden"].shape                        # doctest: +SKIP
     >>>
     >>> edit.clear()                                            # doctest: +SKIP
@@ -28,12 +28,13 @@ The block is written exactly like a trace body — the same envoy tree, the same
 request: there is no prompt to invoke, so ``tracer.invoke(...)`` has no meaning
 here, and the block applies to whatever the engine happens to run.
 
-The engine has to be built with ``enable_prefix_caching=False``. A prefix-cached
-token is served without a forward pass, so no hook fires for it and the block
-sees fewer rows than the prompt has, with nothing to say so. A trace asks for its
-own request to be recomputed; a registration rides requests it did not create and
-cannot, so the cache has to be off at the engine — registering against one that
-has it on warns.
+A prefix-cached token is served without a forward pass, so no hook fires for it
+and the block sees fewer rows than the prompt has, with nothing to say so. The
+requests nnsight submits — a trace's, and ``model.generate``'s while an edit is
+installed — ask to be recomputed. A registration also rides requests nnsight did
+not create (``model.vllm_entrypoint.generate``, an OpenAI-API client) and cannot
+ask for them, so for those the engine has to be built with
+``enable_prefix_caching=False``; registering against one that has it on warns.
 """
 
 from __future__ import annotations
@@ -58,13 +59,13 @@ def _warn_if_prefix_caching(model: "VLLM") -> None:
     """Say so if the engine will serve some tokens without a forward pass.
 
     A prefix-cached token never runs, so no hook fires for it and a registered
-    block sees a short activation — quietly, with nothing to indicate it. A trace
-    can avoid this by asking for its own request to be recomputed (see
-    ``_attach_mediators``), but a registration rides requests it did not create
-    and often did not even come from nnsight, so there is nothing to set the flag
-    on. The engine has to be built with ``enable_prefix_caching=False`` instead,
-    and it is worth saying at the moment the mistake is made rather than leaving
-    it to be found in the shapes.
+    block sees a short activation — quietly, with nothing to indicate it. The
+    requests nnsight submits ask to be recomputed (see ``_attach_mediators`` and
+    ``VLLM._generate``), but a registration also rides requests that did not come
+    from nnsight, so there is nothing to set the flag on. For those the engine
+    has to be built with ``enable_prefix_caching=False``, and it is worth saying
+    at the moment the mistake is made rather than leaving it to be found in the
+    shapes.
     """
     engine = model.vllm_entrypoint
     if engine is None:
@@ -76,11 +77,13 @@ def _warn_if_prefix_caching(model: "VLLM") -> None:
         return
     if getattr(cache_config, "enable_prefix_caching", False):
         warnings.warn(
-            "This engine has prefix caching on, so tokens served from the cache "
-            "never run a forward pass and a registered block will not see them — "
-            "its activations come back short, with no error. Build the model with "
-            "VLLM(..., enable_prefix_caching=False) to register against whole "
-            "prompts.",
+            "This engine has prefix caching on. model.generate and traces "
+            "recompute their prompts, but on a request submitted another way "
+            "(model.vllm_entrypoint.generate, an OpenAI-API client) tokens served "
+            "from the cache never run a forward pass and a registered block will "
+            "not see them — its activations come back short, with no error. Build "
+            "the model with VLLM(..., enable_prefix_caching=False) to register "
+            "against whole prompts on every request.",
             # execute -> Backend.__call__ -> Tracer.__exit__ -> this exit -> caller.
             stacklevel=6,
         )

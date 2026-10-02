@@ -39,6 +39,7 @@ from ....intervention.interleaver import Mediator
 from ....intervention.serialization import loads
 from ....tracing.tracer import _local, _saves, inc
 from ..batching import VLLMBatcher
+from ..collect import compact
 from ..fragments import VLLMFragments
 from ..interleaver import VLLMInterleaver
 
@@ -652,8 +653,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 # sides can't drift out of sync.
                 model = self.nnsight_model
                 logits = type(model).logits.provide(model, original)
-            # The state is a namedtuple, so an edited tensor means a new one; an
-            # untouched read hands the same tensor back and needs no rebuild.
+            # The sampler scales its logits in place (temperature, top-k, top-p),
+            # so with a block in the step it gets a copy: a block's read is a view
+            # of these, and would otherwise be scaled after the block saved it.
+            if self.nnsight_requests.requests:
+                logits = logits.clone()
+            # The state is a namedtuple, so new logits mean a new one.
             if logits is not original:
                 state = self.execute_model_state
                 self.execute_model_state = type(state)(
@@ -846,7 +851,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        return pickle.dumps(collected)
+        return pickle.dumps(compact(collected))
 
     # ------------------------------------------------------------------
     # Worker-side RPC entry points (called by name via collective_rpc)

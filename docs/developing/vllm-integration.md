@@ -324,9 +324,16 @@ instrumentation whose first collect dies on a missing `collect_nnsight`. Porting
 the subclass to the V2 runner is the way out; until then this is the seam.
 
 **Prefix caching.** A cached token runs no forward, so no hook fires for it. A
-trace sets `skip_reading_prefix_cache` on its own request (`_attach_mediators`);
-a registration rides requests it did not create, so it cannot, and
-`_warn_if_prefix_caching` says so at register time.
+trace sets `skip_reading_prefix_cache` on its own request (`_attach_mediators`),
+and `model.generate` does on its requests while an edit is installed
+(`_generate`). A registration also rides requests nnsight did not submit, which
+it cannot flag, and `_warn_if_prefix_caching` says so at register time.
+
+**Logits and saves.** The sampler scales its logits in place, so when a block is
+in the step `sample_tokens` hands it a copy, and a saved `model.logits` stays
+what the block read. Pickling a tensor writes its whole storage, and a block's
+reads are rows narrowed out of the step's buffers, so `collect_nnsight` ships
+each saved view as a copy of itself (`collect.compact`).
 
 ## Serving over HTTP — the `serve/` package
 
