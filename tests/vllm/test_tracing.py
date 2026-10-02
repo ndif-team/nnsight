@@ -735,6 +735,23 @@ class TestLazyDispatch:
         assert model.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
+    def test_a_model_that_reads_a_table_back_builds_on_meta(self, ET_prompt):
+        # BLOOM computes its ALiBi slopes while constructing and reads them back
+        # with `.tolist()`, which a meta tensor cannot serve. The tree has to
+        # build anyway, and the engine, which builds for real, has to have the
+        # real slopes: zeros would make every head ignore distance.
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM("bigscience/bloom-560m", gpu_memory_utilization=0.1)
+        assert not model.dispatched
+        assert model.transformer.h[3].self_attention.attn is not None
+
+        with model.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = model.logits.save()
+
+        assert model.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
     def test_dispatch_does_not_rebuild_the_meta_tree(self, ET_prompt):
         # `__init__` already built one, and dispatch is about to re-point the envoy
         # tree at whatever `_load` returns — so building a second, identical tree
