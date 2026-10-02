@@ -64,7 +64,7 @@ key you read.
 Start a server (holds one dispatched async engine):
 
 ```bash
-nnsight-serve gpt2 --port 8000 --enable-prefix-caching False [--api-key SECRET] [--gpu-memory-utilization 0.1]
+nnsight-serve gpt2 --port 8000 [--api-key SECRET] [--gpu-memory-utilization 0.1]
 ```
 
 `--help` lists only the server's own options (`--host`, `--port`, `--api-key`); every other

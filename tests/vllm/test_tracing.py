@@ -7,10 +7,15 @@ that they land here proves the whole round trip — serialized onto the request,
 run in the worker, saved values shipped home.
 """
 
+from collections import namedtuple
+
 import pytest
 import torch
 
 pytest.importorskip("vllm")
+
+# Module level, so pickle can find it by name.
+Pair = namedtuple("Pair", "row whole")
 
 
 @pytest.fixture(scope="module")
@@ -72,6 +77,27 @@ class TestLogits:
 
         for value in (*hidden, *logits):
             assert value.untyped_storage().nbytes() == value.numel() * value.element_size()
+
+
+class TestCompactPickle:
+    def test_views_ship_their_own_size_wherever_they_sit(self):
+        import pickle
+
+        from nnsight.modeling.vllm.collect import dumps_compact
+
+        buffer = torch.randn(64, 32)
+        row = buffer[3]
+        shared = [row]
+        payload = {"a": shared, "b": shared, "pair": Pair(buffer[5:7], buffer)}
+
+        loaded = pickle.loads(dumps_compact(payload))
+
+        assert torch.equal(loaded["a"][0], row)
+        assert loaded["a"][0].untyped_storage().nbytes() == row.nbytes
+        assert loaded["a"] is loaded["b"]
+        assert type(loaded["pair"]) is Pair
+        assert loaded["pair"].row.untyped_storage().nbytes() == loaded["pair"].row.nbytes
+        assert torch.equal(loaded["pair"].whole, buffer)
 
 
 class TestGeneration:

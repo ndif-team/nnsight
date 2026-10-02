@@ -59,13 +59,13 @@ def vllm_gpt2():
 
 @pytest.fixture(scope="module")
 def vllm_gpt2_uncached():
-    """A gpt2 with prefix caching off, which a registration needs for requests nnsight did not submit.
+    """A gpt2 with prefix caching off, which a registration needs.
 
     A prefix-cached token is served without a forward pass, so no hook fires for
     it and a registered block sees fewer rows than the prompt has — silently. A
-    trace and ``model.generate`` ask for their requests to be recomputed; a
-    registration also rides requests it did not create and cannot ask for those,
-    so the cache has to be off at the engine.
+    trace asks for its own request to be recomputed; a registration rides requests
+    it did not create and cannot, so the cache has to be off at the engine. It is
+    nnsight's default; spelled out here because these tests depend on it.
     """
     from nnsight.modeling.vllm import VLLM
 

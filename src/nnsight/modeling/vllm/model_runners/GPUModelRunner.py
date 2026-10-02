@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import re
 
-import pickle
 import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -39,7 +38,7 @@ from ....intervention.interleaver import Mediator
 from ....intervention.serialization import loads
 from ....tracing.tracer import _local, _saves, inc
 from ..batching import VLLMBatcher
-from ..collect import compact
+from ..collect import dumps_compact
 from ..fragments import VLLMFragments
 from ..interleaver import VLLMInterleaver
 
@@ -851,7 +850,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        return pickle.dumps(compact(collected))
+        return dumps_compact(collected)
 
     # ------------------------------------------------------------------
     # Worker-side RPC entry points (called by name via collective_rpc)

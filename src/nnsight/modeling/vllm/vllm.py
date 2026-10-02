@@ -330,6 +330,13 @@ class VLLM(Remotable):
         # the budget to max_model_len so one prompt always fits). A caller who
         # turns it on is told, per request, when a prompt was chunked.
         kwargs.setdefault("enable_chunked_prefill", False)
+        # A prefix-cached token is served from the KV cache without a forward
+        # pass, so no hook fires for it and a block sees a short activation with
+        # no error. A trace flags its own requests to be recomputed, but an
+        # installed edit runs on every request, including ones nnsight never
+        # submitted and cannot flag, and only the engine's scheduler decides. So
+        # off unless asked for; editing an engine that has it on warns.
+        kwargs.setdefault("enable_prefix_caching", False)
 
         if self.taps:
             # vLLM's breakable graphs are what let a Python callable run at a
@@ -876,10 +883,6 @@ class VLLM(Remotable):
         params = SamplingParams(**kwargs)
         if edits is not None:
             params.extra_args = {**(params.extra_args or {}), "nnsight_edits": edits}
-        # An installed edit reads these requests like a trace does, so they skip
-        # the prefix cache for the same reason a trace's do (see `_prepare`).
-        if self._installed_edits and hasattr(params, "skip_reading_prefix_cache"):
-            params.skip_reading_prefix_cache = True
 
         prompts = inputs[0] if len(inputs) == 1 else list(inputs)
         if self._async_engine:
