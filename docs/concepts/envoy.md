@@ -143,8 +143,12 @@ a map from a module type or dotted path suffix to a custom `Envoy` subclass — 
 chosen module gets a subclass that exposes a custom `eproperty` (e.g. a per-head
 `.heads` view; see [extending.md](../usage/extending.md) and
 [per-head-attention.md](../patterns/per-head-attention.md)). A path suffix matches
-the native path or a `rename=` alias, so one map can be written in the aliased
-names and reused across architectures. You extend nnsight several ways:
+the native path or any spelling of it under the `rename=` aliases, composed through
+ancestors (`"layers.0.self_attn"` under `rename={"transformer.h": "layers", "attn":
+"self_attn"}`), so one map can be written in the aliased names and reused across
+architectures. A `*` component matches any one path component, so `"layers.*"`
+names every entry of the container and not the container itself. You extend nnsight
+several ways:
 
 ### 1. Subclass `NNsight` / `Envoy`
 
