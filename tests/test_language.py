@@ -1158,6 +1158,64 @@ class TestCustomEnvoys:
             view = model.transformer.h[0].ffn.heads.save()
         assert view.ndim == 4 and view.shape[1] == Heads.n_heads
 
+    def test_alias_key_reaches_descendants_of_aliased_modules(self):
+        """Spellings compose through ancestors: a key can name a module under an
+        aliased container, in the names the user types (`model.layers[0].self_attn`)."""
+        class Attn(Envoy):
+            pass
+
+        class Proj(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"transformer.h": "layers", "attn": "self_attn", "mlp": "ffn"},
+            envoys={"layers.0.self_attn": Attn, "ffn.c_fc": Proj},
+        )
+        assert type(model.layers[0].self_attn) is Attn
+        assert type(model.layers[1].self_attn) is Envoy  # the key says block 0
+        assert type(model.layers[3].ffn.c_fc) is Proj
+        assert type(model.layers[3].ffn.c_proj) is Envoy
+
+    def test_wildcard_key_names_every_entry_of_an_aliased_container(self):
+        class Block(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"transformer.h": "layers"}, envoys={"layers.*": Block},
+        )
+        assert len(model.layers) == 12
+        assert all(type(block) is Block for block in model.layers)
+        # Not the container, nor the blocks' children: the key ends the path.
+        assert type(model.layers) is Envoy
+        assert type(model.layers[0].attn) is Envoy
+
+    def test_wildcard_key_on_a_native_path(self):
+        class Block(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", envoys={"transformer.h.*": Block}
+        )
+        assert all(type(block) is Block for block in model.transformer.h)
+        assert type(model.transformer.h) is Envoy
+
+    def test_wildcard_does_not_match_a_shorter_path(self):
+        assert Envoy._path_ends_with("model.layers.0", "layers.*")
+        assert not Envoy._path_ends_with("model.layers", "layers.*")
+        assert not Envoy._path_ends_with("model.layers.0.attn", "layers.*")
+
+    @torch.no_grad()
+    def test_eproperty_works_on_wildcard_matched_envoy(self):
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True,
+            rename={"transformer.h": "layers"}, envoys={"layers.*": Heads},
+        )
+        with model.trace("hello world"):
+            view = model.layers[5].heads.save()
+        assert view.ndim == 4 and view.shape[1] == Heads.n_heads
+
     @torch.no_grad()
     def test_custom_eproperty_reads_per_head_view(self, heads_model):
         with heads_model.trace("hello world"):

@@ -375,10 +375,12 @@ class Envoy:
 
         `_envoys` is ``None`` (the base `Envoy`), a single class for every module,
         or a dict tried in this order: a ``torch.nn.Module`` subclass key on the
-        module's MRO; a dotted path-suffix key (``"attn"``, ``"transformer.h"``)
-        on the native path; the same on each ``rename`` alias path, so one map
-        written in aliased names serves every architecture the rename covers.
-        Nothing matching gives the base `Envoy`.
+        module's MRO; a dotted path-suffix key (``"attn"``, ``"transformer.h"``,
+        ``"layers.*"``) on the native path; the same on each other spelling of the
+        path under the ``rename`` aliases (see `_spellings`), so one map written
+        in aliased names (``{"layers.0.self_attn": Attn}``) serves every
+        architecture the rename covers. Nothing matching gives the base `Envoy`.
+        The class is chosen once, here, as the envoy is built.
         """
         mapping = self._envoys
         if mapping is None or isinstance(mapping, type):
@@ -386,28 +388,52 @@ class Envoy:
         for cls in type(module).__mro__:
             if cls in mapping:
                 return mapping[cls]
-        # An alias path is the native path with the rename key's run replaced
-        # (as `_bind_aliases` binds it), so it is known before aliases bind.
-        paths = [path]
-        for key, aliases in (self._rename or {}).items():
-            if isinstance(key, type) and isinstance(module, key):
-                key = path.rsplit(".", 1)[-1]
-            elif isinstance(key, type) or not self._path_ends_with(path, key):
-                continue
-            prefix = path[: -len(key.lstrip("."))]
-            paths += [prefix + alias for alias in ([aliases] if isinstance(aliases, str) else aliases)]
-        for candidate in paths:
+        for candidate in self._spellings(path, module):
             for key, envoy_cls in mapping.items():
                 if isinstance(key, str) and self._path_ends_with(candidate, key):
                     return envoy_cls
         return Envoy
 
+    def _spellings(self, path: str, module: torch.nn.Module | None = None) -> list[str]:
+        """Every spelling of ``path`` under the ``rename`` aliases, the native one first.
+
+        A spelling of a path is a spelling of its parent's path plus the last
+        component, or, where a ``rename`` key's components end the path, a
+        spelling of what precedes them plus the alias (the rule `_bind_aliases`
+        binds by, so it is known before the aliases bind). Spellings so compose
+        through ancestors: under ``{"transformer.h": "layers", "attn": "self_attn"}``,
+        ``model.transformer.h.0.attn`` is also ``model.layers.0.self_attn``. A
+        class key names ``module`` by type, so it stands for the last component only.
+        """
+        parent, _, name = path.rpartition(".")
+        if not parent:
+            return [path]
+        spellings = [f"{prefix}.{name}" for prefix in self._spellings(parent)]
+        for key, aliases in (self._rename or {}).items():
+            if isinstance(key, type):
+                if not isinstance(module, key):
+                    continue
+                key = name
+            elif not self._path_ends_with(path, key):
+                continue
+            heads = self._spellings(path[: -len(key.lstrip(".")) - 1])  # what precedes the key
+            for alias in [aliases] if isinstance(aliases, str) else aliases:
+                spellings += [f"{prefix}.{alias}" for prefix in heads]
+        return spellings
+
     @staticmethod
     def _path_ends_with(path: str, key: str) -> bool:
-        """Whether ``path`` ends with dotted ``key`` component-wise (not substring)."""
+        """Whether ``path`` ends with dotted ``key`` component-wise (not substring).
+
+        A ``*`` component of ``key`` matches any one component: ``"layers.*"``
+        ends ``model.layers.0`` (every entry of the container), but neither
+        ``model.layers`` nor ``model.layers.0.attn``.
+        """
         parts = path.split(".")
         key_parts = key.removeprefix(".").split(".")
-        return len(key_parts) <= len(parts) and parts[-len(key_parts):] == key_parts
+        return len(key_parts) <= len(parts) and all(
+            k in ("*", p) for p, k in zip(parts[-len(key_parts):], key_parts)
+        )
 
     def __setstate__(self, state):
         self.__dict__.update(state)
