@@ -373,24 +373,33 @@ class Envoy:
     def _resolve_envoy_class(self, module: torch.nn.Module, path: str) -> type["Envoy"]:
         """The [`Envoy`][nnsight.intervention.envoy.Envoy] class to wrap ``module`` (at ``path``) with.
 
-        Consults the `_envoys` map (``None`` -> the base [`Envoy`][nnsight.intervention.envoy.Envoy]): a
-        single class wraps every child with it; a dict's keys are either a
-        ``torch.nn.Module`` subclass (matched against the module's MRO, tried
-        first) or a string dotted path-suffix (``"attn"``, ``"transformer.h"``).
-        Falls back to the base [`Envoy`][nnsight.intervention.envoy.Envoy] when nothing matches — so a model can
-        give, e.g., its attention modules a subclass exposing a ``.heads`` eproperty.
+        `_envoys` is ``None`` (the base `Envoy`), a single class for every module,
+        or a dict tried in this order: a ``torch.nn.Module`` subclass key on the
+        module's MRO; a dotted path-suffix key (``"attn"``, ``"transformer.h"``)
+        on the native path; the same on each ``rename`` alias path, so one map
+        written in aliased names serves every architecture the rename covers.
+        Nothing matching gives the base `Envoy`.
         """
         mapping = self._envoys
-        if mapping is None:
-            return Envoy
-        if isinstance(mapping, type):
-            return mapping
+        if mapping is None or isinstance(mapping, type):
+            return mapping or Envoy
         for cls in type(module).__mro__:
             if cls in mapping:
                 return mapping[cls]
-        for key, envoy_cls in mapping.items():
-            if isinstance(key, str) and self._path_ends_with(path, key):
-                return envoy_cls
+        # An alias path is the native path with the rename key's run replaced
+        # (as `_bind_aliases` binds it), so it is known before aliases bind.
+        paths = [path]
+        for key, aliases in (self._rename or {}).items():
+            if isinstance(key, type) and isinstance(module, key):
+                key = path.rsplit(".", 1)[-1]
+            elif isinstance(key, type) or not self._path_ends_with(path, key):
+                continue
+            prefix = path[: -len(key.lstrip("."))]
+            paths += [prefix + alias for alias in ([aliases] if isinstance(aliases, str) else aliases)]
+        for candidate in paths:
+            for key, envoy_cls in mapping.items():
+                if isinstance(key, str) and self._path_ends_with(candidate, key):
+                    return envoy_cls
         return Envoy
 
     @staticmethod

@@ -1108,6 +1108,56 @@ class TestCustomEnvoys:
         )
         assert isinstance(model.transformer.h[2].mlp, Heads)
 
+    def test_string_key_matches_rename_alias(self):
+        """A suffix key written in an alias's name reaches the module the alias
+        points at — one `envoys=` map can then serve several architectures."""
+        model = TransformersModel(
+            "gpt2", task="text-generation", rename={"mlp": "ffn"}, envoys={"ffn": Heads}
+        )
+        block = model.transformer.h[2]
+        assert type(block.ffn) is Heads
+        assert block.mlp is block.ffn  # same envoy, now of the mapped class
+
+    def test_multi_component_alias_matches_on_binding_envoy(self):
+        class Layers(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"transformer.h": "layers"}, envoys={"layers": Layers},
+        )
+        assert type(model.layers) is Layers
+        assert model.transformer.h is model.layers
+        assert type(model.transformer.h[0]) is Envoy  # the blocks are not `layers`
+
+    def test_native_match_stands_over_alias_match(self):
+        class Other(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"mlp": "ffn"}, envoys={"mlp": Heads, "ffn": Other},
+        )
+        assert type(model.transformer.h[0].ffn) is Heads
+
+    def test_class_key_alias_matches(self):
+        from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", rename={GPT2MLP: "ffn"}, envoys={"ffn": Heads}
+        )
+        assert type(model.transformer.h[0].ffn) is Heads
+
+    @torch.no_grad()
+    def test_eproperty_works_on_alias_matched_envoy(self):
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True,
+            rename={"mlp": "ffn"}, envoys={"ffn": Heads},
+        )
+        with model.trace("hello world"):
+            view = model.transformer.h[0].ffn.heads.save()
+        assert view.ndim == 4 and view.shape[1] == Heads.n_heads
+
     @torch.no_grad()
     def test_custom_eproperty_reads_per_head_view(self, heads_model):
         with heads_model.trace("hello world"):
