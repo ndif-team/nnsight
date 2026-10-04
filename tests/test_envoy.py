@@ -407,6 +407,46 @@ class TestLookup:
     def test_len_of_modulelist(self, envoy):
         assert len(envoy.layers) == 3
 
+    # -- truthiness ------------------------------------------------------
+    #
+    # `__len__` delegates to the wrapped module, and Python falls back to it
+    # when there is no `__bool__`. A module that is not a container has no
+    # `__len__`, so `if envoy:` used to raise `TypeError: object of type
+    # 'Linear' has no len()` -- naming neither the envoy nor the test.
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            pytest.param("", id="root"),
+            pytest.param("layers.0", id="block"),
+            pytest.param("layers.0.mlp.fc", id="linear"),
+            pytest.param("layers", id="modulelist"),
+        ],
+    )
+    def test_an_envoy_is_truthy(self, envoy, path):
+        assert bool(envoy.get(path) if path else envoy) is True
+
+    def test_if_envoy_does_not_raise(self, envoy):
+        # The idiom that hit it, rather than `bool()` spelled out.
+        if envoy.layers[0].mlp.fc:
+            reached = True
+        assert reached
+        assert (envoy.head or None) is envoy.head
+
+    def test_an_empty_container_is_falsy_like_the_module(self, module):
+        # Mirroring the module keeps a container's emptiness meaningful:
+        # torch says an empty ModuleList is falsy, so this does too.
+        module.spare = nn.ModuleList()
+        envoy = Envoy(module)
+
+        assert bool(module.spare) is False
+        assert bool(envoy.spare) is False
+        assert len(envoy.spare) == 0
+
+    def test_truthiness_does_not_change_len(self, envoy):
+        # `__bool__` is added beside `__len__`, not in place of it.
+        assert len(envoy.layers) == 3
+
     def test_get_dotted_path_to_envoy(self, envoy):
         assert envoy.get("layers.0.mlp").path == "model.layers.0.mlp"
 

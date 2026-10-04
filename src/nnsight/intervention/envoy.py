@@ -984,6 +984,19 @@ class Envoy:
         """The number of entries in the wrapped module (e.g. a ``ModuleList``'s length)."""
         return len(self._module)
 
+    def __bool__(self) -> bool:
+        """Truthy exactly when the wrapped module is.
+
+        Without this, Python falls back to `__len__` for truthiness, and that
+        delegates to a module which usually has no `__len__` of its own: `if
+        envoy:` on anything but a container raised `TypeError: object of type
+        'Linear' has no len()`, naming neither the envoy nor the test that
+        produced it. Mirroring the module keeps a container's emptiness
+        meaningful -- an empty `ModuleList` is falsy here as it is in torch --
+        while a plain module answers True, the way `nn.Module` does.
+        """
+        return bool(self._module)
+
     def get(self, path: str) -> Any:
         """Resolve a dotted ``path`` from this envoy, e.g. ``"transformer.h.0.mlp"``.
 
