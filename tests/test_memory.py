@@ -133,6 +133,103 @@ class TestTracerCleanup:
         assert tracer.info.frame is None
 
 
+class TestModelFreedWhileTracerHeld:
+    """``with model.trace(...) as tracer:`` leaves ``tracer`` bound after the
+    block. Holding it must not keep the model: once the model's last reference
+    goes, its weights are freed even though the tracer lives on. Each helper
+    returns the tracer out of the scope that owned the model."""
+
+    def test_module_freed_with_tracer_held(self):
+        def run():
+            model = Envoy(TwoLayer())
+            with model.trace(_x()) as tracer:
+                out = model.b.output.save()
+            return tracer, out, weakref.ref(model._module)
+
+        tracer, out, ref = run()
+        assert ref() is None
+        assert isinstance(out, torch.Tensor)
+
+    def test_module_freed_with_invoke_tracer_held(self):
+        def run():
+            model = Envoy(TwoLayer())
+            with model.trace() as tracer:
+                with tracer.invoke(_x()):
+                    nnsight.save(model.b.output)
+            return tracer, weakref.ref(model._module)
+
+        tracer, ref = run()
+        assert ref() is None
+
+    def test_module_freed_with_tracer_held_after_body_raises(self):
+        def run():
+            model = Envoy(TwoLayer())
+            try:
+                with model.trace(_x()) as tracer:
+                    raise ValueError("boom")
+            except ValueError:
+                pass
+            return tracer, weakref.ref(model._module)
+
+        tracer, ref = run()
+        assert ref() is None
+
+    def test_transformers_model_freed_with_tracer_held(self):
+        from nnsight import TransformersModel
+
+        # The first import of the pipeline stack leaves a traceback cycle that
+        # holds the frames it ran under. Import it here so those frames are the
+        # test's, not the model's.
+        import transformers.pipelines  # noqa: F401
+
+        def run():
+            model = TransformersModel(
+                "openai-community/gpt2", task="text-generation", dispatch=True
+            )
+            with model.trace("The Eiffel Tower is in") as tracer:
+                logits = model.lm_head.output.save()
+            return tracer, logits, weakref.ref(model._module)
+
+        tracer, logits, ref = run()
+        assert ref() is None
+        assert logits.shape[-1] == 50257
+
+
+class TestCacheCleanup:
+    """A trace that declared a cache frees the model by refcounting once the
+    cache is gone; a kept cache holds the model only through ``_cache.model``."""
+
+    def test_module_freed_after_cached_trace(self):
+        def run():
+            model = Envoy(TwoLayer())
+            with model.trace(_x()) as tracer:
+                tracer.cache()
+            return weakref.ref(model._module)
+
+        assert run()() is None
+
+    def test_kept_cache_holds_model_until_detached(self):
+        def run():
+            model = Envoy(TwoLayer())
+            with model.trace(_x()) as tracer:
+                cache = tracer.cache()
+            return cache, weakref.ref(model._module)
+
+        cache, ref = run()
+        assert ref() is not None
+        cache._cache.model = None
+        assert ref() is None
+        assert isinstance(cache["model.b"].output, torch.Tensor)
+
+    def test_modules_leaves_no_cycle(self):
+        def run():
+            model = Envoy(TwoLayer())
+            model.modules()
+            return weakref.ref(model._module)
+
+        assert run()() is None
+
+
 class TestExceptionCleanup:
     """An error mid-trace still tears everything down (the frame clear and the
     interleaver's mediator cleanup both run in `finally`)."""

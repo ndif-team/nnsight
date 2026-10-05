@@ -92,6 +92,28 @@ class InterleavingTracer(Tracer):
         # on the interleaver for the run so handle() can narrow per invoke.
         self.batcher: Batcher | None = None
 
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        exc_traceback: TracebackType | None,
+    ) -> bool:
+        """Run the block, then drop this tracer's references to the model and inputs.
+
+        A ``with model.trace(...) as tracer:`` leaves ``tracer`` bound after the
+        block. Holding the envoy, the bound ``fn`` and the batched inputs here would
+        keep the model's weights (and the input tensors) alive for as long as that
+        name is, so ``del model`` would free nothing on its own.
+        """
+        try:
+            return super().__exit__(exc_type, exc_value, exc_traceback)
+        finally:
+            self.envoy = None
+            self.fn = None
+            self.args = ()
+            self.kwargs = {}
+            self.batcher = None
+
     def stop(self) -> None:
         """Halt the model run as soon as this point is reached.
 
