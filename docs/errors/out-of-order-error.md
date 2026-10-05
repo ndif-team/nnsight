@@ -168,13 +168,6 @@ So, for an out-of-order loop body:
 | bounded, stops **short** of the run's last step (`iter[1:3]` over 4 steps) | **silent** — writes land one step late, trailing code runs |
 | open (`iter[1:]`, `tracer.all()`) | warns; writes land one step late and the last is dropped |
 
-One exception to the first row: a `.source` op whose module's `.source` is first
-touched inside the loop shifts even at step 0. `attn.output[0]` read before
-`attn.source.attention_interface_1.output` in `for step in tracer.iter[:4]` gives
-the op's steps 1–3, one entry short, and ends with the "never reached" warning.
-Touching `attn.source` before the trace restores the raise. See
-[../gotchas/iteration.md](../gotchas/iteration.md).
-
 The silent row — and the fact that a warning is easy to miss — is why an
 intervention inside a loop deserves a check rather than a clean exit. Read a
 location you edited back in a second invoke and compare it against a no-write
@@ -186,6 +179,19 @@ one of these shapes runs clean.
 A loop whose body is in order but whose *bound* exceeds the run is cut short
 with the same warning; that case is
 [value-was-not-provided.md](value-was-not-provided.md).
+
+## Another cause: `.source` first accessed inside a running module
+
+```
+OutOfOrderError: `.source` of model.transformer.h.0.attn was first accessed while that module was already running, ...
+```
+
+A module's operations are reachable only on calls that start after its `.source`
+is instrumented. A trace instruments every `.source` its block names before the
+model runs, so this comes from one the block reaches indirectly — inside a helper
+function, through `getattr` — after reading something from inside that module.
+Touch the module's `.source` before the trace (`_ = model.transformer.h[0].attn.source`),
+or reach it before the block reads anything from inside that module.
 
 ## Another cause: something replaced the module's forward
 

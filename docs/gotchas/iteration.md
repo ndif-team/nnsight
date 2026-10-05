@@ -24,9 +24,8 @@ sources: [src/nnsight/intervention/iterator.py, src/nnsight/intervention/interle
 - The loop form is `for step in tracer.iter[...]:`. A `with tracer.iter[...]:`
   block is deprecated and warns.
 - A read the model already ran past raises `OutOfOrderError` at step 0, but past
-  step 0 it binds to the next step instead. A `.source` op first touched inside
-  the loop does that even at step 0. Read in forward order within a step and
-  compare list lengths and shapes.
+  step 0 it binds to the next step instead. Read in forward order within a step
+  and compare list lengths and shapes.
 - `tracer.iter[N]` targets the `(N+1)`-th **occurrence** of a location. For a
   module reached once per step that is step `N`; for one called several times
   per forward it is the call count.
@@ -296,62 +295,6 @@ with model.generate(prompt, max_new_tokens=4, min_new_tokens=4) as tracer:
   (`tracer.iter[[3, 1]]`) is cut short the same way even though the run made step
   1. If the run did make the steps you asked for, look for a backwards access in
   the loop body before you touch the bound.
-
----
-
-## A `.source` op first touched inside the loop slides even at step 0
-
-### Symptom
-
-The same backwards read as above, on a `.source` op, raises nothing in a loop that
-starts at step 0. The list of op values starts at step 1 and is one entry short,
-and the run ends with the "never reached" warning, which names the loop bound.
-
-### Cause
-
-A module's `.source` is set up the first time it is touched. When that first touch
-is inside the loop, after the op has already run on the current step, the request
-binds to the op's next call: the next step. A module `.output` / `.input` read in
-the same order raises `OutOfOrderError` at step 0, and so does the `.source` read
-when that module's `.source` was touched before the trace. The same first touch
-inside `with tracer.iter[1]:`, placed after a `with tracer.iter[0]:` block, returns
-step 2's value.
-
-### Wrong code
-
-```python
-# attn_implementation="eager", so attention_interface_1 returns the pattern
-attn = model.transformer.h[3].attn
-out, pat = [], []
-with model.generate(prompt, max_new_tokens=4) as tracer:
-    for step in tracer.iter[:4]:
-        out.append(attn.output[0].save())                                # fires last
-        pat.append(attn.source.attention_interface_1.output[1].save())   # already ran
-# len(out) == 4, len(pat) == 3; pat key lengths [8, 9, 10] are steps 1-3
-# UserWarning: '...attention_interface_1.output.i3' was never reached: the loop
-# asked for a step the run did not make ...
-```
-
-### Right code
-
-```python
-attn = model.transformer.h[3].attn
-attn.source   # touch it before the trace: a wrong-order read then raises
-out, pat = [], []
-with model.generate(prompt, max_new_tokens=4) as tracer:
-    for step in tracer.iter[:4]:
-        pat.append(attn.source.attention_interface_1.output[1].save())
-        out.append(attn.output[0].save())
-# len(pat) == 4; key lengths [7, 8, 9, 10] are steps 0-3
-```
-
-### Mitigation
-
-- Within a step, read ops before the module output that contains them, and
-  earlier modules before later ones.
-- Touch `.source` (or `print` it) before the trace.
-- Assert the lengths of parallel lists match, and check shapes that grow per step:
-  an attention pattern's key axis is `prompt_len + step`.
 
 ---
 

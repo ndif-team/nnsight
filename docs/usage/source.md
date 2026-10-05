@@ -26,8 +26,9 @@ to.
 - Use to read or replace a single operation's output.
 - Skip when a child module already exposes the value — `model...mlp.output` is
   cheaper than `.source` (no AST rewrite).
-- Source-instrumentation is installed lazily on first `.source` access and stays on
-  the module for the life of the process. Outside a trace each operation calls
+- Source-instrumentation is installed before the model runs on every module whose
+  `.source` the trace's block names (or on first `.source` access outside a trace),
+  and stays on the module for the life of the process. Outside a trace each operation calls
   straight through, which is cheap but not free: sourcing every block, attention and
   MLP of GPT-2 costs about 6% on a forward pass with no trace running.
 
@@ -195,12 +196,9 @@ with model.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
 An op that fires once per forward is indexed per generation step; an op that loops
 within one forward (e.g. an MoE expert loop) is indexed per fire.
 
-Read ops before the module output that contains them. When the loop is the first
-place a module's `.source` is touched, an op read after `attn.output` does not
-raise: it binds to the op's next call, so the list holds steps 1, 2, … and comes
-up one short. Touching `attn.source` before the trace makes that read raise
-`OutOfOrderError` instead. See
-[../gotchas/iteration.md](../gotchas/iteration.md).
+Read ops before the module output that contains them. An op read after
+`attn.output` is out of order like any other location: it raises
+`OutOfOrderError` at step 0. See [../gotchas/iteration.md](../gotchas/iteration.md).
 
 ## Values that aren't calls: a loop's running state
 
@@ -307,27 +305,26 @@ Requesting one operation per trace tells you which labels answer.
     ```
 
     The other order raises `OutOfOrderError` on `...attention_interface_1.fn`.
-- **The *first* `.source` access on a module has to happen before that module's
-  forward runs.** Instrumenting an operation rewrites the module's forward, so if
-  the trace body already read something, the model is mid-pass by the time the
-  request lands: the instrumentation misses this pass and you get
-  `OutOfOrderError`. It is **per module** — warming `h[5].attn` does nothing for
-  `h[7].attn`, so a layer sweep hits it once per layer. A bare attribute access
-  outside the trace is the whole fix, and costs no forward pass:
+- **A module has to be instrumented before its forward starts, so a trace does it
+  first.** Before the model runs, the trace walks its block for `<envoy>.source`
+  (and for eproperties keyed into `source`) and instruments those modules. It
+  follows names from the enclosing scope or bound in the block, attribute and index
+  access, and `for` loops over envoys, so reading a child before the op works on a
+  fresh model:
 
     ```python
-    _ = model.transformer.h[5].attn.source          # instrument now
-
     with model.trace(prompt):
         qkv     = model.transformer.h[5].attn.c_attn.output.save()
         pattern = model.transformer.h[5].attn.source.attention_interface_1.output[1].save()
     assert tuple(qkv.shape)[-1] == 2304 and pattern.shape[1] == 12
     ```
 
-    Warming the module also covers drills below it, so `attention_interface_1.source`
-    later in the block needs nothing extra. Putting the `.source` request first
-    inside the block works too, but only when nothing you need runs earlier in the
-    forward; the warm-up has no such constraint.
+    A `.source` the walk cannot see — reached inside a helper function, through
+    `getattr`, or from an envoy kept in a list — is instrumented on first access. If
+    that module's forward has already started, the read raises `OutOfOrderError`
+    saying `.source` was first accessed while the module was running. Touch it
+    outside the trace (`_ = model.transformer.h[5].attn.source`, no forward pass) or
+    before the block reads anything from inside that module.
 - **Skipping a whole module drops its source ops.** A skipped module's body never
   runs, so reading `skipped_module.source.<op>.output` is out of order. See
   [skip.md](skip.md).

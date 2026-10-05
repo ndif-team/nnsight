@@ -1045,6 +1045,99 @@ class TestRecursiveIntegration:
         assert saved[2].shape[1] == 1
 
 
+@pytest.fixture
+def fresh_gpt2():
+    """A GPT-2 none of whose modules has been sourced yet."""
+    from nnsight.modeling.transformers import TransformersModel
+
+    return TransformersModel("gpt2", task="text-generation", dispatch=True)
+
+
+class TestSourceBuiltBeforeTheRun:
+    """`.source` reached from inside a module that is already running.
+
+    The running call keeps the body it started with, so the block's ``.source``
+    references are instrumented before the model runs.
+    """
+
+    def test_child_read_before_source_on_a_fresh_model(self, fresh_gpt2):
+        attn = fresh_gpt2.transformer.h[0].attn
+        with fresh_gpt2.trace("hello world"):
+            projected = attn.c_attn.output.save()
+            queries = attn.source.attention_interface_1.inputs[0][1].save()
+        assert queries.shape[2] == projected.shape[1]  # [batch, heads, seq, head_dim]
+
+    def test_source_read_before_a_later_child(self, fresh_gpt2):
+        attn = fresh_gpt2.transformer.h[0].attn
+        with fresh_gpt2.trace("hello world"):
+            weights = attn.source.attention_interface_1.output[0].save()
+            out = attn.c_proj.output.save()
+        assert weights.shape[1] == out.shape[1]
+
+    def test_source_first_used_in_a_second_trace(self, fresh_gpt2):
+        attn = fresh_gpt2.transformer.h[0].attn
+        with fresh_gpt2.trace("hello world"):
+            attn.c_attn.output.save()
+        with fresh_gpt2.trace("hello world"):
+            attn.c_attn.output.save()
+            out = attn.source.attention_interface_1.output[0].save()
+        assert out.shape[1] == 2
+
+    def test_bound_in_the_block_and_in_a_loop(self, fresh_gpt2):
+        with fresh_gpt2.trace("hello world"):
+            outs = nnsight.save([])
+            for i, layer in enumerate(fresh_gpt2.transformer.h[:2]):
+                attn = layer.attn
+                attn.c_attn.output
+                outs.append(attn.source.attention_interface_1.output[0])
+        assert len(outs) == 2
+
+    def test_eproperty_keyed_into_the_forward(self):
+        from nnsight.intervention.eproperty import eproperty
+        from nnsight.modeling.transformers import TransformersModel
+
+        class Attention(Envoy):
+            @eproperty(key="source.attention_interface_1.output")
+            def interface_output(self, value):
+                return value[0]
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True, envoys={"attn": Attention}
+        )
+        attn = model.transformer.h[0].attn
+        with model.trace("hello world"):
+            attn.c_attn.output.save()
+            out = attn.interface_output.save()
+        assert out.shape[1] == 2
+
+    def test_generate_reads_the_first_step(self, fresh_gpt2):
+        attn = fresh_gpt2.transformer.h[0].attn
+        with fresh_gpt2.generate("hello world", max_new_tokens=3):
+            attn.c_attn.output.save()
+            out = attn.source.attention_interface_1.output[0].save()
+        assert out.shape[1] == 2  # the prompt, not a cached step's one token
+
+    def test_unseen_first_access_at_the_input_is_in_time(self, fresh_gpt2):
+        def interface_output(attn):
+            return attn.source.attention_interface_1.output[0]
+
+        attn = fresh_gpt2.transformer.h[0].attn
+        with fresh_gpt2.trace("hello world"):
+            attn.input.save()  # parked before the body starts
+            out = interface_output(attn).save()
+        assert out.shape[1] == 2
+
+    def test_unseen_first_access_mid_call_names_the_cause(self, fresh_gpt2):
+        def interface_output(attn):
+            return attn.source.attention_interface_1.output
+
+        attn = fresh_gpt2.transformer.h[0].attn
+        with pytest.raises(OutOfOrderError, match="first accessed while that module was already running"):
+            with fresh_gpt2.trace("hello world"):
+                attn.c_attn.output.save()
+                interface_output(attn).save()
+
+
 def _raises_boom(x):
     raise ValueError("boom in instrumented forward")
 

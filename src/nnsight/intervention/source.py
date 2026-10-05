@@ -56,6 +56,7 @@ import ast
 import copy
 import functools
 import inspect
+import sys
 import textwrap
 import warnings
 import weakref
@@ -63,9 +64,10 @@ from types import CellType, CodeType, FunctionType
 from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple
 
 import torch
+from greenlet import getcurrent
 
 from .eproperty import eproperty
-from .interleaver import Mediator
+from .interleaver import Mediator, OutOfOrderError
 from .util import first_input, replace_first_input
 
 if TYPE_CHECKING:
@@ -705,6 +707,25 @@ def install_controller(envoy: "Envoy") -> State:
     return state
 
 
+def running(state: State) -> bool:
+    """Whether the body of the module owning ``state`` has started a call that is
+    still on the stack: this greenlet's, or that of one it switches back to (the
+    model side, from a worker). A call parked at its ``.input`` has not started it.
+
+    Walked only when a module is first sourced, so the controller pays nothing.
+    """
+    frame, glet = sys._getframe(), getcurrent()
+    while True:
+        while frame is not None:
+            if frame.f_code is run_body.__code__ and frame.f_locals.get("state") is state:
+                return True
+            frame = frame.f_back
+        glet = glet.parent
+        if glet is None:
+            return False
+        frame = glet.gr_frame
+
+
 def install_source(envoy: "Envoy") -> Compiled:
     """Source-instrument ``envoy``'s module and install the controller.
 
@@ -713,6 +734,15 @@ def install_source(envoy: "Envoy") -> Compiled:
     """
     state = install_controller(envoy)
     if not state.sourced:
+        if running(state):
+            # The call running now started on the plain forward, so none of its
+            # operations can be reached; installing here would serve the request
+            # from a later call instead, or from none.
+            raise OutOfOrderError(
+                f"`.source` of {envoy.path} was first accessed while that module was "
+                "already running, so this call is not instrumented. Access it before "
+                "the trace, or earlier in the block than any value from inside the module."
+            )
         # The body as installed — the forward that actually runs, which is not
         # always the class's — and unbound, since the controller passes the module.
         state.body, state.compiled = instrument(
@@ -720,6 +750,152 @@ def install_source(envoy: "Envoy") -> Compiled:
         )
         state.sourced = True
     return state.compiled
+
+
+def prebuild(node: ast.AST, scope: Any) -> None:
+    """Source-instrument, before the model runs, every module a block reaches through ``.source``.
+
+    The controller picks the module's body when the module is called, so a module
+    first sourced while it is already running stays uninstrumented for that call
+    (`install_source` refuses). A worker reads values in the model's order, so a
+    block that reads a child of a module before that module's ``.source`` would
+    always hit that. This walks the block's AST, resolves each ``X.source`` (and
+    each eproperty whose key goes through ``source``) to the envoys ``X`` can be,
+    and instruments them up front.
+
+    ``X`` resolves statically: names from ``scope`` or bound in the block (by
+    assignment or a ``for`` over envoys), attribute access that the envoy class
+    does not define (children, aliases), and indexing, where an index that isn't
+    a constant stands for every child. Anything else is left to the block, which
+    then gets `install_source`'s error if it is too late.
+    """
+    # What the block names is fixed, so it is worked out once per block (blocks are
+    # memoized per site) and kept on the node; only resolving it uses this run's scope.
+    plan = node.__dict__.get("_nnsight_prebuild")
+    if plan is None:
+        plan = node._nnsight_prebuild = _plan(node)
+    bound, targets = plan
+    names = (scope, bound, set())
+    for value, attr in targets:
+        for envoy in _resolve(value, names):
+            if attr == "source":
+                _prebuild(envoy)
+                continue
+            # An eproperty keyed into a forward, e.g. "source.attention_interface_1.inputs".
+            prop = inspect.getattr_static(type(envoy), attr, None)
+            key = prop.key if isinstance(prop, eproperty) else None
+            if not isinstance(key, str) or "source" not in key.split("."):
+                continue
+            for name in key.split("."):
+                if name == "source":
+                    _prebuild(envoy)
+                    break
+                envoy = _child(envoy, name)
+                if envoy is None:
+                    break
+
+
+def _plan(node: ast.AST) -> tuple[dict, list]:
+    """The names a block binds to envoys, and the ``(X, attr)`` pairs `prebuild` resolves.
+
+    A pair is kept when ``attr`` is ``source`` or something the base `Envoy` does not
+    define (a subclass's eproperty), and ``X`` is a chain of names, attributes the base
+    `Envoy` does not define, and indexing: ``m.h[0].output.save`` cannot reach an envoy.
+    """
+    from .envoy import Envoy  # lazy: envoy imports this module
+
+    def navigable(expr: ast.expr) -> bool:
+        while isinstance(expr, (ast.Attribute, ast.Subscript)):
+            if isinstance(expr, ast.Attribute) and hasattr(Envoy, expr.attr):
+                return False
+            expr = expr.value
+        return isinstance(expr, ast.Name)
+
+    bound: dict[str, list[tuple[ast.expr, bool]]] = {}  # name -> (expr, iterated?)
+    targets = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute):
+            if (sub.attr == "source" or not hasattr(Envoy, sub.attr)) and navigable(sub.value):
+                targets.append((sub.value, sub.attr))
+        elif isinstance(sub, ast.Assign):
+            for target in sub.targets:
+                if isinstance(target, ast.Name):
+                    bound.setdefault(target.id, []).append((sub.value, False))
+        elif isinstance(sub, (ast.For, ast.comprehension)):
+            target, iterable = sub.target, sub.iter
+            if (
+                isinstance(target, ast.Tuple) and len(target.elts) == 2
+                and isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+                and iterable.func.id == "enumerate" and iterable.args
+            ):
+                target, iterable = target.elts[1], iterable.args[0]
+            if isinstance(target, ast.Name):
+                bound.setdefault(target.id, []).append((iterable, True))
+    return bound, targets
+
+
+def _prebuild(envoy: "Envoy") -> None:
+    try:
+        install_source(envoy)
+    except Exception:
+        pass  # the block's own access reports it
+
+
+def _child(envoy: "Envoy", name: str) -> "Envoy | None":
+    """``envoy.name`` if it is an envoy the class does not define.
+
+    A descriptor the class defines (``.output``, ``.source``, a property) is never
+    run: reading one now would park, or compute, outside the run.
+    """
+    from .envoy import Envoy  # lazy: envoy imports this module
+
+    if inspect.getattr_static(type(envoy), name, None) is not None:
+        return None
+    try:
+        value = getattr(envoy, name)
+    except Exception:
+        return None
+    return value if isinstance(value, Envoy) else None
+
+
+def _resolve(expr: ast.expr, names: tuple) -> "list[Envoy]":
+    """The envoys ``expr`` can evaluate to, as far as `prebuild` can tell."""
+    from .envoy import Envoy  # lazy: envoy imports this module
+
+    if isinstance(expr, ast.Name):
+        scope, bound, resolving = names
+        try:
+            value = scope[expr.id]
+        except Exception:
+            value = None
+        found = [value] if isinstance(value, Envoy) else []
+        if expr.id not in resolving:
+            resolving.add(expr.id)
+            for value_expr, iterated in bound.get(expr.id, ()):
+                found.extend(_elements(value_expr, names) if iterated else _resolve(value_expr, names))
+            resolving.discard(expr.id)
+        return found
+    if isinstance(expr, ast.Attribute):
+        return [c for e in _resolve(expr.value, names) if (c := _child(e, expr.attr)) is not None]
+    if isinstance(expr, ast.Subscript) and not isinstance(expr.slice, ast.Slice):
+        found = []
+        for envoy in _resolve(expr.value, names):
+            if not isinstance(expr.slice, ast.Constant):
+                found.extend(envoy._children)  # any of them
+                continue
+            try:
+                found.append(envoy[expr.slice.value])
+            except Exception:
+                pass
+        return [e for e in found if isinstance(e, Envoy)]
+    return []  # a slice is a list of envoys: see `_elements`
+
+
+def _elements(expr: ast.expr, names: tuple) -> "list[Envoy]":
+    """What iterating ``expr`` yields: an envoy's children, or a slice's."""
+    if isinstance(expr, ast.Subscript) and isinstance(expr.slice, ast.Slice):
+        expr = expr.value
+    return [c for e in _resolve(expr, names) for c in e._children]
 
 
 # ---------------------------------------------------------------------------

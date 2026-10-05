@@ -117,11 +117,15 @@ computed from the module's own input.
 
 ### Source instrumentation, on demand
 
-The first time a block uses `envoy.source`, `install_source` upgrades `state.body`
+Before a block's worker starts, `prebuild` walks the block's AST and calls
+`install_source` on every envoy whose `.source` it names; a `.source` it cannot see
+is installed when first accessed. `install_source` upgrades `state.body`
 to a source-instrumented copy of the forward, in which every call `fn(*a, **k)`
 becomes `__nnsight_op__("source.{name}_{n}", fn, *a, **k)` — the same three
 handoffs (`.input` / `.skip` / `.output`) one level down. The controller is
-unchanged; only its `body` swaps. See
+unchanged; only its `body` swaps. `run_body` reads `body` when the call starts, so
+a call already running keeps the plain forward: `install_source` raises
+`OutOfOrderError` when a `run_body` frame for the module is on the stack (`running`). See
 [source-internals.md](source-internals.md).
 
 ## Caches
