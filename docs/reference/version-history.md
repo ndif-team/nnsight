@@ -55,6 +55,7 @@ A loop that asks for a step the run does not make — `iter[:8]` over three gene
 - `AsyncRemoteBackend` — `await backend` for the saves dict, `async for` for streamed status updates.
 - Model identity via `model.to_model_key()` / `Class.from_model_key(...)`.
 - The old `tracer.local()` hybrid streaming is **not** ported.
+- A PEFT adapter (`peft=`, `model.load_adapter`) is attached in place rather than through `PeftModel`: module paths are the base model's, not `model.base_model.model...`.
 
 ### Removed v0.4-era namespace
 

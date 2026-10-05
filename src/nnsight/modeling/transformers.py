@@ -56,7 +56,7 @@ import torch
 
 from .. import NNsightDeprecationWarning
 from ..intervention.envoy import Envoy, traceable
-from . import processing
+from . import peft, processing
 from .huggingface import HuggingFaceModel
 
 if TYPE_CHECKING:
@@ -68,21 +68,6 @@ if TYPE_CHECKING:
         ProcessorMixin,
     )
 
-
-def _import_peft():
-    """Import ``peft`` on demand (it's an optional dependency).
-
-    Only needed when a ``peft=<repo_id>`` adapter is requested, so importing it
-    lazily keeps nnsight usable without peft installed.
-    """
-    try:
-        import peft
-    except ImportError as error:
-        raise ImportError(
-            "Using `peft=<repo_id>` requires the optional `peft` package, which "
-            "is not installed. Install it with `pip install peft`."
-        ) from error
-    return peft
 
 _PREPROCESSORS = ("tokenizer", "image_processor", "feature_extractor", "processor")
 
@@ -138,40 +123,6 @@ def _infer_task(module: torch.nn.Module) -> str:
     raise ValueError(
         f"Could not infer a pipeline task for a pre-loaded {type(module).__name__}; "
         "pass task=... explicitly (e.g. TransformersModel(model, task='text-generation'))."
-    )
-
-
-def _refuse_noop_peft(peft_id: str, caught: list) -> None:
-    """Turn peft's "missing adapter keys" warning into an error.
-
-    peft places adapter weights by **name** and drops the ones it cannot match. As
-    ``lora_B`` initialises to zeros, an adapter whose weights did not land is
-    exactly the identity -- the model behaves like the base checkpoint, so a
-    base-vs-adapter comparison silently becomes base-vs-base with every number in
-    it plausible. peft warns about this precisely because ``from_pretrained``
-    cannot return its load result (see `PeftModel.from_pretrained`), but a warning
-    is easy to miss in a long load, and by the time it matters the run is finished.
-
-    Only the mismatch warns: an adapter whose keys all place -- including a freshly
-    initialised one whose ``lora_B`` is legitimately still zero -- produces none.
-    """
-    missing = [
-        warning
-        for warning in caught
-        if "missing adapter keys" in str(warning.message).lower()
-    ]
-    if not missing:
-        return
-
-    raise ValueError(
-        f"The PEFT adapter {peft_id!r} did not attach: peft could not match its "
-        "weights to this model's modules by name, dropped them, and left the "
-        "adapter at its zero initialisation -- so it is a no-op and the model "
-        "would behave exactly like the base checkpoint. The usual cause is a "
-        "`task=` that builds a different architecture than the adapter was trained "
-        "against: e.g. task='text-generation' where the adapter targets a "
-        "multimodal config, which needs task='image-text-to-text'. peft reported: "
-        f"{str(missing[0].message)[:400]}"
     )
 
 
@@ -502,8 +453,7 @@ class TransformersModel(HuggingFaceModel):
             # adapter modules onto the meta model, so the meta architecture — and
             # thus the module paths a remote request references — matches the
             # adapted model the server runs. No adapter weights are loaded here.
-            peft = _import_peft()
-            model = peft.get_peft_model(model, peft.PeftConfig.from_pretrained(self.peft))
+            peft.attach(model, self.peft, weights=False)
 
         # The model is pre-built, so the meta pipeline only loads preprocessors;
         # pass the pipeline-recognized arch kwargs (e.g. trust_remote_code) so a
@@ -570,16 +520,9 @@ class TransformersModel(HuggingFaceModel):
 
     def _finalize_pipeline(self) -> torch.nn.Module:
         if self.peft is not None:
-            # The pipeline loaded the base weights; wrap them with the adapter's
+            # The pipeline loaded the base weights; attach the adapter with its
             # real weights so the dispatched model runs with the adapter applied.
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                self.pipeline.model = _import_peft().PeftModel.from_pretrained(
-                    self.pipeline.model, self.peft
-                )
-            for warning in caught:
-                warnings.warn(warning.message, warning.category)
-            _refuse_noop_peft(self.peft, caught)
+            peft.attach(self.pipeline.model, self.peft)
         self._sync()
         return self.pipeline.model
 
@@ -694,72 +637,51 @@ class TransformersModel(HuggingFaceModel):
     def _remoteable_set_env(self, env: Optional[dict]) -> None:
         """Apply a per-request environment on the server side.
 
-        Swaps the PEFT adapter to match ``env["peft"]``, rewrapping the loaded
-        module only when the requested adapter differs from the current one so a
-        repeat request pays nothing:
-
-            current  requested  action
-            -------  ---------  ------
-            None     None       no-op
-            None     X          load X
-            X        X          no-op
-            X        Y          unload X, load Y
-            X        None       unload X
+        Only the PEFT adapter travels — the base model is identified by the
+        model key. See `peft.swap` for the transitions.
         """
-        requested = env.get("peft") if env else None
-        if requested == self.peft:
+        peft.swap(self, env.get("peft") if env else None)
+
+    def load_adapter(self, peft_id: Optional[str]) -> None:
+        """Attach a PEFT adapter — the post-hoc form of the ``peft=`` kwarg.
+
+        Call again with a different id to swap adapters, or with ``None`` to
+        remove the current one (see `peft.swap` for the transitions).
+
+        Works before dispatch: only the adapter's config is grafted onto the
+        meta module, so the tree gains the adapter's modules — and remote
+        module paths match — without loading any weights (safetensors cannot
+        load onto the meta device). The adapter's real weights arrive with the
+        base's at dispatch. That deferral means a wrong adapter id fails here
+        (the config is read now), but an adapter that doesn't match the base
+        is refused only at dispatch, where the weights meet.
+
+        This shadows ``PreTrainedModel.load_adapter``, which the envoy would
+        otherwise reach by fallthrough — that one fails on a meta model and
+        changes the module structure without the envoy tree noticing. An
+        adapter attached here also travels with remote requests
+        (`_remoteable_get_env`).
+
+        Args:
+            peft_id: The adapter's repo id or local path, or ``None`` to
+                remove the current adapter.
+        """
+        if self.dispatched:
+            peft.swap(self, peft_id)
             return
+        if peft_id == self.peft:
+            return
+        from .mixins.meta import MetaDevice
 
-        # Rebuild the Envoy tree around the new module in place: a wrap/unwrap
-        # changes the module structure (adapter modules appear or disappear), so
-        # re-init rather than _update, reusing this envoy's interleaver and rename
-        # spec. Drop the previous tree's child-envoy attributes first — the new
-        # structure has different top-level children, and __init__ resets
-        # _children without clearing the stale attributes those children left.
-        def rebind(module: torch.nn.Module) -> None:
-            # Standalone children (whose module isn't part of the HF tree, e.g. the
-            # generator) survive the swap: Envoy.__init__ builds _children only from
-            # `module.named_children()`, so carry them across the re-init by name.
-            submodules = set(self._module.modules())
-            standalone = {
-                name: value
-                for name, value in self.__dict__.items()
-                if isinstance(value, Envoy)
-                and value is not self
-                and value._module not in submodules
-            }
-            for name, value in list(self.__dict__.items()):
-                if isinstance(value, Envoy) and value is not self:
-                    del self.__dict__[name]
-            Envoy.__init__(
-                self, module, path=self.path, interleaver=self.interleaver, rename=self._rename
-            )
-            for name, child in standalone.items():
-                self.__dict__[name] = child
-                self._children.append(child)
-            if self.pipeline is not None:
-                self.pipeline.model = module
-
-        if self.peft is not None:
-            rebind(self._module.unload())
-            # The module is the base checkpoint from here; keep `self.peft` honest
-            # so a refused load below leaves this envoy self-consistent.
-            self.peft = None
-
-        if requested:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                adapted = _import_peft().PeftModel.from_pretrained(self._module, requested)
-            for warning in caught:
-                warnings.warn(warning.message, warning.category)
-            # Check before rebinding, so a no-op adapter never becomes this envoy's
-            # module. A swap is where this matters most: sweeping several adapters
-            # over one loaded base is exactly the workload where every organism
-            # silently collapsing to the base checkpoint looks like a real result.
-            _refuse_noop_peft(requested, caught)
-            rebind(adapted)
-
-        self.peft = requested
+        self.peft = peft_id
+        # Rebuild the meta skeleton exactly as construction would have built it
+        # with this adapter: `_load_meta` reads `self.peft` and grafts the
+        # adapter's architecture from its config alone.
+        with MetaDevice():
+            module = self._load_meta(*self.args, **self.kwargs)
+        self._update(module)
+        if self.pipeline is not None:
+            self.pipeline.model = module
 
     def __getstate__(self) -> dict:
         state = super().__getstate__()
