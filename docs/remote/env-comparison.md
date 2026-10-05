@@ -3,7 +3,7 @@ title: Local vs Remote Environment Comparison
 one_liner: Diff your local Python environment against NDIF's to debug "works locally, fails remotely" issues.
 tags: [remote, ndif, debugging, environment]
 related: [docs/remote/register-local-modules.md, docs/remote/ndif-overview.md]
-sources: [src/nnsight/ndif.py:424, src/nnsight/ndif.py:364, src/nnsight/ndif.py:275, src/nnsight/ndif.py:307]
+sources: [src/nnsight/ndif.py:611, src/nnsight/ndif.py:551, src/nnsight/ndif.py:400, src/nnsight/ndif.py:432, src/nnsight/ndif.py:118]
 ---
 
 # Local vs Remote Environment Comparison
@@ -41,7 +41,21 @@ transformers  4.45.0         4.45.0          ✓
 numpy         1.26.4         1.26.0          ≠
 ```
 
-`compare()` returns an `EnvComparison` object (`src/nnsight/ndif.py:364`) — `print` it for the table, or inspect it programmatically.
+`compare()` returns an `EnvComparison` object (`src/nnsight/ndif.py:551`) — `print` it for the table, or inspect it programmatically.
+
+### Comparing against a specific server
+
+`compare()` reads the configured host (`CONFIG.API.HOST`). A job sent with a per-call host — `remote="http://host:port"` — runs on that server's packages, so name the same host:
+
+```python
+HOST = "http://localhost:5001"
+
+cmp = nnsight.compare(HOST)
+assert cmp.packages["nnterp"]["match"], cmp.packages["nnterp"]
+
+with model.trace("...", remote=HOST):
+    ...
+```
 
 ## Reading the diff
 
@@ -53,7 +67,7 @@ Status legend:
 | `≠` | Mismatch on a non-critical package. Usually safe; investigate if you depend on that package. |
 | `⚠ CRITICAL` | Mismatch on `nnsight`, `transformers`, or `torch` — the packages most likely to break serialization or change model behavior. |
 
-The critical set is hardcoded (`src/nnsight/ndif.py:25`):
+The critical set is hardcoded (`src/nnsight/ndif.py:26`):
 
 ```python
 CRITICAL_PACKAGES = {"nnsight", "transformers", "torch"}
@@ -87,19 +101,38 @@ For the underlying data (e.g. for CI):
 from nnsight import ndif
 
 local = ndif.get_local_env()
-remote = ndif.get_remote_env()        # cached after first call
+remote = ndif.get_remote_env()        # the configured host; cached after the first call
 
 print(local.keys())                   # dict_keys(['python_version', 'packages'])
 print(remote["python_version"])
 print(local["packages"]["torch"])
 ```
 
-`get_local_env()` (`src/nnsight/ndif.py:275`) enumerates installed distributions (by import name) plus modules importable from your working tree; modules outside `site-packages`/`dist-packages` get the version string `"local"` (these are also auto-registered for by-value serialization — see [register-local-modules.md](./register-local-modules.md)).
+`get_local_env()` (`src/nnsight/ndif.py:400`) enumerates installed distributions (by import name) plus modules importable from your working tree; modules outside `site-packages`/`dist-packages` get the version string `"local"` (these are also auto-registered for by-value serialization — see [register-local-modules.md](./register-local-modules.md)).
 
-`get_remote_env(force_refresh=False)` (`src/nnsight/ndif.py:307`) calls `GET {CONFIG.API.HOST}/env` and caches the result in a module global; pass `force_refresh=True` to re-fetch:
+`get_remote_env(host=None, *, force_refresh=False)` (`src/nnsight/ndif.py:432`) calls `GET {host}/env` and caches the result **per host**, so a process that talks to two servers holds both environments and fetches each once:
 
 ```python
-ndif.get_remote_env(force_refresh=True)
+ndif.get_remote_env()                                   # CONFIG.API.HOST
+ndif.get_remote_env("http://localhost:5001")            # a second server, cached separately
+ndif.get_remote_env("http://localhost:5001", force_refresh=True)   # re-fetch that one
+```
+
+`host` is the string a per-call `remote="http://host:port"` takes. A trailing slash is dropped (`resolve_host`, `src/nnsight/ndif.py:118`, which `RemoteBackend` also resolves its host through), so `"http://localhost:5001/"` and `"http://localhost:5001"` are one cache entry. A fetch that fails raises a `RuntimeError` naming the host — a server with no `/env` route says so — and caches nothing, so the next call tries again.
+
+### Seeding the cache (tests, offline runs)
+
+`set_remote_env(env, host=None)` stores an environment for a host without a network call, and `clear_remote_env(host=None)` forgets one host, or all of them with no argument. Code that checks server versions can then run in a test suite with no server:
+
+```python
+from nnsight import ndif
+
+ndif.set_remote_env(
+    {"python_version": "3.12.0", "packages": {"nnsight": "0.8.0", "nnterp": "1.2.0"}},
+    host="http://localhost:5001",
+)
+assert ndif.compare("http://localhost:5001").remote["packages"]["nnterp"] == "1.2.0"
+ndif.clear_remote_env()
 ```
 
 ## Common mismatches and fixes
@@ -120,11 +153,12 @@ A package that's local (or version `"local"`) and not on the server is a candida
 
 ## Suppressing color
 
-Tables use ANSI color when writing to a TTY. Set `NO_COLOR=1` to disable or `FORCE_COLOR=1` to force it on (`src/nnsight/ndif.py:70`).
+Tables use ANSI color when writing to a TTY. Set `NO_COLOR=1` to disable or `FORCE_COLOR=1` to force it on (`src/nnsight/ndif.py:71`).
 
 ## Gotchas
 
-- `get_remote_env()` caches its response. After the server updates, call `force_refresh=True` to see new versions.
+- `get_remote_env()` caches its response per host. After a server updates, pass `force_refresh=True` to see new versions.
+- `compare()` with no argument describes the configured host. For a job sent with `remote="http://host:port"`, pass that host.
 - Introspection reflects the *active* interpreter; a different venv shows different results.
 - Some packages have separate distribution and import names (e.g. `pillow`/`PIL`); the diff keys by import name where possible, so a package can look missing when it's only differently named.
 - The table only shows packages the server has; local-only packages don't appear — use `get_local_env()` to see them.

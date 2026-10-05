@@ -119,12 +119,12 @@ Imported from the top-level `nnsight` package.
 | `nnsight.status` | `nnsight.status(raw=False)` | Query NDIF; `print()` shows deployed models and state. |
 | `nnsight.ndif_status` | `nnsight.ndif_status(raw=False)` | **Deprecated** alias for `status()`. |
 | `nnsight.is_model_running` | `nnsight.is_model_running(repo_id, revision="main") -> bool` | Whether a model is currently RUNNING on NDIF. |
-| `nnsight.compare` | `nnsight.compare() -> EnvComparison` | Diff local vs NDIF Python/package versions; `print()` for the table. |
+| `nnsight.compare` | `nnsight.compare(host=None) -> EnvComparison` | Diff local vs NDIF Python/package versions; `print()` for the table. `host` names the server (default `CONFIG.API.HOST`). |
 | `nnsight.CONFIG` | `Config` | The config singleton (see [config.md](./config.md)). |
 | `nnsight.Object` | type | Tensor-like static type for values read inside a trace (typing hints). |
 | `nnsight.NNsightDeprecationWarning` | `FutureWarning` subclass | The category every nnsight deprecation is raised under. `warnings.filterwarnings("ignore", category=...)` silences nnsight's and nothing else. |
 
-(`get_local_env` / `get_remote_env` live on `nnsight.ndif`, not the top level. `nnsight.session`, `nnsight.apply`, `nnsight.cond`, `nnsight.log`, `nnsight.local`, and the `nnsight.list/dict/int/...` wrappers are **removed** — use plain Python and `model.session()`.)
+(`get_local_env()` / `get_remote_env(host=None, *, force_refresh=False)` live on `nnsight.ndif`, not the top level; the remote environment is cached per host, and `ndif.set_remote_env(env, host=None)` / `ndif.clear_remote_env(host=None)` seed or empty that cache — see [env-comparison.md](../remote/env-comparison.md). `nnsight.session`, `nnsight.apply`, `nnsight.cond`, `nnsight.log`, `nnsight.local`, and the `nnsight.list/dict/int/...` wrappers are **removed** — use plain Python and `model.session()`.)
 
 ## Remote execution
 

@@ -26,6 +26,7 @@ import time
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any, AsyncIterator, Optional, Union
 
+from ...ndif import resolve_host
 from ...schema.config import CONFIG
 from ...schema.response import RESULT, ResponseModel, Status
 from ...schema.request import RequestModel
@@ -95,11 +96,9 @@ class RemoteBackend(Backend):
         self.blocking = blocking
         self.job_id = job_id
         self.status: Optional[Status] = None
-        self.host = host or CONFIG.API.HOST
-        if not self.host.startswith(("http://", "https://")):
-            raise ValueError(
-                f"Invalid host URL: {self.host!r}; must start with http:// or https://"
-            )
+        # The per-call host (`remote="http://host:port"`) or the configured one, in
+        # the spelling `nnsight.ndif` keys its per-host caches on.
+        self.host = resolve_host(host)
         self.api_key = api_key or CONFIG.API.APIKEY or ""
         self.compress = CONFIG.API.COMPRESS
 

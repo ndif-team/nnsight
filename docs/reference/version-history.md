@@ -55,6 +55,7 @@ A loop that asks for a step the run does not make — `iter[:8]` over three gene
 - `AsyncRemoteBackend` — `await backend` for the saves dict, `async for` for streamed status updates.
 - Model identity via `model.to_model_key()` / `Class.from_model_key(...)`.
 - The old `tracer.local()` hybrid streaming is **not** ported.
+- `nnsight.ndif.get_remote_env(host=None, *, force_refresh=False)` and `nnsight.compare(host=None)` take the server to ask and cache per host; the single `ndif._REMOTE_ENV` global is replaced by `ndif.set_remote_env` / `ndif.clear_remote_env`.
 
 ### Removed v0.4-era namespace
 
