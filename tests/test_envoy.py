@@ -309,6 +309,41 @@ class TestUpdate:
         assert "base_layer" not in kept.__dict__ and "tail" not in stack.__dict__
         assert stack.interleaver.envoys[id(module.layers[1])] is kept
 
+    def test_a_dropped_entry_that_shares_its_module_keeps_the_other_entry(self):
+        shared = Envoy(SharedStack())
+        module = shared._module
+        first = shared.layers[0]
+        assert shared.layers[2] is first
+        # Entry 2 goes; the module stays, under entry 0 and `shared`.
+        module.layers = nn.ModuleList(list(module.layers)[:2])
+        shared._update(module)
+        assert {node.path for node in shared.modules()} == module_paths(module)
+        assert shared.layers[0] is first and shared.shared is first
+        assert len(list(shared.layers)) == 2
+        assert shared.interleaver.envoys[id(module.shared)] is first
+
+    def test_aliases_of_a_dropped_entry_go_with_it(self):
+        stack = Envoy(Stack(), rename={"layers": "blocks", "layers.1": "second"})
+        module = stack._module
+        assert stack.blocks is stack.layers and stack.second is stack.layers[1]
+        del module.layers
+        module.tail = nn.Linear(8, 8)
+        stack._update(module)
+        assert "layers" not in stack.__dict__ and "blocks" not in stack.__dict__
+        assert "second" not in stack.__dict__ and not stack._aliases
+        assert {node.path for node in stack.modules()} == module_paths(module)
+
+    def test_the_same_structure_is_only_re_pointed(self):
+        # Swapping meta weights for real ones: every envoy is the same object,
+        # in the same order, re-pointed at the new module's entry.
+        stack = Envoy(Stack())
+        before = [node for node in stack.modules()]
+        fresh = Stack()
+        stack._update(fresh)
+        assert [node for node in stack.modules()] == before
+        assert all(node._module is fresh.get_submodule(node.path.removeprefix("model.")) for node in before if node.path != "model")
+        assert stack._module is fresh
+
     def test_the_updated_tree_traces(self):
         stack = Envoy(Stack())
         module = stack._module

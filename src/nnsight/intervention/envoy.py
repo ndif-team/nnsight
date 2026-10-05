@@ -416,21 +416,30 @@ class Envoy:
                 self._drop_envoy(name)
         for name, child in children.items():
             if child is not None and name not in self._child_map:
+                # TODO: a gained entry gets its envoy class from `envoys=` but no
+                # `rename=` alias: aliases bind in `__init__` (`_bind_aliases`)
+                # only, as for any child wrapped after construction.
                 self._wrap_envoy(name, child)
         # Back in module order, as `__init__` builds them.
         self._child_map = {name: self._child_map[name] for name in children if name in self._child_map}
         entries = list(dict.fromkeys(self._child_map.values()))
-        self._children = entries + [child for child in self._children if child not in entries]
+        kept = {id(entry) for entry in entries}
+        self._children = entries + [child for child in self._children if id(child) not in kept]
 
     def _drop_envoy(self, name: str) -> None:
-        # Forget the entry `name` of the wrapped module, which it no longer has.
+        # Forget the entry `name` of the wrapped module, which it no longer has:
+        # the attribute it was mounted on and the aliases that reached it. The
+        # envoy itself stays while another entry still shares its module.
         child = self._child_map.pop(name)
-        for attribute, value in list(self.__dict__.items()):
-            if value is child:
-                del self.__dict__[attribute]
-        self._aliases = {alias: path for alias, path in self._aliases.items() if path != name}
-        if child in self._children:
-            self._children.remove(child)
+        attribute = name if self.__dict__.get(name) is child else f"{self.OVERLOAD_PREFIX}{name}"
+        self.__dict__.pop(attribute, None)
+        for alias, path in list(self._aliases.items()):
+            if path == name or path.startswith(f"{name}."):
+                del self._aliases[alias]
+                self.__dict__.pop(alias, None)
+        if any(entry is child for entry in self._child_map.values()):
+            return
+        self._children = [entry for entry in self._children if entry is not child]
         if self.interleaver.envoys.get(id(child._module)) is child:
             del self.interleaver.envoys[id(child._module)]
 
