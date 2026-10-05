@@ -1069,6 +1069,48 @@ class TestPeft:
         with pytest.raises(ValueError, match="cannot be attached to its\s+modules in place"):
             model.load_adapter(str(tmp_path / "adapter"))
 
+    @torch.no_grad()
+    def test_a_remote_request_with_an_adapter_runs_on_a_server_without_one(self, tiny_peft_bundle):
+        # What NDIF does: the client is a meta model built with `peft=`, the
+        # server holds the dispatched base; the request carries the adapter id,
+        # the server attaches it, and the request's module paths resolve there.
+        from nnsight.schema.request import RequestModel
+        from nnsight.tracing.backend import Backend
+
+        base_path, adapter_a, _ = tiny_peft_bundle
+        client = TransformersModel(base_path, task="text-generation", peft=adapter_a)
+        server = TransformersModel(base_path, task="text-generation", dispatch=True)
+        assert all(p.device.type == "meta" for p in client._module.parameters())
+
+        class Server(Backend):
+            def __call__(self, tracer):
+                blob = RequestModel.serialize(tracer, compress=False)
+                server._remoteable_set_env(client._remoteable_get_env())
+                remote = RequestModel.deserialize(
+                    blob, server._remoteable_persistent_objects(), compress=False
+                )
+                remote.execute(remote.info.code)
+                self.saves = dict(remote.info.frame.f_locals)
+
+        ids = torch.tensor([[2, 5, 7, 3]])
+        backend = Server()
+        with client.trace(ids, backend=backend):
+            lora = client.transformer.h[0].attn.c_attn.lora_A.default.output.save()
+            client.transformer.h[0].output[0][:, -1] = 0
+            logits = client.output.logits.save()
+        assert server.peft == adapter_a
+        assert backend.saves["lora"].shape[:2] == (1, 4)
+        with server.trace(ids):
+            server.transformer.h[0].output[0][:, -1] = 0
+            direct = server.output.logits.save()
+        torch.testing.assert_close(backend.saves["logits"], direct)
+
+        # A request without an adapter takes it off the server again.
+        client = TransformersModel(base_path, task="text-generation")
+        with client.trace(ids, backend=Server()):
+            client.output.logits.save()
+        assert server.peft is None and not _has_lora(server)
+
     def test_load_adapter_before_dispatch(self, lora_adapter):
         # The post-hoc form of `peft=`: on a meta model only the adapter's
         # config is grafted (safetensors cannot load onto meta — issue #555),
