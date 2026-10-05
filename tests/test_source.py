@@ -13,6 +13,27 @@ from nnsight.intervention.interleaver import OutOfOrderError
 from nnsight.intervention.source import STATE, Controller, SourceNotAvailable
 
 
+def _torch_compile_available() -> bool:
+    """Whether `torch.compile` can wrap a module in this interpreter.
+
+    A torch older than the Python it runs on refuses outright. Only that
+    refusal skips; any other error from `torch.compile` still fails.
+    """
+    try:
+        torch.compile(nn.Identity(), backend="eager")
+    except RuntimeError as error:
+        if "torch.compile is not supported" in str(error):
+            return False
+        raise
+    return True
+
+
+needs_torch_compile = pytest.mark.skipif(
+    not _torch_compile_available(),
+    reason="this torch build does not support torch.compile on this Python",
+)
+
+
 class MLP(nn.Module):
     def __init__(self):
         super().__init__()
@@ -740,6 +761,7 @@ class TestInstall:
         assert torch.allclose(out, expected)
         assert torch.allclose(model(x), expected)
 
+    @needs_torch_compile
     def test_compiled_module_still_runs(self, x):
         # torch.compile's OptimizedModule keeps its forward on the instance too.
         compiled = torch.compile(MLP(), backend="eager")
