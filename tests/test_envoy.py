@@ -267,7 +267,7 @@ class TestSharedEntries:
         assert torch.allclose(middle, module.layers[1](module.shared(x)))
 
 
-class Wrapped(nn.Module):
+class AdapterLayer(nn.Module):
     """A layer holding the module it replaced, as an adapter's layer does."""
 
     def __init__(self, inner):
@@ -287,7 +287,7 @@ class TestUpdate:
         kept = stack.layers[1]
         # Wrap one layer in place and add a sibling; the module changed, the tree did not.
         module = stack._module
-        module.layers[1] = Wrapped(module.layers[1])
+        module.layers[1] = AdapterLayer(module.layers[1])
         module.tail = nn.Linear(8, 8)
         stack._update(module)
 
@@ -347,7 +347,7 @@ class TestUpdate:
     def test_the_updated_tree_traces(self):
         stack = Envoy(Stack())
         module = stack._module
-        module.layers[1] = Wrapped(module.layers[1])
+        module.layers[1] = AdapterLayer(module.layers[1])
         stack._update(module)
         x = torch.randn(1, 8)
         with stack.trace(x):
