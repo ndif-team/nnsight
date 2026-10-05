@@ -987,13 +987,9 @@ class Envoy:
     def __bool__(self) -> bool:
         """Truthy exactly when the wrapped module is.
 
-        Without this, Python falls back to `__len__` for truthiness, and that
-        delegates to a module which usually has no `__len__` of its own: `if
-        envoy:` on anything but a container raised `TypeError: object of type
-        'Linear' has no len()`, naming neither the envoy nor the test that
-        produced it. Mirroring the module keeps a container's emptiness
-        meaningful -- an empty `ModuleList` is falsy here as it is in torch --
-        while a plain module answers True, the way `nn.Module` does.
+        Defined so truthiness does not fall back to `__len__`, which only a
+        container module answers. An empty `ModuleList` is falsy here as it is
+        in torch, and a plain module is truthy, the way `nn.Module` is.
         """
         return bool(self._module)
 

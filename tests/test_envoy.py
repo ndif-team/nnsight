@@ -409,10 +409,8 @@ class TestLookup:
 
     # -- truthiness ------------------------------------------------------
     #
-    # `__len__` delegates to the wrapped module, and Python falls back to it
-    # when there is no `__bool__`. A module that is not a container has no
-    # `__len__`, so `if envoy:` used to raise `TypeError: object of type
-    # 'Linear' has no len()` -- naming neither the envoy nor the test.
+    # `__bool__` mirrors the wrapped module rather than falling back to
+    # `__len__`, which a module that is not a container does not have.
 
     @pytest.mark.parametrize(
         "path",
@@ -442,10 +440,6 @@ class TestLookup:
         assert bool(module.spare) is False
         assert bool(envoy.spare) is False
         assert len(envoy.spare) == 0
-
-    def test_truthiness_does_not_change_len(self, envoy):
-        # `__bool__` is added beside `__len__`, not in place of it.
-        assert len(envoy.layers) == 3
 
     def test_get_dotted_path_to_envoy(self, envoy):
         assert envoy.get("layers.0.mlp").path == "model.layers.0.mlp"
