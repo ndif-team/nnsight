@@ -51,7 +51,7 @@ class TestChat:
         # A list of conversations is a batch of chats — one templated row per
         # conversation. Each conversation is a list of message dicts, i.e. a
         # list of lists, which `_is_pretokenized` would claim as pre-tokenized
-        # sub-sequences if chat detection didn't run first (as in `_num_rows`).
+        # sub-sequences if chat detection didn't run first (as in `processing.num_rows`).
         other = [
             {"role": "user", "content": "What is the capital of France?"},
             {"role": "assistant", "content": "Paris."},

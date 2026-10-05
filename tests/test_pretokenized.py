@@ -13,6 +13,7 @@ from transformers import (
 )
 
 import nnsight
+from nnsight.modeling import processing
 from nnsight.modeling.transformers import TransformersModel
 
 
@@ -460,7 +461,9 @@ def test_a_tensor_outside_the_table_passes_the_input_through_in_every_form(causa
     # way it was written — and such invokes do not batch.
     ids, extra = torch.tensor([[2, 5, 6]]), torch.arange(3)
     for args, kwargs in (((ids,), {}), ((), {"input_ids": ids}), (({"input_ids": ids},), {})):
-        assert causal._preprocess_invoke(args[0] if args else None, {**kwargs, "cache_position": extra})[0] is None
+        data = args[0] if args else None
+        rows, _ = processing.preprocess_invoke(causal, data, {**kwargs, "cache_position": extra})
+        assert rows is None
     # Ids written as lists still reach the model as the tensors it takes.
     expected = causal._module(input_ids=ids, cache_position=extra).logits
     for args, kwargs in ((([2, 5, 6],), {}), (({"input_ids": [[2, 5, 6]]},), {})):

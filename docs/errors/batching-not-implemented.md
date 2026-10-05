@@ -3,7 +3,7 @@ title: Model Does Not Support Batching Multiple Invokes
 one_liner: "NotImplementedError: <ModelClass> does not support batching multiple invokes — two or more input invokes on a model whose _batch() isn't implemented."
 tags: [error, batching, setup]
 related: [docs/usage/invoke-and-batching.md, docs/concepts/batching-and-invokers.md, docs/usage/extending.md]
-sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/batching.py, src/nnsight/modeling/transformers.py]
+sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/batching.py, src/nnsight/modeling/transformers.py, src/nnsight/modeling/processing.py]
 ---
 
 # Model Does Not Support Batching Multiple Invokes
@@ -19,7 +19,7 @@ its own name.
 
 `TransformersModel` implements batching, so it won't hit this for ordinary text
 inputs; it raises its own, more specific messages only for un-batchable multimodal
-inputs (`TransformersModel._batch_pipe` / `._batch_forward`):
+inputs (`batch_pipe` / `batch_forward` in `modeling/processing.py`):
 
 ```
 NotImplementedError: Batching multimodal generate inputs isn't supported; pass a single text/images payload.
