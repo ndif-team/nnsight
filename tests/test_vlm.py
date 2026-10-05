@@ -16,6 +16,7 @@ pytest.importorskip("PIL")
 
 from PIL import Image
 
+from nnsight.modeling import processing
 from nnsight.modeling.transformers import TransformersModel
 
 REPO = "trl-internal-testing/tiny-LlavaForConditionalGeneration"
@@ -145,19 +146,23 @@ class TestInputRouting:
     """A multimodal encoding must pass straight to the model, not be re-tokenized
     and left-pad batched as if it were plain text (which corrupts image tokens)."""
 
-    def test_multimodal_encoding_is_opaque(self, llava):
+    def test_multimodal_encoding_passes_through_whole(self, llava):
         enc = _encoding(llava)
         assert "pixel_values" in enc
         # A multimodal encoding is passed to the model as-is (every field), rather
         # than re-batched as text — which would drop pixel_values / corrupt ids.
-        assert llava._is_opaque(None, dict(enc)) is True
+        rows, (args, kwargs) = processing.preprocess_invoke(llava, None, dict(enc))
+        assert rows is None and args == ()
+        assert set(kwargs) == set(enc)
+        assert kwargs["pixel_values"] is enc["pixel_values"]
 
-    def test_text_only_encoding_is_pretokenized(self, llava):
+    def test_text_only_encoding_is_split_into_rows(self, llava):
         text_only = {
             "input_ids": torch.tensor([[1, 2, 3]]),
             "attention_mask": torch.tensor([[1, 1, 1]]),
         }
-        assert llava._is_pretokenized(None, text_only) is True
+        rows, _ = processing.preprocess_invoke(llava, None, text_only)
+        assert len(rows) == 1 and set(rows[0]) == {"input_ids", "attention_mask"}
 
     def test_encoding_counts_one_row(self, llava):
         enc = _encoding(llava)
@@ -171,10 +176,12 @@ class TestInputRouting:
     def test_params_only_still_zero_rows(self, llava):
         assert llava._batch_size(max_new_tokens=5) == 0
 
-    def test_float_tensor_is_opaque(self, llava):
-        # A float feature tensor passes straight through; integer token ids don't.
-        assert llava._is_opaque(torch.randn(1, 3, 8, 8), {}) is True
-        assert llava._is_pretokenized(torch.tensor([[1, 2, 3]]), {}) is True
+    def test_float_tensor_passes_through_and_token_ids_do_not(self, llava):
+        features = torch.randn(1, 3, 8, 8)
+        rows, (args, _) = processing.preprocess_invoke(llava, features, {})
+        assert rows is None and args[0] is features
+        rows, _ = processing.preprocess_invoke(llava, torch.tensor([[1, 2, 3]]), {})
+        assert len(rows) == 1
 
 
 @pytest.fixture(scope="module")

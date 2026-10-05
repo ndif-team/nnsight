@@ -61,7 +61,7 @@ NNsight(module: torch.nn.Module, path="model", interleaver=None, rename=None)
 | `module` | An already-instantiated `torch.nn.Module`. There is no repo loading; the model is wrapped as-is. |
 | `path` | Root path name for the Envoy tree (default `"model"`). Rarely set by hand. |
 | `interleaver` | Optional `Interleaver` to reuse; a fresh one is created if omitted. |
-| `rename` | Optional dict of module-path aliases, e.g. `{"transformer.h": "layers"}`. Both original and aliased paths resolve (`Envoy._bind_aliases`). |
+| `rename` | Optional dict of module-path aliases, e.g. `{"transformer.h": "layers"}`. Both original and aliased paths resolve (`aliasing.bind`). |
 
 There is **no** `dispatch=`, `device_map=` or `dtype=` here — those belong to the
 HF-backed wrappers, along with lazy meta-tensor loading and remote execution. The

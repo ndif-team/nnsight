@@ -236,7 +236,10 @@ eproperties can share a key to give different views of one location (that's how
 - `.transform` — the write-back for an edited preprocess *view*: when preprocess
   hands back a reshaped/sliced view, in-place edits to it are invisible to the model
   (which still holds the original), so a transform maps the edited view back to the
-  model's layout. It fires once, after the read, and is spliced in like a swap.
+  model's layout; the result is swapped in when the block next asks the model for
+  anything, or at the end of the block, edited or not. Until then a repeated read is
+  the same view. It takes `(self, view, raw)`: the edited view and the value as served, so a
+  view that is one element of a container can rebuild it.
 - `.provide(obj, value)` — serves the value from the model side (via
   `interleaver.handle`), resuming a worker parked on that location. Call it from your
   runtime where the value is produced.
@@ -271,7 +274,7 @@ class Heads(Envoy):
         return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
 
     @heads.transform
-    def heads(self, value):                     # write the edited heads back
+    def heads(self, value, raw):                # write the edited heads back
         b, nh, s, hd = value.shape
         return value.transpose(1, 2).reshape(b, s, nh * hd)
 
@@ -301,7 +304,16 @@ Non-matching modules stay the base `Envoy`. See
 
 - **`envoys=` targets specific modules.** Map a module type or dotted path suffix
   to a custom `Envoy` subclass to attach a custom `eproperty` there; without it a
-  custom `eproperty` lives on the model subclass.
+  custom `eproperty` lives on the model subclass. A suffix matches the native
+  path or a `rename=` alias (`rename={"attn": "self_attn"}` lets
+  `envoys={"self_attn": Heads}` reach GPT-2's `attn`), and aliases compose
+  through ancestors, so with `rename={"transformer.h": "layers", ...}` the key
+  `"layers.0.self_attn"` names what `model.layers[0].self_attn` reaches. A `*`
+  component matches any one component: `"layers.*"` wraps every block, not the
+  container. A type or native-path match takes precedence over an alias match.
+  An alias from a class-keyed `rename` (`{GPT2Attention: "self_attn"}`) is a
+  spelling of that module only: `"self_attn"` matches it, `"self_attn.c_proj"`
+  matches nothing. Key the rename by name to reach what is under it.
 - **Batching needs both `_batch_size` and `_batch`,** and the failure lands at
   trace time, not construction time. With only the default, a second input invoke
   raises `NNsight does not support batching multiple invokes`.

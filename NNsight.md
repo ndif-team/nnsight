@@ -251,8 +251,9 @@ target binds before the block is skipped.
 
 ### 3.2 Parse
 
-Parsing finds the `ast.With` (or `ast.AsyncWith`) node that starts on the trace line
-and turns its body into a compilable code object. Parsing a whole source file is
+Parsing finds the `ast.With` (or `ast.AsyncWith`) node the trace was entered from —
+the `with` line, or on Python 3.12+ the line of the tracer's own item, which a
+parenthesized header puts below it — and turns its body into a compilable code object. Parsing a whole source file is
 `O(its AST)` and dominates a cold capture, so `parse` first tries `_parse_block`,
 which slices *just* the block out of the source — the (possibly multi-line) header
 and its body, bounded by indentation and open-bracket depth — dedents it to column
@@ -1399,7 +1400,7 @@ Note that values produced inside one invoke are not visible in another; sharing 
 
 It works across tasks — text-generation, fill-mask, text-classification, image-classification, image-text-to-text, feature-extraction, and more — and accepts either a repo id **or** a pre-loaded module. From a repo id, the pipeline loads the model and infers every preprocessor. From a pre-loaded module the factory can't infer, so the task is inferred from the architecture (`_infer_task`: a generative model is text-generation, otherwise the class-name suffix decides) or taken from `task=`, and preprocessors are sourced from what you passed or the model's `name_or_path`. Other construction options: `peft=<repo_id>` applies a LoRA adapter at load time (and can be swapped per request server-side via the remote env hooks); `rename=`, `envoys=`, and `dispatch=` are the standard Envoy/Meta arguments.
 
-**Batching specifics.** `_batch_size`/`_num_rows` classify every input format — a string is one row, a list of strings one per prompt, a flat token-id list one row, a 2-D tensor or list-of-sequences one per leading entry, a chat conversation one row (not one per message). `_batch` dispatches on which run mode is active: `pipe` hands prompts to the pipeline with `batch_size`; `trace`/`generate` assemble model inputs here — each invoke's text goes through the task's own `preprocess`, and the per-invoke encodings are padded together by the pipeline's `pad_collate_fn`, while pre-tokenized ids and raw feature tensors bypass preprocessing. Padding side is the model's business, not the task's: causal decoders left-pad (so `output[:, -1]` is every row's real last token) and get mask-derived `position_ids` so an absolute-position model doesn't mispredict a short prompt padded up to a longer one; encoders keep right padding. Inputs that can't be padded into an `input_ids` batch — a raw feature tensor, a multimodal encoding — are carried straight to the model as a lone invoke, and asking to batch several of them raises rather than silently mangling them.
+**Batching specifics.** `_batch_size` (`processing.batch_size`) classifies every input format — a string is one row, a list of strings one per prompt, a flat token-id list one row, a 2-D tensor or list-of-sequences one per leading entry, a chat conversation one row (not one per message). `_batch` dispatches on which run mode is active: `pipe` hands prompts to the pipeline with `batch_size`; `trace`/`generate` assemble model inputs in `modeling/processing.py` — each invoke's text goes through the task's own `preprocess`, and the per-invoke encodings are padded together by `processing.collate`, while pre-tokenized ids and raw feature tensors bypass preprocessing. Padding side is the model's business, not the task's: causal decoders left-pad (so `output[:, -1]` is every row's real last token) and get mask-derived `position_ids` so an absolute-position model doesn't mispredict a short prompt padded up to a longer one; encoders keep right padding. Inputs that can't be padded into an `input_ids` batch — a raw feature tensor, a multimodal encoding — are carried straight to the model as a lone invoke, and asking to batch several of them raises rather than silently mangling them.
 
 Full page: [docs/models/transformers-model.md](docs/models/transformers-model.md).
 

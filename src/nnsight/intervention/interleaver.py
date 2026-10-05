@@ -48,6 +48,7 @@ from greenlet import GreenletExit, getcurrent, greenlet
 from ..tracing.util import Scope
 
 if TYPE_CHECKING:
+    from .eproperty import WriteBack
     from .envoy import Envoy
     from .fragments import Fragments
 
@@ -219,10 +220,9 @@ class Mediator:
         # Caches created by this worker's `tracer.cache()`. They observe every
         # location this run reaches (post-intervention); see Interleaver.handle.
         self.caches: list = []
-        # A one-shot write-back bound by an eproperty read whose value was a
-        # reshaped view (see eproperty.transform): fired once, right after this
-        # worker's read on a location, to splice the edited view back in `handle`.
-        self.transform: Optional[Callable] = None
+        # The write-back an eproperty read bound, if one is waiting (see
+        # `eproperty.WriteBack`): swapped in by `flush` when the worker next moves on.
+        self.transform: Optional[WriteBack] = None
         # The exception this worker raised, if any — a tracer.stop()'s
         # EarlyStopException or a genuine error in intervention code. Set only under
         # a deferring interleaver (see Interleaver.defer_exceptions): a driver that
@@ -243,6 +243,7 @@ class Mediator:
         [`Scope`][nnsight.tracing.util.Scope]).
         """
         exec(self.code, self.lcls.copy() if self.copy else self.lcls)
+        self.flush()  # an edit made by the block's last statement still goes back
 
     def __getstate__(self) -> dict:
         # Ships with the model (an edit rides in envoy._edits to a remote server).
@@ -320,18 +321,33 @@ class Mediator:
         sequentially.
         """
         mediator = cls.current(location)
-        worker = getcurrent()
-        iteration = (
-            mediator.iteration
-            if mediator.iteration is not None
-            else mediator.occurrence(location)
-        )
-        return worker.parent.switch(Pending(event, location, iteration, *rest))
+        # The occurrence this request asks for, read before the flush: serving
+        # the flushed swap relaxes a pinned step (see `handle`), and this request
+        # is the pinned one.
+        occurrence = mediator.wanted(location)
+        mediator.flush()
+        return getcurrent().parent.switch(Pending(event, location, occurrence, *rest))
+
+    def flush(self) -> None:
+        """Swap a waiting write-back into the model, from inside the worker, before it moves on.
+
+        The swap is tagged with the occurrence the view was read at, not the
+        one a request made now would ask for: under ``tracer.iter`` the worker
+        may already be pinned to the next step, and the edit belongs to the
+        visit it was read on, which the model is still paused at.
+        """
+        waiting, self.transform = self.transform, None
+        if waiting is not None:
+            getcurrent().parent.switch(Pending(Event.SWAP, waiting.location, waiting.occurrence, waiting.fn()))
 
     def occurrence(self, location: str) -> int:
         """How many times the model has reached ``location`` since this worker started."""
         counts = {} if self.interleaver is None else self.interleaver.counts
         return counts.get(location, 0) - self.counts_at_start.get(location, 0)
+
+    def wanted(self, location: str) -> int:
+        """The occurrence of ``location`` a request made now would ask for: the pinned step, else the next one."""
+        return self.iteration if self.iteration is not None else self.occurrence(location)
 
 
     @classmethod
@@ -484,17 +500,6 @@ class Mediator:
             if pending.event is Event.VALUE:  # serve this worker only its rows
                 served = value if batcher is None else batcher.narrow(value, self.batch_group)
                 self.pending = self.switch(served)
-                # If that read bound a write-back (an eproperty whose preprocess
-                # returned a view), the worker has since edited the view — fire it
-                # and splice the mapped-back result in, exactly like a swap.
-                if self.transform is not None:
-                    mapped = self.transform()
-                    value = (
-                        mapped
-                        if batcher is None
-                        else batcher.widen(value, self.batch_group, mapped)
-                    )
-                    self.transform = None
             elif pending.event is Event.SWAP:  # splice its edit back into the batch
                 if batcher is None:
                     value = pending.value

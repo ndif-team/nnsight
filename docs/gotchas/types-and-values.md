@@ -104,7 +104,7 @@ Weights that have not been loaded are on `meta`, so a scan reports every activat
 tensor alongside a fake one. There is nothing for the device check to compare.
 
 ```python
-model = TransformersModel("openai-community/gpt2", device_map="cuda")   # undispatched
+model = TransformersModel("openai-community/gpt2", device="cuda")       # undispatched
 steering = torch.randn(768)                                             # CPU
 
 with model.scan("The Eiffel Tower is in"):

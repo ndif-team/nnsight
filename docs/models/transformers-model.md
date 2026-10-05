@@ -3,7 +3,7 @@ title: TransformersModel
 one_liner: Primary wrapper for any HuggingFace transformers task; trace/generate/pipe/scan with tokenization and batching handled by the task's pipeline.
 tags: [models, transformers, primary]
 related: [docs/models/index.md, docs/models/nnsight-base.md, docs/models/language-model.md, docs/models/vision-language-model.md, docs/models/vllm.md]
-sources: [src/nnsight/modeling/transformers.py, src/nnsight/modeling/huggingface.py, src/nnsight/modeling/mixins/meta.py, tests/test_language.py, tests/test_encoder.py, tests/test_vision.py, tests/test_vlm.py, tests/test_chunked_tasks.py, tests/test_modeling.py]
+sources: [src/nnsight/modeling/transformers.py, src/nnsight/modeling/processing.py, src/nnsight/modeling/huggingface.py, src/nnsight/modeling/mixins/meta.py, tests/test_language.py, tests/test_encoder.py, tests/test_vision.py, tests/test_vlm.py, tests/test_chunked_tasks.py, tests/test_modeling.py]
 ---
 
 # TransformersModel
@@ -24,7 +24,34 @@ model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 # or pin it explicitly
 model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
+
+# choose the device with device=, not device_map=
+model = TransformersModel("openai-community/gpt2", device="cpu", dispatch=True)
 ```
+
+### Choosing a device
+
+To put the whole model on one device pass `device=` (`"cpu"`, `"cuda"`, `"cuda:1"`, `0`).
+`device_map=` is for spreading a model across several devices (`"auto"` on a
+multi-GPU machine, or a dict that places modules on different devices).
+
+The model loads through `transformers.pipeline(...)`, and the pipeline moves a model
+that `from_pretrained` placed on a single device to its own `device`, which defaults to
+the first accelerator. So `device_map="cpu"`, `device_map={"": "cpu"}`, and leaving the
+device out all give a model on `cuda:0` when a GPU is present, with no warning. This
+holds for `dispatch=True` and for a lazy model dispatched on first use. Check with
+`next(model.parameters()).device`.
+
+| Argument (one GPU present) | Model ends up on |
+|---|---|
+| none | `cuda:0` (CPU only when no accelerator exists) |
+| `device="cpu"` | `cpu` |
+| `device="cuda"` / `device=0` | `cuda:0` |
+| `device_map="cpu"` / `device_map={"": "cpu"}` | `cuda:0` |
+| `device_map="cuda"` / `device_map="auto"` | `cuda:0` |
+| `device_map=` dict naming two or more devices | as mapped (the pipeline leaves a multi-device model where it is) |
+
+`DiffusionModel` loads through diffusers instead and works the other way round: there `device_map="cuda"` places the pipeline and `device=` is ignored (see [diffusion-model.md](diffusion-model.md)).
 
 Inferring the task asks the Hub for the checkpoint's metadata, and a fully cached
 checkpoint does not change that. Under `HF_HUB_OFFLINE=1` the first form raises
@@ -70,7 +97,7 @@ TransformersModel(
     dispatch=False,             # True = load real weights now; False = lazy meta build
     rename=None,                # dict of module-path aliases
     **kwargs,                   # forwarded to transformers.pipeline / from_pretrained
-                                # (dtype, device_map, attn_implementation, ...)
+                                # (dtype, device, device_map, attn_implementation, ...)
 )
 ```
 
@@ -82,7 +109,8 @@ TransformersModel(
 | `peft` | Repo id of a PEFT adapter grafted onto the base model at load. `model.load_adapter(repo_id)` does the same after construction, swaps to another adapter, or removes the current one with `None`. The adapter is attached in place, so every path of the base model still names the same module (`model.transformer.h[0].attn.c_attn` is now the adapter's layer, holding the original as `.base_layer`), and a trace written for the base model runs unchanged with an adapter. Prompt-learning adapters (prefix/prompt tuning), which wrap the forward instead, are refused. See `tests/test_language.py` for verified PEFT usage. |
 | `dispatch` | `True` loads real weights during `__init__`; `False` (default) builds the architecture on the `meta` device and loads weights lazily on the first `trace`/`generate`/`pipe`. |
 | `dtype` | Forwarded. A torch dtype, or a quantization name (`"nf4"`, `"int8"`, ...) — see [quantization.md](quantization.md). The transformers 4 spelling `torch_dtype` is still accepted. |
-| `device_map`, `trust_remote_code`, `attn_implementation`, ... | Forwarded to the pipeline / `from_pretrained`. |
+| `device` | The single device to load onto (`"cpu"`, `"cuda:1"`, `0`). Defaults to the first accelerator. See [Choosing a device](#choosing-a-device). |
+| `device_map`, `trust_remote_code`, `attn_implementation`, ... | Forwarded to the pipeline / `from_pretrained`. `device_map` spreads a model across devices; a single-device map such as `"cpu"` is overridden by the pipeline's `device`. |
 | `rename` | Module-path aliases (see [Module renaming](#module-renaming)). |
 
 `kwargs` are split between the `pipeline(...)` factory's own parameters and `model_kwargs` automatically (`transformers.py`, `_split_pipeline_kwargs`), so anything HF accepts works.
@@ -174,7 +202,7 @@ assert model.dispatched is False                        # scan never loads weigh
 
 ## Input forms `trace` / `generate` accept
 
-Every invoke is normalized to per-row `input_ids` and left-pad batched into one forward, so mixed formats and unequal lengths combine freely (`transformers.py`, `_preprocess_invoke`; verified in `tests/test_language.py`):
+Every invoke is normalized to per-row model inputs and padded into one forward, so mixed formats and unequal lengths combine freely (`processing.py`, `preprocess_invoke`; verified in `tests/test_language.py`):
 
 ```python
 model.trace("a single prompt")                          # str -> 1 row
@@ -187,6 +215,43 @@ model.trace(input_ids=ids, attention_mask=mask)         # keyword tensors
 model.trace(**model.tokenizer("hi", return_tensors="pt"))  # unpacked encoding
 ```
 
+An encoding, keywords, and ids with keywords are the same input written three
+ways. Its per-row fields are split by row, padded and batched with whatever the
+other invokes pass:
+
+| Field | Padded with |
+|---|---|
+| `input_ids`, `decoder_input_ids` | the pad token |
+| `inputs_embeds`, `decoder_inputs_embeds` | zeros |
+| `attention_mask`, `decoder_attention_mask`, `global_attention_mask`, `token_type_ids`, `position_ids`, `decoder_position_ids` | 0 |
+| `special_tokens_mask` | 1 |
+| `labels` | -100, which the loss ignores |
+| `start_positions`, `end_positions`, `next_sentence_label` | one per row, no padding |
+
+- **Padding side.** Fields the length of the input are padded on the side the
+  batch is (the tokenizer's, or the feature extractor's when it names one). The
+  decoder's fields, and `labels` on an encoder-decoder, have a length of their
+  own and are padded on the right.
+- **Unbatched ids take unbatched fields.** `trace([5, 6, 7], labels=[5, 6, 7])`
+  is one row with a label per token, and `labels=1` beside it is one class label.
+- **One row of `token_type_ids` or `position_ids`** stands for every row of a
+  batch, as the models broadcast them. Any other field needs a row per input row.
+- **A field one invoke leaves out** gets a default: segment 0, positions counted
+  from the row's first token, and an ignored label. A field with no default (a
+  decoder input, a float label) has to be in every invoke or none. Segment 0 is
+  what an encoder assumes; GPT-2 adds an embedding for any `token_type_ids` it is
+  given, so pass them to every invoke of a GPT-2 batch or to none.
+- **`inputs_embeds`** stands in for `input_ids`, in `trace` and `generate`.
+- **Positions** are derived from the mask row by row, on a left-padding
+  tokenizer: a row that is padding then tokens is counted from its first token,
+  and any other row is left as the model counts it. Positions you pass are kept,
+  and a mask wider than the input (a key-value cache continuation) gets none.
+
+Other keywords are forward arguments, passed on as they are. A *tensor* outside
+the table (`pixel_values`, `cache_position`, ...) is not known to be per-row, so
+an input carrying one is handed to the model whole and does not batch with
+other invokes.
+
 Chat messages are detected and templated automatically (as `Pipeline.__call__` would):
 
 ```python
@@ -195,7 +260,7 @@ with model.trace(messages):
     ...
 ```
 
-A raw float feature tensor or a multimodal encoding (one carrying `pixel_values`, `input_features`, ...) is **opaque** — it passes straight to the model untouched and cannot be batched with others (`transformers.py`, `_is_opaque`).
+A raw float feature tensor or a multimodal encoding (one carrying `pixel_values`, `input_features`, ...) is **opaque** — it passes straight to the model untouched and cannot be batched with others (`processing.py`, `preprocess_invoke`).
 
 ### Batching across invokes
 
@@ -207,7 +272,7 @@ with model.trace() as tracer:
         b = model.output.logits[:, -1].save()      # batch of 2
 ```
 
-Causal decoders left-pad and get mask-derived `position_ids`; encoders (BERT, DistilBERT) keep right padding and need no correction (`transformers.py`, `_supply_position_ids`; `tests/test_encoder.py`). An empty `tracer.invoke()` sees the whole padded batch.
+Causal decoders left-pad and get mask-derived `position_ids`; encoders (BERT, DistilBERT) keep right padding and need no correction (`processing.py`, `supply_position_ids`; `tests/test_encoder.py`). An empty `tracer.invoke()` sees the whole padded batch.
 
 ## Chunked tasks
 
@@ -234,7 +299,7 @@ Two consequences:
 
 `keypoint-matching` is the other refused task, for a different reason: its unit input is a *pair* of images, which a trace's list convention (one prompt per element) would split. Run the whole task with `model.pipe([image_a, image_b])`, or trace one forward on an encoding you build yourself: `model.image_processor(images=[image_a, image_b], return_tensors='pt')`.
 
-A task whose input is a dict — `{"image": ..., "question": ..., "word_boxes": [...]}` for `document-question-answering`, `{"image": ..., "candidate_labels": [...]}` for `zero-shot-object-detection`, `{"table": ..., "query": ...}` for `table-question-answering` — goes through the task's own preprocessing, including the `_args_parser` step `Pipeline.__call__` would run (which is where `table-question-answering` builds its `pd.DataFrame`). A mapping carrying tensors is still read as a model encoding (`transformers.py`, `_is_task_input`). A dual-encoder zero-shot task (`zero-shot-image-classification`, `zero-shot-audio-classification`) nests the candidate labels' text encoding inside its preprocess row; the trace merges those tensors into its one forward, so `logits_per_image` / `logits_per_audio` reads `(1, n_labels)` — one text row per candidate label against the single image/audio row.
+A task whose input is a dict — `{"image": ..., "question": ..., "word_boxes": [...]}` for `document-question-answering`, `{"image": ..., "candidate_labels": [...]}` for `zero-shot-object-detection`, `{"table": ..., "query": ...}` for `table-question-answering` — goes through the task's own preprocessing, including the `_args_parser` step `Pipeline.__call__` would run (which is where `table-question-answering` builds its `pd.DataFrame`). A mapping carrying tensors is still read as a model encoding (`processing.py`, `is_task_input`). A dual-encoder zero-shot task (`zero-shot-image-classification`, `zero-shot-audio-classification`) nests the candidate labels' text encoding inside its preprocess row; the trace merges those tensors into its one forward, so `logits_per_image` / `logits_per_audio` reads `(1, n_labels)` — one text row per candidate label against the single image/audio row.
 
 Row counts across the five, measured on the checkpoints `tests/test_chunked_tasks.py` uses plus `openai/whisper-tiny`:
 
@@ -307,6 +372,8 @@ with model.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
 # per_step[0] is the full prompt; per_step[1:] are one cached token each
 ```
 
+Within a step, read locations in forward order. A wrong-order read in the loop can bind to the next step instead of raising; see [../gotchas/iteration.md](../gotchas/iteration.md).
+
 ## Interventions
 
 ```python
@@ -355,7 +422,7 @@ Aliases are honored in `tracer.cache()` keys too (`tests/test_language.py`).
 
 ## Dispatch behavior
 
-- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device. The Envoy tree is fully usable for writing intervention code.
+- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device. The Envoy tree is fully usable for writing intervention code. The config it is built from takes the same load kwargs the real load's config does — `attn_implementation`, `experts_implementation`, `dtype`, overrides of config attributes — so `model.config` says before dispatch what it will say after; placement kwargs (`device_map`, `max_memory`, ...) wait for dispatch.
 - `dispatch=True`: real weights load during `__init__`.
 - First `trace`/`generate`/`pipe` auto-dispatches if needed (`mixins/meta.py`, `Meta.interleave`). `scan` does **not** dispatch.
 - Call `model.dispatch()` to force loading.
@@ -366,6 +433,7 @@ Aliases are honored in `tracer.cache()` keys too (`tests/test_language.py`).
 
 ## Gotchas
 
+- **`device_map="cpu"` loads on the GPU.** Pass `device="cpu"` for one device; `device_map=` is for spreading a model across devices. See [Choosing a device](#choosing-a-device).
 - **`generate` vs `pipe`.** `generate` returns token ids and decodes with the checkpoint's `generation_config`, which may sample — pass `do_sample=False` for a deterministic run; `pipe` returns decoded records and folds in the checkpoint's sampling `task_specific_params`.
 - **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` raises if there's no active trace.
 - **`scan` needs `dispatch=False` to be cheap** but works either way; it never loads weights.

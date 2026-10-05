@@ -30,9 +30,22 @@ class Heads(Envoy):
         return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
 
     @heads.transform
-    def heads(self, value):
+    def heads(self, value, raw):
         b, nh, s, hd = value.shape
         return value.transpose(1, 2).reshape(b, s, nh * hd)
+
+
+class HiddenCopy(Envoy):
+    """A copy of the first element of a tuple output; the transform rebuilds the
+    tuple around the edited copy from the raw served value."""
+
+    @eproperty(key="output")
+    def hidden(self, value):
+        return value[0].clone()
+
+    @hidden.transform
+    def hidden(self, edited, raw):
+        return (edited.clone(), *raw[1:])
 
 
 @pytest.fixture(scope="module")
@@ -324,6 +337,17 @@ class TestCombinedWith:
         ) as tracer:
             ids = tracer.result.save()
         assert isinstance(ids, torch.Tensor) and ids.shape == (1, 12)
+
+    def test_parenthesized_header_one_item_per_line(self, gpt2):
+        # The layout ruff and black give a header too long for one line: each item
+        # on its own line, so the trace is entered from a line below the `with`.
+        with (
+            gpt2.trace(PROMPT) as tracer,
+            torch.no_grad(),
+        ):
+            hidden = gpt2.transformer.h[0].output[0].save()
+        assert hidden.shape[-1] == 768
+        assert tracer.info is not None
 
     def test_combined_with_invoke_inside(self, gpt2):
         with torch.no_grad(), gpt2.trace() as tracer:
@@ -802,6 +826,35 @@ class TestScan:
             "gpt2", task="text-generation", dtype=torch.float16
         )
         assert all(p.dtype == torch.float16 for p in model._module.parameters())
+
+    @pytest.mark.parametrize(
+        "repo, key",
+        [
+            ("hf-internal-testing/tiny-random-MixtralForCausalLM", "experts_implementation"),
+            ("gpt2", "attn_implementation"),
+        ],
+    )
+    def test_implementation_kwargs_reach_the_meta_config(self, repo, key):
+        """An `*_implementation=` load kwarg is on the meta model's config.
+
+        The real load stores it on the config; the meta build must agree, so
+        that what the lazy model reports before dispatch is what it runs after.
+        """
+        model = TransformersModel(repo, task="text-generation", **{key: "eager"})
+        assert model.dispatched is False
+        assert getattr(model._module.config, f"_{key}") == "eager"
+        model.dispatch()
+        assert getattr(model._module.config, f"_{key}") == "eager"
+
+    def test_meta_config_unchanged_without_config_kwargs(self):
+        """Placement kwargs are still dropped, and leave the config as it was."""
+        plain = TransformersModel("gpt2", task="text-generation")
+        placed = TransformersModel(
+            "gpt2", task="text-generation", device_map="cpu", max_memory={"cpu": "1GB"}
+        )
+        assert placed.dispatched is False
+        assert placed._module.config.to_dict() == plain._module.config.to_dict()
+        assert placed._module.config._attn_implementation == plain._module.config._attn_implementation
 
 
 def _has_lora(model) -> bool:
@@ -1352,6 +1405,142 @@ class TestCustomEnvoys:
         )
         assert isinstance(model.transformer.h[2].mlp, Heads)
 
+    def test_string_key_matches_rename_alias(self):
+        """A suffix key written in an alias's name reaches the module the alias
+        points at — one `envoys=` map can then serve several architectures."""
+        model = TransformersModel(
+            "gpt2", task="text-generation", rename={"mlp": "ffn"}, envoys={"ffn": Heads}
+        )
+        block = model.transformer.h[2]
+        assert type(block.ffn) is Heads
+        assert block.mlp is block.ffn  # same envoy, now of the mapped class
+
+    def test_multi_component_alias_matches_on_binding_envoy(self):
+        class Layers(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"transformer.h": "layers"}, envoys={"layers": Layers},
+        )
+        assert type(model.layers) is Layers
+        assert model.transformer.h is model.layers
+        assert type(model.transformer.h[0]) is Envoy  # the blocks are not `layers`
+
+    def test_native_match_stands_over_alias_match(self):
+        class Other(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"mlp": "ffn"}, envoys={"mlp": Heads, "ffn": Other},
+        )
+        assert type(model.transformer.h[0].ffn) is Heads
+
+    def test_class_key_alias_matches(self):
+        from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", rename={GPT2MLP: "ffn"}, envoys={"ffn": Heads}
+        )
+        assert type(model.transformer.h[0].ffn) is Heads
+
+    @torch.no_grad()
+    def test_eproperty_works_on_alias_matched_envoy(self):
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True,
+            rename={"mlp": "ffn"}, envoys={"ffn": Heads},
+        )
+        with model.trace("hello world"):
+            view = model.transformer.h[0].ffn.heads.save()
+        assert view.ndim == 4 and view.shape[1] == Heads.n_heads
+
+    def test_alias_key_reaches_descendants_of_aliased_modules(self):
+        """Spellings compose through ancestors: a key can name a module under an
+        aliased container, in the names the user types (`model.layers[0].self_attn`)."""
+        class Attn(Envoy):
+            pass
+
+        class Proj(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"transformer.h": "layers", "attn": "self_attn", "mlp": "ffn"},
+            envoys={"layers.0.self_attn": Attn, "ffn.c_fc": Proj},
+        )
+        assert type(model.layers[0].self_attn) is Attn
+        assert type(model.layers[1].self_attn) is Envoy  # the key says block 0
+        assert type(model.layers[3].ffn.c_fc) is Proj
+        assert type(model.layers[3].ffn.c_proj) is Envoy
+
+    def test_wildcard_key_names_every_entry_of_an_aliased_container(self):
+        class Block(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"transformer.h": "layers"}, envoys={"layers.*": Block},
+        )
+        assert len(model.layers) == 12
+        assert all(type(block) is Block for block in model.layers)
+        # Not the container, nor the blocks' children: the key ends the path.
+        assert type(model.layers) is Envoy
+        assert type(model.layers[0].attn) is Envoy
+
+    def test_wildcard_rename_alias_is_a_spelling(self):
+        """`*` means the same in a `rename` key, so an alias bound through one
+        is a spelling an `envoys=` key can be written in."""
+        class Block(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"*.h": "layers"}, envoys={"layers.*": Block},
+        )
+        assert model.layers is model.transformer.h
+        assert all(type(block) is Block for block in model.layers)
+
+    def test_class_key_alias_does_not_spell_what_is_under_it(self):
+        from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
+
+        class Proj(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={GPT2MLP: "ffn"}, envoys={"ffn.c_fc": Proj},
+        )
+        assert model.transformer.h[0].ffn.c_fc is model.transformer.h[0].mlp.c_fc
+        assert type(model.transformer.h[0].ffn.c_fc) is Envoy
+
+    def test_wildcard_key_on_a_native_path(self):
+        class Block(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", envoys={"transformer.h.*": Block}
+        )
+        assert all(type(block) is Block for block in model.transformer.h)
+        assert type(model.transformer.h) is Envoy
+
+    def test_wildcard_does_not_match_a_shorter_path(self):
+        from nnsight.intervention.aliasing import path_ends_with
+
+        assert path_ends_with("model.layers.0", "layers.*")
+        assert not path_ends_with("model.layers", "layers.*")
+        assert not path_ends_with("model.layers.0.attn", "layers.*")
+
+    @torch.no_grad()
+    def test_eproperty_works_on_wildcard_matched_envoy(self):
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True,
+            rename={"transformer.h": "layers"}, envoys={"layers.*": Heads},
+        )
+        with model.trace("hello world"):
+            view = model.layers[5].heads.save()
+        assert view.ndim == 4 and view.shape[1] == Heads.n_heads
+
     @torch.no_grad()
     def test_custom_eproperty_reads_per_head_view(self, heads_model):
         with heads_model.trace("hello world"):
@@ -1366,3 +1555,74 @@ class TestCustomEnvoys:
             heads_model.transformer.h[0].mlp.heads[:, 5] = 0  # zero head 5
             edited = heads_model.output.logits.save()
         assert not torch.allclose(base, edited)
+
+    @torch.no_grad()
+    def test_a_repeated_read_is_the_same_view(self, heads_model):
+        """``x[...] += f(x)`` reads twice; both reads are the view the write-back carries."""
+        mlp = heads_model.transformer.h[0].mlp
+        with heads_model.trace("hello world"):
+            first = mlp.heads
+            same = nnsight.save(mlp.heads is first)
+            first[:, 5] *= 2
+            once = heads_model.output.logits.save()
+        with heads_model.trace("hello world"):
+            mlp.heads[:, 5] += mlp.heads[:, 5]
+            twice = heads_model.output.logits.save()
+        with heads_model.trace("hello world"):
+            base = heads_model.output.logits.save()
+        assert same and torch.equal(once, twice) and not torch.allclose(base, once)
+
+    @torch.no_grad()
+    def test_an_edit_by_the_last_statement_goes_back(self, heads_model):
+        """The block ends without another request; the write-back is flushed at its end."""
+        seen = []
+        handle = heads_model._module.lm_head.register_forward_hook(lambda module, args, out: seen.append(out.clone()))
+        try:
+            with heads_model.trace("hello world"):
+                pass
+            with heads_model.trace("hello world"):
+                heads_model.transformer.h[0].mlp.heads[:, 5] = 0
+        finally:
+            handle.remove()
+        assert len(seen) == 2 and not torch.allclose(seen[0], seen[1])
+
+    @torch.no_grad()
+    def test_another_view_of_the_location_is_its_own(self, heads_model):
+        """The memo is per eproperty: ``.output`` after ``.heads`` is the model's tensor, not the heads view."""
+        mlp = heads_model.transformer.h[0].mlp
+        with heads_model.trace("hello world"):
+            heads = mlp.heads
+            out = mlp.output
+            shapes = nnsight.save((heads.ndim, out.ndim, out is heads))
+        assert shapes == (4, 3, False)
+
+    @torch.no_grad()
+    def test_a_view_is_read_anew_on_every_step(self, heads_model):
+        """One view a step and nothing else between: each step's is the next call's, not the last view."""
+        mlp = heads_model.transformer.h[0].mlp
+        with heads_model.generate("hello world", max_new_tokens=3, min_new_tokens=3, do_sample=False) as tracer:
+            views = nnsight.save([])
+            for step in tracer.iter[:3]:
+                views.append(mlp.heads)
+        assert [v.shape[2] for v in views[1:]] == [1, 1] and views[0].shape[2] > 1
+        assert not torch.equal(views[1], views[2])
+
+    @torch.no_grad()
+    def test_transform_with_raw_rebuilds_a_tuple(self):
+        """The transform's raw argument: a copied element of a tuple output is
+        written back into the tuple, and the copy stays the user's."""
+        from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True, envoys={GPT2Attention: HiddenCopy}
+        )
+        with model.trace("hello world"):
+            base = model.output.logits.save()
+        with model.trace("hello world"):
+            model.transformer.h[0].attn.hidden[:] = 0
+            kept = model.transformer.h[0].attn.hidden.save()
+            out = model.transformer.h[0].attn.output.save()
+            edited = model.output.logits.save()
+        assert not torch.allclose(base, edited)
+        assert torch.equal(kept, torch.zeros_like(kept))
+        assert isinstance(out, tuple) and torch.equal(out[0], torch.zeros_like(out[0]))

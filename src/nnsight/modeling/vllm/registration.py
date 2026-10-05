@@ -12,8 +12,7 @@ that request's own, and it comes back on that request's ``RequestOutput`` —
 ``output.saves`` — by the same collect a traced value uses, then is dropped.
 
 Example:
-    >>> model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True,
-    ...              enable_prefix_caching=False)
+    >>> model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True)
     >>>
     >>> with model.edit() as (tracer, edit):                    # doctest: +SKIP
     ...     hidden = model.model.layers[16].output[0].save()
@@ -28,12 +27,12 @@ The block is written exactly like a trace body — the same envoy tree, the same
 request: there is no prompt to invoke, so ``tracer.invoke(...)`` has no meaning
 here, and the block applies to whatever the engine happens to run.
 
-The engine has to be built with ``enable_prefix_caching=False``. A prefix-cached
-token is served without a forward pass, so no hook fires for it and the block
-sees fewer rows than the prompt has, with nothing to say so. A trace asks for its
-own request to be recomputed; a registration rides requests it did not create and
-cannot, so the cache has to be off at the engine — registering against one that
-has it on warns.
+A prefix-cached token is served without a forward pass, so no hook fires for it
+and the block sees fewer rows than the prompt has, with nothing to say so. A
+trace asks for its own request to be recomputed; a registration rides requests it
+did not create and cannot, so nnsight builds its engines with
+``enable_prefix_caching=False``, and registering against one built with it on
+warns.
 """
 
 from __future__ import annotations
@@ -62,9 +61,9 @@ def _warn_if_prefix_caching(model: "VLLM") -> None:
     can avoid this by asking for its own request to be recomputed (see
     ``_attach_mediators``), but a registration rides requests it did not create
     and often did not even come from nnsight, so there is nothing to set the flag
-    on. The engine has to be built with ``enable_prefix_caching=False`` instead,
-    and it is worth saying at the moment the mistake is made rather than leaving
-    it to be found in the shapes.
+    on. nnsight builds its engines with the cache off; one built with it on is
+    worth flagging at the moment the edit is installed rather than leaving it to
+    be found in the shapes.
     """
     engine = model.vllm_entrypoint
     if engine is None:
@@ -76,11 +75,11 @@ def _warn_if_prefix_caching(model: "VLLM") -> None:
         return
     if getattr(cache_config, "enable_prefix_caching", False):
         warnings.warn(
-            "This engine has prefix caching on, so tokens served from the cache "
-            "never run a forward pass and a registered block will not see them — "
-            "its activations come back short, with no error. Build the model with "
-            "VLLM(..., enable_prefix_caching=False) to register against whole "
-            "prompts.",
+            "This engine was built with prefix caching on, so tokens served from "
+            "the cache never run a forward pass and a registered block will not "
+            "see them — its activations come back short, with no error. Leave "
+            "enable_prefix_caching at nnsight's default (False) to register "
+            "against whole prompts.",
             # execute -> Backend.__call__ -> Tracer.__exit__ -> this exit -> caller.
             stacklevel=6,
         )

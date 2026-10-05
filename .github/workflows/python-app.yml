@@ -5,10 +5,8 @@ name: Tests
 
 on:
   push:
-    # Development happens on the release branch, so it has to be listed here or
-    # nothing tests it: a `pull_request` run only ever tests the PR head, never
-    # the merge that lands it, and never a commit pushed straight to the branch.
-    branches: ["main", "0.8"]
+    # A `pull_request` run tests the PR head, not the merge that lands it.
+    branches: ["main", "dev"]
   pull_request:
 
 permissions:
@@ -19,16 +17,10 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
-      # Both ends of the advertised range. `pyproject.toml` claims 3.10 through
-      # 3.14, and a single 3.12 job cannot see a break that only the newest one
-      # has: #698 was exactly that -- PEP 649 gives every `def` an extra
-      # `__annotate__` symtable child on 3.14, which silently disabled the
-      # payload scope filter, and the two tests that covered it were failing on
-      # 3.14 while CI stayed green. 3.11 and 3.13 are left out rather than
-      # guessed at; add them once someone has run the suite there.
+      # The floor, the middle and the ceiling of what `pyproject.toml` advertises.
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.14"]
+        python-version: ["3.10", "3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@v4

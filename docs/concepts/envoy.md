@@ -3,7 +3,7 @@ title: Envoy
 one_liner: Envoy wraps a torch.nn.Module and mirrors its submodule tree, exposing .input / .inputs / .output as eproperty descriptors over Mediator.value / Mediator.swap, plus .skip (method) and .source (property).
 tags: [concept, mental-model, envoy]
 related: [docs/concepts/interleaver-and-controller.md, docs/concepts/source-tracing.md, docs/concepts/threading-and-mediators.md]
-sources: [src/nnsight/intervention/envoy.py, src/nnsight/modeling/base.py]
+sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/aliasing.py, src/nnsight/modeling/base.py]
 ---
 
 # Envoy
@@ -109,9 +109,11 @@ def output(self, value):                 # identity view of the module's output
 A third callback, `.transform`, is the write-back half of a *reshaping* preprocess.
 When a preprocess returns a reshaped/sliced view (e.g. a per-head split), in-place
 edits to that view are invisible to the model, so a `@output.transform` maps the
-edited view back to the model's layout; it fires once, after the block is done with
-the read, and its result is spliced in like a swap. The base `.input`/`.output` are
-identity views and register none — see the per-head example in `eproperty.py`.
+edited view back to the model's layout, and its result is swapped in when the block
+next asks the model for anything, or at the end of the block. Until then a second read
+of the value is the same view, so `x.heads[:, 5] += f(x.heads)` edits one tensor. It
+fires whether or not the view was edited. The base `.input`/`.output` are identity
+views and register none — see the per-head example in `eproperty.py`.
 
 Accessing an eproperty **outside a trace** raises (`Mediator`):
 
@@ -140,7 +142,12 @@ By default every child envoy is the base `Envoy`, but a model can pass `envoys=`
 a map from a module type or dotted path suffix to a custom `Envoy` subclass — so a
 chosen module gets a subclass that exposes a custom `eproperty` (e.g. a per-head
 `.heads` view; see [extending.md](../usage/extending.md) and
-[per-head-attention.md](../patterns/per-head-attention.md)). You extend nnsight
+[per-head-attention.md](../patterns/per-head-attention.md)). A path suffix matches
+the native path or any spelling of it under the `rename=` aliases, composed through
+ancestors (`"layers.0.self_attn"` under `rename={"transformer.h": "layers", "attn":
+"self_attn"}`), so one map can be written in the aliased names and reused across
+architectures. A `*` component matches any one path component, so `"layers.*"`
+names every entry of the container and not the container itself. You extend nnsight
 several ways:
 
 ### 1. Subclass `NNsight` / `Envoy`
@@ -196,7 +203,8 @@ value is computed — in the vLLM model runner,
 `tracer.result` is the same pattern with no `description` and a bare `"result"`
 location — `Envoy.interleave` serves it with `handle("result", result)` after the
 forward. A `description` is what surfaces an eproperty in the Envoy repr tree as
-`(logits): pre-sampling logits for this step`; `.input`/`.output` carry none, so they
+`(logits): pre-sampling logits for this step`, with the stub's return annotation
+after an arrow when it has one (`(logits) -> Logits: ...`); `.input`/`.output` carry none, so they
 stay hidden.
 
 ## Shared modules
@@ -217,7 +225,7 @@ Each such entry names the one envoy at the module's first path.
 
 ## Module renaming (aliases)
 
-`rename={...}` on `NNsight`/`Envoy` binds aliases pointing at the same child envoy (`_bind_aliases`, `envoy.py`). A single-component path (`{"transformer": "gpt"}`) binds wherever it resolves; a multi-component path (`{"transformer.h": "layers"}`) binds on the envoy it resolves from. Aliases are ordinary attributes referencing the same object, so they survive a dispatch re-point with no rebuild.
+`rename={...}` on `NNsight`/`Envoy` binds aliases pointing at the same child envoy (`bind`, `aliasing.py`). A single-component path (`{"transformer": "gpt"}`) binds wherever it resolves; a multi-component path (`{"transformer.h": "layers"}`) binds on the envoy it resolves from. Aliases are ordinary attributes referencing the same object, so they survive a dispatch re-point with no rebuild.
 
 ## Overloaded submodule names
 

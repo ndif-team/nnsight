@@ -21,7 +21,7 @@ All are subclasses of `Envoy` (the tree node type). `NNsight` is the thin, named
 | `LanguageModel` | `from nnsight import LanguageModel` | **Deprecated** — warns on construction. Use `TransformersModel(repo_id, task="text-generation")`. |
 | `VisionLanguageModel` | `from nnsight import VisionLanguageModel` | **Deprecated** — warns on construction. Use `TransformersModel(repo_id, task="image-text-to-text")`. |
 
-Common constructor kwargs (via `HuggingFaceModel` / `Meta`): `dispatch=False` (load real weights now vs lazily on first run), `device_map=`, `revision=`, `rename=`. `TransformersModel` also takes `task=`, `tokenizer=`, `processor=`, `image_processor=`, `feature_extractor=`, `peft=<adapter repo_id>`.
+Common constructor kwargs (via `HuggingFaceModel` / `Meta`): `dispatch=False` (load real weights now vs lazily on first run), `device=` (the one device to load onto: `"cpu"`, `"cuda:1"`, `0`; default the first accelerator), `device_map=` (spread across devices: `"auto"`, a dict; `device_map="cpu"` still lands on the GPU, see [Choosing a device](../models/transformers-model.md#choosing-a-device)), `revision=`, `rename=`. `TransformersModel` also takes `task=`, `tokenizer=`, `processor=`, `image_processor=`, `feature_extractor=`, `peft=<adapter repo_id>`.
 
 ## Run methods
 
@@ -105,7 +105,7 @@ Deprecated aliases (warn under `NNsightDeprecationWarning`; use the `tracer.*` f
 | `model.logits` | `VLLM` | This request's pre-sampling logits for the step. |
 | `model.samples` | `VLLM` | The token ids the sampler drew for the step, `[1, 1]` for one sequence. |
 | `model.logits_processor(model.lm_head, h)` | `VLLM` | The unembed on vLLM (a logit lens); `model.lm_head(h)` raises. |
-| `model.edit` | `VLLM` | `with model.edit(name=None) as (tracer, edit):` — install a block on the engine, run for *every* request it handles; values arrive on `output.saves`. `edit.clear()` / `model.clear_edits()` stop it. Needs `enable_prefix_caching=False`. |
+| `model.edit` | `VLLM` | `with model.edit(name=None) as (tracer, edit):` — install a block on the engine, run for *every* request it handles; values arrive on `output.saves`. `edit.clear()` / `model.clear_edits()` stop it. Needs prefix caching off (nnsight's default). |
 | `edits=[...]` | `VLLM` | On `trace`/`invoke`/plain `generate`: run only the edits installed under these names, plus every unnamed edit. Omitted = all. |
 
 ## Top-level functions

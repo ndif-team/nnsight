@@ -89,7 +89,7 @@ combine with a fake one. A steering vector on the wrong device is a common inter
 and the scan that was supposed to catch it says nothing:
 
 ```python
-model = TransformersModel("openai-community/gpt2", device_map="cuda")   # undispatched
+model = TransformersModel("openai-community/gpt2", device="cuda")       # undispatched
 steering = torch.randn(768)                                             # CPU
 
 with model.scan("The Eiffel Tower is in"):
