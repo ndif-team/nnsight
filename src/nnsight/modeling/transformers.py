@@ -50,6 +50,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
+import copy
 import warnings
 
 import torch
@@ -124,6 +125,41 @@ def _infer_task(module: torch.nn.Module) -> str:
         f"Could not infer a pipeline task for a pre-loaded {type(module).__name__}; "
         "pass task=... explicitly (e.g. TransformersModel(model, task='text-generation'))."
     )
+
+
+def _resolve_config(kwargs: dict, revision: Optional[str]) -> dict:
+    """Return ``kwargs`` with a user ``config=`` loaded into a config object.
+
+    ``from_pretrained(repo, config=...)`` builds from that config, but neither
+    route here passes it there by itself: ``AutoConfig.from_pretrained`` returns
+    an object ``config=`` as unused (and misreads a string one), and
+    ``pipeline(config=...)`` uses it only to pick the model class, never handing
+    it to ``from_pretrained``. Loading a path up front gives both loads one
+    object to build from. Overrides passed beside an object config are not
+    merged into it, as with ``from_pretrained``.
+    """
+    config = kwargs.get("config")
+    if isinstance(config, str):
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(
+            config,
+            revision=revision,
+            trust_remote_code=bool(kwargs.get("trust_remote_code", False)),
+        )
+        kwargs = {**kwargs, "config": config}
+    return kwargs
+
+
+def _first_auto(autos: tuple, build: Any) -> torch.nn.Module:
+    """``build(auto)`` for the task's auto classes in turn; the first that builds wins."""
+    error = None
+    for auto in autos:
+        try:
+            return build(auto)
+        except Exception as exception:  # noqa: BLE001 - try next candidate
+            error = exception
+    raise error
 
 
 def _split_pipeline_kwargs(kwargs: dict) -> tuple[dict, dict]:
@@ -431,22 +467,21 @@ class TransformersModel(HuggingFaceModel):
         # dropped. `quantization_config` is held back: from_pretrained takes it
         # before the config does and merges it with a pre-quantized checkpoint's
         # own, so letting the config claim it would overwrite that on meta.
-        config, _ = AutoConfig.from_pretrained(
-            repo_id,
-            revision=self.revision,
-            return_unused_kwargs=True,
-            **{k: v for k, v in kwargs.items() if k != "quantization_config"},
-        )
-
-        error = None
-        for auto in targeted["pt"]:
-            try:
-                model = auto.from_config(config, **arch)
-                break
-            except Exception as exception:  # noqa: BLE001 - try next candidate
-                error = exception
+        # A user `config=` replaces the checkpoint's, copied as from_pretrained
+        # copies it, so building on it leaves the caller's object untouched.
+        kwargs = _resolve_config(kwargs, self.revision)
+        config = kwargs.pop("config", None)
+        if config is not None:
+            config = copy.deepcopy(config)
         else:
-            raise error
+            config, _ = AutoConfig.from_pretrained(
+                repo_id,
+                revision=self.revision,
+                return_unused_kwargs=True,
+                **{k: v for k, v in kwargs.items() if k != "quantization_config"},
+            )
+
+        model = _first_auto(targeted["pt"], lambda auto: auto.from_config(config, **arch))
 
         if self.peft is not None:
             # Read only the adapter's config (adapter_config.json) and graft the
@@ -485,7 +520,37 @@ class TransformersModel(HuggingFaceModel):
         # and lands in `model_kwargs`, which is where from_pretrained wants it.
         kwargs = resolve_load_kwargs(kwargs)
 
+        kwargs = _resolve_config(kwargs, self.revision)
         top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
+        config = top_level.pop("config", None)
+        if config is not None:
+            # `config` is a factory argument, but the factory only picks the
+            # model class with it: its loader takes `config` as a parameter of
+            # its own and calls from_pretrained without it, so `model_kwargs`
+            # cannot carry it either. Load the model here, with the factory
+            # arguments that would have reached from_pretrained, and wrap it.
+            from transformers.pipelines import check_task, get_task
+
+            self.task = self.task or get_task(repo_id)
+            _, targeted, _ = check_task(self.task)
+            for name in ("dtype", "torch_dtype", "device_map"):
+                if name in top_level:
+                    model_kwargs[name] = top_level.pop(name)
+            for name in ("trust_remote_code", "token"):
+                if name in top_level:
+                    model_kwargs[name] = top_level[name]
+            if "torch_dtype" not in model_kwargs:
+                model_kwargs.setdefault("dtype", "auto")  # the factory's default
+            model = _first_auto(
+                targeted["pt"],
+                lambda auto: auto.from_pretrained(
+                    repo_id, config=config, revision=self.revision, **model_kwargs
+                ),
+            )
+            self.pipeline = pipeline(
+                self.task, model=model, **self._preprocessor_sources(), **top_level
+            )
+            return self._finalize_pipeline()
         # The pipeline loads the model and infers every preprocessor; only
         # forward the ones the user explicitly supplied.
         provided = {

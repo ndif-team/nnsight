@@ -856,6 +856,57 @@ class TestScan:
         assert placed._module.config.to_dict() == plain._module.config.to_dict()
         assert placed._module.config._attn_implementation == plain._module.config._attn_implementation
 
+    @pytest.mark.parametrize("dispatch", [False, True])
+    @torch.no_grad()
+    def test_config_kwarg_builds_the_model(self, dispatch):
+        """A `config=` load kwarg is the config the model is built from.
+
+        Neither route passes it to transformers by itself: AutoConfig returns it
+        as unused, and `pipeline()` only resolves the model class with it.
+        """
+        from transformers import AutoConfig
+
+        repo = "hf-internal-testing/tiny-random-GPTNeoXForCausalLM"
+        config = AutoConfig.from_pretrained(repo)
+        parallel = config.use_parallel_residual
+        config.use_parallel_residual = not parallel
+        config.num_hidden_layers = 1
+
+        model = TransformersModel(
+            repo, task="text-generation", config=config, dispatch=dispatch
+        )
+        assert model.dispatched is dispatch
+        assert model._module.config.use_parallel_residual is not parallel
+        assert len(model.gpt_neox.layers) == 1
+        # The caller's object is copied, not built on.
+        assert model._module.config is not config
+        if not dispatch:
+            model.dispatch()
+            assert model._module.config.use_parallel_residual is not parallel
+            assert len(model.gpt_neox.layers) == 1
+        assert all(p.device.type != "meta" for p in model._module.parameters())
+        with model.trace(PROMPT):
+            logits = model.output.logits.save()
+        assert torch.isfinite(logits).all()
+
+    @torch.no_grad()
+    def test_unchanged_config_kwarg_loads_the_checkpoint(self, gpt2):
+        """A `config=` load still loads the checkpoint's weights and preprocessors."""
+        from transformers import AutoConfig
+
+        model = TransformersModel(
+            "gpt2",
+            task="text-generation",
+            config=AutoConfig.from_pretrained("gpt2"),
+            dispatch=True,
+        )
+        assert model.tokenizer is not None
+        with model.trace(PROMPT):
+            logits = model.output.logits.save()
+        with gpt2.trace(PROMPT):
+            expected = gpt2.output.logits.save()
+        assert torch.equal(logits, expected)
+
 
 def _has_lora(model) -> bool:
     return any("lora" in name.lower() for name, _ in model._module.named_modules())
