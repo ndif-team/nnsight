@@ -251,8 +251,9 @@ target binds before the block is skipped.
 
 ### 3.2 Parse
 
-Parsing finds the `ast.With` (or `ast.AsyncWith`) node that starts on the trace line
-and turns its body into a compilable code object. Parsing a whole source file is
+Parsing finds the `ast.With` (or `ast.AsyncWith`) node the trace was entered from —
+the `with` line, or on Python 3.12+ the line of the tracer's own item, which a
+parenthesized header puts below it — and turns its body into a compilable code object. Parsing a whole source file is
 `O(its AST)` and dominates a cold capture, so `parse` first tries `_parse_block`,
 which slices *just* the block out of the source — the (possibly multi-line) header
 and its body, bounded by indentation and open-bracket depth — dedents it to column

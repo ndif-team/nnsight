@@ -338,6 +338,17 @@ class TestCombinedWith:
             ids = tracer.result.save()
         assert isinstance(ids, torch.Tensor) and ids.shape == (1, 12)
 
+    def test_parenthesized_header_one_item_per_line(self, gpt2):
+        # The layout ruff and black give a header too long for one line: each item
+        # on its own line, so the trace is entered from a line below the `with`.
+        with (
+            gpt2.trace(PROMPT) as tracer,
+            torch.no_grad(),
+        ):
+            hidden = gpt2.transformer.h[0].output[0].save()
+        assert hidden.shape[-1] == 768
+        assert tracer.info is not None
+
     def test_combined_with_invoke_inside(self, gpt2):
         with torch.no_grad(), gpt2.trace() as tracer:
             with tracer.invoke(PROMPT):
