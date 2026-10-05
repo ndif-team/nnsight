@@ -85,47 +85,58 @@ PROCESSOR_MEDIA_KEYS = frozenset(
 PROCESSOR_KEYS = PROCESSOR_MEDIA_KEYS | {"text"}
 
 
+# Tasks a trace refuses, with what to do instead. ``mask-generation``'s
+# preprocess runs the model, and ``keypoint-matching``'s unit input is a pair
+# of images, which the list convention (one prompt per element) would split.
+UNTRACEABLE_TASKS = {
+    "mask-generation": (
+        "task='mask-generation' has no forward to trace from an image: its "
+        "preprocess embeds the image by running the model, then yields one "
+        "input per batch of candidate points. Run the whole task with "
+        "model.pipe(image), or trace one forward on an encoding you build "
+        "yourself: model.image_processor(image, return_tensors='pt'), with "
+        "the points you want as input_points=."
+    ),
+    "keypoint-matching": (
+        "task='keypoint-matching' takes a pair of images as one input, "
+        "which a trace's list convention (one prompt per element) "
+        "would split. Run the whole task with model.pipe([image_a, "
+        "image_b]), or trace one forward on an encoding you build "
+        "yourself: model.image_processor(images=[image_a, image_b], "
+        "return_tensors='pt')."
+    ),
+}
+
+
 def batch_size(inputs: tuple, kwargs: dict) -> int:
     """Number of batch rows an invoke's input contributes.
 
-    Accepts every input format a forward takes: a string is one row, a list of
-    strings one per prompt, a single token-id list one row, and a batch of
-    token-id lists / a 2-D tensor / a pre-tokenized encoding one per leading
-    entry. Multimodal data passed by keyword (``text=``/``images=`` to a VLM's
-    generate) counts as one row. Zero rows means params only (e.g.
-    ``max_new_tokens=``), so the trace expects ``invoke()`` blocks for the data.
+    Model inputs (token ids, an encoding, keywords) count the rows `split`
+    makes of their input; a string is one row, a chat conversation one, and a
+    list of prompts or images one per entry. Multimodal data passed by keyword
+    (``text=``/``images=`` to a VLM's generate) counts as one row. Zero rows
+    means params only (e.g. ``max_new_tokens=``), so the trace expects
+    ``invoke()`` blocks for the data.
     """
-    if inputs:
-        return num_rows(inputs[0])
-    if has_text_input(kwargs):
-        return num_rows(kwargs)
-    # A VLM generate passes its data by keyword; treat its presence as one row.
-    if kwargs.get("text") is not None or any(
-        kwargs.get(key) is not None
-        for key in ("images", "pixel_values", "input_features")
-    ):
-        return 1
-    return 0
-
-
-def num_rows(value: Any) -> int:
-    """The leading (row) dimension of one input value."""
-    if isinstance(value, str):
-        return 1
-    if isinstance(value, Mapping) and has_text_input(value):
-        key = "input_ids" if value.get("input_ids") is not None else "inputs_embeds"
-        return len(split(key, value[key])[0])
-    if isinstance(value, torch.Tensor):
-        return 1 if value.ndim <= 1 else value.shape[0]
-    chats = as_chats(value)
+    data = inputs[0] if inputs else None
+    encoding = as_encoding(data, kwargs)
+    key = input_key(encoding) if encoding is not None else None
+    if key is not None:
+        return len(split(key, encoding[key])[0])
+    if data is None:
+        return int(
+            any(
+                kwargs.get(key) is not None
+                for key in ("text", "images", "pixel_values", "input_features")
+            )
+        )
+    if isinstance(data, torch.Tensor):
+        return 1 if data.ndim <= 1 else data.shape[0]
+    chats = as_chats(data)
     if chats is not None:
         return len(chats)  # a chat conversation is one row, not one per message
-    if is_token_ids(value):
-        return len(split("input_ids", value)[0])
-    if isinstance(value, (list, tuple)):
-        # A list of strings / images is one row per element.
-        return len(value)
-    # A lone non-text object (e.g. a PIL image) is a single row.
+    if isinstance(data, (list, tuple)):
+        return len(data)
     return 1
 
 
@@ -217,24 +228,13 @@ def batch_forward(model, invokes: list) -> tuple:
     items: list = []
     forward: dict = {}
     for inputs, kwargs in invokes:
-        data = inputs[0] if inputs else None
-        rows, forward_kwargs = preprocess_invoke(model, data, kwargs)
+        rows, forward_kwargs = preprocess_invoke(model, inputs[0] if inputs else None, kwargs)
         if rows is None:
-            # A raw feature tensor / multimodal encoding can't be padded into an
-            # input_ids batch — pass a lone invoke straight to the model. An
-            # encoding (positional or via kwargs) is unpacked as keyword inputs.
             if len(invokes) > 1:
                 raise NotImplementedError(
                     "Can't batch these inputs; pass text or token ids."
                 )
-            # `forward_kwargs` is `kwargs` for a plain opaque input, and an
-            # encoding when the invoke was written in processor terms or its
-            # ids had to be made tensors.
-            if forward_kwargs is not kwargs:
-                return tuple(), forward_kwargs
-            if isinstance(data, Mapping):
-                return tuple(), {**dict(data), **kwargs}
-            return inputs, kwargs
+            return forward_kwargs
         # A chunked task decides its own row count, and the batcher counted
         # this invoke's input as its own rows before preprocessing — so with
         # another invoke in the batch every group after this one names rows
@@ -258,61 +258,36 @@ def batch_forward(model, invokes: list) -> tuple:
 def preprocess_invoke(model, data: Any, kwargs: dict) -> tuple:
     """One invoke -> (list of per-row model-input dicts, forward kwargs).
 
-    Returns ``(None, kwargs)`` for an opaque input (a raw feature tensor or a
-    multimodal encoding) that the caller passes through to the model untouched.
+    An input not known to be per-row — written in processor terms, a raw
+    feature tensor, an encoding with a tensor outside `ROW_FIELDS`, a
+    dual-encoder task's paired rows — goes to the model on its own, and comes
+    back as ``(None, (args, kwargs))``: the whole model call.
     """
     media = as_processor_encoding(model, data, kwargs)
     if media is not None:
-        return None, media
+        return None, ((), media)
     if isinstance(data, torch.Tensor) and data.is_floating_point():
-        return None, kwargs  # raw features
+        return None, ((data,), kwargs)  # raw features
     # The three ways of writing model inputs are one encoding from here on,
     # so they cannot be routed differently.
     encoding = as_encoding(data, kwargs)
-    if encoding is not None and not has_text_input(encoding):
-        return None, kwargs
-    if encoding is not None and has_nontext_keys(encoding):
-        # Passed through whole. Tensors go as they are; ids written as
-        # lists are made the tensors a forward takes first.
-        if all(
+    if encoding is not None and (
+        input_key(encoding) is None or has_nontext_keys(encoding)
+    ):
+        # Passed through whole. Ids written as lists (or without a batch
+        # dimension) are made the tensors a forward takes first.
+        if input_key(encoding) is not None and not all(
             isinstance(value, torch.Tensor) and value.dim() > 1
             for key, value in encoding.items()
             if key in ROW_FIELDS and value is not None
         ):
-            return None, kwargs
-        rows, forward = encode_pretokenized(encoding)
-        return None, {**collate(model, rows), **forward}
-    if model.task == "keypoint-matching":
-        # This task's unit input is a *pair* of images, which collides with
-        # the list convention (one prompt per element): the pair is split
-        # into two single-image preprocess calls, and a nested pair reads
-        # as pre-tokenized ids — which is why this check sits before
-        # `encode_pretokenized`. (An encoding you built yourself is opaque
-        # and never reaches here.)
-        raise NotImplementedError(
-            "task='keypoint-matching' takes a pair of images as one input, "
-            "which a trace's list convention (one prompt per element) "
-            "would split. Run the whole task with model.pipe([image_a, "
-            "image_b]), or trace one forward on an encoding you build "
-            "yourself: model.image_processor(images=[image_a, image_b], "
-            "return_tensors='pt')."
-        )
+            rows, forward = encode_pretokenized(encoding)
+            encoding = {**collate(model, rows), **forward}
+        return None, ((), encoding)
+    if model.task in UNTRACEABLE_TASKS:
+        raise NotImplementedError(UNTRACEABLE_TASKS[model.task])
     if encoding is not None:
         return encode_pretokenized(encoding)
-    if model.task == "mask-generation":
-        # This task's preprocess *runs the model*: it embeds the image, then
-        # yields one input per batch of candidate points, each carrying a copy
-        # of that embedding. There is no single forward to assemble — the
-        # encoder ran outside the trace, and the rows would be one copy of the
-        # image embedding per point batch (128 of them at the task's default).
-        raise NotImplementedError(
-            "task='mask-generation' has no forward to trace from an image: its "
-            "preprocess embeds the image by running the model, then yields one "
-            "input per batch of candidate points. Run the whole task with "
-            "model.pipe(image), or trace one forward on an encoding you build "
-            "yourself: model.image_processor(image, return_tensors='pt'), with "
-            "the points you want as input_points=."
-        )
     # Text / image / audio: let the pipeline tokenize/featurize it, routing the
     # invoke's kwargs (truncation, chat tools, ...) through its own param split.
     preprocess_params, forward_params, _ = model.pipeline._sanitize_parameters(**kwargs)
@@ -326,30 +301,23 @@ def preprocess_invoke(model, data: Any, kwargs: dict) -> tuple:
     for one in inputs:
         row = model.pipeline.preprocess(one, **preprocess_params)
         # A chunked task's preprocess is a generator: it *yields* the
-        # encodings it splits one input into instead of returning one, and
-        # each is a forward of its own. They are unrolled into rows here, so
-        # the whole input is traced in the trace's one forward; handing the
-        # generator to `collate` is what makes it ask a generator for
-        # `.items()`.
+        # encodings it splits one input into, each a forward of its own. They
+        # are unrolled into rows, so the whole input is traced in one forward.
         rows.extend([row] if hasattr(row, "items") else row)
-    merged = [merge_nested_encodings(row) for row in rows]
-    if any(row is not None for row in merged):
-        # A dual-encoder zero-shot task (CLIP, CLAP) runs one forward whose
-        # batch dims differ per half — one image/audio row against one text
-        # row per candidate label — so its rows don't collate with anything
-        # else's; a lone one goes to the model whole, like an encoding.
+    if any("text_inputs" in row for row in rows):
+        # A dual-encoder zero-shot task (CLIP, CLAP) nests the candidate
+        # labels' text encoding in its row, and its forward pairs one
+        # image/audio row with one text row per label — so it collates with
+        # nothing else, and goes to the model whole.
         if len(rows) > 1:
             raise NotImplementedError(
                 f"task={model.task!r} pairs each input with its own nested "
                 "text encoding, so several inputs don't collate into one "
                 "forward. Trace one input at a time."
             )
-        encoding = {
-            key: value
-            for key, value in merged[0].items()
-            if isinstance(value, torch.Tensor)
-        }
-        return None, {**encoding, **forward_params}
+        row = {**rows[0], **rows[0]["text_inputs"][0]}
+        tensors = {k: v for k, v in row.items() if isinstance(v, torch.Tensor)}
+        return None, ((), {**tensors, **forward_params})
     return rows, forward_params
 
 
@@ -366,39 +334,12 @@ def parse_task_args(model, inputs: list) -> list:
         return inputs
     parsed = []
     for one in inputs:
-        if hasattr(one, "keys") and is_task_input(one):
+        if is_task_input(one):
             out = parser(one)
             parsed.extend(out if isinstance(out, list) else [out])
         else:
             parsed.append(one)
     return parsed
-
-
-def merge_nested_encodings(row: Any) -> Optional[dict]:
-    """Flatten a preprocess row whose model inputs sit one level down.
-
-    A dual-encoder zero-shot pipeline (CLIP, CLAP) returns the candidate
-    labels' text encoding *nested* — ``{"pixel_values": ..., "text_inputs":
-    [BatchEncoding]}`` — and unwraps it in its ``_forward`` right before
-    the model call. Collation keeps only top-level tensors, which would
-    silently drop the text half. Returns the row with every nested
-    encoding's tensors merged in, or ``None`` when nothing is nested.
-    """
-    merged, found = {}, False
-    for key, value in row.items():
-        inner = value
-        if isinstance(inner, (list, tuple)) and len(inner) == 1:
-            inner = inner[0]
-        if hasattr(inner, "keys") and not isinstance(inner, torch.Tensor):
-            inner = dict(inner)
-            if inner and all(
-                isinstance(item, torch.Tensor) for item in inner.values()
-            ):
-                merged.update(inner)
-                found = True
-                continue
-        merged[key] = value
-    return merged if found else None
 
 
 def as_processor_encoding(model, data: Any, kwargs: dict) -> Optional[dict]:
@@ -443,7 +384,8 @@ def as_processor_encoding(model, data: Any, kwargs: dict) -> Optional[dict]:
 def collate(model, items: list) -> dict:
     """Pad per-row encodings into one batch of model-input tensors.
 
-    The fields of `ROW_FIELDS` are batched here: rows of one shape are
+    A row that leaves out a field another row has gets its `default`. The
+    fields of `ROW_FIELDS` are batched here: rows of one shape are
     concatenated, and narrower rows are padded with the field's own value —
     on the side the tokenizer pads on, or on the right for a field with a
     length of its own (`TARGET_FIELDS`). Anything else a row carries
@@ -456,9 +398,15 @@ def collate(model, items: list) -> dict:
         for item in items
     ]
     if len(items) == 1:
-        return dict(items[0])
-    targets = target_fields(model)
-    fill_missing(items, targets)
+        return items[0]
+    targets = TARGET_FIELDS
+    if getattr(getattr(model._module, "config", None), "is_encoder_decoder", False):
+        targets = targets | {"labels"}
+    keys = dict.fromkeys(key for item in items for key in item)
+    items = [
+        {key: item[key] if key in item else default(key, item, items, targets) for key in keys}
+        for item in items
+    ]
 
     feature = model.feature_extractor or model.image_processor
     side = (
@@ -466,7 +414,6 @@ def collate(model, items: list) -> dict:
         or getattr(model.tokenizer, "padding_side", None)
         or "right"
     )
-
     encoding = {}
     others = [
         {k: v for k, v in item.items() if k not in ROW_FIELDS} for item in items
@@ -475,57 +422,39 @@ def collate(model, items: list) -> dict:
         from transformers.pipelines.base import pad_collate_fn
 
         encoding.update(pad_collate_fn(model.tokenizer, feature)(others))
-    for key in items[0]:
+    for key in keys:
         if key in ROW_FIELDS:
             rows = [item[key] for item in items]
             encoding[key] = pad(model, key, rows, side == "left" and key not in targets)
     return encoding
 
 
-def target_fields(model) -> frozenset:
-    """The fields with a length of their own on this model (see `TARGET_FIELDS`)."""
-    config = getattr(model._module, "config", None)
-    if getattr(config, "is_encoder_decoder", False):
-        return TARGET_FIELDS | {"labels"}
-    return TARGET_FIELDS
+def default(key: str, item: dict, items: list, targets: frozenset) -> torch.Tensor:
+    """The value of ``key`` for a row that leaves it out, so it batches with ``items``.
 
-
-def fill_missing(items: list, targets: frozenset) -> None:
-    """Give every row the fields any row has (in place), so they batch.
-
-    An invoke that leaves out a field another supplies gets a default:
-    segment zero, positions counted from its first token, and a label the
-    loss ignores. A field with no default (a decoder input, a float label)
-    has to be passed by every invoke or none.
+    Segment zero, positions counted from the row's first token, and a label
+    the loss ignores. A field with no default (a decoder input, a float
+    label) has to be passed by every invoke or none.
     """
-    for key in {key for item in items for key in item}:
-        present = [item[key] for item in items if key in item]
-        if len(present) == len(items):
-            continue
-        for item in items:
-            if key in item:
-                continue
-            ids = item.get("input_ids", item.get("inputs_embeds"))
-            if ids is not None and key == "token_type_ids":
-                item[key] = torch.zeros(ids.shape[:2], dtype=torch.long)
-            elif ids is not None and key == "position_ids":
-                item[key] = positions(
-                    item.get("attention_mask", torch.ones(ids.shape[:2]))
-                )
-            elif key == "labels" and not present[0].is_floating_point():
-                # Ignored labels: one per example, or one per token of this row
-                # where labels follow the input (a target is widened by padding).
-                like = present[0]
-                if like.dim() > 1:
-                    aligned = ids is not None and key not in targets
-                    like = like[:, :1].expand(-1, ids.shape[1] if aligned else 1)
-                item[key] = torch.full_like(like, -100)
-            else:
-                raise ValueError(
-                    f"Can't batch these invokes: {len(present)} of {len(items)} rows "
-                    f"have `{key}`, and there is no default to give the others. "
-                    f"Pass `{key}` in every invoke or in none."
-                )
+    present = [other[key] for other in items if key in other]
+    ids = item.get("input_ids", item.get("inputs_embeds"))
+    if ids is not None and key == "token_type_ids":
+        return torch.zeros(ids.shape[:2], dtype=torch.long)
+    if ids is not None and key == "position_ids":
+        return positions(item.get("attention_mask", torch.ones(ids.shape[:2])))
+    if key == "labels" and not present[0].is_floating_point():
+        # Ignored labels: one per example, or one per token of this row
+        # where labels follow the input (a target is widened by padding).
+        like = present[0]
+        if like.dim() > 1:
+            aligned = ids is not None and key not in targets
+            like = like[:, :1].expand(-1, ids.shape[1] if aligned else 1)
+        return torch.full_like(like, -100)
+    raise ValueError(
+        f"Can't batch these invokes: {len(present)} of {len(items)} rows "
+        f"have `{key}`, and there is no default to give the others. "
+        f"Pass `{key}` in every invoke or in none."
+    )
 
 
 def pad(model, key: str, rows: list, left: bool) -> torch.Tensor:
@@ -609,24 +538,23 @@ def has_nontext_keys(encoding: Any) -> bool:
     )
 
 
-def has_text_input(encoding: Any) -> bool:
-    """Whether an encoding names the tokens: ``input_ids`` or ``inputs_embeds``."""
-    return (
-        encoding.get("input_ids") is not None
-        or encoding.get("inputs_embeds") is not None
-    )
+def input_key(encoding: Mapping) -> Optional[str]:
+    """Which field names the tokens, ``input_ids`` or ``inputs_embeds``; ``None`` for neither."""
+    for key in ("input_ids", "inputs_embeds"):
+        if encoding.get(key) is not None:
+            return key
+    return None
 
 
 def is_token_ids(data: Any) -> bool:
-    """Whether a positional input is token ids: an integer array, or a list of ints or of sequences."""
-    if isinstance(data, (list, tuple)):
-        if not data or as_chats(data) is not None:
-            return False
-        data = data[0]
-        if isinstance(data, (numbers.Integral, list, tuple)):
-            return True
-    if isinstance(data, torch.Tensor) or type(data).__module__ == "numpy":
-        return not torch.as_tensor(data).is_floating_point()
+    """Whether a positional input is token ids: integers, at any depth of nesting."""
+    leaf = data
+    while isinstance(leaf, (list, tuple)) and leaf:
+        leaf = leaf[0]
+    if leaf is not data and isinstance(leaf, numbers.Integral):
+        return True
+    if isinstance(leaf, torch.Tensor) or type(leaf).__module__ == "numpy":
+        return not torch.as_tensor(leaf).is_floating_point()
     return False
 
 
@@ -636,20 +564,16 @@ def as_encoding(data: Any, kwargs: dict) -> Optional[dict]:
     An encoding, keywords, and ids with keywords are merged here, keywords
     winning. Text, an image, or a task's own dict is not model input.
     """
-    if data is None:
-        # Keywords alone are an encoding only if they carry an input.
-        if has_text_input(kwargs) or has_nontext_keys(kwargs):
-            return kwargs
-        return None
-    if isinstance(data, Mapping):
-        # A task's own dict holds no tensors, but neither does an encoding
-        # of lists: that one names its tokens.
-        if is_task_input(data) and not has_text_input(data):
-            return None
-        return {**data, **kwargs}
     if is_token_ids(data):
         return {"input_ids": data, **kwargs}
-    return None
+    mapping = kwargs if data is None else data
+    # A task's own dict holds no tensors, but neither does an encoding of
+    # lists: that one names its tokens.
+    if not isinstance(mapping, Mapping) or (
+        is_task_input(mapping) and input_key(mapping) is None
+    ):
+        return None
+    return {**(data or {}), **kwargs}
 
 
 def encode_pretokenized(encoding: dict) -> tuple:
@@ -665,7 +589,7 @@ def encode_pretokenized(encoding: dict) -> tuple:
     }
     forward = {k: v for k, v in encoding.items() if k not in ROW_FIELDS}
 
-    source = "input_ids" if "input_ids" in fields else "inputs_embeds"
+    source = input_key(fields)
     inputs, batched = split(source, fields.pop(source))
     items = [{source: row} for row in inputs]
     # No mask to assume beside a key-value cache: it would have to cover the
@@ -708,27 +632,22 @@ def split(
     value is that one row's: per-token labels, or a single class label
     (a lone value that is not one per token).
     """
-    # How many dimensions one row of the *input* has.
-    row_dims = 2 if key.endswith("inputs_embeds") else 1
     if isinstance(value, (list, tuple)) and value and not isinstance(
         value[0], numbers.Number
     ):
-        # A list of sequences, which may be ragged: one row each, or the
-        # rows of each where an entry is itself a batch.
-        rows = []
-        for entry in map(torch.as_tensor, value):
-            rows.extend(entry.unsqueeze(1) if entry.dim() > row_dims else [entry.unsqueeze(0)])
-        return rows, True
+        # A list of sequences, which may be ragged: each entry is one row, or
+        # a batch of them.
+        return [row for entry in value for row in split(key, entry)[0]], True
     value = torch.as_tensor(value)
+    # How many dimensions one row of the *input* has.
+    row_dims = 2 if key.endswith("inputs_embeds") else 1
     if batched is None:
         batched = value.dim() > row_dims
-    if not batched and value.dim() <= row_dims:
-        if value.numel() == 1 and width not in (None, 1):
-            return [value.reshape(1)], batched
-        return [value.unsqueeze(0)], batched
-    if value.dim() == 0:
-        return [value.unsqueeze(0)], batched
-    return [row.unsqueeze(0) for row in value], batched
+    if value.dim() > 0 and (batched or value.dim() > row_dims):
+        return list(value.unsqueeze(1)), batched
+    if value.numel() == 1 and width not in (None, 1):
+        return [value.reshape(1)], batched
+    return [value.unsqueeze(0)], batched
 
 
 def supply_position_ids(model, encoding: dict) -> None:
@@ -753,9 +672,8 @@ def supply_position_ids(model, encoding: dict) -> None:
     ids = encoding.get("input_ids", encoding.get("inputs_embeds"))
     if (
         "position_ids" in encoding
-        or not isinstance(mask, torch.Tensor)
-        or not isinstance(ids, torch.Tensor)
-        or mask.dim() != 2
+        or mask is None
+        or ids is None
         or mask.shape != ids.shape[:2]
         or bool(mask.all())
         or getattr(model.tokenizer, "padding_side", None) != "left"
