@@ -360,7 +360,7 @@ class TestSelfNamingAttribute:
         assert {node.path for node in envoy.modules()} == before
 
     def test_a_rename_through_it_resolves(self):
-        # A duplicate envoy re-ran `_bind_aliases` on the same module: RecursionError.
+        # A duplicate envoy re-ran `aliasing.bind` on the same module: RecursionError.
         envoy = Envoy(SelfNaming(), rename={"base_model.layer": "inner"})
         assert envoy.inner is envoy.layer
 

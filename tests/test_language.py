@@ -1228,9 +1228,11 @@ class TestCustomEnvoys:
         assert type(model.transformer.h) is Envoy
 
     def test_wildcard_does_not_match_a_shorter_path(self):
-        assert Envoy._path_ends_with("model.layers.0", "layers.*")
-        assert not Envoy._path_ends_with("model.layers", "layers.*")
-        assert not Envoy._path_ends_with("model.layers.0.attn", "layers.*")
+        from nnsight.intervention.aliasing import path_ends_with
+
+        assert path_ends_with("model.layers.0", "layers.*")
+        assert not path_ends_with("model.layers", "layers.*")
+        assert not path_ends_with("model.layers.0.attn", "layers.*")
 
     @torch.no_grad()
     def test_eproperty_works_on_wildcard_matched_envoy(self):

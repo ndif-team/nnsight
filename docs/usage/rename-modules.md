@@ -3,7 +3,7 @@ title: Rename Modules
 one_liner: Alias module paths via `rename={...}` at construction; supports single-component renames, subtree mounts, and multiple aliases.
 tags: [usage, models, rename, aliases]
 related: [docs/usage/trace.md, docs/usage/access-and-modify.md, docs/usage/cache.md]
-sources: [src/nnsight/intervention/envoy.py, src/nnsight/modeling/mixins/meta.py]
+sources: [src/nnsight/intervention/aliasing.py, src/nnsight/intervention/envoy.py, src/nnsight/modeling/mixins/meta.py]
 ---
 
 # Rename Modules
