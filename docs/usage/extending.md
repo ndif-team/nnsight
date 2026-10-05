@@ -306,8 +306,14 @@ Non-matching modules stay the base `Envoy`. See
   to a custom `Envoy` subclass to attach a custom `eproperty` there; without it a
   custom `eproperty` lives on the model subclass. A suffix matches the native
   path or a `rename=` alias (`rename={"attn": "self_attn"}` lets
-  `envoys={"self_attn": Heads}` reach GPT-2's `attn`); a type or native-path
-  match takes precedence over an alias match.
+  `envoys={"self_attn": Heads}` reach GPT-2's `attn`), and aliases compose
+  through ancestors, so with `rename={"transformer.h": "layers", ...}` the key
+  `"layers.0.self_attn"` names what `model.layers[0].self_attn` reaches. A `*`
+  component matches any one component: `"layers.*"` wraps every block, not the
+  container. A type or native-path match takes precedence over an alias match.
+  An alias from a class-keyed `rename` (`{GPT2Attention: "self_attn"}`) is a
+  spelling of that module only: `"self_attn"` matches it, `"self_attn.c_proj"`
+  matches nothing. Key the rename by name to reach what is under it.
 - **Batching needs both `_batch_size` and `_batch`,** and the failure lands at
   trace time, not construction time. With only the default, a second input invoke
   raises `NNsight does not support batching multiple invokes`.

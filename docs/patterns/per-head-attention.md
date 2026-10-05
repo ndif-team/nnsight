@@ -225,8 +225,10 @@ Three things this example turns on, none of them guessable from the signature:
 - **A string key matches by dotted path suffix; a type key matches by class.**
   `"attn.c_proj"` is the right key here because GPT-2's MLP has a `c_proj` too and
   both are `Conv1D` — a type key would wrap the MLP projection as well. A suffix
-  also matches a `rename=` alias, so the same map can be written in standardized
-  names and reused across architectures.
+  also matches a `rename=` alias, composed through ancestors (`"layers.*.self_attn"`
+  under `rename={"transformer.h": "layers", "attn": "self_attn"}`), so the same map
+  can be written in standardized names and reused across architectures; `*` matches
+  any one path component.
 - **`key="input"` serves the raw `(args, kwargs)` pair**, not a bare tensor. The
   preprocess destructures `(x,), _ = value`, and the transform has to hand back
   the same shape: `((tensor,), {})`.

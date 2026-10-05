@@ -61,6 +61,7 @@ from .interleaver import (
     Interleaver,
     Mediator,
 )
+from . import aliasing
 from .batching import Batcher
 from .editing import EditingTracer
 from .eproperty import eproperty
@@ -152,7 +153,7 @@ class Envoy:
         # Default interventions registered via .edit(), replayed on every trace.
         self._edits: list[Mediator] = []
 
-        # Module-name aliases (see `rename` / `_bind_aliases`). `_rename` is
+        # Module-name aliases (see `rename` / `aliasing.bind`). `_rename` is
         # the raw spec, inherited by children; `_aliases` maps each alias bound on
         # *this* envoy to the real path it resolved from (used by `__repr__`).
         self._rename = rename
@@ -174,7 +175,7 @@ class Envoy:
                 self._add_envoy(name, child)
 
         # Children exist now, so multi-component alias paths (e.g. "h.0") resolve.
-        self._bind_aliases()
+        aliasing.bind(self)
 
     #: Prefix for a submodule mounted under a name nnsight already serves.
     OVERLOAD_PREFIX = "E_"
@@ -261,110 +262,6 @@ class Envoy:
         )
         return named
 
-    def _bind_aliases(self) -> None:
-        """Bind each ``rename`` alias as an attribute pointing at the same Envoy.
-
-        For every ``path -> alias(es)`` entry, resolve ``path`` *relative to this
-        envoy*; if it names a descendant envoy, bind each alias as an attribute on
-        this envoy pointing at that same descendant object. Because every envoy in
-        the tree runs this, a single-component path like ``"mlp"`` binds wherever
-        it resolves (each block that has one), while a multi-component path like
-        ``"transformer.h.3.mlp"`` binds only on the envoy it resolves from. A
-        leading dot is a no-op — path components are matched by name (an empty
-        first component is skipped, mirroring `nnsight.util.fetch_attr`).
-
-        A key may also be a module *class*: ``{Mamba2Mixer: "linear_attn"}``
-        binds the alias on every envoy that has exactly one direct child whose
-        module is an instance of that class, pointing at that child. This is
-        for a tree that holds different modules under one native name (a
-        hybrid's ``mixer``: a Mamba-2 mixer on one block, an attention on the
-        next), where the standard name follows what the block holds and no
-        name-keyed entry can say so. Two matching children on one envoy is an
-        error, not a guess.
-
-        A key that does not resolve here is skipped, not an error: one ``rename``
-        is meant to be reusable across architectures that spell the same module
-        differently (``{"attn": "att", "self_attn": "att"}``), and on any given
-        envoy only one of those spellings exists.
-
-        An alias that would *displace* something is an error, because there is
-        no spelling of it that works. Three things can be underneath: another
-        alias from an earlier key, a name on the envoy (a child, its own state,
-        or an `Envoy` attribute like ``output`` or ``trace``), or a name on the
-        wrapped module — an alias lands in ``__dict__`` and so wins over the
-        ``__getattr__`` fallthrough, silently shadowing the model's own
-        ``config``, ``weight``, ``eval`` and the rest.
-
-        Aliases are ordinary attributes referencing the *same* child object (not
-        copies, and not added to `_children`), so ``__getattr__`` needs no
-        alias branch, iteration doesn't double-count, and re-pointing the tree on
-        dispatch (`_update`, in place) keeps them valid with no rebuild.
-        """
-        if not self._rename:
-            return
-        for key, aliases in self._rename.items():
-            if isinstance(key, type):
-                matches = [
-                    (name, child) for name, child in self._child_map.items()
-                    if isinstance(child._module, key)
-                ]
-                if len(matches) > 1:
-                    raise ValueError(
-                        f"`rename` key {key.__name__} matches {len(matches)} children of "
-                        f"`{self.path}` ({', '.join(name for name, _ in matches)}); a class "
-                        f"key binds only where one child is of that class. Key those by name."
-                    )
-                if not matches:
-                    continue
-                path, target = matches[0]
-            else:
-                path = key.lstrip(".")
-                try:
-                    target = self.get(path)
-                except AttributeError:
-                    continue
-                if not isinstance(target, Envoy):
-                    continue
-            for alias in [aliases] if isinstance(aliases, str) else aliases:
-                # Already pointing at this very envoy: nothing is displaced.
-                # Covers a key aliased to its own name (``{"attn": "attn"}``,
-                # which a cross-architecture dict pairs with
-                # ``{"self_attn": "attn"}``) and two keys reaching one module
-                # through tied weights.
-                if self.__dict__.get(alias) is target:
-                    continue
-
-                # What the name would displace, in the order lookup would find
-                # it. `hasattr` is right for the module and wrong for the envoy:
-                # an eproperty's `__get__` raises outside interleaving, so the
-                # envoy's own classes are scanned by namespace instead.
-                bound = self._aliases.get(alias)
-                if bound is not None:
-                    displaced = f"the alias already bound here from {bound!r}"
-                elif alias in self.__dict__:
-                    displaced = "a child module or attribute of that name"
-                elif any(alias in vars(klass) for klass in type(self).__mro__):
-                    displaced = f"the `{type(self).__name__}.{alias}` attribute"
-                elif hasattr(self._module, alias):
-                    # The same test `__getattr__` gates its fallthrough on, so
-                    # this is the shadowing surface exactly: every name it finds
-                    # is one `envoy.<name>` answers to today.
-                    displaced = "an attribute of the wrapped module"
-                else:
-                    displaced = None
-
-                if displaced is not None:
-                    raise ValueError(
-                        f"`rename` alias {alias!r} for {path!r} would shadow "
-                        f"{displaced} on `{self.path}`. Aliases are bound as plain "
-                        f"attributes, so this would make the original unreachable "
-                        f"by name while leaving it in the tree. Pick a different "
-                        f"alias."
-                    )
-
-                object.__setattr__(self, alias, target)
-                self._aliases[alias] = path
-
     def _add_envoy(self, name: str, module: torch.nn.Module) -> Envoy:
         # Register a (possibly new) module on self._module, then mirror it.
         self._module.add_module(name, module)
@@ -375,10 +272,12 @@ class Envoy:
 
         `_envoys` is ``None`` (the base `Envoy`), a single class for every module,
         or a dict tried in this order: a ``torch.nn.Module`` subclass key on the
-        module's MRO; a dotted path-suffix key (``"attn"``, ``"transformer.h"``)
-        on the native path; the same on each ``rename`` alias path, so one map
-        written in aliased names serves every architecture the rename covers.
-        Nothing matching gives the base `Envoy`.
+        module's MRO; a dotted path-suffix key (``"attn"``, ``"transformer.h"``,
+        ``"layers.*"``) on the native path; the same on each other spelling of the
+        path under the ``rename`` aliases (see `aliasing.spellings`), so one map written
+        in aliased names (``{"layers.0.self_attn": Attn}``) serves every
+        architecture the rename covers. Nothing matching gives the base `Envoy`.
+        The class is chosen once, here, as the envoy is built.
         """
         mapping = self._envoys
         if mapping is None or isinstance(mapping, type):
@@ -386,28 +285,11 @@ class Envoy:
         for cls in type(module).__mro__:
             if cls in mapping:
                 return mapping[cls]
-        # An alias path is the native path with the rename key's run replaced
-        # (as `_bind_aliases` binds it), so it is known before aliases bind.
-        paths = [path]
-        for key, aliases in (self._rename or {}).items():
-            if isinstance(key, type) and isinstance(module, key):
-                key = path.rsplit(".", 1)[-1]
-            elif isinstance(key, type) or not self._path_ends_with(path, key):
-                continue
-            prefix = path[: -len(key.lstrip("."))]
-            paths += [prefix + alias for alias in ([aliases] if isinstance(aliases, str) else aliases)]
-        for candidate in paths:
+        for candidate in aliasing.spellings(self._rename, path, module):
             for key, envoy_cls in mapping.items():
-                if isinstance(key, str) and self._path_ends_with(candidate, key):
+                if isinstance(key, str) and aliasing.path_ends_with(candidate, key):
                     return envoy_cls
         return Envoy
-
-    @staticmethod
-    def _path_ends_with(path: str, key: str) -> bool:
-        """Whether ``path`` ends with dotted ``key`` component-wise (not substring)."""
-        parts = path.split(".")
-        key_parts = key.removeprefix(".").split(".")
-        return len(key_parts) <= len(parts) and parts[-len(key_parts):] == key_parts
 
     def __setstate__(self, state):
         self.__dict__.update(state)

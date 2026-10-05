@@ -3,7 +3,7 @@ title: Envoy
 one_liner: Envoy wraps a torch.nn.Module and mirrors its submodule tree, exposing .input / .inputs / .output as eproperty descriptors over Mediator.value / Mediator.swap, plus .skip (method) and .source (property).
 tags: [concept, mental-model, envoy]
 related: [docs/concepts/interleaver-and-controller.md, docs/concepts/source-tracing.md, docs/concepts/threading-and-mediators.md]
-sources: [src/nnsight/intervention/envoy.py, src/nnsight/modeling/base.py]
+sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/aliasing.py, src/nnsight/modeling/base.py]
 ---
 
 # Envoy
@@ -143,8 +143,12 @@ a map from a module type or dotted path suffix to a custom `Envoy` subclass — 
 chosen module gets a subclass that exposes a custom `eproperty` (e.g. a per-head
 `.heads` view; see [extending.md](../usage/extending.md) and
 [per-head-attention.md](../patterns/per-head-attention.md)). A path suffix matches
-the native path or a `rename=` alias, so one map can be written in the aliased
-names and reused across architectures. You extend nnsight several ways:
+the native path or any spelling of it under the `rename=` aliases, composed through
+ancestors (`"layers.0.self_attn"` under `rename={"transformer.h": "layers", "attn":
+"self_attn"}`), so one map can be written in the aliased names and reused across
+architectures. A `*` component matches any one path component, so `"layers.*"`
+names every entry of the container and not the container itself. You extend nnsight
+several ways:
 
 ### 1. Subclass `NNsight` / `Envoy`
 
@@ -221,7 +225,7 @@ Each such entry names the one envoy at the module's first path.
 
 ## Module renaming (aliases)
 
-`rename={...}` on `NNsight`/`Envoy` binds aliases pointing at the same child envoy (`_bind_aliases`, `envoy.py`). A single-component path (`{"transformer": "gpt"}`) binds wherever it resolves; a multi-component path (`{"transformer.h": "layers"}`) binds on the envoy it resolves from. Aliases are ordinary attributes referencing the same object, so they survive a dispatch re-point with no rebuild.
+`rename={...}` on `NNsight`/`Envoy` binds aliases pointing at the same child envoy (`bind`, `aliasing.py`). A single-component path (`{"transformer": "gpt"}`) binds wherever it resolves; a multi-component path (`{"transformer.h": "layers"}`) binds on the envoy it resolves from. Aliases are ordinary attributes referencing the same object, so they survive a dispatch re-point with no rebuild.
 
 ## Overloaded submodule names
 
