@@ -36,7 +36,7 @@ def tiny_config():
 def model(tokenizer):
     torch.manual_seed(7)
     module = BertForMaskedLM(tiny_config()).eval()
-    return TransformersModel(module, task="fill-mask", tokenizer=tokenizer)
+    return TransformersModel(module, task="fill-mask", tokenizer=tokenizer, device="cpu")
 
 
 @pytest.mark.parametrize("form", ["encoding", "keywords", "token_ids"])
@@ -132,7 +132,9 @@ def test_unequal_invokes_preserve_positions_and_ignore_added_label_padding(
 @torch.no_grad()
 def test_sequence_classification_labels_keep_the_batch_shape(tokenizer):
     module = BertForSequenceClassification(tiny_config()).eval()
-    model = TransformersModel(module, task="text-classification", tokenizer=tokenizer)
+    model = TransformersModel(
+        module, task="text-classification", tokenizer=tokenizer, device="cpu"
+    )
     encoding = tokenizer(["hello", "hello world"], padding=True, return_tensors="pt")
     encoding["labels"] = torch.tensor([0, 1])
     expected = module(**encoding)

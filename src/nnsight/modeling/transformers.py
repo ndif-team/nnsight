@@ -1180,14 +1180,28 @@ class TransformersModel(HuggingFaceModel):
         ]
         if len(items) == 1:
             return dict(items[0])
-        from transformers.pipelines.base import _pad, pad_collate_fn
+        from transformers.pipelines.base import pad_collate_fn
 
         feature = self.feature_extractor or self.image_processor
         encoding = dict(pad_collate_fn(self.tokenizer, feature)(items))
-        if "labels" in encoding and self.tokenizer is not None:
+        if "labels" in encoding:
             # Pipeline collation pads unknown fields with zero, which is a valid
-            # target class/token. Added label positions must be ignored by the loss.
-            encoding["labels"] = _pad(items, "labels", -100, self.tokenizer.padding_side)
+            # target class/token. Added label positions must be ignored by the
+            # loss, so per-token labels are padded again here, with -100, on the
+            # side the ids were padded on. Per-example labels have no width to pad.
+            labels = [item["labels"] for item in items]
+            if labels[0].dim() > 1:
+                width = encoding["input_ids"].shape[-1]
+                left = getattr(self.tokenizer, "padding_side", "right") == "left"
+                labels = [
+                    torch.nn.functional.pad(
+                        row,
+                        (width - row.shape[-1], 0) if left else (0, width - row.shape[-1]),
+                        value=-100,
+                    )
+                    for row in labels
+                ]
+            encoding["labels"] = torch.cat(labels)
         return encoding
 
     @staticmethod
