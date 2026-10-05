@@ -267,6 +267,62 @@ class TestSharedEntries:
         assert torch.allclose(middle, module.layers[1](module.shared(x)))
 
 
+class Wrapped(nn.Module):
+    """A layer holding the module it replaced, as an adapter's layer does."""
+
+    def __init__(self, inner):
+        super().__init__()
+        self.base_layer = inner
+        self.extra = nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.base_layer(x) + self.extra(x)
+
+
+class TestUpdate:
+    """`_update` re-points the tree at a module whose structure may have changed."""
+
+    def test_entries_the_module_gained_and_lost_follow_it(self):
+        stack = Envoy(Stack())
+        kept = stack.layers[1]
+        # Wrap one layer in place and add a sibling; the module changed, the tree did not.
+        module = stack._module
+        module.layers[1] = Wrapped(module.layers[1])
+        module.tail = nn.Linear(8, 8)
+        stack._update(module)
+
+        assert {node.path for node in stack.modules()} == module_paths(module)
+        # The envoy of a module still in the tree is the same object, re-pointed.
+        assert stack.layers[1] is kept and kept._module is module.layers[1]
+        assert stack.layers[1].base_layer.path == "model.layers.1.base_layer"
+        assert stack.tail.path == "model.tail"
+        assert [child.path for child in stack._children] == [
+            f"model.{name}" for name, _ in module.named_children()
+        ]
+
+        # Take the wrapper out again: its children go, the held module is back.
+        module.layers[1] = module.layers[1].base_layer
+        del module.tail
+        stack._update(module)
+        assert {node.path for node in stack.modules()} == module_paths(module)
+        assert stack.layers[1] is kept and kept._module is module.layers[1]
+        assert "base_layer" not in kept.__dict__ and "tail" not in stack.__dict__
+        assert stack.interleaver.envoys[id(module.layers[1])] is kept
+
+    def test_the_updated_tree_traces(self):
+        stack = Envoy(Stack())
+        module = stack._module
+        module.layers[1] = Wrapped(module.layers[1])
+        stack._update(module)
+        x = torch.randn(1, 8)
+        with stack.trace(x):
+            into = stack.layers[1].input.save()
+            held = stack.layers[1].base_layer.output.save()
+            whole = stack.layers[1].output.save()
+        assert torch.allclose(held, module.layers[1].base_layer(into))
+        assert torch.allclose(whole, held + module.layers[1].extra(into))
+
+
 class TestRebuiltContainer:
     """A container rebuilt from modules the tree already wraps — truncating layers."""
 

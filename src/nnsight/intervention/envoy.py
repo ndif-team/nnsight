@@ -389,10 +389,14 @@ class Envoy:
         return state
 
     def _update(self, module: torch.nn.Module) -> None:
-        # Re-point an existing envoy tree at a new module of the same structure
-        # (e.g. swapping meta weights for real ones). instrument() removes this
-        # path's old controller before re-adding, and we recurse over children by
-        # name (as in __init__), so modules shared across paths line up.
+        # Re-point an existing envoy tree at a new module (swapping meta weights
+        # for real ones, or an adapter attached to or taken out of the module in
+        # place). instrument() removes this path's old controller before
+        # re-adding, and we recurse over children by name (as in __init__), so
+        # modules shared across paths line up. Entries the new module lacks are
+        # dropped and entries it gained are mirrored, so the tree is the module's
+        # again; what persists is every envoy of a module that is still there,
+        # with its edits, class and aliases.
         self.interleaver.envoys.pop(id(self._module), None)
         self._module = module
         self.interleaver.envoys[id(module)] = self
@@ -407,6 +411,28 @@ class Envoy:
             # to re-point at, so leave it as-is (it keeps its own module and controller).
             if children.get(name) is not None:
                 child._update(children[name])
+        for name in list(self._child_map):
+            if children.get(name) is None:
+                self._drop_envoy(name)
+        for name, child in children.items():
+            if child is not None and name not in self._child_map:
+                self._wrap_envoy(name, child)
+        # Back in module order, as `__init__` builds them.
+        self._child_map = {name: self._child_map[name] for name in children if name in self._child_map}
+        entries = list(dict.fromkeys(self._child_map.values()))
+        self._children = entries + [child for child in self._children if child not in entries]
+
+    def _drop_envoy(self, name: str) -> None:
+        # Forget the entry `name` of the wrapped module, which it no longer has.
+        child = self._child_map.pop(name)
+        for attribute, value in list(self.__dict__.items()):
+            if value is child:
+                del self.__dict__[attribute]
+        self._aliases = {alias: path for alias, path in self._aliases.items() if path != name}
+        if child in self._children:
+            self._children.remove(child)
+        if self.interleaver.envoys.get(id(child._module)) is child:
+            del self.interleaver.envoys[id(child._module)]
 
     def trace(
         self,

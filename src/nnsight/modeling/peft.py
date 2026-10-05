@@ -114,7 +114,7 @@ def detach(model: torch.nn.Module) -> None:
         del model.peft_config
 
 def swap(model, requested: Optional[str]) -> None:
-    """Swap ``model``'s loaded PEFT adapter to ``requested``, and rebuild its envoy tree.
+    """Swap ``model``'s loaded PEFT adapter to ``requested``, and re-point its envoy tree.
 
     The module changes only when the requested adapter differs from the
     current one, so a repeat request pays nothing:
@@ -130,7 +130,6 @@ def swap(model, requested: Optional[str]) -> None:
     if requested == model.peft:
         return
 
-    previous = set(model._module.modules())
     if model.peft is not None:
         detach(model._module)
         # The module is the base checkpoint from here; keep `model.peft` honest
@@ -146,4 +145,4 @@ def swap(model, requested: Optional[str]) -> None:
             attach(model._module, requested)
             model.peft = requested
     finally:
-        model._rebind(model._module, previous)
+        model._update(model._module)

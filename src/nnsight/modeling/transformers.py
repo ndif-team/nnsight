@@ -628,52 +628,6 @@ class TransformersModel(HuggingFaceModel):
         """
         peft.swap(self, env.get("peft") if env else None)
 
-    def _rebind(self, module: torch.nn.Module, previous: Optional[set] = None) -> None:
-        """Rebuild the Envoy tree around ``module`` in place.
-
-        Attaching or removing an adapter changes the module structure (adapter
-        modules appear or disappear), so re-init rather than `_update`, reusing
-        this envoy's interleaver, rename spec and custom envoy classes. Drop the
-        previous tree's child-envoy attributes first — __init__ resets
-        _children without clearing the attributes those children left.
-
-        ``previous`` is the modules the tree held before a change made to
-        ``self._module`` in place, which can no longer be read off it.
-        """
-        # Standalone children (whose module isn't part of the HF tree, e.g. the
-        # generator) survive the swap: Envoy.__init__ builds _children only from
-        # `module.named_children()`, so carry them across the re-init by name.
-        submodules = set(self._module.modules()) | (previous or set())
-        standalone = {
-            name: value
-            for name, value in self.__dict__.items()
-            if isinstance(value, Envoy)
-            and value is not self
-            and value._module not in submodules
-        }
-        # The new tree holds modules of the old one (an adapter layer holds the
-        # module it replaced). Forget the old tree's envoys first, or those
-        # modules resolve to envoys carrying their previous paths and the new
-        # subtree is never built.
-        for old_module in submodules:
-            self.interleaver.envoys.pop(id(old_module), None)
-        for name, value in list(self.__dict__.items()):
-            if isinstance(value, Envoy) and value is not self:
-                del self.__dict__[name]
-        Envoy.__init__(
-            self,
-            module,
-            path=self.path,
-            interleaver=self.interleaver,
-            rename=self._rename,
-            envoys=self._envoys,
-        )
-        for name, child in standalone.items():
-            self.__dict__[name] = child
-            self._children.append(child)
-        if self.pipeline is not None:
-            self.pipeline.model = module
-
     def load_adapter(self, peft_id: Optional[str]) -> None:
         """Attach a PEFT adapter — the post-hoc form of the ``peft=`` kwarg.
 
@@ -711,7 +665,9 @@ class TransformersModel(HuggingFaceModel):
         # adapter's architecture from its config alone.
         with MetaDevice():
             module = self._load_meta(*self.args, **self.kwargs)
-        self._rebind(module)
+        self._update(module)
+        if self.pipeline is not None:
+            self.pipeline.model = module
 
     def __getstate__(self) -> dict:
         state = super().__getstate__()
