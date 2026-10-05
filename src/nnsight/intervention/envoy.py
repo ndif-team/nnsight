@@ -984,6 +984,15 @@ class Envoy:
         """The number of entries in the wrapped module (e.g. a ``ModuleList``'s length)."""
         return len(self._module)
 
+    def __bool__(self) -> bool:
+        """Truthy exactly when the wrapped module is.
+
+        Defined so truthiness does not fall back to `__len__`, which only a
+        container module answers. An empty `ModuleList` is falsy here as it is
+        in torch, and a plain module is truthy, the way `nn.Module` is.
+        """
+        return bool(self._module)
+
     def get(self, path: str) -> Any:
         """Resolve a dotted ``path`` from this envoy, e.g. ``"transformer.h.0.mlp"``.
 
