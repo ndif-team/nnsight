@@ -441,6 +441,8 @@ def test_only_segments_and_positions_are_shared_across_rows(tokenizer):
     [
         pytest.param([torch.tensor([[2, 5, 4, 3]]), torch.tensor([[2, 7, 3]])], id="list-of-1xL-tensors"),
         pytest.param(np.array([[2, 5, 4, 3], [2, 7, 3, 0]]), id="numpy"),
+        pytest.param([torch.tensor([[2, 5, 3], [2, 6, 3]]), torch.tensor([[2, 7, 3]])], id="list-of-batches"),
+        pytest.param({"input_ids": [[2, 5, 4, 3], [2, 7, 3]]}, id="encoding-of-lists"),
         pytest.param([np.int64(2), np.int64(5), np.int64(3)], id="numpy-ints"),
     ],
 )
@@ -459,6 +461,34 @@ def test_a_tensor_outside_the_table_passes_the_input_through_in_every_form(causa
     ids, extra = torch.tensor([[2, 5, 6]]), torch.arange(3)
     for args, kwargs in (((ids,), {}), ((), {"input_ids": ids}), (({"input_ids": ids},), {})):
         assert causal._preprocess_invoke(args[0] if args else None, {**kwargs, "cache_position": extra})[0] is None
+    # Ids written as lists still reach the model as the tensors it takes.
+    expected = causal._module(input_ids=ids, cache_position=extra).logits
+    for args, kwargs in ((([2, 5, 6],), {}), (({"input_ids": [[2, 5, 6]]},), {})):
+        with causal.trace(*args, **kwargs, cache_position=extra):
+            logits = nnsight.save(causal.output.logits)
+        torch.testing.assert_close(logits, expected)
+
+
+@torch.no_grad()
+def test_a_tokenizer_encoding_without_tensors_is_an_encoding(model):
+    encoding = model.tokenizer("hello [MASK] world")
+    assert isinstance(encoding["input_ids"], list)
+    expected = model._module(**model.tokenizer("hello [MASK] world", return_tensors="pt")).logits
+    with model.trace(encoding):
+        logits = nnsight.save(model.output.logits)
+    torch.testing.assert_close(logits, expected)
+
+
+@torch.no_grad()
+def test_no_mask_is_assumed_beside_a_cache(causal):
+    module = causal._module
+    past = module(input_ids=torch.tensor([[2, 5, 6]]), use_cache=True).past_key_values
+    expected = module(input_ids=torch.tensor([[7]]), past_key_values=copy.deepcopy(past)).logits
+    with causal.trace([7], past_key_values=past):
+        received = nnsight.save(causal.inputs[1])
+        logits = nnsight.save(causal.output.logits)
+    assert "attention_mask" not in received
+    torch.testing.assert_close(logits, expected)
 
 
 @torch.no_grad()

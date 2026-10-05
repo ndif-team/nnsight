@@ -1008,12 +1008,13 @@ class TransformersModel(HuggingFaceModel):
                     raise NotImplementedError(
                         "Can't batch these inputs; pass text or token ids."
                     )
-                if isinstance(data, Mapping):
-                    return tuple(), {**dict(data), **kwargs}
-                # `forward_kwargs` is `kwargs` for a plain opaque input, and the
-                # processor's encoding when the invoke was written in processor terms.
+                # `forward_kwargs` is `kwargs` for a plain opaque input, and an
+                # encoding when the invoke was written in processor terms or its
+                # ids had to be made tensors.
                 if forward_kwargs is not kwargs:
                     return tuple(), forward_kwargs
+                if isinstance(data, Mapping):
+                    return tuple(), {**dict(data), **kwargs}
                 return inputs, kwargs
             # A chunked task decides its own row count, and the batcher counted
             # this invoke's input as its own rows before preprocessing — so with
@@ -1048,10 +1049,19 @@ class TransformersModel(HuggingFaceModel):
         # The three ways of writing model inputs are one encoding from here on,
         # so they cannot be routed differently.
         encoding = self._as_encoding(data, kwargs)
-        if encoding is not None and (
-            not self._has_text_input(encoding) or self._has_nontext_keys(encoding)
-        ):
+        if encoding is not None and not self._has_text_input(encoding):
             return None, kwargs
+        if encoding is not None and self._has_nontext_keys(encoding):
+            # Passed through whole. Tensors go as they are; ids written as
+            # lists are made the tensors a forward takes first.
+            if all(
+                isinstance(value, torch.Tensor) and value.dim() > 1
+                for key, value in encoding.items()
+                if key in self._ROW_FIELDS and value is not None
+            ):
+                return None, kwargs
+            rows, forward = self._encode_pretokenized(encoding)
+            return None, {**self._collate(rows), **forward}
         if self.task == "keypoint-matching":
             # This task's unit input is a *pair* of images, which collides with
             # the list convention (one prompt per element): the pair is split
@@ -1405,7 +1415,11 @@ class TransformersModel(HuggingFaceModel):
                 return kwargs
             return None
         if isinstance(data, Mapping):
-            return None if self._is_task_input(data) else {**data, **kwargs}
+            # A task's own dict holds no tensors, but neither does an encoding
+            # of lists: that one names its tokens.
+            if self._is_task_input(data) and not self._has_text_input(data):
+                return None
+            return {**data, **kwargs}
         if self._is_token_ids(data):
             return {"input_ids": data, **kwargs}
         return None
@@ -1426,7 +1440,9 @@ class TransformersModel(HuggingFaceModel):
         source = "input_ids" if "input_ids" in fields else "inputs_embeds"
         inputs, batched = self._split(source, fields.pop(source))
         items = [{source: row} for row in inputs]
-        if "attention_mask" not in fields:
+        # No mask to assume beside a key-value cache: it would have to cover the
+        # cached tokens too, and the model builds that one itself.
+        if "attention_mask" not in fields and encoding.get("past_key_values") is None:
             for item in items:
                 # One per token: ids of any rank, or embeddings less their width.
                 row = item[source]
@@ -1469,9 +1485,12 @@ class TransformersModel(HuggingFaceModel):
         if isinstance(value, (list, tuple)) and value and not isinstance(
             value[0], numbers.Number
         ):
-            # A list of sequences, which may be ragged: one row each.
-            rows = [torch.as_tensor(row) for row in value]
-            return [row if row.dim() > row_dims else row.unsqueeze(0) for row in rows], True
+            # A list of sequences, which may be ragged: one row each, or the
+            # rows of each where an entry is itself a batch.
+            rows = []
+            for entry in map(torch.as_tensor, value):
+                rows.extend(entry.unsqueeze(1) if entry.dim() > row_dims else [entry.unsqueeze(0)])
+            return rows, True
         value = torch.as_tensor(value)
         if batched is None:
             batched = value.dim() > row_dims
