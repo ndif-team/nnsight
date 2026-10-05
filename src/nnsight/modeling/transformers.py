@@ -1186,13 +1186,18 @@ class TransformersModel(HuggingFaceModel):
         encoding = dict(pad_collate_fn(self.tokenizer, feature)(items))
         if "labels" in encoding:
             # Pipeline collation pads unknown fields with zero, which is a valid
-            # target class/token. Added label positions must be ignored by the
-            # loss, so per-token labels are padded again here, with -100, on the
-            # side the ids were padded on. Per-example labels have no width to pad.
+            # target class/token, so labels are batched here instead. Rows of one
+            # shape (per-example labels, equal-length targets) are stacked as they
+            # are. Rows of different widths are padded with -100, which the loss
+            # ignores, to the widest of them: on the side the ids were padded on
+            # when each row labels its own tokens, on the right otherwise
+            # (a seq2seq target has its own length).
             labels = [item["labels"] for item in items]
-            if labels[0].dim() > 1:
-                width = encoding["input_ids"].shape[-1]
-                left = getattr(self.tokenizer, "padding_side", "right") == "left"
+            if len({row.shape for row in labels}) > 1:
+                width = max(row.shape[-1] for row in labels)
+                left = getattr(self.tokenizer, "padding_side", "right") == "left" and all(
+                    item["labels"].shape == item["input_ids"].shape for item in items
+                )
                 labels = [
                     torch.nn.functional.pad(
                         row,

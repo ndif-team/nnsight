@@ -172,3 +172,27 @@ def test_shared_sequence_field_broadcasts_across_rows(model, field):
     with model.trace(encoding):
         actual = nnsight.save(model.output.logits)
     torch.testing.assert_close(actual, expected.logits)
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        pytest.param(torch.tensor([[2, 5, 6, 7, 5, 3], [2, 6, 3, -100, -100, -100]]), id="wider-than-the-ids"),
+        pytest.param(torch.tensor([[2], [0]]), id="one-column"),
+    ],
+)
+@torch.no_grad()
+def test_labels_that_are_not_per_token_keep_their_own_width(model, labels):
+    # Labels are padded to the ids' width only when they label the ids' tokens;
+    # a target with its own length (seq2seq, one column per example) is not
+    # cut or padded to match.
+    ids = torch.tensor([[2, 5, 4, 3], [2, 7, 4, 3]])
+    with model.trace() as tracer:
+        with tracer.invoke(ids[:1], labels=labels[:1]):
+            pass
+        with tracer.invoke(ids[1:], labels=labels[1:]):
+            pass
+        with tracer.invoke():
+            received = nnsight.save(model.inputs[1]["labels"])
+            tracer.stop()
+    torch.testing.assert_close(received, labels)
