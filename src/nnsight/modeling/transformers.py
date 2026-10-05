@@ -689,10 +689,10 @@ class TransformersModel(HuggingFaceModel):
 
         An adapter wrap/unwrap changes the module structure (adapter modules
         appear or disappear), so re-init rather than `_update`, reusing this
-        envoy's interleaver and rename spec. Drop the previous tree's
-        child-envoy attributes first — the new structure has different
-        top-level children, and __init__ resets _children without clearing the
-        stale attributes those children left.
+        envoy's interleaver, rename spec and custom envoy classes. Drop the
+        previous tree's child-envoy attributes first — the new structure has
+        different top-level children, and __init__ resets _children without
+        clearing the stale attributes those children left.
         """
         # Standalone children (whose module isn't part of the HF tree, e.g. the
         # generator) survive the swap: Envoy.__init__ builds _children only from
@@ -715,7 +715,12 @@ class TransformersModel(HuggingFaceModel):
             if isinstance(value, Envoy) and value is not self:
                 del self.__dict__[name]
         Envoy.__init__(
-            self, module, path=self.path, interleaver=self.interleaver, rename=self._rename
+            self,
+            module,
+            path=self.path,
+            interleaver=self.interleaver,
+            rename=self._rename,
+            envoys=self._envoys,
         )
         for name, child in standalone.items():
             self.__dict__[name] = child

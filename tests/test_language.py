@@ -927,6 +927,35 @@ class TestPeft:
         assert model.peft is None and not _has_lora(model)
         assert model.transformer.h[0].path == "model.transformer.h.0"
 
+    @torch.no_grad()
+    def test_swap_keeps_custom_envoy_classes_and_aliases(self, tiny_peft_bundle):
+        from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
+
+        class Mlp(Envoy):
+            pass
+
+        base_path, adapter_a, _ = tiny_peft_bundle
+        model = TransformersModel(
+            base_path, task="text-generation", dispatch=True,
+            rename={"mlp": "ffn"}, envoys={GPT2MLP: Mlp},
+        )
+        model.load_adapter(adapter_a)
+        block = model.base_model.model.transformer.h[0]
+        assert type(block.mlp) is Mlp and block.ffn is block.mlp
+
+        model.load_adapter(None)
+        block = model.transformer.h[0]
+        assert type(block.mlp) is Mlp and block.ffn is block.mlp
+
+    @torch.no_grad()
+    def test_load_adapter_builds_the_tree_construction_does(self, tiny_peft_bundle):
+        base_path, adapter_a, _ = tiny_peft_bundle
+        built = TransformersModel(base_path, task="text-generation", peft=adapter_a, dispatch=True)
+        loaded = TransformersModel(base_path, task="text-generation", dispatch=True)
+        loaded.load_adapter(adapter_a)
+        paths = lambda model: [envoy.path for envoy in model.modules()]
+        assert paths(loaded) == paths(built)
+
     def test_load_adapter_before_dispatch(self, lora_adapter):
         # The post-hoc form of `peft=`: on a meta model only the adapter's
         # config is grafted (safetensors cannot load onto meta — issue #555),
