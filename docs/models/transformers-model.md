@@ -202,7 +202,7 @@ assert model.dispatched is False                        # scan never loads weigh
 
 ## Input forms `trace` / `generate` accept
 
-Every invoke is normalized to per-row `input_ids` and left-pad batched into one forward, so mixed formats and unequal lengths combine freely (`transformers.py`, `_preprocess_invoke`; verified in `tests/test_language.py`):
+Every invoke is normalized to per-row model inputs and padded into one forward, so mixed formats and unequal lengths combine freely (`transformers.py`, `_preprocess_invoke`; verified in `tests/test_language.py`):
 
 ```python
 model.trace("a single prompt")                          # str -> 1 row
@@ -223,25 +223,34 @@ other invokes pass:
 |---|---|
 | `input_ids`, `decoder_input_ids` | the pad token |
 | `inputs_embeds`, `decoder_inputs_embeds` | zeros |
-| `attention_mask`, `decoder_attention_mask`, `global_attention_mask`, `token_type_ids`, `position_ids` | 0 |
+| `attention_mask`, `decoder_attention_mask`, `global_attention_mask`, `token_type_ids`, `position_ids`, `decoder_position_ids` | 0 |
 | `special_tokens_mask` | 1 |
 | `labels` | -100, which the loss ignores |
 | `start_positions`, `end_positions`, `next_sentence_label` | one per row, no padding |
 
-- **Padding side.** Fields the length of the input follow the tokenizer's side.
-  The decoder's fields, and `labels` on an encoder-decoder, have a length of
-  their own and are padded on the right.
+- **Padding side.** Fields the length of the input are padded on the side the
+  batch is (the tokenizer's, or the feature extractor's when it names one). The
+  decoder's fields, and `labels` on an encoder-decoder, have a length of their
+  own and are padded on the right.
 - **Unbatched ids take unbatched fields.** `trace([5, 6, 7], labels=[5, 6, 7])`
   is one row with a label per token, and `labels=1` beside it is one class label.
-- **A field one invoke leaves out** gets its default: no mask, segment 0,
-  positions from 0, and an ignored label. A field with no default (a decoder
-  input, a float label) has to be in every invoke or none.
+- **One row of `token_type_ids` or `position_ids`** stands for every row of a
+  batch, as the models broadcast them. Any other field needs a row per input row.
+- **A field one invoke leaves out** gets a default: segment 0, positions counted
+  from the row's first token, and an ignored label. A field with no default (a
+  decoder input, a float label) has to be in every invoke or none. Segment 0 is
+  what an encoder assumes; GPT-2 adds an embedding for any `token_type_ids` it is
+  given, so pass them to every invoke of a GPT-2 batch or to none.
 - **`inputs_embeds`** stands in for `input_ids`, in `trace` and `generate`.
-- **Positions** are derived from the mask only for a left-padded batch (padding,
-  then tokens) on a model whose forward takes `position_ids`; positions you pass
-  are kept.
+- **Positions** are derived from the mask row by row, on a left-padding
+  tokenizer: a row that is padding then tokens is counted from its first token,
+  and any other row is left as the model counts it. Positions you pass are kept,
+  and a mask wider than the input (a key-value cache continuation) gets none.
 
-Other keywords are forward arguments, passed on as they are.
+Other keywords are forward arguments, passed on as they are. A *tensor* outside
+the table (`pixel_values`, `cache_position`, ...) is not known to be per-row, so
+an input carrying one is handed to the model whole and does not batch with
+other invokes.
 
 Chat messages are detected and templated automatically (as `Pipeline.__call__` would):
 

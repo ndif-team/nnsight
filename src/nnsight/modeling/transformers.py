@@ -50,9 +50,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
-import inspect
+import numbers
 import sys
 import warnings
+from collections.abc import Mapping
 
 import torch
 from torch._guards import detect_fake_mode
@@ -797,8 +798,8 @@ class TransformersModel(HuggingFaceModel):
     # when another in the batch is wider (``None``: the tokenizer's pad token).
     # These are split per row, padded and batched; an invoke's other keywords are
     # forward arguments, handed over as they are. An encoding carrying a tensor
-    # outside this table (pixel_values, input_features, ...) is multimodal: it is
-    # passed through whole, and the model derives its own positions.
+    # outside this table (pixel_values, input_features, cache_position, ...) is
+    # not known to be per-row, so it is passed through whole, on its own.
     _ROW_FIELDS = {
         "input_ids": None,
         "inputs_embeds": 0.0,
@@ -814,13 +815,22 @@ class TransformersModel(HuggingFaceModel):
         "decoder_input_ids": None,
         "decoder_inputs_embeds": 0.0,
         "decoder_attention_mask": 0,
+        "decoder_position_ids": 0,
     }
     # The fields with a length of their own rather than the input's. They are
     # padded on the right whichever side the input is padded on; ``labels`` joins
     # them on an encoder-decoder, where it is the decoder's target.
     _TARGET_FIELDS = frozenset(
-        {"decoder_input_ids", "decoder_inputs_embeds", "decoder_attention_mask"}
+        {
+            "decoder_input_ids",
+            "decoder_inputs_embeds",
+            "decoder_attention_mask",
+            "decoder_position_ids",
+        }
     )
+    # The fields one row of which can stand for every row of a batch, as the
+    # models themselves broadcast them.
+    _SHARED_FIELDS = frozenset({"token_type_ids", "position_ids"})
 
     # Non-text arguments a task's *processor* takes. An invoke naming any of these is
     # written in processor terms (``trace(prompt, images=[img])``) rather than model
@@ -842,11 +852,10 @@ class TransformersModel(HuggingFaceModel):
         generate) counts as one row. Zero rows means params only (e.g.
         ``max_new_tokens=``), so the trace expects ``invoke()`` blocks for the data.
         """
-        value = inputs[0] if inputs else kwargs.get("input_ids")
-        if value is not None:
-            return self._num_rows(value)
-        if kwargs.get("inputs_embeds") is not None:
-            return self._num_rows(kwargs["inputs_embeds"], row_dims=2)
+        if inputs:
+            return self._num_rows(inputs[0])
+        if self._has_text_input(kwargs):
+            return self._num_rows(kwargs)
         # A VLM generate passes its data by keyword; treat its presence as one row.
         if kwargs.get("text") is not None or any(
             kwargs.get(key) is not None
@@ -856,29 +865,23 @@ class TransformersModel(HuggingFaceModel):
         return 0
 
     @staticmethod
-    def _num_rows(value: Any, row_dims: int = 1) -> int:
-        """The leading (row) dimension of one input value.
-
-        ``row_dims`` is how many dimensions one row has: 1 for token ids, 2 for
-        ``inputs_embeds``.
-        """
+    def _num_rows(value: Any) -> int:
+        """The leading (row) dimension of one input value."""
         if isinstance(value, str):
             return 1
+        if isinstance(value, Mapping) and TransformersModel._has_text_input(value):
+            key = "input_ids" if value.get("input_ids") is not None else "inputs_embeds"
+            return len(TransformersModel._split(key, value[key])[0])
         if isinstance(value, torch.Tensor):
-            return 1 if value.ndim <= row_dims else value.shape[0]
+            return 1 if value.ndim <= 1 else value.shape[0]
         chats = TransformersModel._as_chats(value)
         if chats is not None:
             return len(chats)  # a chat conversation is one row, not one per message
+        if TransformersModel._is_token_ids(value):
+            return len(TransformersModel._split("input_ids", value)[0])
         if isinstance(value, (list, tuple)):
-            if not value:
-                return 0
-            # A flat list of token ids is a single sequence; a list of strings /
-            # sub-sequences / tensors is one row per element.
-            return 1 if isinstance(value[0], int) else len(value)
-        if hasattr(value, "get") and value.get("input_ids") is not None:
-            return TransformersModel._num_rows(value["input_ids"])
-        if hasattr(value, "get") and value.get("inputs_embeds") is not None:
-            return TransformersModel._num_rows(value["inputs_embeds"], row_dims=2)
+            # A list of strings / images is one row per element.
+            return len(value)
         # A lone non-text object (e.g. a PIL image) is a single row.
         return 1
 
@@ -1005,7 +1008,7 @@ class TransformersModel(HuggingFaceModel):
                     raise NotImplementedError(
                         "Can't batch these inputs; pass text or token ids."
                     )
-                if data is not None and hasattr(data, "keys"):
+                if isinstance(data, Mapping):
                     return tuple(), {**dict(data), **kwargs}
                 # `forward_kwargs` is `kwargs` for a plain opaque input, and the
                 # processor's encoding when the invoke was written in processor terms.
@@ -1040,15 +1043,22 @@ class TransformersModel(HuggingFaceModel):
         media = self._as_processor_encoding(data, kwargs)
         if media is not None:
             return None, media
-        if self._is_opaque(data, kwargs):
+        if isinstance(data, torch.Tensor) and data.is_floating_point():
+            return None, kwargs  # raw features
+        # The three ways of writing model inputs are one encoding from here on,
+        # so they cannot be routed differently.
+        encoding = self._as_encoding(data, kwargs)
+        if encoding is not None and (
+            not self._has_text_input(encoding) or self._has_nontext_keys(encoding)
+        ):
             return None, kwargs
         if self.task == "keypoint-matching":
             # This task's unit input is a *pair* of images, which collides with
             # the list convention (one prompt per element): the pair is split
             # into two single-image preprocess calls, and a nested pair reads
             # as pre-tokenized ids — which is why this check sits before
-            # `_is_pretokenized`. (An encoding you built yourself is opaque and
-            # never reaches here.)
+            # `_encode_pretokenized`. (An encoding you built yourself is opaque
+            # and never reaches here.)
             raise NotImplementedError(
                 "task='keypoint-matching' takes a pair of images as one input, "
                 "which a trace's list convention (one prompt per element) "
@@ -1057,12 +1067,8 @@ class TransformersModel(HuggingFaceModel):
                 "yourself: model.image_processor(images=[image_a, image_b], "
                 "return_tensors='pt')."
             )
-        # Chat detection comes first, as it does in `_num_rows` and in
-        # `Pipeline.__call__`: a list of conversations is a list of lists (of
-        # message dicts), which `_is_pretokenized` would otherwise read as
-        # pre-tokenized sub-sequences and hand to `torch.tensor`.
-        if self._as_chats(data) is None and self._is_pretokenized(data, kwargs):
-            return self._encode_pretokenized(data, kwargs)
+        if encoding is not None:
+            return self._encode_pretokenized(encoding)
         if self.task == "mask-generation":
             # This task's preprocess *runs the model*: it embeds the image, then
             # yields one input per batch of candidate points, each carrying a copy
@@ -1218,7 +1224,8 @@ class TransformersModel(HuggingFaceModel):
         ]
         if len(items) == 1:
             return dict(items[0])
-        self._fill_missing(items)
+        targets = self._target_fields()
+        self._fill_missing(items, targets)
 
         feature = self.feature_extractor or self.image_processor
         side = (
@@ -1226,7 +1233,6 @@ class TransformersModel(HuggingFaceModel):
             or getattr(self.tokenizer, "padding_side", None)
             or "right"
         )
-        targets = self._target_fields()
 
         encoding = {}
         others = [
@@ -1249,13 +1255,13 @@ class TransformersModel(HuggingFaceModel):
             return self._TARGET_FIELDS | {"labels"}
         return self._TARGET_FIELDS
 
-    def _fill_missing(self, items: list) -> None:
+    def _fill_missing(self, items: list, targets: frozenset) -> None:
         """Give every row the fields any row has (in place), so they batch.
 
-        An invoke that leaves out a field another supplies gets what the model
-        would have assumed for it: segment zero, positions counted from zero, no
-        mask, and a label the loss ignores. A field with no such default (a
-        decoder input, a float label) has to be passed by every invoke or none.
+        An invoke that leaves out a field another supplies gets a default:
+        segment zero, positions counted from its first token, and a label the
+        loss ignores. A field with no default (a decoder input, a float label)
+        has to be passed by every invoke or none.
         """
         for key in {key for item in items for key in item}:
             present = [item[key] for item in items if key in item]
@@ -1265,18 +1271,18 @@ class TransformersModel(HuggingFaceModel):
                 if key in item:
                     continue
                 ids = item.get("input_ids", item.get("inputs_embeds"))
-                if ids is not None and key == "attention_mask":
-                    item[key] = torch.ones(ids.shape[:2], dtype=torch.long)
-                elif ids is not None and key == "token_type_ids":
+                if ids is not None and key == "token_type_ids":
                     item[key] = torch.zeros(ids.shape[:2], dtype=torch.long)
                 elif ids is not None and key == "position_ids":
-                    item[key] = torch.arange(ids.shape[1]).unsqueeze(0)
+                    item[key] = self._positions(
+                        item.get("attention_mask", torch.ones(ids.shape[:2]))
+                    )
                 elif key == "labels" and not present[0].is_floating_point():
                     # Ignored labels: one per example, or one per token of this row
                     # where labels follow the input (a target is widened by padding).
                     like = present[0]
                     if like.dim() > 1:
-                        aligned = ids is not None and key not in self._target_fields()
+                        aligned = ids is not None and key not in targets
                         like = like[:, :1].expand(-1, ids.shape[1] if aligned else 1)
                     item[key] = torch.full_like(like, -100)
                 else:
@@ -1289,14 +1295,20 @@ class TransformersModel(HuggingFaceModel):
     def _pad(self, key: str, rows: list, left: bool) -> torch.Tensor:
         """Concatenate one field's rows, padding the narrower ones to the widest."""
         rows = [row.to(rows[0].device) for row in rows]
+        if len({row.dim() for row in rows}) > 1:
+            raise ValueError(
+                f"Can't batch `{key}`: its rows have shapes "
+                f"{', '.join(str(tuple(row.shape[1:])) for row in rows)}. "
+                "Pass it the same way in every invoke."
+            )
         if len({row.shape[1:] for row in rows}) > 1:
             value = self._ROW_FIELDS[key]
             if value is None:
                 value = getattr(self.tokenizer, "pad_token_id", None)
                 if value is None:
                     raise ValueError(
-                        f"Can't pad `{key}` rows of different lengths: the tokenizer "
-                        "has no pad token. Set `model.tokenizer.pad_token`."
+                        f"Can't pad `{key}` rows of different lengths without a pad "
+                        "token. Set `model.tokenizer.pad_token`."
                     )
             width = max(row.shape[1] for row in rows)
             # `pad` counts dimensions from the last, so skip the ones after the width.
@@ -1312,22 +1324,19 @@ class TransformersModel(HuggingFaceModel):
         return torch.cat(rows)
 
     @staticmethod
-    def _is_opaque(data: Any, kwargs: dict) -> bool:
-        """Whether the input must be passed to the model as-is (not batched as text).
+    def _positions(mask: torch.Tensor) -> torch.Tensor:
+        """``position_ids`` for a ``[rows, tokens]`` attention mask.
 
-        A raw feature tensor, or an encoding (positional or via ``kwargs``) that has
-        neither ``input_ids`` nor ``inputs_embeds``, or carries a non-text modality
-        field (``pixel_values``, ...).
+        A row that is padding then tokens is counted from its first token, so
+        left padding does not shift it. Any other row (unpadded, padded on the
+        right, or masked with a gap, which is not padding) is counted from its
+        first position, as the model would count it.
         """
-        if isinstance(data, torch.Tensor):
-            return data.is_floating_point()
-        if data is None:
-            return TransformersModel._has_nontext_keys(kwargs)
-        if hasattr(data, "get") and not isinstance(data, (list, tuple, str)):
-            if TransformersModel._is_task_input(data):
-                return False
-            return not TransformersModel._has_text_input(data) or TransformersModel._has_nontext_keys(data)
-        return False
+        mask = mask.long()
+        counted = (mask.cumsum(-1) - 1).clamp(min=0)
+        plain = torch.arange(mask.shape[-1], device=mask.device).expand_as(mask)
+        left_padded = (mask.diff(dim=-1) >= 0).all(-1, keepdim=True)
+        return torch.where(left_padded, counted, plain)
 
     @staticmethod
     def _is_task_input(data: Any) -> bool:
@@ -1346,7 +1355,7 @@ class TransformersModel(HuggingFaceModel):
         misreads ``table-question-answering``'s dict, whose ``pd.DataFrame``
         table also has a ``.shape``, as an encoding.
         """
-        values = list(dict(data).values()) if hasattr(data, "keys") else []
+        values = list(data.values()) if isinstance(data, Mapping) else []
         return bool(values) and not any(
             isinstance(value, torch.Tensor) for value in values
         )
@@ -1372,42 +1381,41 @@ class TransformersModel(HuggingFaceModel):
         )
 
     @staticmethod
-    def _is_pretokenized(data: Any, kwargs: dict) -> bool:
-        """Whether the input is already token ids / an encoding (not raw text)."""
-        if data is None:
-            return TransformersModel._has_text_input(kwargs)
-        if isinstance(data, str):
-            return False
-        if isinstance(data, torch.Tensor):
-            return not data.is_floating_point()
+    def _is_token_ids(data: Any) -> bool:
+        """Whether a positional input is token ids: an integer array, or a list of ints or of sequences."""
         if isinstance(data, (list, tuple)):
-            if not data:
+            if not data or TransformersModel._as_chats(data) is not None:
                 return False
-            first = data[0]
-            if isinstance(first, str):
-                return False
-            if isinstance(first, torch.Tensor):
-                return not first.is_floating_point()
-            return isinstance(first, (int, list, tuple))
-        if hasattr(data, "get"):
-            return TransformersModel._has_text_input(data)
+            data = data[0]
+            if isinstance(data, (numbers.Integral, list, tuple)):
+                return True
+        if isinstance(data, torch.Tensor) or type(data).__module__ == "numpy":
+            return not torch.as_tensor(data).is_floating_point()
         return False
 
-    def _encode_pretokenized(self, data: Any, kwargs: dict) -> tuple:
-        """A pre-tokenized invoke -> (one model-input dict per row, forward kwargs).
+    def _as_encoding(self, data: Any, kwargs: dict) -> Optional[dict]:
+        """An invoke written in model inputs -> one encoding; ``None`` otherwise.
 
-        The three ways of writing it — an encoding, keywords, ids with keywords —
-        are merged into one encoding first, so they cannot differ. Its
-        `_ROW_FIELDS` are split into rows, each keeping a leading batch
-        dimension of 1 for `_collate`; the rest are forward arguments.
+        An encoding, keywords, and ids with keywords are merged here, keywords
+        winning. Text, an image, or a task's own dict is not model input.
         """
         if data is None:
-            encoding = kwargs
-        elif hasattr(data, "get") and not isinstance(data, (list, tuple, torch.Tensor)):
-            encoding = {**dict(data), **kwargs}
-        else:
-            encoding = {"input_ids": data, **kwargs}
+            # Keywords alone are an encoding only if they carry an input.
+            if self._has_text_input(kwargs) or self._has_nontext_keys(kwargs):
+                return kwargs
+            return None
+        if isinstance(data, Mapping):
+            return None if self._is_task_input(data) else {**data, **kwargs}
+        if self._is_token_ids(data):
+            return {"input_ids": data, **kwargs}
+        return None
 
+    def _encode_pretokenized(self, encoding: dict) -> tuple:
+        """A text encoding -> (one model-input dict per row, forward kwargs).
+
+        Its `_ROW_FIELDS` are split into rows, each keeping a leading batch
+        dimension of 1 for `_collate`; the rest are forward arguments.
+        """
         fields = {
             key: value
             for key, value in encoding.items()
@@ -1420,42 +1428,58 @@ class TransformersModel(HuggingFaceModel):
         items = [{source: row} for row in inputs]
         if "attention_mask" not in fields:
             for item in items:
-                item["attention_mask"] = torch.ones(item[source].shape[:2], dtype=torch.long)
+                # One per token: ids of any rank, or embeddings less their width.
+                row = item[source]
+                shape = row.shape if source == "input_ids" else row.shape[:-1]
+                item["attention_mask"] = torch.ones(shape, dtype=torch.long)
 
+        width = inputs[0].shape[1]
         for key, value in fields.items():
-            rows, _ = self._split(key, value, batched)
-            # One row for a batch of several is shared by all of them.
-            if len(rows) == 1:
+            rows, _ = self._split(key, value, batched, width)
+            if len(rows) == 1 and key in self._SHARED_FIELDS:
                 rows = rows * len(items)
             if len(rows) != len(items):
                 raise ValueError(
                     f"`{key}` has {len(rows)} rows, but `{source}` has {len(items)}."
                 )
             for item, row in zip(items, rows):
+                if key in self._SHARED_FIELDS and row.shape[1] != item[source].shape[1]:
+                    raise ValueError(
+                        f"`{key}` has {row.shape[1]} positions for a row of "
+                        f"{item[source].shape[1]} tokens."
+                    )
                 item[key] = row
         return items, forward
 
     @staticmethod
-    def _split(key: str, value: Any, batched: Optional[bool] = None) -> tuple:
+    def _split(
+        key: str, value: Any, batched: Optional[bool] = None, width: Optional[int] = None
+    ) -> tuple:
         """One field of an encoding -> (its rows, whether it came as a batch).
 
         Each row comes back with a leading batch dimension of 1. Whether the
         encoding is a batch is read off the input (``batched=None``) — ids of
         more than one dimension, or a list of sequences — and the other fields
-        are split to match: beside unbatched ids, flat per-token labels and a
-        single class label are each one row.
+        are split to match. Beside unbatched ids of ``width`` tokens, a flat
+        value is that one row's: per-token labels, or a single class label
+        (a lone value that is not one per token).
         """
-        if isinstance(value, (list, tuple)) and value and isinstance(
-            value[0], (list, tuple, torch.Tensor)
-        ):
-            # A list of sequences, which may be ragged: one row each.
-            return [torch.as_tensor(row).unsqueeze(0) for row in value], True
-        value = torch.as_tensor(value)
         # How many dimensions one row of the *input* has.
         row_dims = 2 if key.endswith("inputs_embeds") else 1
+        if isinstance(value, (list, tuple)) and value and not isinstance(
+            value[0], numbers.Number
+        ):
+            # A list of sequences, which may be ragged: one row each.
+            rows = [torch.as_tensor(row) for row in value]
+            return [row if row.dim() > row_dims else row.unsqueeze(0) for row in rows], True
+        value = torch.as_tensor(value)
         if batched is None:
             batched = value.dim() > row_dims
-        if value.dim() == 0 or (not batched and value.dim() <= row_dims):
+        if not batched and value.dim() <= row_dims:
+            if value.numel() == 1 and width not in (None, 1):
+                return [value.reshape(1)], batched
+            return [value.unsqueeze(0)], batched
+        if value.dim() == 0:
             return [value.unsqueeze(0)], batched
         return [row.unsqueeze(0) for row in value], batched
 
@@ -1464,18 +1488,12 @@ class TransformersModel(HuggingFaceModel):
 
         Left padding shifts each real token's absolute index, so an absolute-position
         model (GPT-2 family) would mispredict a short prompt padded up to a longer
-        one. Deriving ``position_ids`` from the attention mask keeps every real token
-        at its true 0-based position. Applied only where that is what the mask
-        means and the model can use it: a left-padding tokenizer, a forward that
-        takes ``position_ids`` and was given none, and a text-only batch whose
-        every mask row is padding then tokens. An *unpadded* batch needs no correction, a
-        right-padded one is already correct, a mask with a gap in it is not
-        padding, and a multimodal model derives its own positions from the
-        image-expanded sequence.
-        Row count is deliberately not part of this test -- a single padded row needs
-        the correction just as much as a padded batch does, and gating on
-        ``shape[0] > 1`` made the same prompt answer differently depending on whether
-        another row happened to share its batch.
+        one. Counting each left-padded row from its first token (`_positions`)
+        keeps every real token at its true 0-based position. Applied only where
+        the mask says that: a left-padding tokenizer, no positions given, a
+        text-only batch, and a mask the width of the input with padding in it. A
+        mask wider than the input covers a key-value cache as well, and the
+        model places those tokens itself.
         """
         mask = encoding.get("attention_mask")
         # Under `scan` the forward runs on fake tensors to propagate shapes only, so
@@ -1484,17 +1502,20 @@ class TransformersModel(HuggingFaceModel):
         # the correction here changes nothing a scan can observe.
         if detect_fake_mode() is not None:
             return
+        ids = encoding.get("input_ids", encoding.get("inputs_embeds"))
         if (
             "position_ids" in encoding
             or not isinstance(mask, torch.Tensor)
+            or not isinstance(ids, torch.Tensor)
             or mask.dim() != 2
+            or mask.shape != ids.shape[:2]
             or bool(mask.all())
-            or bool((mask.diff(dim=-1) < 0).any())
-            or any(key not in self._ROW_FIELDS for key in encoding)
             or getattr(self.tokenizer, "padding_side", None) != "left"
-            or "position_ids" not in inspect.signature(type(self._module).forward).parameters
+            or any(key not in self._ROW_FIELDS for key in encoding)
         ):
             return
-        position_ids = mask.long().cumsum(-1) - 1
-        position_ids.masked_fill_(mask == 0, 0)
+        position_ids = self._positions(mask)
+        # No left-padded row: the model's own count is already right.
+        if bool((position_ids == torch.arange(mask.shape[-1], device=mask.device)).all()):
+            return
         encoding["position_ids"] = position_ids

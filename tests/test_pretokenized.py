@@ -1,5 +1,8 @@
 """Pretokenized traces preserve the model inputs produced by a tokenizer."""
 
+import copy
+
+import numpy as np
 import pytest
 import torch
 from transformers import (
@@ -385,16 +388,6 @@ def test_positions_are_derived_only_from_left_padding(causal):
 
 
 @torch.no_grad()
-def test_positions_are_not_given_to_a_forward_that_takes_none(seq2seq):
-    received, _ = batch(
-        seq2seq,
-        ((torch.tensor([[2, 5, 6, 3]]),), {"decoder_input_ids": torch.tensor([[0]])}),
-        ((torch.tensor([[2, 3]]),), {"decoder_input_ids": torch.tensor([[0]])}),
-    )
-    assert "position_ids" not in received
-
-
-@torch.no_grad()
 def test_a_flag_beside_keyword_ids_changes_nothing_else(causal):
     ids, mask = torch.tensor([[0, 2, 5]]), torch.tensor([[0, 1, 1]])
     with causal.trace(input_ids=ids, attention_mask=mask, output_hidden_states=True):
@@ -408,5 +401,137 @@ def test_equal_length_rows_batch_without_a_pad_token(causal):
     causal.tokenizer.pad_token = None
     received, _ = batch(causal, ((torch.tensor([[2, 5]]),), {}), ((torch.tensor([[6, 3]]),), {}))
     assert received["input_ids"].tolist() == [[2, 5], [6, 3]]
-    with pytest.raises(ValueError, match="the tokenizer has no pad token"):
+    with pytest.raises(ValueError, match="without a pad token"):
         batch(causal, ((torch.tensor([[2, 5]]),), {}), ((torch.tensor([[6]]),), {}))
+
+
+# -- the edges an audit against the native models turned up -------------------
+
+
+@torch.no_grad()
+def test_one_class_label_is_one_shape_however_it_is_written(tokenizer):
+    module = BertForSequenceClassification(tiny_config()).eval()
+    model = TransformersModel(module, task="text-classification", tokenizer=tokenizer, device="cpu")
+    received, _ = batch(
+        model,
+        (([2, 5, 6, 3],), {"labels": 1}),
+        (([2, 7, 3],), {"labels": torch.tensor(0)}),
+        (([2, 6, 3],), {"labels": [1]}),
+        ((torch.tensor([[2, 5, 3]]),), {"labels": torch.tensor([0])}),
+    )
+    assert received["labels"].tolist() == [1, 0, 1, 0]
+
+
+@torch.no_grad()
+def test_only_segments_and_positions_are_shared_across_rows(tokenizer):
+    module = BertForSequenceClassification(tiny_config()).eval()
+    model = TransformersModel(module, task="text-classification", tokenizer=tokenizer, device="cpu")
+    ids = torch.tensor([[2, 5, 6, 3], [2, 7, 6, 3]])
+    # The model raises for one label over two rows; so does the trace.
+    with pytest.raises(ValueError, match="`labels` has 1 rows, but `input_ids` has 2"):
+        with model.trace(ids, labels=torch.tensor([1])):
+            pass
+    with pytest.raises(ValueError, match="`token_type_ids` has 3 positions for a row of 4"):
+        with model.trace(ids, token_type_ids=torch.tensor([[0, 1, 1]])):
+            pass
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        pytest.param([torch.tensor([[2, 5, 4, 3]]), torch.tensor([[2, 7, 3]])], id="list-of-1xL-tensors"),
+        pytest.param(np.array([[2, 5, 4, 3], [2, 7, 3, 0]]), id="numpy"),
+        pytest.param([np.int64(2), np.int64(5), np.int64(3)], id="numpy-ints"),
+    ],
+)
+@torch.no_grad()
+def test_id_forms_count_and_split_into_the_same_rows(model, ids):
+    rows = model._batch_size(ids)
+    received, _ = batch(model, ((ids,), {}), ((torch.tensor([[2, 5, 3]]),), {}))
+    assert received["input_ids"].dim() == 2
+    assert received["input_ids"].shape[0] == rows + 1
+
+
+@torch.no_grad()
+def test_a_tensor_outside_the_table_passes_the_input_through_in_every_form(causal):
+    # Not known to be per-row, so the input is handed over whole — whichever
+    # way it was written — and such invokes do not batch.
+    ids, extra = torch.tensor([[2, 5, 6]]), torch.arange(3)
+    for args, kwargs in (((ids,), {}), ((), {"input_ids": ids}), (({"input_ids": ids},), {})):
+        assert causal._preprocess_invoke(args[0] if args else None, {**kwargs, "cache_position": extra})[0] is None
+
+
+@torch.no_grad()
+def test_a_mask_wider_than_the_input_gets_no_positions(causal):
+    # A key-value cache continuation: the mask covers past and new tokens.
+    module = causal._module
+    past = module(input_ids=torch.tensor([[0, 2, 5]]), attention_mask=torch.tensor([[0, 1, 1]]), use_cache=True)
+    new, mask = torch.tensor([[6]]), torch.tensor([[0, 1, 1, 1]])
+    # The forward appends to the cache it is given, so each run gets its own.
+    cache = copy.deepcopy(past.past_key_values)
+    expected = module(input_ids=new, attention_mask=mask, past_key_values=cache).logits
+    with causal.trace(new, attention_mask=mask, past_key_values=past.past_key_values):
+        received = nnsight.save(causal.inputs[1])
+        logits = nnsight.save(causal.output.logits)
+    assert "position_ids" not in received
+    torch.testing.assert_close(logits, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.long, torch.bool])
+@torch.no_grad()
+def test_positions_are_decided_row_by_row(causal, dtype):
+    # A row padded on the right, a row with a gap, and a row nnsight left-pads:
+    # only the last is counted from its first token.
+    received, _ = batch(
+        causal,
+        ((torch.tensor([[2, 5, 6, 0, 0]]),), {"attention_mask": torch.tensor([[1, 1, 1, 0, 0]], dtype=dtype)}),
+        ((torch.tensor([[2, 5, 6, 7, 3]]),), {"attention_mask": torch.tensor([[1, 1, 0, 1, 1]], dtype=dtype)}),
+        ((torch.tensor([[2, 7, 3]]),), {"attention_mask": torch.tensor([[1, 1, 1]], dtype=dtype)}),
+    )
+    assert received["position_ids"].tolist() == [[0, 1, 2, 3, 4], [0, 1, 2, 3, 4], [0, 0, 0, 1, 2]]
+
+
+@torch.no_grad()
+def test_default_positions_count_from_a_rows_first_token(causal):
+    # One invoke passes positions, so the other's are filled in — from its mask.
+    received, _ = batch(
+        causal,
+        ((torch.tensor([[0, 2, 5]]),), {"attention_mask": torch.tensor([[0, 1, 1]])}),
+        ((torch.tensor([[2, 5, 6]]),), {"position_ids": torch.tensor([[4, 5, 6]])}),
+    )
+    assert received["position_ids"].tolist() == [[0, 0, 1], [4, 5, 6]]
+
+
+@torch.no_grad()
+def test_each_field_is_padded_with_its_own_value(causal, seq2seq):
+    embeds = causal._module.get_input_embeddings()(torch.tensor([[2, 5, 6]])) + 1.0
+    received, _ = batch(
+        causal,
+        ((), {"inputs_embeds": embeds[:, :1], "special_tokens_mask": [[0]], "global_attention_mask": [[1]]}),
+        ((), {"inputs_embeds": embeds, "special_tokens_mask": [[0, 0, 0]], "global_attention_mask": [[1, 1, 1]]}),
+    )
+    assert not received["inputs_embeds"][0, :2].any()
+    assert received["special_tokens_mask"].tolist() == [[1, 1, 0], [0, 0, 0]]
+    assert received["global_attention_mask"].tolist() == [[0, 0, 1], [1, 1, 1]]
+
+    decoder = seq2seq._module.get_input_embeddings()(torch.tensor([[0, 5, 6]])) + 1.0
+    ids = torch.tensor([[2, 5, 3]])
+    received, _ = batch(
+        seq2seq,
+        ((ids,), {"decoder_inputs_embeds": decoder[:, :1]}),
+        ((ids,), {"decoder_inputs_embeds": decoder}),
+    )
+    assert received["decoder_inputs_embeds"].shape == (2, 3, 16)
+    assert not received["decoder_inputs_embeds"][0, 1:].any()
+
+
+@torch.no_grad()
+def test_ids_of_more_than_two_dimensions_get_a_mask_per_token(tokenizer):
+    from transformers import BertForMultipleChoice
+
+    module = BertForMultipleChoice(tiny_config()).eval()
+    model = TransformersModel(module, task="fill-mask", tokenizer=tokenizer, device="cpu")
+    ids = torch.tensor([[[2, 5, 6, 3], [2, 7, 6, 3]]])
+    with model.trace(ids):
+        received = nnsight.save(model.inputs[1])
+    assert received["attention_mask"].shape == ids.shape
