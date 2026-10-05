@@ -15,7 +15,7 @@ this module leans on the pipeline rather than re-deriving any of it:
   ``from_config`` a model, so the meta model is built here and handed to it.
 * **Input**: each invoke goes through the task's own ``preprocess`` (with its own
   ``_sanitize_parameters`` splitting preprocess from forward kwargs), and the
-  per-invoke encodings are padded together by the pipeline's ``pad_collate_fn``.
+  per-invoke encodings are padded together by `TransformersModel._collate`.
 * **Padding**: which side to pad is the model's business, not the task's, so it
   follows `TransformersModel._is_causal` — decoders left-pad and get
   mask-derived ``position_ids``; encoders keep right padding.
@@ -50,6 +50,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
+import inspect
 import sys
 import warnings
 
@@ -792,11 +793,33 @@ class TransformersModel(HuggingFaceModel):
 
     # -- batching ------------------------------------------------------------
 
-    # Encoding keys that are purely text/token; an encoding carrying anything else
-    # (pixel_values, input_features, ...) is multimodal and the model derives its
-    # own positions, so the left-pad position_ids correction is skipped for it.
-    _TEXT_KEYS = frozenset(
-        {"input_ids", "attention_mask", "token_type_ids", "position_ids", "labels"}
+    # The per-row model inputs of a text forward, and what a row is padded with
+    # when another in the batch is wider (``None``: the tokenizer's pad token).
+    # These are split per row, padded and batched; an invoke's other keywords are
+    # forward arguments, handed over as they are. An encoding carrying a tensor
+    # outside this table (pixel_values, input_features, ...) is multimodal: it is
+    # passed through whole, and the model derives its own positions.
+    _ROW_FIELDS = {
+        "input_ids": None,
+        "inputs_embeds": 0.0,
+        "attention_mask": 0,
+        "token_type_ids": 0,
+        "position_ids": 0,
+        "special_tokens_mask": 1,
+        "global_attention_mask": 0,
+        "labels": -100,
+        "start_positions": 0,
+        "end_positions": 0,
+        "next_sentence_label": 0,
+        "decoder_input_ids": None,
+        "decoder_inputs_embeds": 0.0,
+        "decoder_attention_mask": 0,
+    }
+    # The fields with a length of their own rather than the input's. They are
+    # padded on the right whichever side the input is padded on; ``labels`` joins
+    # them on an encoder-decoder, where it is the decoder's target.
+    _TARGET_FIELDS = frozenset(
+        {"decoder_input_ids", "decoder_inputs_embeds", "decoder_attention_mask"}
     )
 
     # Non-text arguments a task's *processor* takes. An invoke naming any of these is
@@ -822,6 +845,8 @@ class TransformersModel(HuggingFaceModel):
         value = inputs[0] if inputs else kwargs.get("input_ids")
         if value is not None:
             return self._num_rows(value)
+        if kwargs.get("inputs_embeds") is not None:
+            return self._num_rows(kwargs["inputs_embeds"], row_dims=2)
         # A VLM generate passes its data by keyword; treat its presence as one row.
         if kwargs.get("text") is not None or any(
             kwargs.get(key) is not None
@@ -831,12 +856,16 @@ class TransformersModel(HuggingFaceModel):
         return 0
 
     @staticmethod
-    def _num_rows(value: Any) -> int:
-        """The leading (row) dimension of one input value."""
+    def _num_rows(value: Any, row_dims: int = 1) -> int:
+        """The leading (row) dimension of one input value.
+
+        ``row_dims`` is how many dimensions one row has: 1 for token ids, 2 for
+        ``inputs_embeds``.
+        """
         if isinstance(value, str):
             return 1
         if isinstance(value, torch.Tensor):
-            return 1 if value.ndim <= 1 else value.shape[0]
+            return 1 if value.ndim <= row_dims else value.shape[0]
         chats = TransformersModel._as_chats(value)
         if chats is not None:
             return len(chats)  # a chat conversation is one row, not one per message
@@ -848,6 +877,8 @@ class TransformersModel(HuggingFaceModel):
             return 1 if isinstance(value[0], int) else len(value)
         if hasattr(value, "get") and value.get("input_ids") is not None:
             return TransformersModel._num_rows(value["input_ids"])
+        if hasattr(value, "get") and value.get("inputs_embeds") is not None:
+            return TransformersModel._num_rows(value["inputs_embeds"], row_dims=2)
         # A lone non-text object (e.g. a PIL image) is a single row.
         return 1
 
@@ -902,7 +933,7 @@ class TransformersModel(HuggingFaceModel):
         and ``trace`` run the model, so their input is assembled into model inputs
         here (see `_batch_forward`): each invoke's text/image is turned into
         model inputs by `Pipeline.preprocess` and the per-invoke encodings are
-        padded together by the pipeline's own ``pad_collate_fn``; pre-tokenized ids
+        padded together by `_collate`; pre-tokenized ids
         and raw feature tensors bypass preprocessing.
         """
         name = getattr(fn, "__name__", None)
@@ -1171,50 +1202,122 @@ class TransformersModel(HuggingFaceModel):
         return {**dict(encoding), **forward}
 
     def _collate(self, items: list) -> dict:
-        """Pad per-invoke encodings into one batch of model-input tensors."""
-        # Drop the pipeline's non-tensor bookkeeping (e.g. prompt_text) up front, so
-        # every item has the same keys for pad_collate_fn's consistency check.
+        """Pad per-row encodings into one batch of model-input tensors.
+
+        The fields of `_ROW_FIELDS` are batched here: rows of one shape are
+        concatenated, and narrower rows are padded with the field's own value —
+        on the side the tokenizer pads on, or on the right for a field with a
+        length of its own (`_TARGET_FIELDS`). Anything else a row carries
+        (a pipeline's image or audio features) goes to the pipeline's
+        ``pad_collate_fn``, which knows the feature extractor's padding.
+        """
+        # Drop the pipeline's non-tensor bookkeeping (e.g. prompt_text) up front.
         items = [
             {k: v for k, v in item.items() if isinstance(v, torch.Tensor)}
             for item in items
         ]
         if len(items) == 1:
             return dict(items[0])
-        from transformers.pipelines.base import pad_collate_fn
+        self._fill_missing(items)
 
         feature = self.feature_extractor or self.image_processor
-        encoding = dict(pad_collate_fn(self.tokenizer, feature)(items))
-        if "labels" in encoding:
-            # Pipeline collation pads unknown fields with zero, which is a valid
-            # target class/token, so labels are batched here instead. Rows of one
-            # shape (per-example labels, equal-length targets) are stacked as they
-            # are. Rows of different widths are padded with -100, which the loss
-            # ignores, to the widest of them: on the side the ids were padded on
-            # when each row labels its own tokens, on the right otherwise
-            # (a seq2seq target has its own length).
-            labels = [item["labels"] for item in items]
-            if len({row.shape for row in labels}) > 1:
-                width = max(row.shape[-1] for row in labels)
-                left = getattr(self.tokenizer, "padding_side", "right") == "left" and all(
-                    item["labels"].shape == item["input_ids"].shape for item in items
-                )
-                labels = [
-                    torch.nn.functional.pad(
-                        row,
-                        (width - row.shape[-1], 0) if left else (0, width - row.shape[-1]),
-                        value=-100,
-                    )
-                    for row in labels
-                ]
-            encoding["labels"] = torch.cat(labels)
+        side = (
+            getattr(feature, "padding_side", None)
+            or getattr(self.tokenizer, "padding_side", None)
+            or "right"
+        )
+        targets = self._target_fields()
+
+        encoding = {}
+        others = [
+            {k: v for k, v in item.items() if k not in self._ROW_FIELDS} for item in items
+        ]
+        if others[0]:
+            from transformers.pipelines.base import pad_collate_fn
+
+            encoding.update(pad_collate_fn(self.tokenizer, feature)(others))
+        for key in items[0]:
+            if key in self._ROW_FIELDS:
+                rows = [item[key] for item in items]
+                encoding[key] = self._pad(key, rows, side == "left" and key not in targets)
         return encoding
+
+    def _target_fields(self) -> frozenset:
+        """The fields with a length of their own on this model (see `_TARGET_FIELDS`)."""
+        config = getattr(self._module, "config", None)
+        if getattr(config, "is_encoder_decoder", False):
+            return self._TARGET_FIELDS | {"labels"}
+        return self._TARGET_FIELDS
+
+    def _fill_missing(self, items: list) -> None:
+        """Give every row the fields any row has (in place), so they batch.
+
+        An invoke that leaves out a field another supplies gets what the model
+        would have assumed for it: segment zero, positions counted from zero, no
+        mask, and a label the loss ignores. A field with no such default (a
+        decoder input, a float label) has to be passed by every invoke or none.
+        """
+        for key in {key for item in items for key in item}:
+            present = [item[key] for item in items if key in item]
+            if len(present) == len(items):
+                continue
+            for item in items:
+                if key in item:
+                    continue
+                ids = item.get("input_ids", item.get("inputs_embeds"))
+                if ids is not None and key == "attention_mask":
+                    item[key] = torch.ones(ids.shape[:2], dtype=torch.long)
+                elif ids is not None and key == "token_type_ids":
+                    item[key] = torch.zeros(ids.shape[:2], dtype=torch.long)
+                elif ids is not None and key == "position_ids":
+                    item[key] = torch.arange(ids.shape[1]).unsqueeze(0)
+                elif key == "labels" and not present[0].is_floating_point():
+                    # Ignored labels: one per example, or one per token of this row
+                    # where labels follow the input (a target is widened by padding).
+                    like = present[0]
+                    if like.dim() > 1:
+                        aligned = ids is not None and key not in self._target_fields()
+                        like = like[:, :1].expand(-1, ids.shape[1] if aligned else 1)
+                    item[key] = torch.full_like(like, -100)
+                else:
+                    raise ValueError(
+                        f"Can't batch these invokes: {len(present)} of {len(items)} rows "
+                        f"have `{key}`, and there is no default to give the others. "
+                        f"Pass `{key}` in every invoke or in none."
+                    )
+
+    def _pad(self, key: str, rows: list, left: bool) -> torch.Tensor:
+        """Concatenate one field's rows, padding the narrower ones to the widest."""
+        rows = [row.to(rows[0].device) for row in rows]
+        if len({row.shape[1:] for row in rows}) > 1:
+            value = self._ROW_FIELDS[key]
+            if value is None:
+                value = getattr(self.tokenizer, "pad_token_id", None)
+                if value is None:
+                    raise ValueError(
+                        f"Can't pad `{key}` rows of different lengths: the tokenizer "
+                        "has no pad token. Set `model.tokenizer.pad_token`."
+                    )
+            width = max(row.shape[1] for row in rows)
+            # `pad` counts dimensions from the last, so skip the ones after the width.
+            after = (0, 0) * (rows[0].dim() - 2)
+            rows = [
+                torch.nn.functional.pad(
+                    row,
+                    after + ((width - row.shape[1], 0) if left else (0, width - row.shape[1])),
+                    value=value,
+                )
+                for row in rows
+            ]
+        return torch.cat(rows)
 
     @staticmethod
     def _is_opaque(data: Any, kwargs: dict) -> bool:
         """Whether the input must be passed to the model as-is (not batched as text).
 
         A raw feature tensor, or an encoding (positional or via ``kwargs``) that has
-        no ``input_ids`` or carries a non-text modality field (``pixel_values``, ...).
+        neither ``input_ids`` nor ``inputs_embeds``, or carries a non-text modality
+        field (``pixel_values``, ...).
         """
         if isinstance(data, torch.Tensor):
             return data.is_floating_point()
@@ -1223,7 +1326,7 @@ class TransformersModel(HuggingFaceModel):
         if hasattr(data, "get") and not isinstance(data, (list, tuple, str)):
             if TransformersModel._is_task_input(data):
                 return False
-            return data.get("input_ids") is None or TransformersModel._has_nontext_keys(data)
+            return not TransformersModel._has_text_input(data) or TransformersModel._has_nontext_keys(data)
         return False
 
     @staticmethod
@@ -1250,17 +1353,29 @@ class TransformersModel(HuggingFaceModel):
 
     @staticmethod
     def _has_nontext_keys(encoding: Any) -> bool:
-        """Whether an encoding carries a field beyond the plain text/token ones."""
+        """Whether an encoding carries a tensor beyond the text fields of `_ROW_FIELDS`.
+
+        Tensors only: a flag riding along (``output_hidden_states=True``) is a
+        forward argument, and says nothing about what the input is.
+        """
         return any(
-            key not in TransformersModel._TEXT_KEYS and value is not None
+            key not in TransformersModel._ROW_FIELDS and isinstance(value, torch.Tensor)
             for key, value in dict(encoding).items()
+        )
+
+    @staticmethod
+    def _has_text_input(encoding: Any) -> bool:
+        """Whether an encoding names the tokens: ``input_ids`` or ``inputs_embeds``."""
+        return (
+            encoding.get("input_ids") is not None
+            or encoding.get("inputs_embeds") is not None
         )
 
     @staticmethod
     def _is_pretokenized(data: Any, kwargs: dict) -> bool:
         """Whether the input is already token ids / an encoding (not raw text)."""
         if data is None:
-            return kwargs.get("input_ids") is not None
+            return TransformersModel._has_text_input(kwargs)
         if isinstance(data, str):
             return False
         if isinstance(data, torch.Tensor):
@@ -1275,15 +1390,16 @@ class TransformersModel(HuggingFaceModel):
                 return not first.is_floating_point()
             return isinstance(first, (int, list, tuple))
         if hasattr(data, "get"):
-            return data.get("input_ids") is not None
+            return TransformersModel._has_text_input(data)
         return False
 
     def _encode_pretokenized(self, data: Any, kwargs: dict) -> tuple:
-        """Split a text encoding into rows, retaining its model-input fields.
+        """A pre-tokenized invoke -> (one model-input dict per row, forward kwargs).
 
-        Sequence fields keep a leading singleton batch dimension for padding.
-        Labels may instead be one scalar per example; their rank distinguishes
-        those from per-token targets when the rows are collated.
+        The three ways of writing it — an encoding, keywords, ids with keywords —
+        are merged into one encoding first, so they cannot differ. Its
+        `_ROW_FIELDS` are split into rows, each keeping a leading batch
+        dimension of 1 for `_collate`; the rest are forward arguments.
         """
         if data is None:
             encoding = kwargs
@@ -1292,42 +1408,56 @@ class TransformersModel(HuggingFaceModel):
         else:
             encoding = {"input_ids": data, **kwargs}
 
-        forward = {k: v for k, v in encoding.items() if k not in self._TEXT_KEYS}
-        items = []
-        for sequence in self._as_sequences(encoding["input_ids"]):
-            input_ids = torch.tensor(sequence).unsqueeze(0)
-            items.append({"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)})
+        fields = {
+            key: value
+            for key, value in encoding.items()
+            if key in self._ROW_FIELDS and value is not None
+        }
+        forward = {k: v for k, v in encoding.items() if k not in self._ROW_FIELDS}
 
-        for key in ("attention_mask", "token_type_ids", "position_ids", "labels"):
-            value = encoding.get(key)
-            if value is None:
-                continue
-            rows = list(value) if key == "labels" else self._as_sequences(value)
-            # HF broadcasts shared segment/position ids across a batch.
-            if key in {"token_type_ids", "position_ids"} and len(rows) == 1:
+        source = "input_ids" if "input_ids" in fields else "inputs_embeds"
+        inputs, batched = self._split(source, fields.pop(source))
+        items = [{source: row} for row in inputs]
+        if "attention_mask" not in fields:
+            for item in items:
+                item["attention_mask"] = torch.ones(item[source].shape[:2], dtype=torch.long)
+
+        for key, value in fields.items():
+            rows, _ = self._split(key, value, batched)
+            # One row for a batch of several is shared by all of them.
+            if len(rows) == 1:
                 rows = rows * len(items)
             if len(rows) != len(items):
-                raise ValueError(f"{key} has {len(rows)} rows, but input_ids has {len(items)}")
+                raise ValueError(
+                    f"`{key}` has {len(rows)} rows, but `{source}` has {len(items)}."
+                )
             for item, row in zip(items, rows):
-                item[key] = torch.as_tensor(row).unsqueeze(0)
+                item[key] = row
         return items, forward
 
     @staticmethod
-    def _as_sequences(value: Any) -> list:
-        """Split ids/masks into a list of 1-D python-int sequences (one per row)."""
-        if isinstance(value, torch.Tensor):
-            value = value.tolist()  # 1-D -> list[int]; 2-D -> list[list[int]]
-        if isinstance(value, (list, tuple)):
-            if not value:
-                return []
-            first = value[0]
-            if isinstance(first, (list, tuple)):
-                return [list(sequence) for sequence in value]
-            if isinstance(first, torch.Tensor):
-                return [sequence.tolist() for sequence in value]
-            # A flat list of ints is a single sequence.
-            return [list(value)]
-        return [list(value)]
+    def _split(key: str, value: Any, batched: Optional[bool] = None) -> tuple:
+        """One field of an encoding -> (its rows, whether it came as a batch).
+
+        Each row comes back with a leading batch dimension of 1. Whether the
+        encoding is a batch is read off the input (``batched=None``) — ids of
+        more than one dimension, or a list of sequences — and the other fields
+        are split to match: beside unbatched ids, flat per-token labels and a
+        single class label are each one row.
+        """
+        if isinstance(value, (list, tuple)) and value and isinstance(
+            value[0], (list, tuple, torch.Tensor)
+        ):
+            # A list of sequences, which may be ragged: one row each.
+            return [torch.as_tensor(row).unsqueeze(0) for row in value], True
+        value = torch.as_tensor(value)
+        # How many dimensions one row of the *input* has.
+        row_dims = 2 if key.endswith("inputs_embeds") else 1
+        if batched is None:
+            batched = value.dim() > row_dims
+        if value.dim() == 0 or (not batched and value.dim() <= row_dims):
+            return [value.unsqueeze(0)], batched
+        return [row.unsqueeze(0) for row in value], batched
 
     def _supply_position_ids(self, encoding: dict) -> None:
         """Add mask-derived ``position_ids`` for a left-padded text batch (in place).
@@ -1335,11 +1465,13 @@ class TransformersModel(HuggingFaceModel):
         Left padding shifts each real token's absolute index, so an absolute-position
         model (GPT-2 family) would mispredict a short prompt padded up to a longer
         one. Deriving ``position_ids`` from the attention mask keeps every real token
-        at its true 0-based position. Only applied to a genuinely left-padded,
-        text-only batch without explicit positions: an *unpadded* batch needs no
-        correction (caught by ``mask.all()``), a right-padded (encoder) batch is
-        already correct, and a multimodal model derives its own positions from
-        the image-expanded sequence.
+        at its true 0-based position. Applied only where that is what the mask
+        means and the model can use it: a left-padding tokenizer, a forward that
+        takes ``position_ids`` and was given none, and a text-only batch whose
+        every mask row is padding then tokens. An *unpadded* batch needs no correction, a
+        right-padded one is already correct, a mask with a gap in it is not
+        padding, and a multimodal model derives its own positions from the
+        image-expanded sequence.
         Row count is deliberately not part of this test -- a single padded row needs
         the correction just as much as a padded batch does, and gating on
         ``shape[0] > 1`` made the same prompt answer differently depending on whether
@@ -1357,8 +1489,10 @@ class TransformersModel(HuggingFaceModel):
             or not isinstance(mask, torch.Tensor)
             or mask.dim() != 2
             or bool(mask.all())
+            or bool((mask.diff(dim=-1) < 0).any())
+            or any(key not in self._ROW_FIELDS for key in encoding)
             or getattr(self.tokenizer, "padding_side", None) != "left"
-            or any(key not in self._TEXT_KEYS for key in encoding)
+            or "position_ids" not in inspect.signature(type(self._module).forward).parameters
         ):
             return
         position_ids = mask.long().cumsum(-1) - 1

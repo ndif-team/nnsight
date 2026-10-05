@@ -215,10 +215,33 @@ model.trace(input_ids=ids, attention_mask=mask)         # keyword tensors
 model.trace(**model.tokenizer("hi", return_tensors="pt"))  # unpacked encoding
 ```
 
-Encodings retain `token_type_ids`, explicit `position_ids`, and `labels`. Token
-labels are padded with `-100` so added padding does not contribute to the loss;
-per-example labels retain their batch dimension. Supplied positions take
-precedence over the mask-derived positions used for left padding.
+An encoding, keywords, and ids with keywords are the same input written three
+ways. Its per-row fields are split by row, padded and batched with whatever the
+other invokes pass:
+
+| Field | Padded with |
+|---|---|
+| `input_ids`, `decoder_input_ids` | the pad token |
+| `inputs_embeds`, `decoder_inputs_embeds` | zeros |
+| `attention_mask`, `decoder_attention_mask`, `global_attention_mask`, `token_type_ids`, `position_ids` | 0 |
+| `special_tokens_mask` | 1 |
+| `labels` | -100, which the loss ignores |
+| `start_positions`, `end_positions`, `next_sentence_label` | one per row, no padding |
+
+- **Padding side.** Fields the length of the input follow the tokenizer's side.
+  The decoder's fields, and `labels` on an encoder-decoder, have a length of
+  their own and are padded on the right.
+- **Unbatched ids take unbatched fields.** `trace([5, 6, 7], labels=[5, 6, 7])`
+  is one row with a label per token, and `labels=1` beside it is one class label.
+- **A field one invoke leaves out** gets its default: no mask, segment 0,
+  positions from 0, and an ignored label. A field with no default (a decoder
+  input, a float label) has to be in every invoke or none.
+- **`inputs_embeds`** stands in for `input_ids`, in `trace` and `generate`.
+- **Positions** are derived from the mask only for a left-padded batch (padding,
+  then tokens) on a model whose forward takes `position_ids`; positions you pass
+  are kept.
+
+Other keywords are forward arguments, passed on as they are.
 
 Chat messages are detected and templated automatically (as `Pipeline.__call__` would):
 
