@@ -141,38 +141,85 @@ def _infer_task(module: torch.nn.Module) -> str:
     )
 
 
-def _refuse_noop_peft(peft_id: str, caught: list) -> None:
-    """Turn peft's "missing adapter keys" warning into an error.
+def _attach_adapter(model: torch.nn.Module, peft_id: str, weights: bool = True) -> None:
+    """Attach a PEFT adapter to ``model`` in place, from its repo id or path.
 
-    peft places adapter weights by **name** and drops the ones it cannot match. As
-    ``lora_B`` initialises to zeros, an adapter whose weights did not land is
-    exactly the identity -- the model behaves like the base checkpoint, so a
-    base-vs-adapter comparison silently becomes base-vs-base with every number in
-    it plausible. peft warns about this precisely because ``from_pretrained``
-    cannot return its load result (see `PeftModel.from_pretrained`), but a warning
-    is easy to miss in a long load, and by the time it matters the run is finished.
+    The adapter's layers are injected into the model it was given, where
+    ``PeftModel.from_pretrained`` would wrap it: each targeted module becomes
+    the adapter's layer holding the original as ``base_layer``, and every other
+    module stays where it was. So a path into the base model
+    (``transformer.h.0.attn``) names the same module with or without an adapter.
 
-    Only the mismatch warns: an adapter whose keys all place -- including a freshly
-    initialised one whose ``lora_B`` is legitimately still zero -- produces none.
+    ``weights=False`` reads only the adapter's config, which is all a meta model
+    needs: it gains the adapter's modules and paths, and no weights are loaded.
+
+    An adapter whose weights do not land is refused. peft places them by
+    **name** and leaves the ones it cannot match at their initialisation, and
+    as ``lora_B`` starts at zero that adapter is exactly the identity: a
+    base-vs-adapter comparison silently becomes base-vs-base with every number
+    in it plausible.
     """
-    missing = [
-        warning
-        for warning in caught
-        if "missing adapter keys" in str(warning.message).lower()
-    ]
-    if not missing:
-        return
+    peft = _import_peft()
+    config = peft.PeftConfig.from_pretrained(peft_id)
+    if config.is_prompt_learning or getattr(config, "is_adaption_prompt", False):
+        raise ValueError(
+            f"The PEFT adapter {peft_id!r} is a {config.peft_type} adapter, which "
+            "works by wrapping the model's forward and cannot be attached to its "
+            "modules in place. Adapters that add layers (LoRA and its relatives) "
+            "are the ones `peft=` and `load_adapter` take."
+        )
+    from peft.functional import cast_adapter_dtype
 
-    raise ValueError(
-        f"The PEFT adapter {peft_id!r} did not attach: peft could not match its "
-        "weights to this model's modules by name, dropped them, and left the "
-        "adapter at its zero initialisation -- so it is a no-op and the model "
-        "would behave exactly like the base checkpoint. The usual cause is a "
-        "`task=` that builds a different architecture than the adapter was trained "
-        "against: e.g. task='text-generation' where the adapter targets a "
-        "multimodal config, which needs task='image-text-to-text'. peft reported: "
-        f"{str(missing[0].message)[:400]}"
-    )
+    base = {id(parameter) for parameter in model.parameters()}
+    peft.inject_adapter_in_model(config, model)
+    # What `PeftModel` does on construction: a half-precision adapter is held
+    # in float32.
+    cast_adapter_dtype(model, "default")
+    if not weights:
+        return
+    # The adapter's own parameters: a wrapped module's keep their identity but
+    # not their names (`c_attn.weight` is now `c_attn.base_layer.weight`).
+    added = {name for name, parameter in model.named_parameters() if id(parameter) not in base}
+
+    # A saved adapter names its weights from peft's wrapper.
+    state = {
+        key.removeprefix("base_model.model."): value
+        for key, value in peft.utils.load_peft_weights(peft_id, device="cpu").items()
+    }
+    result = peft.set_peft_model_state_dict(model, state)
+    missing = [key for key in result.missing_keys if key in added]
+    if missing or result.unexpected_keys:
+        _detach_adapter(model)
+        unplaced = (list(result.unexpected_keys) or missing)[:3]
+        raise ValueError(
+            f"The PEFT adapter {peft_id!r} did not attach: peft could not match its "
+            "weights to this model's modules by name, so it would be a no-op and "
+            "the model would behave exactly like the base checkpoint. The usual "
+            "cause is a `task=` that builds a different architecture than the "
+            "adapter was trained against: e.g. task='text-generation' where the "
+            "adapter targets a multimodal config, which needs "
+            f"task='image-text-to-text'. Weights with no place: {unplaced}"
+        )
+
+
+def _detach_adapter(model: torch.nn.Module) -> None:
+    """Take a PEFT adapter attached by `_attach_adapter` back out, in place.
+
+    Every adapter layer is replaced by the module it holds, which leaves the
+    model with the modules and paths it had before.
+    """
+    from peft.tuners.tuners_utils import BaseTunerLayer
+    from peft.utils.other import AuxiliaryTrainingWrapper
+
+    for parent in list(model.modules()):
+        for name, child in list(parent.named_children()):
+            if isinstance(child, BaseTunerLayer):
+                setattr(parent, name, child.get_base_layer())
+            elif isinstance(child, AuxiliaryTrainingWrapper):
+                # `modules_to_save` and trainable tokens wrap a whole module.
+                setattr(parent, name, child.original_module)
+    if hasattr(model, "peft_config"):
+        del model.peft_config
 
 
 def _split_pipeline_kwargs(kwargs: dict) -> tuple[dict, dict]:
@@ -487,8 +534,7 @@ class TransformersModel(HuggingFaceModel):
             # adapter modules onto the meta model, so the meta architecture — and
             # thus the module paths a remote request references — matches the
             # adapted model the server runs. No adapter weights are loaded here.
-            peft = _import_peft()
-            model = peft.get_peft_model(model, peft.PeftConfig.from_pretrained(self.peft))
+            _attach_adapter(model, self.peft, weights=False)
 
         # The model is pre-built, so the meta pipeline only loads preprocessors;
         # pass the pipeline-recognized arch kwargs (e.g. trust_remote_code) so a
@@ -555,16 +601,9 @@ class TransformersModel(HuggingFaceModel):
 
     def _finalize_pipeline(self) -> torch.nn.Module:
         if self.peft is not None:
-            # The pipeline loaded the base weights; wrap them with the adapter's
+            # The pipeline loaded the base weights; attach the adapter with its
             # real weights so the dispatched model runs with the adapter applied.
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                self.pipeline.model = _import_peft().PeftModel.from_pretrained(
-                    self.pipeline.model, self.peft
-                )
-            for warning in caught:
-                warnings.warn(warning.message, warning.category)
-            _refuse_noop_peft(self.peft, caught)
+            _attach_adapter(self.pipeline.model, self.peft)
         self._sync()
         return self.pipeline.model
 
@@ -684,20 +723,22 @@ class TransformersModel(HuggingFaceModel):
         """
         self._swap_adapter(env.get("peft") if env else None)
 
-    def _rebind(self, module: torch.nn.Module) -> None:
+    def _rebind(self, module: torch.nn.Module, previous: Optional[set] = None) -> None:
         """Rebuild the Envoy tree around ``module`` in place.
 
-        An adapter wrap/unwrap changes the module structure (adapter modules
-        appear or disappear), so re-init rather than `_update`, reusing this
-        envoy's interleaver, rename spec and custom envoy classes. Drop the
-        previous tree's child-envoy attributes first — the new structure has
-        different top-level children, and __init__ resets _children without
-        clearing the stale attributes those children left.
+        Attaching or removing an adapter changes the module structure (adapter
+        modules appear or disappear), so re-init rather than `_update`, reusing
+        this envoy's interleaver, rename spec and custom envoy classes. Drop the
+        previous tree's child-envoy attributes first — __init__ resets
+        _children without clearing the attributes those children left.
+
+        ``previous`` is the modules the tree held before a change made to
+        ``self._module`` in place, which can no longer be read off it.
         """
         # Standalone children (whose module isn't part of the HF tree, e.g. the
         # generator) survive the swap: Envoy.__init__ builds _children only from
         # `module.named_children()`, so carry them across the re-init by name.
-        submodules = set(self._module.modules())
+        submodules = set(self._module.modules()) | (previous or set())
         standalone = {
             name: value
             for name, value in self.__dict__.items()
@@ -705,10 +746,10 @@ class TransformersModel(HuggingFaceModel):
             and value is not self
             and value._module not in submodules
         }
-        # The new module may keep the old one as a descendant (PEFT's wrapper holds
-        # the base model). Forget the old tree's envoys first, or those modules
-        # resolve to envoys carrying their pre-swap paths and the new subtree is
-        # never built.
+        # The new tree holds modules of the old one (an adapter layer holds the
+        # module it replaced). Forget the old tree's envoys first, or those
+        # modules resolve to envoys carrying their previous paths and the new
+        # subtree is never built.
         for old_module in submodules:
             self.interleaver.envoys.pop(id(old_module), None)
         for name, value in list(self.__dict__.items()):
@@ -731,40 +772,37 @@ class TransformersModel(HuggingFaceModel):
     def _swap_adapter(self, requested: Optional[str]) -> None:
         """Swap the loaded module's PEFT adapter to ``requested``.
 
-        Rewraps only when the requested adapter differs from the current one, so
-        a repeat request pays nothing:
+        The module changes only when the requested adapter differs from the
+        current one, so a repeat request pays nothing:
 
             current  requested  action
             -------  ---------  ------
             None     None       no-op
-            None     X          load X
+            None     X          attach X
             X        X          no-op
-            X        Y          unload X, load Y
-            X        None       unload X
+            X        Y          detach X, attach Y
+            X        None       detach X
         """
         if requested == self.peft:
             return
 
+        previous = set(self._module.modules())
         if self.peft is not None:
-            self._rebind(self._module.unload())
+            _detach_adapter(self._module)
             # The module is the base checkpoint from here; keep `self.peft` honest
             # so a refused load below leaves this envoy self-consistent.
             self.peft = None
-
-        if requested:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                adapted = _import_peft().PeftModel.from_pretrained(self._module, requested)
-            for warning in caught:
-                warnings.warn(warning.message, warning.category)
-            # Check before rebinding, so a no-op adapter never becomes this envoy's
-            # module. A swap is where this matters most: sweeping several adapters
-            # over one loaded base is exactly the workload where every organism
-            # silently collapsing to the base checkpoint looks like a real result.
-            _refuse_noop_peft(requested, caught)
-            self._rebind(adapted)
-
-        self.peft = requested
+        try:
+            if requested:
+                # Refused before this envoy is told of it, so a no-op adapter is
+                # never its module. A swap is where that matters most: sweeping
+                # several adapters over one loaded base is exactly the workload
+                # where every organism silently collapsing to the base
+                # checkpoint looks like a real result.
+                _attach_adapter(self._module, requested)
+                self.peft = requested
+        finally:
+            self._rebind(self._module, previous)
 
     def load_adapter(self, peft_id: Optional[str]) -> None:
         """Attach a PEFT adapter — the post-hoc form of the ``peft=`` kwarg.

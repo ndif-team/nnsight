@@ -892,11 +892,10 @@ class TestPeft:
 
         model._remoteable_set_env({"peft": lora_adapter})  # None -> X
         assert model.peft == lora_adapter and _has_lora(model)
-        assert model.base_model.model.transformer.h[0].path == (
-            "model.base_model.model.transformer.h.0"
+        assert model.transformer.h[0].path == "model.transformer.h.0"
+        assert model.transformer.h[0].attn.c_attn.lora_A.path == (
+            "model.transformer.h.0.attn.c_attn.lora_A"
         )
-        assert model.base_model._children
-        assert "transformer" not in model.__dict__
 
         module_after_load = model._module
         model._remoteable_set_env({"peft": lora_adapter})  # X -> X (no-op)
@@ -917,11 +916,10 @@ class TestPeft:
         for adapter in (adapter_a, adapter_b):
             model._remoteable_set_env({"peft": adapter})
             assert model.peft == adapter and _has_lora(model)
-            assert model.base_model.model.transformer.h[0].path == (
-                "model.base_model.model.transformer.h.0"
+            assert model.transformer.h[0].path == "model.transformer.h.0"
+            assert model.transformer.h[0].attn.c_attn.lora_A.path == (
+                "model.transformer.h.0.attn.c_attn.lora_A"
             )
-            assert model.base_model._children
-            assert "transformer" not in model.__dict__
 
         model._remoteable_set_env({})
         assert model.peft is None and not _has_lora(model)
@@ -940,7 +938,8 @@ class TestPeft:
             rename={"mlp": "ffn"}, envoys={GPT2MLP: Mlp},
         )
         model.load_adapter(adapter_a)
-        block = model.base_model.model.transformer.h[0]
+        block = model.transformer.h[0]
+        assert _has_lora(model)
         assert type(block.mlp) is Mlp and block.ffn is block.mlp
 
         model.load_adapter(None)
@@ -955,6 +954,120 @@ class TestPeft:
         loaded.load_adapter(adapter_a)
         paths = lambda model: [envoy.path for envoy in model.modules()]
         assert paths(loaded) == paths(built)
+
+    @torch.no_grad()
+    def test_an_adapter_leaves_the_base_paths_where_they_were(self, tiny_peft_bundle):
+        # The adapter is attached in place: every path of the base model is
+        # still a path of the adapted one, and names the same kind of thing.
+        base_path, adapter_a, _ = tiny_peft_bundle
+        base = TransformersModel(base_path, task="text-generation", dispatch=True)
+        adapted = TransformersModel(base_path, task="text-generation", peft=adapter_a, dispatch=True)
+        paths = lambda model: [envoy.path for envoy in model.modules()]
+        assert set(paths(base)) < set(paths(adapted))
+        assert type(adapted._module) is type(base._module)
+
+        # The targeted module holds what it replaced.
+        c_attn = adapted.transformer.h[0].attn.c_attn
+        assert type(c_attn.base_layer._module) is type(base.transformer.h[0].attn.c_attn._module)
+
+    @torch.no_grad()
+    def test_an_attached_adapter_computes_what_pefts_wrapper_does(self, tiny_peft_bundle):
+        from peft import PeftModel
+        from transformers import GPT2LMHeadModel
+
+        base_path, adapter_a, _ = tiny_peft_bundle
+        ids = torch.tensor([[2, 5, 7, 3]])
+        reference = PeftModel.from_pretrained(GPT2LMHeadModel.from_pretrained(base_path), adapter_a)
+        # A freshly initialised lora_B is zero; give it values so the adapter
+        # is not the identity and the comparison means something.
+        for name, parameter in reference.named_parameters():
+            if "lora_B" in name:
+                torch.nn.init.normal_(parameter, generator=torch.Generator().manual_seed(0))
+        path = base_path + "-trained"
+        reference.save_pretrained(path)
+        expected = reference.eval()(input_ids=ids).logits
+        plain = GPT2LMHeadModel.from_pretrained(base_path).eval()(input_ids=ids).logits
+        assert not torch.allclose(expected, plain, atol=1e-4)
+
+        model = TransformersModel(base_path, task="text-generation", dispatch=True, device="cpu")
+        model.load_adapter(path)
+        with model.trace(ids):
+            logits = model.output.logits.save()
+        torch.testing.assert_close(logits, expected, atol=1e-5, rtol=1e-4)
+
+        # Removing it gives back the base model, module for module.
+        model.load_adapter(None)
+        base = TransformersModel(base_path, task="text-generation", dispatch=True, device="cpu")
+        assert [envoy.path for envoy in model.modules()] == [envoy.path for envoy in base.modules()]
+        assert not hasattr(model._module, "peft_config")
+        with model.trace(ids):
+            logits = model.output.logits.save()
+        torch.testing.assert_close(logits, plain, atol=1e-5, rtol=1e-4)
+
+    @torch.no_grad()
+    def test_one_block_of_code_runs_with_and_without_an_adapter(self, tiny_peft_bundle):
+        base_path, adapter_a, _ = tiny_peft_bundle
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        shapes = []
+        for adapter in (None, adapter_a, None):
+            model.load_adapter(adapter)
+            with model.trace(torch.tensor([[2, 5, 7, 3]])):
+                hidden = model.transformer.h[0].attn.c_attn.output.save()
+            shapes.append(tuple(hidden.shape))
+        assert shapes[0] == shapes[1] == shapes[2]
+
+    def test_an_adapter_whose_weights_have_no_place_is_refused(self, tiny_peft_bundle, tmp_path):
+        import json, shutil
+
+        base_path, adapter_a, _ = tiny_peft_bundle
+        # The same config with weights saved for a module this model does not have.
+        from safetensors.torch import load_file, save_file
+
+        broken = tmp_path / "broken"
+        shutil.copytree(adapter_a, broken)
+        weights = load_file(broken / "adapter_model.safetensors")
+        save_file(
+            {key.replace("transformer.h.0", "transformer.h.7"): value for key, value in weights.items()},
+            broken / "adapter_model.safetensors",
+        )
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        with pytest.raises(ValueError, match="did not attach"):
+            model.load_adapter(str(broken))
+        # Left as it was: no adapter, the base tree, and it still runs.
+        assert model.peft is None and not _has_lora(model)
+        with torch.no_grad(), model.trace(torch.tensor([[2, 5, 7, 3]])):
+            out = model.transformer.h[0].output.save()
+        assert out is not None
+
+    def test_modules_to_save_are_put_back(self, tmp_path):
+        from peft import LoraConfig, get_peft_model
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        config = GPT2Config(vocab_size=32, n_positions=16, n_embd=8, n_layer=1, n_head=1)
+        GPT2LMHeadModel(config).save_pretrained(tmp_path / "base")
+        lora = LoraConfig(target_modules=["c_attn"], modules_to_save=["ln_f"], r=2)
+        get_peft_model(GPT2LMHeadModel(config), lora).save_pretrained(tmp_path / "adapter")
+
+        base_path = str(tmp_path / "base")
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        before = [envoy.path for envoy in model.modules()]
+        model.load_adapter(str(tmp_path / "adapter"))
+        assert type(model.transformer.ln_f._module).__name__ != "LayerNorm"
+        model.load_adapter(None)
+        assert [envoy.path for envoy in model.modules()] == before
+        assert type(model.transformer.ln_f._module).__name__ == "LayerNorm"
+
+    def test_a_prompt_learning_adapter_is_refused(self, tmp_path):
+        from peft import PromptTuningConfig, get_peft_model
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        config = GPT2Config(vocab_size=32, n_positions=16, n_embd=8, n_layer=1, n_head=1)
+        GPT2LMHeadModel(config).save_pretrained(tmp_path / "base")
+        prompt = PromptTuningConfig(task_type="CAUSAL_LM", num_virtual_tokens=2)
+        get_peft_model(GPT2LMHeadModel(config), prompt).save_pretrained(tmp_path / "adapter")
+        model = TransformersModel(str(tmp_path / "base"), task="text-generation", dispatch=True)
+        with pytest.raises(ValueError, match="cannot be attached to its\s+modules in place"):
+            model.load_adapter(str(tmp_path / "adapter"))
 
     def test_load_adapter_before_dispatch(self, lora_adapter):
         # The post-hoc form of `peft=`: on a meta model only the adapter's
