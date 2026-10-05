@@ -833,7 +833,7 @@ class TestRenameByClass:
         assert model.layers[0].input_layernorm is model.blocks[0].norm
 
     def test_two_matching_children_is_an_error(self):
-        with pytest.raises(ValueError, match="matches 2 children of `model` \\(a, b\\)"):
+        with pytest.raises(ValueError, match="matches 2 modules under `model` \\(a, b\\)"):
             Envoy(TwoNorms(), rename={nn.LayerNorm: "norm"})
 
     def test_the_alias_serves_the_child(self):
@@ -872,3 +872,54 @@ class TestEpropertyRepr:
 
         envoy = Typed(torch.nn.Linear(2, 2))
         assert "(view) -> Tensor: a view" in repr(envoy)
+
+
+class Backbone(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.h = nn.ModuleList([nn.Linear(8, 8) for _ in range(2)])
+        self.ln_f = nn.LayerNorm(8)
+
+
+class Wrapped(nn.Module):
+    """A backbone under a name that differs by architecture, beside a head."""
+
+    def __init__(self):
+        super().__init__()
+        self.transformer = Backbone()
+        self.head = nn.Linear(8, 8)
+
+
+class TestRenameWildcard:
+    def test_a_wildcard_stands_for_whichever_entry_holds_the_rest(self):
+        model = Envoy(Wrapped(), rename={"*.h": "layers"})
+        assert model.layers is model.transformer.h
+        assert model._aliases["layers"] == "transformer.h"
+        assert "layers" not in model.transformer.__dict__
+
+    def test_a_wildcard_matching_two_modules_is_an_error(self):
+        with pytest.raises(ValueError, match="'h.\\*' matches 2 modules under `model.transformer` \\(h.0, h.1\\)"):
+            Envoy(Wrapped(), rename={"h.*": "block"})
+
+    def test_a_wildcard_matching_nothing_is_skipped(self):
+        model = Envoy(Wrapped(), rename={"*.layers": "layers"})
+        assert "layers" not in model.__dict__
+
+    def test_a_wildcard_alias_is_a_spelling_for_envoys(self):
+        class Block(Envoy):
+            pass
+
+        model = Envoy(Wrapped(), rename={"*.h": "layers"}, envoys={"layers.*": Block, "layers": Block})
+        assert type(model.layers) is Block
+        assert all(type(block) is Block for block in model.layers)
+        assert type(model.transformer.ln_f) is Envoy
+
+    def test_a_key_that_binds_nowhere_is_no_spelling(self):
+        class Block(Envoy):
+            pass
+
+        # `model.transformer` resolves from no envoy (the root's path is not
+        # part of a key), so no `backbone` alias exists for `envoys=` to match.
+        model = Envoy(Wrapped(), rename={"model.transformer": "backbone"}, envoys={"backbone": Block})
+        assert "backbone" not in model.__dict__
+        assert type(model.transformer) is Envoy

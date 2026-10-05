@@ -56,6 +56,7 @@ shape:
 | **Single component** (`"mlp"`) | Binds wherever it resolves — every block that has an `mlp` child gets the alias. |
 | **Dotted path** (`"transformer.h"`, `"transformer.h.3.mlp"`) | Mounts that subtree on the **root** envoy under the alias name. |
 | **Leading dot** (`".h"`) | The dot is a no-op; the path resolves relative to each envoy, so the alias binds on whichever envoy has that child (e.g. `model.transformer.layers`, not `model.layers`). |
+| **`*` component** (`"*.h"`) | `*` stands for any one entry, so the key need not spell a name that differs by architecture: `"*.h"` mounts the `h` under whichever child of the root has one. Two matches from one envoy raise; none is skipped. |
 | **Module class** (`Mamba2Mixer`) | Binds on every envoy that has exactly one direct child of that class, pointing at that child, whatever its native name. Two matching children on one envoy raise; none is skipped. |
 
 | Value form | Behavior |
@@ -81,6 +82,10 @@ g.my_mlp is g.transformer.h[3].mlp                          # True
 # leading dot: binds where it resolves (under transformer), not on the root
 g = TransformersModel("openai-community/gpt2", dispatch=True, rename={".h": "layers"})
 g.transformer.layers[0] is g.transformer.h[0]              # True
+
+# a `*` component: the backbone's own name is not spelled
+g = TransformersModel("openai-community/gpt2", dispatch=True, rename={"*.h": "layers"})
+g.layers[0] is g.transformer.h[0]                          # True
 
 # a class key: the alias follows what each block holds, not what it is called
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
@@ -149,6 +154,11 @@ You can also index a renamed `ModuleList` entry by its alias string:
 
   Aliasing a key to its own name (`{"attn": "attn"}`) is a no-op, not a
   collision, so it stays usable alongside the cross-architecture pattern above.
+- **A `*` or class key binds only where it matches one module.** An alias names
+  one module, so `{"h.*": "block"}` raises on a stack of more than one block
+  rather than picking one; `*` is for a component whose name varies
+  (`"*.h"`), not for naming every entry. To give every entry's child a name,
+  key the child (`{"attn": "self_attn"}`).
 - **A dotted key mounts on the root; a leading-dot key mounts where it resolves.**
   Pick the form that matches where you want to reach the alias.
 

@@ -1191,6 +1191,32 @@ class TestCustomEnvoys:
         assert type(model.layers) is Envoy
         assert type(model.layers[0].attn) is Envoy
 
+    def test_wildcard_rename_alias_is_a_spelling(self):
+        """`*` means the same in a `rename` key, so an alias bound through one
+        is a spelling an `envoys=` key can be written in."""
+        class Block(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"*.h": "layers"}, envoys={"layers.*": Block},
+        )
+        assert model.layers is model.transformer.h
+        assert all(type(block) is Block for block in model.layers)
+
+    def test_class_key_alias_does_not_spell_what_is_under_it(self):
+        from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
+
+        class Proj(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={GPT2MLP: "ffn"}, envoys={"ffn.c_fc": Proj},
+        )
+        assert model.transformer.h[0].ffn.c_fc is model.transformer.h[0].mlp.c_fc
+        assert type(model.transformer.h[0].ffn.c_fc) is Envoy
+
     def test_wildcard_key_on_a_native_path(self):
         class Block(Envoy):
             pass

@@ -279,8 +279,15 @@ class Envoy:
         for a tree that holds different modules under one native name (a
         hybrid's ``mixer``: a Mamba-2 mixer on one block, an attention on the
         next), where the standard name follows what the block holds and no
-        name-keyed entry can say so. Two matching children on one envoy is an
-        error, not a guess.
+        name-keyed entry can say so.
+
+        A ``*`` component of a dotted key stands for any one entry:
+        ``{"*.h": "layers"}`` mounts the ``h`` under whichever child of this
+        envoy has one, so the key need not spell the backbone's name
+        (``transformer`` here, ``model`` there).
+
+        An alias names one module, so a class or ``*`` key that matches two
+        from one envoy is an error, not a guess (see `_named`).
 
         A key that does not resolve here is skipped, not an error: one ``rename``
         is meant to be reusable across architectures that spell the same module
@@ -303,28 +310,18 @@ class Envoy:
         if not self._rename:
             return
         for key, aliases in self._rename.items():
-            if isinstance(key, type):
-                matches = [
-                    (name, child) for name, child in self._child_map.items()
-                    if isinstance(child._module, key)
-                ]
-                if len(matches) > 1:
-                    raise ValueError(
-                        f"`rename` key {key.__name__} matches {len(matches)} children of "
-                        f"`{self.path}` ({', '.join(name for name, _ in matches)}); a class "
-                        f"key binds only where one child is of that class. Key those by name."
-                    )
-                if not matches:
-                    continue
-                path, target = matches[0]
-            else:
-                path = key.lstrip(".")
-                try:
-                    target = self.get(path)
-                except AttributeError:
-                    continue
-                if not isinstance(target, Envoy):
-                    continue
+            matches = self._named(key)
+            if len(matches) > 1:
+                name = key.__name__ if isinstance(key, type) else repr(key)
+                raise ValueError(
+                    f"`rename` key {name} matches {len(matches)} modules under "
+                    f"`{self.path}` ({', '.join(path for path, _ in matches)}); an alias "
+                    f"names one module, so a key binds only where it matches one. "
+                    f"Key those by name."
+                )
+            if not matches:
+                continue
+            path, target = matches[0]
             for alias in [aliases] if isinstance(aliases, str) else aliases:
                 # Already pointing at this very envoy: nothing is displaced.
                 # Covers a key aliased to its own name (``{"attn": "attn"}``,
@@ -365,6 +362,38 @@ class Envoy:
                 object.__setattr__(self, alias, target)
                 self._aliases[alias] = path
 
+    def _named(self, key: str | type) -> list[tuple[str, Envoy]]:
+        """The descendants a ``rename`` key names from this envoy, as (relative path, envoy).
+
+        A class key names each direct child whose module is an instance of it.
+        A dotted key is walked a component at a time, as `get` walks it, and a
+        ``*`` component stands for every entry of the module reached so far:
+        ``"*.h"`` names the ``h`` under whichever child has one.
+        """
+        if isinstance(key, type):
+            found = [
+                (name, child) for name, child in self._child_map.items()
+                if isinstance(child._module, key)
+            ]
+        else:
+            found = [("", self)]
+            for part in key.lstrip(".").split("."):
+                step = []
+                for path, obj in found:
+                    if part == "*":
+                        if isinstance(obj, Envoy):
+                            step += [(f"{path}.{name}", child) for name, child in obj._child_map.items()]
+                        continue
+                    try:
+                        step.append((f"{path}.{part}", getattr(obj, part)))
+                    except AttributeError:
+                        continue
+                found = step
+            found = [(path[1:], obj) for path, obj in found if isinstance(obj, Envoy)]
+        # A module the tree holds under two names is one envoy, so one match.
+        unique = {id(envoy): (path, envoy) for path, envoy in reversed(found)}
+        return list(reversed(unique.values()))
+
     def _add_envoy(self, name: str, module: torch.nn.Module) -> Envoy:
         # Register a (possibly new) module on self._module, then mirror it.
         self._module.add_module(name, module)
@@ -398,25 +427,31 @@ class Envoy:
         """Every spelling of ``path`` under the ``rename`` aliases, the native one first.
 
         A spelling of a path is a spelling of its parent's path plus the last
-        component, or, where a ``rename`` key's components end the path, a
-        spelling of what precedes them plus the alias (the rule `_bind_aliases`
+        component, or, where a ``rename`` key names the path from an ancestor, a
+        spelling of that ancestor's path plus the alias (the rule `_bind_aliases`
         binds by, so it is known before the aliases bind). Spellings so compose
         through ancestors: under ``{"transformer.h": "layers", "attn": "self_attn"}``,
         ``model.transformer.h.0.attn`` is also ``model.layers.0.self_attn``. A
-        class key names ``module`` by type, so it stands for the last component only.
+        class key names ``module`` by type, so it stands for the last component
+        only: its alias is a spelling of ``module``, not of what is under it.
         """
-        parent, _, name = path.rpartition(".")
-        if not parent:
+        parts = path.split(".")
+        if len(parts) == 1:
             return [path]
-        spellings = [f"{prefix}.{name}" for prefix in self._spellings(parent)]
+        parent = ".".join(parts[:-1])
+        spellings = [f"{prefix}.{parts[-1]}" for prefix in self._spellings(parent)]
         for key, aliases in (self._rename or {}).items():
             if isinstance(key, type):
                 if not isinstance(module, key):
                     continue
-                key = name
-            elif not self._path_ends_with(path, key):
-                continue
-            heads = self._spellings(path[: -len(key.lstrip(".")) - 1])  # what precedes the key
+                ancestor = parent
+            else:
+                # The key is relative to an ancestor, so it is shorter than the path.
+                size = key.lstrip(".").count(".") + 1
+                if size >= len(parts) or not self._path_ends_with(path, key):
+                    continue
+                ancestor = ".".join(parts[:-size])
+            heads = self._spellings(ancestor)
             for alias in [aliases] if isinstance(aliases, str) else aliases:
                 spellings += [f"{prefix}.{alias}" for prefix in heads]
         return spellings
