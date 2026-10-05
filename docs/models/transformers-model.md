@@ -79,7 +79,7 @@ TransformersModel(
 | `repo_id` | A HuggingFace repo id string, or an already-instantiated `torch.nn.Module`. |
 | `task` | The pipeline task (`"text-generation"`, `"fill-mask"`, `"text-classification"`, `"image-classification"`, `"image-text-to-text"`, ...). If `None`, inferred from the checkpoint — which asks the Hub, so pass it explicitly when you are offline (see [Loading](#loading)). |
 | `tokenizer` / `processor` / `image_processor` / `feature_extractor` | Pass one to adopt it instead of letting the pipeline load it. Which of them a task uses varies; the unused ones stay `None` (`transformers.py`, `_preprocessor_sources`). |
-| `peft` | Repo id of a PEFT adapter grafted onto the base model at load. See `tests/test_language.py` for verified PEFT usage. |
+| `peft` | Repo id of a PEFT adapter grafted onto the base model at load. `model.load_adapter(repo_id)` does the same after construction, swaps to another adapter, or removes the current one with `None`. Either way the tree is PEFT's: modules sit under `model.base_model.model`. See `tests/test_language.py` for verified PEFT usage. |
 | `dispatch` | `True` loads real weights during `__init__`; `False` (default) builds the architecture on the `meta` device and loads weights lazily on the first `trace`/`generate`/`pipe`. |
 | `dtype` | Forwarded. A torch dtype, or a quantization name (`"nf4"`, `"int8"`, ...) — see [quantization.md](quantization.md). The transformers 4 spelling `torch_dtype` is still accepted. |
 | `device_map`, `trust_remote_code`, `attn_implementation`, ... | Forwarded to the pipeline / `from_pretrained`. |
