@@ -290,7 +290,7 @@ def preprocess_invoke(model, data: Any, kwargs: dict) -> tuple:
         return encode_pretokenized(encoding)
     # Text / image / audio: let the pipeline tokenize/featurize it, routing the
     # invoke's kwargs (truncation, chat tools, ...) through its own param split.
-    preprocess_params, forward_params, _ = model.pipeline._sanitize_parameters(**kwargs)
+    preprocess_params, forward_params, _ = sanitize(model, kwargs)
     # Chat message(s) are wrapped in Chat (as Pipeline.__call__ would) so the
     # template is applied; otherwise a list of strings is one input per prompt.
     inputs = as_chats(data, chat_cls(model))
@@ -319,6 +319,43 @@ def preprocess_invoke(model, data: Any, kwargs: dict) -> tuple:
         tensors = {k: v for k, v in row.items() if isinstance(v, torch.Tensor)}
         return None, ((), {**tensors, **forward_params})
     return rows, forward_params
+
+
+def sanitize(model, kwargs: dict) -> tuple:
+    """Split an invoke's kwargs with the pipeline's ``_sanitize_parameters``,
+    with generate arguments flat among the forward kwargs.
+
+    The multimodal generating pipelines (``image-text-to-text``,
+    ``any-to-any``) take generate arguments one level down, as
+    ``generate_kwargs={...}``, which their own ``_forward`` unpacks; a
+    ``max_new_tokens`` is folded in there too. They take any other keyword as
+    a processor argument. So a ``do_sample=False`` would reach the processor,
+    which ignores it, and the ``generate_kwargs`` dict would reach the model's
+    ``generate``, which rejects it. Here generate arguments go to the forward
+    kwargs either way, flat, as ``text-generation``'s pipeline puts them.
+    """
+    import inspect
+
+    from transformers import GenerationConfig, GenerationMixin
+
+    named = inspect.signature(model.pipeline._sanitize_parameters).parameters
+    generation = {}
+    if "generate_kwargs" in named:
+        # max_length is also the processor's truncation length, and the
+        # pipeline sends it there; leave it to the pipeline.
+        names = (
+            set(GenerationConfig().to_dict())
+            | set(inspect.signature(GenerationMixin.generate).parameters)
+        ) - set(named) - {"max_length", "self", "inputs", "kwargs"}
+        generation = {k: v for k, v in kwargs.items() if k in names}
+        kwargs = {k: v for k, v in kwargs.items() if k not in names}
+    preprocess_params, forward_params, postprocess_params = (
+        model.pipeline._sanitize_parameters(**kwargs)
+    )
+    forward_params = dict(forward_params)
+    forward_params.update(forward_params.pop("generate_kwargs", None) or {})
+    forward_params.update(generation)
+    return preprocess_params, forward_params, postprocess_params
 
 
 def parse_task_args(model, inputs: list) -> list:
