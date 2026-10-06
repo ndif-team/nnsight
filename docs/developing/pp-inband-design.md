@@ -59,13 +59,17 @@ last stage broadcasts the outbox and the `ROUND` marks on the pipeline group
 earlier stages receive it at the same point. The broadcast carries the
 entries of the stages between as well, which the stages before them lack,
 but not the first stage's, which every later stage already got forward.
-Under sync scheduling the
+A stage relays a copy taken when the entry arrived, since its own copy of
+the block may change the value it was handed in place. Under sync
+scheduling the
 stages before the last never run `sample_tokens`, so the last stage puts the
 same entries, on the host, on its `ModelRunnerOutput`; `NNsightScheduler`
-(`pp_scheduler.py`, installed through vLLM's `scheduler_cls`) keeps them by
-request and attaches them to the request's next `SchedulerOutput`, which
-every stage reads before its forward. A request that finishes has no next
-step, and the scheduler drops what it left.
+(`pp_scheduler.py`) keeps them by request and attaches them to the request's
+next `SchedulerOutput`, which every stage reads before its forward. A request
+that finishes has no next step, and the scheduler drops what it left. It is
+installed through vLLM's `scheduler_cls` only where async scheduling will be
+off (the Ray executor, or `async_scheduling=False`), because that setting
+replaces whatever scheduler vLLM would pick, its `AsyncScheduler` included.
 
 **Filing.** Each stage files a forward payload's entries from stages before
 it and a backward payload's entries from stages after it, so a value is filed
@@ -128,6 +132,12 @@ multiprocess executor.
 
 ## Measured against push at 7B
 
+Measured at `ee4cd475`, where every in-band PP engine ran vLLM's sync
+`Scheduler` in place of `AsyncScheduler` (the default scheduler was replaced
+through `scheduler_cls`; fixed since, see "The carriers"), while push ran
+`AsyncScheduler`. The single-step rows involve one scheduling decision; the
+decode row compares the two schedulers as much as the two transports.
+
 Qwen2.5-7B-Instruct, bfloat16, PP=2 on the same two A100s for both branches,
 `gpu_memory_utilization=0.3`, one PP=1 engine of the same build as the
 reference. "long" is a 512-token prompt. Median of 5 calls after 2 warmups, ms.
@@ -149,12 +159,25 @@ output, and the sum of the last stage's logits at each of four decode steps.
 
 The two rows that cross stages once per trace are where the channel's cost
 was: 20 ms and 7 ms per trace on push, within the PP=1 spread on in-band.
-The decode loop, whose every step crosses backward, costs 7 ms more over
-eight steps than push, the broadcast being one collective per step where
-push's sender ran in the background; both are 60 ms over PP=1 across the
-eight steps, which is the step boundary itself.
+The decode row compares different schedulers (see above); for the per-step
+cost of the transport itself, see "Costs and limits".
 
 ## Costs and limits
+
+- Every decode step, a stage before the last waits in the backward
+  broadcast until the last stage has finished sampling, whether or not
+  anything is sent: `broadcast_tensor_dict` exchanges its header over the
+  CPU group, so the waiting stage's CPU stops there instead of preparing its
+  next step, as it does under vLLM's own GPU-only token broadcast. Measured
+  on Qwen2.5-7B at PP=2 with an empty block, alternating rounds on the same
+  two GPUs, all under `AsyncScheduler`: in-band 45.8 and 36.7 ms per step,
+  the same code with the backward exchange removed 26.2 and 30.5, push 25.9
+  and 33.9. The host's load average was about 3400 on 48 cores, so the size
+  of the gap on a quiet machine is not established. A single forward pass
+  pays it once. Removing it means sending the backward payload only on steps
+  where an earlier stage's copy is waiting on a later stage's value (the
+  stage says so in the forward payload it already sends), which is not
+  implemented.
 
 - Under tensor parallelism vLLM splits any sent tensor whose element count
   divides by the TP size across the TP ranks and gathers it on the other

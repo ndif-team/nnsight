@@ -39,8 +39,9 @@ class NNsightScheduler(Scheduler):
                 self._nnsight_backward.setdefault(entry[2], []).append(entry)
         return super().update_from_output(scheduler_output, model_runner_output)
 
-    def schedule(self) -> Any:
-        output = super().schedule()
+    def schedule(self, *args: Any, **kwargs: Any) -> Any:
+        # Newer vLLM passes the engine core's throttle_prefills flag, older none.
+        output = super().schedule(*args, **kwargs)
         if self._nnsight_pp:
             output.nnsight_backward = [
                 entry for req in output.num_scheduled_tokens for entry in self._nnsight_backward.pop(req, [])

@@ -114,13 +114,21 @@ def test_kept_values_live_with_their_requests_unless_pinned():
     assert "model.lm_head.param.weight" in kept                # pinned: outlives every request
 
 
+def _stage_link(world):
+    """What a stage's interleaver reads of its link here: the pipeline's size.
+    A real Link to two peers would start their threads."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(world=world, peers=list(range(world - 1)))
+
+
 def test_the_last_stage_sends_back_only_what_the_earlier_stages_lack():
     """The last of three stages got stage 0's and stage 1's entries forward.
     Stage 1's are needed back on stage 0; stage 0's are needed by no one
     before it, so they are not sent back to the stage that made them."""
     from nnsight.modeling.vllm.pp_interleaver import ROUND, PPInterleaver
 
-    last = PPInterleaver(None, Link(None, 0, 1), 2, torch.device("cpu"))
+    last = PPInterleaver(None, _stage_link(3), 2, torch.device("cpu"))
     first = (VALUE, 0, "req-a", 0, "model.decoder_blocks.1.output", torch.ones(2))
     middle = (VALUE, 1, "req-a", 0, "model.decoder_blocks.5.output", torch.zeros(2))
     last.receive([first, middle], forward=True)
@@ -129,3 +137,46 @@ def test_the_last_stage_sends_back_only_what_the_earlier_stages_lack():
     sent = last.flush_backward(["req-a"])
     assert [(kind, stage) for kind, stage, *_ in sent] == [(VALUE, 2), (VALUE, 1), (ROUND, 2)]
     assert last.flush_backward([]) == []
+
+
+def test_a_relayed_value_is_sent_on_as_it_arrived():
+    """The middle of three stages hands stage 0's value to its copy of the
+    block, which changes it in place; stage 2 must still get it as stage 0
+    served it."""
+    from nnsight.modeling.vllm.pp_interleaver import PPInterleaver
+
+    middle = PPInterleaver(None, _stage_link(3), 1, torch.device("cpu"))
+    middle.receive([(VALUE, 0, "req-a", 0, "model.decoder_blocks.1.output", torch.ones(3))], forward=True)
+    handed = middle.inbox[("req-a", 0)]["model.decoder_blocks.1.output"][0]
+    handed.add_(100)
+
+    (sent,) = middle.flush_forward()
+    assert torch.equal(sent[5], torch.ones(3))
+
+
+def test_the_sync_scheduler_is_installed_only_where_async_scheduling_is_off():
+    from nnsight.modeling.vllm.vllm import VLLM
+
+    def chosen(**kwargs):
+        return VLLM._pipeline_kwargs(VLLM, {"pipeline_parallel_size": 2, **kwargs}).get("scheduler_cls")
+
+    assert chosen() is None
+    assert chosen(distributed_executor_backend="mp") is None
+    assert chosen(distributed_executor_backend="ray") == VLLM._SCHEDULER_CLS
+    assert chosen(async_scheduling=False) == VLLM._SCHEDULER_CLS
+    assert VLLM._pipeline_kwargs(VLLM, {"async_scheduling": False}).get("scheduler_cls") is None
+
+
+def test_the_scheduler_passes_on_what_the_engine_core_gives_schedule(monkeypatch):
+    """vLLM 0.27 and later call schedule(throttle_prefills); 0.19 calls schedule()."""
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    from nnsight.modeling.vllm.pp_scheduler import NNsightScheduler
+
+    seen = []
+    monkeypatch.setattr(Scheduler, "schedule", lambda self, *args, **kwargs: seen.append((args, kwargs)) or object())
+    scheduler = NNsightScheduler.__new__(NNsightScheduler)
+    scheduler._nnsight_pp = False
+    scheduler.schedule()
+    scheduler.schedule(False)
+    assert seen == [((), {}), ((False,), {})]

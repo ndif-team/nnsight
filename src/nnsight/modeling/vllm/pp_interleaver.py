@@ -143,21 +143,25 @@ class PPInterleaver(VLLMInterleaver):
 
     def flush_backward(self, reqs: Iterable[str]) -> list[tuple]:
         """The last stage's entries for the earlier ones after a step: what it
-        and the stages between served, and a mark per request that the step
-        is done, so a worker waiting for a value of it stops waiting.
-
-        A stage's entry is needed backward only by the stages before it, so
-        the first stage's, which every later stage got forward, stay here.
-        """
-        between = [entry for entry in self.relayed if entry[1] > 0]
-        entries = self.outbox + between + [(ROUND, self.local_rank, req, 0, None, None) for req in reqs]
+        and the stages between served (see `receive` for which those are),
+        and a mark per request that the step is done, so a worker waiting for
+        a value of it stops waiting."""
+        entries = self.outbox + self.relayed + [(ROUND, self.local_rank, req, 0, None, None) for req in reqs]
         self.outbox, self.relayed = [], []
         return entries
 
     def receive(self, entries: list[tuple], forward: bool) -> None:
         """File a payload's entries. Forward, the ones from earlier stages are
         this stage's and are kept for the stages after it; backward, the ones
-        from later stages. Each value is filed once whichever way it came."""
+        from later stages. Each value is filed once whichever way it came.
+
+        What is kept to send on is a copy taken now: the filed value is handed
+        to this stage's copy of the block, which may change it in place before
+        the send. A stage before the last sends on everything it got forward;
+        the last sends back only the stages between's, since the first stage's
+        reached every later stage forward and no stage before it needs them.
+        """
+        last = self.local_rank == self.link.world - 1
         for entry in entries:
             kind, stage, req, ordinal, provider, payload = entry
             if (stage < self.local_rank) != forward or stage == self.local_rank:
@@ -169,8 +173,8 @@ class PPInterleaver(VLLMInterleaver):
                 self.errors.setdefault(key, {})[provider] = payload
             elif kind == ROUND:
                 self.arrived[req] = self.arrived.get(req, 0) + 1
-            if forward:
-                self.relayed.append(entry)
+            if forward and (not last or stage > 0):
+                self.relayed.append((kind, stage, req, ordinal, provider, _clone(payload)))
 
     # --------------------------------------------------------- the receiver
 
