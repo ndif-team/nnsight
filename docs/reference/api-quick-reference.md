@@ -138,4 +138,4 @@ Pass `remote=` to `model.trace(...)` / `model.generate(...)` / `model.session(..
 
 `RemoteBackend` extra kwargs: `blocking`, `job_id`, `verbose`. `AsyncRemoteBackend` (built by `VLLM` async traces and available directly) supports `await backend` → the saves dict, and `async for update in backend` → status updates then the saves dict last.
 
-Model identity for remote: `model.to_model_key()` → `"import.path.Class:model_key"`; `Class.from_model_key(key)` reconstructs it. Deprecated aliases (`LanguageModel`, `VisionLanguageModel`) share `TransformersModel`'s key.
+Model identity for remote: `model.to_model_key()` → `"import.path.Class:model_key"`; `Class.from_model_key(key)` reconstructs it. A `TransformersModel` key carries repo id, revision, and the resolved pipeline task, so each task of a checkpoint is a distinct remote model. Deprecated aliases (`LanguageModel`, `VisionLanguageModel`) share `TransformersModel`'s key.

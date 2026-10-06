@@ -48,6 +48,7 @@ invoke is refused rather than served the wrong rows.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, Optional
 
 import warnings
@@ -616,6 +617,17 @@ class TransformersModel(HuggingFaceModel):
         return self.pipeline(*inputs, **kwargs)
 
     # -- remote --------------------------------------------------------------
+
+    def _remoteable_model_key(self) -> str:
+        # The task is part of the model's remote identity: two tasks over one
+        # checkpoint can load different architecture classes (ForCausalLM vs
+        # ForSequenceClassification), so they are different deployments, and the
+        # server must rebuild the pipeline the client traced rather than
+        # re-infer one from the Hub. Always the resolved task, never null — an
+        # unset task is inferred by the meta build before any key is minted.
+        data = json.loads(super()._remoteable_model_key())
+        data["task"] = self.task
+        return json.dumps(data)
 
     def _remoteable_persistent_objects(self) -> dict:
         objects = super()._remoteable_persistent_objects()

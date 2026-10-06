@@ -114,6 +114,25 @@ _DEPLOYED_LEVELS = {"HOT", "WARM"}
 _STATE_COLOR = {"RUNNING": "green", "DEPLOYING": "yellow", "UNHEALTHY": "red"}
 
 
+def _task_of(value: dict) -> Optional[str]:
+    """The deployment's pipeline task, from its status entry.
+
+    A newer server surfaces ``task`` directly; otherwise it's parsed out of the
+    model key's JSON suffix. ``None`` for a key minted before tasks were part of
+    the model's identity (such a deployment serves whatever task the server
+    inferred at load).
+    """
+    if value.get("task"):
+        return value["task"]
+    import json
+
+    suffix = (value.get("model_key") or "").partition(":")[2]
+    try:
+        return json.loads(suffix).get("task")
+    except Exception:
+        return None
+
+
 def _get(
     path: str,
     timeout: tuple[float, float] = (5.0, 30.0),
@@ -134,9 +153,11 @@ def _get(
 class NdifStatus:
     """A view of NDIF's deployed models, with a formatted table on ``print``.
 
-    ``deployments`` maps repo id -> ``{model_class, repo_id, revision, level,
-    state}`` for each HOT/WARM model; ``status`` is the derived service state.
-    Indexing/iteration delegate to ``deployments`` for convenience.
+    ``deployments`` maps repo id -> ``{model_class, repo_id, task, revision,
+    level, state}`` for each HOT/WARM model; ``status`` is the derived service
+    state. Indexing/iteration delegate to ``deployments`` for convenience. A
+    checkpoint deployed under several tasks appears once per task, keyed
+    ``"repo_id (task)"``.
     """
 
     class Status(str, Enum):
@@ -186,13 +207,16 @@ class NdifStatus:
             rows.append([
                 value["model_class"],
                 value["repo_id"],
+                value.get("task") or "-",
                 value["revision"],
                 value["level"],
                 value["state"],
             ])
             colors.append(_STATE_COLOR.get(value["state"]))
         table = _render_table(
-            ["Model Class", "Repo ID", "Revision", "Level", "State"], rows, colors
+            ["Model Class", "Repo ID", "Task", "Revision", "Level", "State"],
+            rows,
+            colors,
         )
         return f"{self._MESSAGE[self.status]}\n\n{table}"
 
@@ -228,20 +252,34 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
     if raw:
         return response
 
-    deployments = {}
+    entries = []
     for name, value in response.get("deployments", {}).items():
         if value.get("deployment_level") not in _DEPLOYED_LEVELS:
             continue  # deployed models only (skip COLD downloaded)
         model_key = value.get("model_key", "")
         model_class = model_key.split(":", 1)[0].split(".")[-1] if model_key else "-"
         repo_id = value.get("repo_id", name)
-        deployments[repo_id] = {
+        entries.append({
             "model_class": model_class,
             "repo_id": repo_id,
+            "task": _task_of(value),
             "revision": value.get("revision") or "main",
             "level": value.get("deployment_level"),
             "state": value.get("application_state", "UNHEALTHY"),
-        }
+        })
+
+    # Keyed by repo id for the common case (`"gpt2" in nnsight.status()`); the
+    # same checkpoint deployed under several tasks is several deployments, so
+    # only then does the task join the dict key to keep every entry visible.
+    counts: dict = {}
+    for entry in entries:
+        counts[entry["repo_id"]] = counts.get(entry["repo_id"], 0) + 1
+    deployments = {}
+    for entry in entries:
+        key = entry["repo_id"]
+        if counts[key] > 1:
+            key = f"{key} ({entry['task'] or '?'})"
+        deployments[key] = entry
     return NdifStatus(deployments)
 
 
@@ -259,15 +297,20 @@ def ndif_status(raw: bool = False) -> Union[dict, NdifStatus]:
     return status(raw)
 
 
-def is_model_running(repo_id: str, revision: str = "main") -> bool:
+def is_model_running(
+    repo_id: str, revision: str = "main", task: Optional[str] = None
+) -> bool:
     """Whether ``repo_id`` (at ``revision``) is currently RUNNING on NDIF.
 
     Returns ``False`` if the service is unreachable. The repo id is canonicalized
-    via the Hub so different spellings match the deployed key.
+    via the Hub so different spellings match the deployed key. ``task`` narrows
+    the check to one deployment when the same checkpoint is up under several
+    pipeline tasks; unset, any task counts.
 
     Examples:
         >>> import nnsight
         >>> nnsight.is_model_running("openai-community/gpt2")
+        >>> nnsight.is_model_running("openai-community/gpt2", task="text-generation")
     """
     try:
         response = _get("/status")
@@ -279,8 +322,13 @@ def is_model_running(repo_id: str, revision: str = "main") -> bool:
 
     repo_id = HfApi().model_info(repo_id).id
     for value in response.get("deployments", {}).values():
-        if value.get("repo_id") == repo_id and (value.get("revision") or "main") == revision:
-            return value.get("application_state") == "RUNNING"
+        if (
+            value.get("repo_id") == repo_id
+            and (value.get("revision") or "main") == revision
+            and (task is None or _task_of(value) == task)
+            and value.get("application_state") == "RUNNING"
+        ):
+            return True
     return False
 
 

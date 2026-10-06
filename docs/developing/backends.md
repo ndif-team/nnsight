@@ -73,7 +73,9 @@ A remote backend never serializes the model — it names it. `to_model_key()`
 import-path part comes from `_remoteable_class()` (`remotable.py`), which a
 deprecated alias overrides to return the canonical class, so a model wrapped as
 `LanguageModel` and one wrapped as `TransformersModel` produce the *same* key the
-server knows it by. The server reconstructs with `from_model_key`.
+server knows it by. For a `TransformersModel` the model-specific part carries the
+repo id, revision, *and* the resolved pipeline task, so each task of a checkpoint
+is its own key. The server reconstructs with `from_model_key`.
 
 ### RemoteBackend — NDIF over one websocket
 
