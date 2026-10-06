@@ -15,7 +15,7 @@ All are subclasses of `Envoy` (the tree node type). `NNsight` is the thin, named
 | Class | Import | One-liner |
 |-------|--------|-----------|
 | `NNsight` | `from nnsight import NNsight` | Wrap any `torch.nn.Module`. Recursively mirrors the module tree as envoys. |
-| `TransformersModel` | `from nnsight import TransformersModel` | **Primary** HuggingFace class, backed by a `transformers.pipeline`. Any task via `task=...` (inferred if unset). |
+| `TransformersModel` | `from nnsight import TransformersModel` | **Primary** HuggingFace class, backed by a `transformers.pipeline`. Any task via `task=...` (read from the config if unset). |
 | `DiffusionModel` | `from nnsight import DiffusionModel` | Wraps any `diffusers.DiffusionPipeline`; components (`unet`, `vae`, ...) are envoys. |
 | `VLLM` | `from nnsight.modeling.vllm import VLLM` | vLLM-backed model; interventions run inside the engine's worker. `mode="sync"` (default) or `mode="async"`. |
 | `LanguageModel` | `from nnsight import LanguageModel` | **Deprecated** — warns on construction. Use `TransformersModel(repo_id, task="text-generation")`. |
