@@ -323,13 +323,10 @@ class Envoy:
         self.__dict__.update(state)
         # The parent link is not pickled (a weakref does not pickle). A parent in
         # the same payload re-links its children here, which also covers a child
-        # whose parent was rebuilt first. An envoy that came without its parent
-        # takes the parent of the live envoy for its module on this side.
+        # whose parent was rebuilt first; the payload's top envoy has none.
+        self.__dict__.setdefault("_parent", None)
         for child in self._children:
             child._parent = weakref.ref(self)
-        if "_parent" not in self.__dict__:
-            live = self.interleaver.envoys.get(id(self._module))
-            self._parent = live._parent if live is not None and live is not self else None
 
     def __getstate__(self) -> dict:
         # For serialization: tag the heavy/server-side objects as persistent so

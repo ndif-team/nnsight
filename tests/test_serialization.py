@@ -698,14 +698,12 @@ class TestParentLinks:
         self._assert_parents(copy)
         assert copy.transformer.h[2].mlp.root is copy
 
-    def test_a_shipped_subtree_takes_the_live_parent(self, gpt2):
-        # Shipped without its parent, the top envoy takes the parent of the live
-        # envoy for its module; below it, the copies link to each other.
+    def test_a_shipped_subtree_is_its_own_root(self, gpt2):
+        # Shipped without its parent, the top envoy has none; below it, the copies link to each other.
         block = loads(dumps(gpt2.transformer.h[2]), gpt2._remoteable_persistent_objects())
         assert block is not gpt2.transformer.h[2]
-        assert block.parent is gpt2.transformer.h
+        assert block.parent is None and block.root is block
         assert block.mlp.parent is block
-        assert block.root is gpt2
 
     @torch.no_grad()
     def test_a_deserialized_trace_reads_through_parent(self, gpt2):
