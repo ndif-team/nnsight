@@ -114,25 +114,6 @@ _DEPLOYED_LEVELS = {"HOT", "WARM"}
 _STATE_COLOR = {"RUNNING": "green", "DEPLOYING": "yellow", "UNHEALTHY": "red"}
 
 
-def _task_of(value: dict) -> Optional[str]:
-    """The deployment's pipeline task, from its status entry.
-
-    A newer server surfaces ``task`` directly; otherwise it's parsed out of the
-    model key's JSON suffix. ``None`` for a key minted before tasks were part of
-    the model's identity (such a deployment serves whatever task the server
-    inferred at load).
-    """
-    if value.get("task"):
-        return value["task"]
-    import json
-
-    suffix = (value.get("model_key") or "").partition(":")[2]
-    try:
-        return json.loads(suffix).get("task")
-    except Exception:
-        return None
-
-
 def _get(
     path: str,
     timeout: tuple[float, float] = (5.0, 30.0),
@@ -262,7 +243,7 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
         entries.append({
             "model_class": model_class,
             "repo_id": repo_id,
-            "task": _task_of(value),
+            "task": value.get("task"),
             "revision": value.get("revision") or "main",
             "level": value.get("deployment_level"),
             "state": value.get("application_state", "UNHEALTHY"),
@@ -325,7 +306,7 @@ def is_model_running(
         if (
             value.get("repo_id") == repo_id
             and (value.get("revision") or "main") == revision
-            and (task is None or _task_of(value) == task)
+            and (task is None or value.get("task") == task)
             and value.get("application_state") == "RUNNING"
         ):
             return True
