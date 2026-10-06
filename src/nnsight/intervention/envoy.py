@@ -87,6 +87,8 @@ def traceable(method: Callable) -> Callable:
         try:
             tracer.capture()
         except WithBlockNotFoundError:
+            if "remote" in kwargs or "blocking" in kwargs:
+                raise ValueError("Cannot use `remote` or `blocking` on a bare call. You must use a `with` block.")
             # Called directly (not as a `with` block): run it through interleave
             # so dispatch, device placement, and input prep still happen — same
             # path as trace(trace=False). Only edits apply (interleave adds them).
