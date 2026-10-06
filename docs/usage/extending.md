@@ -139,6 +139,7 @@ class MyModel(NNsight):
             ExtraModule(),
             path=f"{self.path}.extra",
             interleaver=self.interleaver,
+            parent=self,
         )
         self._children.append(self.extra)
 
@@ -299,6 +300,26 @@ model = TransformersModel(
 Non-matching modules stay the base `Envoy`. See
 [per-head-attention.md](../patterns/per-head-attention.md) for the attention
 (tuple-output) version.
+
+An eproperty that needs more than its own module's value reaches the rest of the
+tree through `self.parent` (the envoy one level up, `None` on the root) and
+`self.root` (the model envoy). Reads through them follow the same execution
+order as any other read, so a preprocess on attention can read the MLP that
+runs after it:
+
+```python
+class Attn(Envoy):
+    @eproperty(key="output")
+    def with_mlp(self, value):                  # attention output + the block's MLP output
+        return value[0] + self.parent.mlp.output
+
+model = TransformersModel(
+    "openai-community/gpt2", task="text-generation",
+    envoys={"attn": Attn}, dispatch=True,
+)
+with model.trace(prompt):
+    summed = model.transformer.h[1].attn.with_mlp.save()
+```
 
 ## Gotchas
 
