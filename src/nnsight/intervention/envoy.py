@@ -968,6 +968,10 @@ class Envoy:
                 result.append((envoy.path, envoy) if names else envoy)
 
         walk(self)
+        # `walk` reaches itself through its closure cell, a cycle that holds
+        # `result` (and so every envoy and the model) until a GC pass. Clearing
+        # the cell frees it by refcounting.
+        del walk
         return result
 
     def named_modules(

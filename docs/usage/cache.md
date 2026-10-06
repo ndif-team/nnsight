@@ -319,6 +319,16 @@ Returns a `CacheView` (already saved, so it survives past the trace).
   costs 1.1 GiB and 20x the time of caching its 12 blocks (36 MiB). A cache and a
   hand-written `save()` loop over the same modules cost the same (19.0 ms against
   18.8 ms, batch 32 x 64); the cache saves you the loop, not time.
+- **A kept cache keeps the model.** Tree navigation runs through the model's
+  envoys, so the view holds the model, and `del model` frees no weights while a
+  cache from it is alive. Detach the model to release it. Path access keeps
+  working:
+
+  ```python
+  cache._cache.model = None
+  del model
+  cache["model.transformer.h.0"].output      # still works
+  ```
 - **Wrap a collection run in `torch.no_grad()`** unless you need gradients, and
   keep the batch shape fixed across a sweep: the same prompt in differently shaped
   batches gives activations that agree to floating-point noise, not bit-exactly.
