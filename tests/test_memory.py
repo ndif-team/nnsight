@@ -230,6 +230,30 @@ class TestCacheCleanup:
         assert run()() is None
 
 
+    def test_parent_links_leave_no_cycle(self):
+        def run():
+            model = Envoy(TwoLayer())
+            with model.trace(_x()) as tracer:
+                nnsight.save(tracer.result)
+            assert model.a.parent is model and model.a.root is model
+            return weakref.ref(model._module)
+
+        assert run()() is None
+
+    def test_a_held_child_does_not_hold_the_model(self):
+        # The child's link to its parent is weak, so keeping one envoy does not
+        # keep its ancestors (or the model they wrap) alive.
+        def run():
+            model = Envoy(TwoLayer())
+            with model.trace(_x()):
+                model.b.output.save()
+            return model.b, weakref.ref(model._module)
+
+        child, ref = run()
+        assert ref() is None
+        assert child.parent is None
+
+
 class TestExceptionCleanup:
     """An error mid-trace still tears everything down (the frame clear and the
     interleaver's mediator cleanup both run in `finally`)."""

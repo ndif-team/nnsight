@@ -302,7 +302,10 @@ class TransformersModel(HuggingFaceModel):
         # `_update` (dispatch) and `_remoteable_set_env` (PEFT rebind) both preserve
         # standalone children like this one.
         self.generator = GeneratorEnvoy(
-            Generator(), path=f"{self.path}.generator", interleaver=self.interleaver
+            Generator(),
+            path=f"{self.path}.generator",
+            interleaver=self.interleaver,
+            parent=self,
         )
         self._children.append(self.generator)
 

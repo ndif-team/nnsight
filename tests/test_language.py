@@ -799,6 +799,20 @@ class TestScan:
         assert real.device.type != "meta"
         assert torch.isfinite(real).all()
 
+    def test_parent_links_survive_dispatch(self):
+        model = TransformersModel("gpt2", task="text-generation")
+        block = model.transformer.h[3]
+        model.dispatch()
+        # Dispatch re-points every envoy at the real module; none is rebuilt, and
+        # each still points at its live parent.
+        assert model.parent is None
+        for node in model.modules():
+            for child in node._children:
+                assert child.parent is node, child.path
+        assert model.transformer.h[3] is block and block.parent is model.transformer.h
+        assert block.mlp.c_fc.root is model
+        assert model.generator.parent is model
+
     @pytest.mark.parametrize("key", ["dtype", "torch_dtype"])
     @torch.no_grad()
     def test_dtype_auto_builds_on_meta(self, key):
@@ -1436,6 +1450,26 @@ class TestCustomEnvoys:
             rename={"mlp": "ffn"}, envoys={"mlp": Heads, "ffn": Other},
         )
         assert type(model.transformer.h[0].ffn) is Heads
+
+    @torch.no_grad()
+    def test_eproperty_reads_a_sibling_through_parent(self):
+        """An eproperty on `attn` reaches the block's `mlp` through `self.parent`;
+        the MLP runs after attention, so the read is in order."""
+
+        class Attn(Envoy):
+            @eproperty(key="output")
+            def with_mlp(self, value):
+                return value[0] + self.parent.mlp.output
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True, envoys={"attn": Attn}
+        )
+        with model.trace("hello world"):
+            summed = model.transformer.h[1].attn.with_mlp.save()
+        with model.trace("hello world"):
+            attn = model.transformer.h[1].attn.output[0].save()
+            mlp = model.transformer.h[1].mlp.output.save()
+        assert torch.allclose(summed, attn + mlp)
 
     def test_class_key_alias_matches(self):
         from transformers.models.gpt2.modeling_gpt2 import GPT2MLP

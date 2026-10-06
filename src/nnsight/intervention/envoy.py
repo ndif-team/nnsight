@@ -47,6 +47,7 @@ from __future__ import annotations
 import functools
 import inspect
 import warnings
+import weakref
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 import torch
@@ -125,6 +126,8 @@ class Envoy:
         _module: The wrapped `torch.nn.Module`.
         _edits: Default interventions registered by [`edit`][nnsight.intervention.envoy.Envoy.edit], replayed on every
             trace (a list of [`Mediator`][nnsight.intervention.interleaver.Mediator]).
+        _parent: A weak reference to the envoy whose `_children` holds this one,
+            or ``None`` on the root. Read it through [`parent`][nnsight.intervention.envoy.Envoy.parent].
         _children: The child envoys this envoy owns, in module order — one per
             module, so a module the tree already wraps elsewhere is not in it.
         _child_map: Every entry of the wrapped module's ``_modules``, by name and
@@ -139,7 +142,13 @@ class Envoy:
         interleaver: Interleaver | None = None,
         rename: dict[str | type, str | list[str]] | None = None,
         envoys: dict | None = None,
+        parent: Envoy | None = None,
     ) -> None:
+        # Weak, so no envoy keeps its ancestors (and the model) alive: the tree is
+        # owned top-down through `_children`, and `del model` frees it by
+        # refcounting. Set before the children are built, so it is in place
+        # while they are.
+        self._parent = weakref.ref(parent) if parent is not None else None
         self._module = module
         self.path = path
         self.interleaver = interleaver if interleaver is not None else Interleaver()
@@ -228,6 +237,7 @@ class Envoy:
                 interleaver=self.interleaver,
                 rename=self._rename,
                 envoys=self._envoys,
+                parent=self,
             )
             if index is None:
                 self._children.append(envoy)
@@ -291,14 +301,42 @@ class Envoy:
                     return envoy_cls
         return Envoy
 
+    @property
+    def parent(self) -> Envoy | None:
+        """The envoy whose children include this one, or ``None`` on the root.
+
+        A module the tree reaches by two paths has one envoy, and its parent is
+        the envoy at the first path; an alias (``rename=``) is not a child, so it
+        leaves the parent alone.
+        """
+        return self._parent() if self._parent is not None else None
+
+    @property
+    def root(self) -> Envoy:
+        """The top of the tree: the model envoy, reached by following [`parent`][nnsight.intervention.envoy.Envoy.parent]."""
+        envoy = self
+        while (parent := envoy.parent) is not None:
+            envoy = parent
+        return envoy
+
     def __setstate__(self, state):
         self.__dict__.update(state)
+        # The parent link is not pickled (a weakref does not pickle). A parent in
+        # the same payload re-links its children here, which also covers a child
+        # whose parent was rebuilt first. An envoy that came without its parent
+        # takes the parent of the live envoy for its module on this side.
+        for child in self._children:
+            child._parent = weakref.ref(self)
+        if "_parent" not in self.__dict__:
+            live = self.interleaver.envoys.get(id(self._module))
+            self._parent = live._parent if live is not None and live is not self else None
 
     def __getstate__(self) -> dict:
         # For serialization: tag the heavy/server-side objects as persistent so
         # they're referenced by id rather than serialized. The server resolves
         # them from its own model (Module:<path>) and interleaver (Interleaver).
         state = self.__dict__.copy()
+        state.pop("_parent", None)
         state["interleaver"]._persistent_id = "Interleaver"
         state["_module"]._persistent_id = f"Module:{self.path}"
         return state
