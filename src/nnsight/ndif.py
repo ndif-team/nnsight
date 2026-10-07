@@ -136,9 +136,11 @@ class NdifStatus:
 
     ``deployments`` maps repo id -> ``{model_class, repo_id, task, revision,
     level, state}`` for each HOT/WARM model; ``status`` is the derived service
-    state. Indexing/iteration delegate to ``deployments`` for convenience. A
+    state. Indexing/iteration delegate to ``deployments`` for convenience.
+    Replicas of one deployment fold into one entry (healthiest state wins). A
     checkpoint deployed under several tasks appears once per task, keyed
-    ``"repo_id (task)"``.
+    ``"repo_id (task)"`` — with the revision joining the key when the tasks
+    tie (several revisions under one task).
     """
 
     class Status(str, Enum):
@@ -233,34 +235,59 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
     if raw:
         return response
 
-    entries = []
+    # /status has one entry per *replica*. Fold replicas of one model_key into
+    # one deployment first, keeping the healthiest level/state — otherwise a
+    # second replica of a model looks like a second deployment, and a spare
+    # replica still DEPLOYING masks a RUNNING one.
+    level_rank = {"HOT": 0, "WARM": 1}
+    state_rank = {"RUNNING": 0, "DEPLOYING": 1, "NOT_STARTED": 2, "UNHEALTHY": 3}
+    groups: dict = {}
     for name, value in response.get("deployments", {}).items():
         if value.get("deployment_level") not in _DEPLOYED_LEVELS:
             continue  # deployed models only (skip COLD downloaded)
-        model_key = value.get("model_key", "")
-        model_class = model_key.split(":", 1)[0].split(".")[-1] if model_key else "-"
-        repo_id = value.get("repo_id", name)
-        entries.append({
+        model_key = value.get("model_key") or name
+        model_class = (
+            model_key.split(":", 1)[0].split(".")[-1] if ":" in model_key else "-"
+        )
+        entry = {
             "model_class": model_class,
-            "repo_id": repo_id,
+            "repo_id": value.get("repo_id", name),
             "task": value.get("task"),
             "revision": value.get("revision") or "main",
             "level": value.get("deployment_level"),
             "state": value.get("application_state", "UNHEALTHY"),
-        })
+        }
+        held = groups.get(model_key)
+        if held is None:
+            groups[model_key] = entry
+        elif (
+            level_rank.get(entry["level"], 9),
+            state_rank.get(entry["state"], 9),
+        ) < (
+            level_rank.get(held["level"], 9),
+            state_rank.get(held["state"], 9),
+        ):
+            groups[model_key] = entry
 
-    # Keyed by repo id for the common case (`"gpt2" in nnsight.status()`); the
-    # same checkpoint deployed under several tasks is several deployments, so
-    # only then does the task join the dict key to keep every entry visible.
-    counts: dict = {}
-    for entry in entries:
-        counts[entry["repo_id"]] = counts.get(entry["repo_id"], 0) + 1
+    # Keyed by repo id for the common case (`"gpt2" in nnsight.status()`). Only
+    # when several *distinct deployments* share a repo — the same checkpoint
+    # under several tasks, or several revisions — does the task join the dict
+    # key (plus the revision, when the tasks tie) to keep every entry visible.
+    by_repo: dict = {}
+    for entry in groups.values():
+        by_repo.setdefault(entry["repo_id"], []).append(entry)
+
     deployments = {}
-    for entry in entries:
-        key = entry["repo_id"]
-        if counts[key] > 1:
-            key = f"{key} ({entry['task'] or '?'})"
-        deployments[key] = entry
+    for repo_id, repo_entries in by_repo.items():
+        if len(repo_entries) == 1:
+            deployments[repo_id] = repo_entries[0]
+            continue
+        tasks = [entry["task"] for entry in repo_entries]
+        for entry in repo_entries:
+            suffix = entry["task"] or "?"
+            if tasks.count(entry["task"]) > 1:
+                suffix = f"{suffix}, {entry['revision']}"
+            deployments[f"{repo_id} ({suffix})"] = entry
     return NdifStatus(deployments)
 
 

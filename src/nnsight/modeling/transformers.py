@@ -511,9 +511,19 @@ class TransformersModel(HuggingFaceModel):
         # The pipeline factory can't infer the task or the preprocessors from a
         # module instance, so infer the task and source the preprocessors from
         # what was passed in or the model's name_or_path (captured as
-        # self.repo_id).
+        # self.repo_id). The Hub's answer first: the task is part of the remote
+        # model key, and a checkpoint wrapped pre-loaded must mint the same key
+        # as one loaded by repo id — the class-name guess disagrees with the
+        # Hub's pipeline_tag for some checkpoints (a llava repo is tagged
+        # image-text-to-text, its class-name guess says text-generation). The
+        # local guess remains the offline fallback.
         if self.task is None:
-            self.task = _infer_task(module)
+            from transformers.pipelines import get_task
+
+            try:
+                self.task = get_task(self.repo_id)
+            except Exception:
+                self.task = _infer_task(module)
         self.pipeline = pipeline(
             self.task, model=module, **self._preprocessor_sources(), **top_level
         )
@@ -625,8 +635,15 @@ class TransformersModel(HuggingFaceModel):
         # server must rebuild the pipeline the client traced rather than
         # re-infer one from the Hub. Always the resolved task, never null — an
         # unset task is inferred by the meta build before any key is minted.
+        # The alias table, not check_task's full normalization: an alias names
+        # the identical pipeline ("sentiment-analysis" is "text-classification"),
+        # so two spellings must not become two deployments — but check_task
+        # would also collapse "translation_en_to_fr" to bare "translation",
+        # which names a *different* pipeline configuration.
+        from transformers.pipelines import TASK_ALIASES
+
         data = json.loads(super()._remoteable_model_key())
-        data["task"] = self.task
+        data["task"] = TASK_ALIASES.get(self.task, self.task)
         return json.dumps(data)
 
     def _remoteable_persistent_objects(self) -> dict:

@@ -3,7 +3,7 @@ title: NDIF Status and Availability
 one_liner: Check the NDIF service state and whether a specific model is currently running before submitting.
 tags: [remote, ndif, status]
 related: [docs/remote/index.md, docs/remote/api-key-and-config.md]
-sources: [src/nnsight/ndif.py:197, src/nnsight/ndif.py:249, src/nnsight/ndif.py:128]
+sources: [src/nnsight/ndif.py:210, src/nnsight/ndif.py:308, src/nnsight/ndif.py:134]
 ---
 
 # NDIF Status and Availability
@@ -41,9 +41,9 @@ TransformersModel  meta-llama/Llama-3.1-70B  text-generation  main      HOT    R
 TransformersModel  openai-community/gpt2     text-generation  main      WARM   DEPLOYING
 ```
 
-Only **deployed** models appear — those at level `HOT` or `WARM` (`COLD`, i.e. downloaded but not up, is filtered out; `src/nnsight/ndif.py:222`).
+Only **deployed** models appear — those at level `HOT` or `WARM` (`COLD`, i.e. downloaded but not up, is filtered out; `src/nnsight/ndif.py:246`).
 
-`status()` returns an `NdifStatus` (`src/nnsight/ndif.py:128`). It's a dict-like view over `deployments`, so you can inspect it programmatically:
+`status()` returns an `NdifStatus` (`src/nnsight/ndif.py:134`). It's a dict-like view over `deployments`, so you can inspect it programmatically:
 
 ```python
 s = nnsight.status()
@@ -54,7 +54,7 @@ for repo_id in s:                    # iterates deployment repo ids
     print(repo_id, info["model_class"], info["level"], info["state"])
 ```
 
-Each `info` dict has `model_class`, `repo_id`, `task`, `revision`, `level`, `state`. `NdifStatus` supports `s[key]`, `key in s`, `len(s)`, `s.keys()`, and iteration. A checkpoint deployed under several pipeline tasks is several deployments; each appears as its own entry, keyed `"repo_id (task)"`.
+Each `info` dict has `model_class`, `repo_id`, `task`, `revision`, `level`, `state`. `NdifStatus` supports `s[key]`, `key in s`, `len(s)`, `s.keys()`, and iteration. Replicas of one deployment fold into a single entry (healthiest state wins). A checkpoint deployed under several pipeline tasks is several deployments; each appears as its own entry, keyed `"repo_id (task)"` — and when the tasks tie (several revisions under one task), the revision joins the key.
 
 `status(raw=True)` returns the raw `/status` JSON instead of an `NdifStatus`.
 
@@ -62,7 +62,7 @@ Each `info` dict has `model_class`, `repo_id`, `task`, `revision`, `level`, `sta
 
 ## Service status values
 
-`NdifStatus.status` is one of (`src/nnsight/ndif.py:136`):
+`NdifStatus.status` is one of (`src/nnsight/ndif.py:146`):
 
 | Value | Meaning |
 |-------|---------|
@@ -74,7 +74,7 @@ Per-model `state` values seen in the table: `RUNNING` (live), `DEPLOYING` (comin
 
 ## is_model_running
 
-For a yes/no answer about a single model (`src/nnsight/ndif.py:249`):
+For a yes/no answer about a single model (`src/nnsight/ndif.py:308`):
 
 ```python
 if nnsight.is_model_running("meta-llama/Llama-3.1-70B"):

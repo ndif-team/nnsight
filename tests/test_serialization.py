@@ -744,3 +744,28 @@ class TestModelKey:
 
         other = TransformersModel("openai-community/gpt2", task="feature-extraction")
         assert other.to_model_key() != gpt2.to_model_key()
+
+    def test_key_is_stable_across_rebuild(self, gpt2):
+        # mint -> from_model_key -> re-mint must be a fixed point: the server
+        # rebuilds from the key and anything it re-mints (status, logs) must
+        # name the same deployment.
+        _seed_id_cache()
+        from nnsight.modeling.huggingface import HuggingFaceModel
+
+        key = gpt2.to_model_key()
+        assert HuggingFaceModel.from_model_key(key).to_model_key() == key
+
+    def test_alias_task_mints_the_canonical_key(self):
+        # "sentiment-analysis" IS "text-classification" (transformers'
+        # TASK_ALIASES); two spellings of one pipeline must not become two
+        # deployments.
+        _seed_id_cache()
+        import json
+
+        from nnsight.modeling.transformers import TransformersModel
+
+        aliased = TransformersModel(
+            "openai-community/gpt2", task="sentiment-analysis"
+        )
+        suffix = json.loads(aliased.to_model_key().split(":", 1)[1])
+        assert suffix["task"] == "text-classification"
