@@ -224,7 +224,10 @@ def seq2seq(tokenizer):
         decoder_start_token_id=0, pad_token_id=0,
     )
     module = T5ForConditionalGeneration(config).eval()
-    return TransformersModel(module, task="text-generation", tokenizer=tokenizer, device="cpu")
+    # Its own tokenizer: a model sets the padding side on the one it is given.
+    return TransformersModel(
+        module, task="text-generation", tokenizer=copy.deepcopy(tokenizer), device="cpu"
+    )
 
 
 def batch(model, *invokes):

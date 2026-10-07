@@ -18,7 +18,7 @@ this module leans on the pipeline rather than re-deriving any of it:
   per-invoke encodings are padded together by `processing.collate`.
 * **Padding**: which side to pad is the model's business, not the task's, so it
   follows `TransformersModel._is_causal` — decoders left-pad and get
-  mask-derived ``position_ids``; encoders keep right padding.
+  mask-derived ``position_ids``; encoders and encoder-decoders pad right.
 
 Three ways in, and the difference matters:
 
@@ -369,25 +369,32 @@ class TransformersModel(HuggingFaceModel):
         # Pad with EOS when there's no pad token. Left-pad only for causal decoders,
         # so a batched trace/generation aligns the last real token at the right edge
         # (``output[:, -1]`` is every row's real last token); encoder tasks keep
-        # their default (right) padding.
+        # their default (right) padding. An encoder-decoder is set to the right
+        # explicitly: the text-generation pipeline it loads under left-pads every
+        # model it wraps, which shifts the absolute positions of BART's encoder.
         if self.tokenizer is None:
             return
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         if self._is_causal():
             self.tokenizer.padding_side = "left"
+        elif self._is_encoder_decoder():
+            self.tokenizer.padding_side = "right"
 
     def _is_causal(self) -> bool:
         # A decoder-only generative model (GPT-2, Llava, ...) — as opposed to an
         # encoder (BERT) or encoder-decoder (T5). Decides left-padding and the
         # left-pad position_ids correction.
         model = getattr(self.pipeline, "model", None)
-        config = getattr(model, "config", None)
         return (
             model is not None
             and model.can_generate()
-            and not getattr(config, "is_encoder_decoder", False)
+            and not self._is_encoder_decoder()
         )
+
+    def _is_encoder_decoder(self) -> bool:
+        model = getattr(self.pipeline, "model", None)
+        return bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False))
 
     def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import AutoConfig, pipeline
