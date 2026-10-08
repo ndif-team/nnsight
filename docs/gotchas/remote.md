@@ -34,7 +34,7 @@ print(hs.shape)   # (1, 7, 768)
 ```
 
 Model identity for a real remote request comes from `model.to_model_key()`, e.g.
-`nnsight.modeling.transformers.TransformersModel:{"repo_id": "openai-community/gpt2", "revision": null}`. Deprecated aliases (`LanguageModel`) share `TransformersModel`'s key.
+`nnsight.modeling.transformers.TransformersModel:{"repo_id": "openai-community/gpt2", "revision": null, "task": "text-generation"}`. Deprecated aliases (`LanguageModel`) share `TransformersModel`'s key when the task they pin matches.
 
 ---
 

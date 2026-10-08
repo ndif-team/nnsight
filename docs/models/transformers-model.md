@@ -429,7 +429,7 @@ Aliases are honored in `tracer.cache()` keys too (`tests/test_language.py`).
 
 ## Remote
 
-`TransformersModel` is remoteable. `model.to_model_key()` identifies the checkpoint (repo id + revision, canonicalized via the Hub), and `trace(..., remote=True)` runs on NDIF. The deprecated `LanguageModel` / `VisionLanguageModel` aliases share this class's remote key (`language.py`, `LanguageModel._remoteable_class`), so a model deployed as a `TransformersModel` is reachable when wrapped as either. See [docs/remote/](../remote/).
+`TransformersModel` is remoteable. `model.to_model_key()` identifies the checkpoint (repo id + revision, canonicalized via the Hub, plus the resolved pipeline task — so each task of a checkpoint is its own remote model, and the server rebuilds the exact pipeline you traced), and `trace(..., remote=True)` runs on NDIF. The deprecated `LanguageModel` / `VisionLanguageModel` aliases share this class's remote key (`language.py`, `LanguageModel._remoteable_class`) — but each pins a task (`text-generation` / `image-text-to-text`), and the task is part of the key, so they reach a `TransformersModel` deployment only when its task matches the one they pin. See [docs/remote/](../remote/).
 
 ## Gotchas
 

@@ -119,6 +119,95 @@ class TestPullEnv:
         assert registered == []
 
 
+_TG_KEY = (
+    'nnsight.modeling.transformers.TransformersModel:'
+    '{"repo_id": "openai-community/gpt2", "revision": null, "task": "text-generation"}'
+)
+_FX_KEY = (
+    'nnsight.modeling.transformers.TransformersModel:'
+    '{"repo_id": "openai-community/gpt2", "revision": null, "task": "feature-extraction"}'
+)
+
+
+def _replica(key, state="RUNNING", level="HOT", revision=None, task="text-generation"):
+    # One /status entry, shaped like the controller's: per *replica*, carrying
+    # the deployment's model_key and task.
+    return {
+        "deployment_level": level,
+        "application_state": state,
+        "model_key": key,
+        "repo_id": "openai-community/gpt2",
+        "revision": revision,
+        "task": task,
+    }
+
+
+class TestStatusGrouping:
+    """status() folds replicas of one model_key into one entry and keys by repo
+    id, splitting the key only for genuinely distinct deployments."""
+
+    def _serve(self, monkeypatch, deployments):
+        monkeypatch.setattr(ndif, "_get", lambda path, **kwargs: {"deployments": deployments})
+
+    def test_two_replicas_are_one_entry(self, monkeypatch):
+        # Two replicas of one deployment must not look like a repo-id
+        # collision: the entry keeps the plain repo-id key, and a spare
+        # replica still DEPLOYING doesn't mask the RUNNING one.
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TG_KEY: _replica(_TG_KEY, "RUNNING"),
+            "b:ModelActor:" + _TG_KEY: _replica(_TG_KEY, "DEPLOYING"),
+        })
+        s = nnsight.status()
+        assert "openai-community/gpt2" in s
+        assert len(s) == 1
+        assert s["openai-community/gpt2"]["state"] == "RUNNING"
+        assert s.status is ndif.NdifStatus.Status.UP
+
+    def test_two_tasks_key_per_task(self, monkeypatch):
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TG_KEY: _replica(_TG_KEY, task="text-generation"),
+            "b:ModelActor:" + _FX_KEY: _replica(_FX_KEY, task="feature-extraction"),
+        })
+        s = nnsight.status()
+        assert "openai-community/gpt2 (text-generation)" in s
+        assert "openai-community/gpt2 (feature-extraction)" in s
+        assert len(s) == 2
+
+    def test_same_task_two_revisions_key_by_revision(self, monkeypatch):
+        key_b = _TG_KEY.replace('"revision": null', '"revision": "abc123"')
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TG_KEY: _replica(_TG_KEY, revision=None),
+            "b:ModelActor:" + key_b: _replica(key_b, revision="abc123"),
+        })
+        s = nnsight.status()
+        assert "openai-community/gpt2 (text-generation, main)" in s
+        assert "openai-community/gpt2 (text-generation, abc123)" in s
+
+
+class TestIsModelRunningTask:
+    def _serve(self, monkeypatch, deployments):
+        monkeypatch.setattr(ndif, "_get", lambda path, **kwargs: {"deployments": deployments})
+        import huggingface_hub
+
+        class _Api:
+            def model_info(self, repo_id):
+                class _Info:
+                    id = repo_id
+                return _Info()
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", _Api)
+
+    def test_task_narrows_to_one_deployment(self, monkeypatch):
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TG_KEY: _replica(_TG_KEY, "RUNNING", task="text-generation"),
+            "b:ModelActor:" + _FX_KEY: _replica(_FX_KEY, "DEPLOYING", task="feature-extraction"),
+        })
+        assert nnsight.is_model_running("openai-community/gpt2") is True
+        assert nnsight.is_model_running("openai-community/gpt2", task="text-generation") is True
+        assert nnsight.is_model_running("openai-community/gpt2", task="feature-extraction") is False
+        assert nnsight.is_model_running("openai-community/gpt2", task="absent-task") is False
+
+
 class TestGracefulFailure:
     def test_status_unreachable_is_down(self, monkeypatch):
         monkeypatch.setattr(nnsight.CONFIG.API, "HOST", "http://localhost:1")
