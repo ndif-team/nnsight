@@ -456,6 +456,11 @@ def device_mesh(model: Any) -> Any:
     """
     module = getattr(model, "_module", model)
     mesh = getattr(module, "_device_mesh", None)
+    # 5.19 keeps the model-level mesh as a named (pp, fsdp, tp) hybrid; a
+    # collective placed on it with one placement lands on the wrong dim. The
+    # tp submesh is the one gather/shard mean.
+    if mesh is not None and getattr(mesh, "mesh_dim_names", None) and "tp" in mesh.mesh_dim_names:
+        mesh = mesh["tp"]
     return mesh if mesh is not None and mesh.size() > 1 else None
 
 
@@ -677,6 +682,14 @@ class TPFragments(Fragments):
         )
         if owned is not None:
             mesh = owned
+        # Under FSDP2 (applied whenever ep_dispatch_experts is in the plan,
+        # even at fsdp_size=1) a parameter's mesh is the hybrid (fsdp, tp) one,
+        # while transformers installs the style's transforms — and runs its
+        # unsharded forward — on the 1-D "tp" submesh. Collectives and
+        # re-installed wrappers must use that submesh, or the wrapper builds
+        # inputs on a mesh the unsharded weight no longer lives on.
+        if getattr(mesh, "mesh_dim_names", None) and "tp" in mesh.mesh_dim_names:
+            mesh = mesh["tp"]
         return style, mesh, ALL_PARALLEL_STYLES._global_mapping.get(style)
 
     def style_at(self, path: str) -> "tuple[str | None, Any]":
