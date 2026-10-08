@@ -106,12 +106,25 @@ SIDES: Dict[str, Dict[str, str]] = {
     "grouped_gemm": {},                                   # * shards expert parameters only; the
                                                           #   wrapper it installs is the identity
     "moe_tp_experts": {"output": "partial"},              # + output transform all-reduces (see below)
+    "ep_dispatch_experts": {},                            # * 5.19's token-dispatching expert parallelism;
+                                                          #   see the note below
 }
 
 # Entries marked + follow from reading transformers' style classes rather than
 # from running a model: ``moe_tp_experts`` ends in an unconditional all-reduce (so
 # a partial, not the shard its name suggests), and ``sequence_parallel``
 # reduce-scatters on the last dim (a whole-width partial at the handoff).
+#
+# ``ep_dispatch_experts`` (transformers 5.19) replaces the ``ep_router`` +
+# ``moe_tp_experts`` pair in expert-parallel plans: its wrapper all-to-alls each
+# token to its expert's owner rank and combines the answers before returning.
+# Uniquely, that wrapper is *kept as the controller's body* rather than stripped
+# and rebuilt (`_framework_forward` exempts it): rebuilding needs the ep/tp
+# submeshes transformers derived at shard time, which the module does not carry
+# — and with the wrapper under the tap, the handoff sees whole values on both
+# sides, hence the empty entry. Verified by the expert-parallel suite
+# (tests/tp/test_cpu_expert_parallel.py), which compares rank values —
+# including an edit of ``experts.output`` — against a single-process run.
 #
 # ``embedding_rowwise`` is marked ! because the rule above is right and unreachable
 # in practice: a vocab-parallel embedding's value carries a ``_MaskPartial``
@@ -553,6 +566,17 @@ class TPFragments(Fragments):
         if self._plan is None:
             mesh = getattr(module, "_device_mesh", None)
             plan = getattr(module, "tp_plan", None)
+            # 5.19 moved expert-parallel entries out of ``tp_plan`` into their
+            # own ``ep_plan`` (on 5.16-5.18, and for a dense model, there is no
+            # such attribute and ``tp_plan`` is the whole story). Styles are
+            # resolved against both: the plans never name the same module —
+            # upstream drops TP rules for everything the EP plan owns.
+            try:
+                ep_plan = getattr(module, "ep_plan", None)
+            except Exception:  # a property that raises off-mesh
+                ep_plan = None
+            if ep_plan:
+                plan = {**(plan or {}), **ep_plan}
             if mesh is not None and plan:
                 self._plan = (envoy.path, plan, mesh)
 
@@ -581,7 +605,14 @@ class TPFragments(Fragments):
                 "can't be shown whole, so this model can't be traced tensor-parallel."
             )
 
-        _keep_tp_forward(envoy, style_object, mesh)
+        # ``ep_dispatch_experts`` is never stripped in the first place — the
+        # controller keeps its wrapper as the body (see
+        # ``_framework_forward`` in ``nnsight.intervention.source``) because
+        # rebuilding it would need the ep/tp submeshes transformers derived at
+        # shard time. With the wrapper under the tap there is nothing to put
+        # back.
+        if style != "ep_dispatch_experts":
+            _keep_tp_forward(envoy, style_object, mesh)
 
         self.enabled = True
         self.tp_styles[envoy.path] = (style, mesh)
@@ -611,17 +642,41 @@ class TPFragments(Fragments):
         # envoy's own prefix. Both spell a module the way `named_modules` does.
         name = envoy.path[len(root) + 1 :]
 
-        from transformers.distributed.tensor_parallel import (
-            ALL_PARALLEL_STYLES,
-            _get_parameter_tp_plan,
-        )
+        from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
         # transformers' own matcher, not a reimplementation of its globbing: the
         # plan's keys wildcard layer numbers, and a private copy of that rule is
-        # exactly the kind of drift this module keeps being broken by.
-        style = _get_parameter_tp_plan(parameter_name=name, tp_plan=plan, is_weight=False)
+        # exactly the kind of drift this module keeps being broken by. Being
+        # private, the matcher itself drifts too: 5.19 renamed it (and its
+        # ``tp_plan`` parameter to ``plan`` — hence positional args below).
+        try:
+            from transformers.distributed.tensor_parallel import _get_parameter_plan
+        except ImportError:  # transformers < 5.19
+            from transformers.distributed.tensor_parallel import (
+                _get_parameter_tp_plan as _get_parameter_plan,
+            )
+
+        style = _get_parameter_plan(name, plan, is_weight=False)
         if style is None:
             return None
+
+        # The mesh the style's transforms (and nnsight's gathers) must use is
+        # the one the module's weights are sharded on — 5.19 shards on the
+        # named "tp" submesh while the model-level ``_device_mesh`` is the full
+        # (pp, fsdp, tp) mesh, and a DTensor op over mixed meshes refuses to
+        # run. The weights are the ground truth either way.
+        from torch.distributed.tensor import DTensor
+
+        owned = next(
+            (
+                parameter.device_mesh
+                for parameter in module.parameters()
+                if isinstance(parameter, DTensor)
+            ),
+            None,
+        )
+        if owned is not None:
+            mesh = owned
         return style, mesh, ALL_PARALLEL_STYLES._global_mapping.get(style)
 
     def style_at(self, path: str) -> "tuple[str | None, Any]":
