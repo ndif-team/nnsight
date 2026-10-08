@@ -511,19 +511,13 @@ class TransformersModel(HuggingFaceModel):
         # The pipeline factory can't infer the task or the preprocessors from a
         # module instance, so infer the task and source the preprocessors from
         # what was passed in or the model's name_or_path (captured as
-        # self.repo_id). The Hub's answer first: the task is part of the remote
-        # model key, and a checkpoint wrapped pre-loaded must mint the same key
-        # as one loaded by repo id — the class-name guess disagrees with the
-        # Hub's pipeline_tag for some checkpoints (a llava repo is tagged
-        # image-text-to-text, its class-name guess says text-generation). The
-        # local guess remains the offline fallback.
+        # self.repo_id). The class-name guess can differ from the Hub's
+        # pipeline_tag — which is what a repo-id construction infers into the
+        # remote model key — but a pre-loaded module is a *local* model: its
+        # weights are already in hand, so its key never has to match a
+        # deployment. Local inference keeps this path offline.
         if self.task is None:
-            from transformers.pipelines import get_task
-
-            try:
-                self.task = get_task(self.repo_id)
-            except Exception:
-                self.task = _infer_task(module)
+            self.task = _infer_task(module)
         self.pipeline = pipeline(
             self.task, model=module, **self._preprocessor_sources(), **top_level
         )

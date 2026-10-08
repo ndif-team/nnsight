@@ -935,34 +935,15 @@ class TestPreloadedModule:
         model = TransformersModel(hf_gpt2, task="text-generation", tokenizer=tok)
         assert model.tokenizer is tok
 
-    def test_preloaded_module_task_comes_from_the_hub(self):
-        # The task is part of the remote key, so a pre-loaded wrap must infer
-        # the same task a repo-id load would: the Hub's pipeline_tag — which
-        # also knows tasks the class-name map doesn't (*ForQuestionAnswering).
+    def test_question_answering_module_asks_for_a_task(self):
+        # transformers 5 has no question-answering pipeline, so there is no task to
+        # infer for a *ForQuestionAnswering module: the user has to be told to pass
+        # one, rather than getting a KeyError out of the pipeline factory.
         from transformers import TapasForQuestionAnswering
 
         module = TapasForQuestionAnswering.from_pretrained(
             "hf-internal-testing/tiny-random-TapasForQuestionAnswering"
         )
-        model = TransformersModel(module)
-        assert model.task == "table-question-answering"
-
-    def test_question_answering_module_asks_for_a_task_offline(self, monkeypatch):
-        # With the Hub unreachable, the class-name fallback has no entry for a
-        # *ForQuestionAnswering module: the user has to be told to pass a task,
-        # rather than getting a KeyError out of the pipeline factory.
-        import transformers.pipelines
-
-        from transformers import TapasForQuestionAnswering
-
-        module = TapasForQuestionAnswering.from_pretrained(
-            "hf-internal-testing/tiny-random-TapasForQuestionAnswering"
-        )
-
-        def unreachable(repo_id):
-            raise OSError("offline")
-
-        monkeypatch.setattr(transformers.pipelines, "get_task", unreachable)
         with pytest.raises(ValueError, match="pass task="):
             TransformersModel(module)
 
