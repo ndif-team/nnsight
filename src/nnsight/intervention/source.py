@@ -651,10 +651,10 @@ def _framework_forward(module: Any) -> bool:
     if qualname.startswith("EpDispatchExpertsParallel."):
         # The one TP wrapper that is kept as the body instead of rebuilt
         # around the controller: it dispatches each token to its expert's
-        # owner rank and combines the answers before returning, so outside it
-        # the values are whole — and rebuilding it would need the ep/tp
-        # submeshes transformers derived at shard time, which the module does
-        # not carry. See SIDES["ep_dispatch_experts"] in
+        # owner rank and combines the answers before returning, so the
+        # handoff must sit outside it, where values are whole — inside, each
+        # rank holds only the tokens routed to its own experts, which no
+        # gather rule could reassemble. See the note under SIDES in
         # nnsight.modeling.tp.fragments.
         return False
     return ".install_forward.<locals>." in qualname
