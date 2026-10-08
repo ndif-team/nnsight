@@ -117,8 +117,21 @@ class TestStyleCoverage:
             f"carry a shard) or to UNSUPPORTED."
         )
 
+    # Styles the tables carry ahead of older supported transformers: the floor
+    # is 5.16 while CI installs the latest, so the tables must be a superset
+    # across that range, and an entry for a style a newer release added is not
+    # stale on an install that predates it. Each names the release that
+    # introduced it; drop an entry here once the floor passes that release.
+    FORWARD_STYLES = {
+        "ep_dispatch_experts",  # transformers 5.19
+    }
+
     def test_no_rule_names_a_style_that_no_longer_exists(self):
-        stale = (set(SIDES) | set(UNSUPPORTED)) - _upstream_styles()
+        stale = (
+            (set(SIDES) | set(UNSUPPORTED))
+            - _upstream_styles()
+            - self.FORWARD_STYLES
+        )
         assert not stale, (
             f"rules name parallel styles transformers no longer has: "
             f"{sorted(stale)} — probably renamed upstream."
