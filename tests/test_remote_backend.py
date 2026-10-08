@@ -24,12 +24,13 @@ class _FakeConnection:
     that it was closed. recv/close are synchronous, like the real sync client the
     backend connects with (receive() runs recv off the event loop)."""
 
-    def __init__(self, statuses):
+    def __init__(self, statuses, meta=None):
         self._messages = [
             ResponseModel(
                 id="job",
                 status=status,
                 description="boom" if status == Status.ERROR else "",
+                meta=meta if status == Status.COMPLETED else None,
             ).model_dump_json()
             for status in statuses
         ]
@@ -42,11 +43,11 @@ class _FakeConnection:
         self.closed = True
 
 
-def _backend(statuses, result=None):
+def _backend(statuses, result=None, meta=None):
     # Build a backend and drop a fake, already-subscribed connection onto it (so
     # __call__'s real submit is bypassed), stubbing the async download.
     backend = AsyncRemoteBackend(MODEL_KEY, host="http://ndif.test")
-    backend.connection = _FakeConnection(statuses)
+    backend.connection = _FakeConnection(statuses, meta=meta)
 
     async def _download(url):
         return result
@@ -122,3 +123,109 @@ class TestAsyncRemoteBackend:
         from nnsight.intervention.backends.remote import RemoteBackend
 
         assert issubclass(AsyncRemoteBackend, RemoteBackend)
+
+
+# What the server reports on COMPLETED: wall-clock seconds, and the peak GPU
+# memory the request drove on top of the resident weights. Keys are the server's;
+# the client stores the dict as-is and never interprets it.
+META = {
+    "runtime": 1.25,
+    "max_memory_usage": 2048,
+    "max_mem_by_gpu": {"0": 2048, "1": 1024},
+    "max_mem_pct_by_gpu": {"0": 12.5, "1": 6.25},
+}
+
+
+class TestResponseMeta:
+    """`meta` on the wire: it survives both encodings, and is optional."""
+
+    def test_survives_the_json_frame(self):
+        # Text frames — every status update, and a COMPLETED that carries a url.
+        response = ResponseModel(id="job", status=Status.COMPLETED, meta=META)
+        assert ResponseModel.model_validate_json(
+            response.model_dump_json()
+        ).meta == META
+
+    def test_survives_the_pickled_frame(self):
+        # Binary frames — a COMPLETED whose data is the result blob itself.
+        response = ResponseModel(id="job", status=Status.COMPLETED, meta=META)
+        assert ResponseModel.unpickle(response.pickle()).meta == META
+
+    def test_absent_from_an_older_server(self):
+        # A server that doesn't report cost sends no such key; parsing must not fail.
+        response = ResponseModel.model_validate_json(
+            '{"id": "job", "status": "COMPLETED"}'
+        )
+        assert response.meta is None
+
+
+class TestBackendMeta:
+    """The backend keeps the finished job's cost report, whichever way it waited."""
+
+    def test_none_before_the_job_completes(self):
+        backend = AsyncRemoteBackend(MODEL_KEY, host="http://ndif.test")
+        assert backend.meta is None
+
+    def test_recorded_when_awaited(self):
+        backend = _backend(
+            [Status.RUNNING, Status.COMPLETED], result={"out": 1}, meta=META
+        )
+        asyncio.run(backend.resolve())
+        assert backend.meta == META
+
+    def test_recorded_when_streamed(self):
+        # stream() bypasses note(), so it records the report on its own path.
+        backend = _backend(
+            [Status.RUNNING, Status.COMPLETED], result={"out": 1}, meta=META
+        )
+
+        async def go():
+            async for _ in backend:
+                pass
+
+        asyncio.run(go())
+        assert backend.meta == META
+
+    def test_recorded_off_a_polled_response(self):
+        # The blocking and non-blocking paths both reach a response through note().
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test")
+        assert backend.note(
+            ResponseModel(id="job", status=Status.COMPLETED, meta=META)
+        )
+        assert backend.meta == META
+
+    def test_intermediate_updates_leave_it_alone(self):
+        # RUNNING carries no report; it must not clear one already recorded.
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test")
+        backend.note(ResponseModel(id="job", status=Status.COMPLETED, meta=META))
+        backend.note(ResponseModel(id="job", status=Status.RUNNING))
+        assert backend.meta == META
+
+    def test_recorded_even_when_the_job_fails(self):
+        # The report is taken off the response *before* note() raises. A failed
+        # job is exactly when it earns its keep -- an OOM's meta carries
+        # alloc_shortfall_by_gpu, which the traceback cannot tell you.
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test")
+        failure = dict(META, alloc_shortfall_by_gpu={"0": 1_310_000_000})
+        with pytest.raises(RemoteError, match="out of memory"):
+            backend.note(
+                ResponseModel(
+                    id="job",
+                    status=Status.ERROR,
+                    description="CUDA out of memory",
+                    meta=failure,
+                )
+            )
+        assert backend.meta == failure
+        assert backend.meta["alloc_shortfall_by_gpu"]["0"] == 1_310_000_000
+
+    def test_stays_none_against_an_older_server(self):
+        backend = _backend([Status.RUNNING, Status.COMPLETED], result={"out": 1})
+        asyncio.run(backend.resolve())
+        assert backend.meta is None

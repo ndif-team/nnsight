@@ -77,6 +77,47 @@ Status updates are `ResponseModel` objects carrying one of these (`src/nnsight/s
 
 The client renders these as a single in-place status line (animated spinner in terminals, an in-place HTML element in Jupyter). See `StatusDisplay` (`src/nnsight/intervention/backends/display.py:58`). There is no `STREAM` status — the old `tracer.local()` hybrid-streaming path does not exist here.
 
+## What the job cost
+
+The `COMPLETED` response also carries `meta` — a plain dict of what the run cost on the server. The backend keeps the last one it saw, and the tracer keeps the backend it ran on, so read it after the block exits (the backend runs in `__exit__`, so it is still `None` inside):
+
+```python
+with model.trace("Hello", remote=True) as tracer:
+    out = model.lm_head.output.save()
+
+meta = tracer.backend.meta
+meta["runtime"]             # 0.42
+meta["max_memory_usage"]    # 2147483648
+meta["max_mem_by_gpu"]      # {'0': 2147483648}
+meta["max_mem_pct_by_gpu"]  # {'0': 20.0}
+```
+
+| Key | Meaning |
+|---|---|
+| `runtime` | Wall-clock seconds the block ran on the server. |
+| `max_mem_by_gpu` | Peak bytes the block drove *on top of the resident weights*, per card. Not the card's total usage — the weights are the server's, and you cannot shrink them. |
+| `max_mem_pct_by_gpu` | `max_mem_by_gpu` against the headroom the job had (its share of the card, less what the weights already hold), as a percentage. 100 means it filled everything left for it. |
+| `max_memory_usage` | `max_mem_by_gpu` on the worst-pressured card. |
+| `alloc_shortfall_by_gpu` | Only on an out-of-memory failure; see below. |
+
+GPU maps are keyed by device id as a **string**: `meta["max_mem_by_gpu"]["0"]`, not `[0]`. Every key is optional — an older server sends no `meta` at all — so use `.get()` before trusting one.
+
+A **failed** job reports its cost too, which is when it matters most. The backend records it before raising, so catch the error and read it off the tracer:
+
+```python
+from nnsight.intervention.backends.remote import RemoteError
+
+try:
+    with model.trace(prompt, remote=True) as tracer:
+        acts = model.transformer.h[-1].output.save()
+except RemoteError:
+    print(tracer.backend.meta.get("alloc_shortfall_by_gpu"))   # {'0': 1310000000}
+```
+
+`alloc_shortfall_by_gpu` is present only when the server ran out of GPU memory. For each card that ran out it gives the part of the refused allocation that would not fit — the number that says how much you need to free. That is not the size of the refused allocation: asking for 2 GB with 1.9 GB free and asking for it with nothing free are the same request and completely different problems. The traceback can't tell you either, since the allocation that failed is by definition the one that never counted. On a sharded model, *which* card is itself the finding. Treat it as approximate; the allocator drops cached blocks and retries before it gives up, and it is `None` when the server could not tell which card refused.
+
+A non-blocking job's `poll()` and an `AsyncRemoteBackend` record it the same way, on the backend you already hold.
+
 ## What "meta device" means client-side
 
 When you instantiate `TransformersModel("meta-llama/Llama-3.1-70B")` without `dispatch=True`, the model is built on `torch.device("meta")` — the architecture is constructed (so `model.transformer.h[0].output` is a real envoy path) but no weights are allocated. This is what lets a machine with no GPU write intervention code against a 70B model.
