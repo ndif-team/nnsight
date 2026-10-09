@@ -68,6 +68,18 @@ from .source import Source, install_source
 from .tracer import InterleavingTracer
 from .util import first_input, replace_first_input
 
+# Torch's containers hold their modules as their own `_modules` entries, which is
+# exactly what the envoy tree mirrors. Indexing and iterating them goes through
+# the children, so both yield envoys, and an entry sharing its module with
+# another keeps its own name. A container that keeps its modules one level down
+# — in a child list, reached by its own `__getitem__` — is what
+# `Envoy._indexes_past_children` answers for.
+_CHILD_INDEXED = (
+    torch.nn.ModuleList,
+    torch.nn.Sequential,
+    torch.nn.ModuleDict,
+)
+
 
 def traceable(method: Callable) -> Callable:
     """Make an Envoy method usable as a trace context.
@@ -906,6 +918,35 @@ class Envoy:
         else:
             object.__setattr__(self, name, value)
 
+    def _indexes_past_children(self) -> type | None:
+        """The wrapped module's class, when its own indexing reaches past the
+        entries this envoy mirrors.
+
+        A container that keeps its modules in a child list — a set of
+        transcoders behind a `ModuleList` — reads ``set[i]`` as the i-th module
+        *inside* that list, while the envoy tree's children are the container's
+        own entries (here, one: the list). Its ``__len__`` counts what its
+        ``__getitem__`` indexes, so taking it at its word is what makes
+        ``len``, iteration and indexing agree.
+
+        ``None`` for a plain module and for torch's own containers, whose
+        entries the tree mirrors one-for-one: those resolve by child name, which
+        is what keeps a shared entry at its own name and what makes indexing
+        return envoys rather than bare modules.
+        """
+        if isinstance(self._module, _CHILD_INDEXED):
+            return None
+        cls = type(self._module)
+        return cls if getattr(cls, "__getitem__", None) is not None else None
+
+    def _envoy_for(self, value: Any) -> Envoy | None:
+        """The envoy naming ``value``, or ``None`` when this tree wraps no such
+        module — a module built on the fly, or a ``__getitem__`` that returns
+        something other than a module."""
+        if not isinstance(value, torch.nn.Module):
+            return None
+        return self.interleaver.envoys.get(id(value))
+
     def __iter__(self) -> Iterator[Envoy]:
         """Iterate over this envoy's direct children.
 
@@ -913,6 +954,12 @@ class Envoy:
         `ModuleList`, so ``for layer in model.model.layers:``
         walks the layers. This is *not* recursive; use [`modules`][nnsight.intervention.envoy.Envoy.modules] to walk the
         whole subtree.
+
+        A container that indexes past its own entries
+        (`_indexes_past_children`) is iterated the way it iterates itself, so
+        what you get back matches its ``__len__`` and its indexing — still as
+        envoys. Anything it yields that this tree does not wrap drops the whole
+        delegation, and iteration falls back to the children.
 
         Yields:
             Envoy: Each direct child envoy, in order.
@@ -923,6 +970,24 @@ class Envoy:
                 for layer in model.model.layers:
                     print(layer.path)
         """
+        cls = self._indexes_past_children()
+        if cls is not None:
+            if getattr(cls, "__iter__", None) is not None:
+                values = list(cls.__iter__(self._module))
+            elif getattr(cls, "__len__", None) is not None:
+                # No `__iter__` of its own. Python would synthesize one from
+                # `__getitem__`, which stops only on `IndexError`; walk the
+                # length the container reports instead, so a `__getitem__` that
+                # raises something else cannot run away.
+                values = [
+                    cls.__getitem__(self._module, index)
+                    for index in range(len(self._module))
+                ]
+            else:
+                values = []
+            envoys = [self._envoy_for(value) for value in values]
+            if envoys and all(envoy is not None for envoy in envoys):
+                return iter(envoys)
         return iter([child for _, child in self._named_children()])
 
     def __getitem__(self, key: Any) -> Envoy:
@@ -932,6 +997,13 @@ class Envoy:
         indexes it — ``layers[2]`` is the module `layers` holds at ``"2"``, even
         when an earlier entry is a module the tree already wraps elsewhere and so
         has no envoy of its own here.
+
+        When no child answers to that name, a container that indexes past its own
+        entries (`_indexes_past_children`) is asked, and the envoy naming the
+        module it returns is the result — so a set holding its modules in a child
+        list indexes as itself, one envoy per module. A key it cannot answer with
+        a module this tree wraps raises, rather than handing back a bare module
+        that no trace can address.
 
         Args:
             key: An index the wrapped module accepts (an int, or a str), or a
@@ -945,10 +1017,24 @@ class Envoy:
             return [child for _, child in self._named_children()][key]
         if isinstance(key, int) and key < 0:
             key += len(self)
-        return getattr(self, str(key))
+        try:
+            return getattr(self, str(key))
+        except AttributeError:
+            cls = self._indexes_past_children()
+            if cls is None:
+                raise
+            envoy = self._envoy_for(cls.__getitem__(self._module, key))
+            if envoy is None:
+                raise
+            return envoy
 
     def __len__(self) -> int:
-        """The number of entries in the wrapped module (e.g. a ``ModuleList``'s length)."""
+        """The number of entries in the wrapped module (e.g. a ``ModuleList``'s length).
+
+        The count the module keeps, which is the count indexing and iteration
+        honour: for a container holding its modules in a child list, all three
+        speak of the modules, not of the one entry that holds them.
+        """
         return len(self._module)
 
     def get(self, path: str) -> Any:
