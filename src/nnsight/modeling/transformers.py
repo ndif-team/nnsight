@@ -504,6 +504,11 @@ class TransformersModel(HuggingFaceModel):
         self._sync()
         return model
 
+    #: Load kwargs that select and tune the streamed (run:ai) loading path. They are
+    #: nnsight's, not transformers', so `_load` pops them before anything reaches
+    #: ``pipeline()`` / ``from_pretrained`` (which would reject unknown names).
+    _STREAM_KWARGS = ("gpu_direct", "lazy", "concurrency")
+
     def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import pipeline
 
@@ -514,6 +519,13 @@ class TransformersModel(HuggingFaceModel):
         # here -- the tensor-parallel server loads through *this* class.
         self._refuse_impossible_tp(repo_id, kwargs)
 
+        # Which loading path: ``load_format="from_pretrained"`` forces the plain
+        # transformers path; ``"runai_streamer"`` demands the streamed one (and
+        # raises if run:ai isn't installed); None (default) streams when it can
+        # and falls back silently. See `_load_streamed`.
+        load_format = kwargs.pop("load_format", None)
+        stream_kwargs = {k: kwargs.pop(k) for k in self._STREAM_KWARGS if k in kwargs}
+
         # Also before the split: `dtype` is a pipeline-factory argument, so a
         # quantization name left in it would be handed to `pipeline()` rather
         # than to the quantizer. `quantization_config` is not a factory argument
@@ -521,6 +533,27 @@ class TransformersModel(HuggingFaceModel):
         kwargs = resolve_load_kwargs(kwargs)
 
         top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
+
+        if load_format != "from_pretrained" and "quantization_config" not in model_kwargs:
+            try:
+                model = self._load_streamed(repo_id, top_level, model_kwargs, **stream_kwargs)
+            except ImportError:
+                if load_format == "runai_streamer":
+                    raise  # explicitly requested -- don't swallow the error
+            else:
+                # The weights are placed; only the preprocessors are left for the
+                # pipeline to load. Placement arguments are meaningless on a
+                # pre-built model (the factory rejects them), so they stay out.
+                if self.task is None:
+                    self.task = _infer_task(model)
+                factory = {
+                    k: v for k, v in top_level.items() if k not in ("device", "device_map")
+                }
+                self.pipeline = pipeline(
+                    self.task, model=model, **self._preprocessor_sources(), **factory
+                )
+                return self._finalize_pipeline()
+
         # The pipeline loads the model and infers every preprocessor; only
         # forward the ones the user explicitly supplied.
         provided = {
@@ -537,6 +570,152 @@ class TransformersModel(HuggingFaceModel):
             model_kwargs=model_kwargs,
         )
         return self._finalize_pipeline()
+
+    # -- streamed (run:ai) loading -------------------------------------------
+
+    def _stream_model_class(self, config: Any) -> type:
+        """The concrete model class the streamed path loads into.
+
+        ``from_pretrained(None, state_dict=...)`` needs a concrete class -- the
+        Auto classes reject a ``None`` path. With a task set, the task's auto
+        classes decide (the same choice ``pipeline()`` would make); otherwise
+        the checkpoint's own ``architectures`` entry does. Both resolve offline.
+        """
+        import transformers
+        from transformers.pipelines import check_task
+
+        if self.task is not None:
+            _, targeted, _ = check_task(self.task)
+            for auto in targeted["pt"]:
+                try:
+                    return auto._model_mapping[type(config)]
+                except (KeyError, AttributeError):
+                    continue
+        for name in getattr(config, "architectures", None) or []:
+            cls = getattr(transformers, name, None)
+            if cls is not None:
+                return cls
+        raise ImportError(
+            f"streamed loading: no transformers class for {type(config).__name__} "
+            f"(task={self.task!r}); falling back to from_pretrained"
+        )
+
+    @staticmethod
+    def _stream_dtype(model_kwargs: dict, config: Any) -> Optional[torch.dtype]:
+        """The dtype weights end up in, resolved the way ``from_pretrained`` does.
+
+        An explicit ``dtype``/``torch_dtype`` wins; ``"auto"`` or nothing means
+        the checkpoint's declared dtype (``config.dtype``); a missing declaration
+        keeps each tensor as serialized (None).
+        """
+        dtype = next((model_kwargs[k] for k in ("dtype", "torch_dtype") if k in model_kwargs), None)
+        if dtype is None or dtype == "auto":
+            dtype = getattr(config, "dtype", None) or getattr(config, "torch_dtype", None)
+        if isinstance(dtype, str):
+            dtype = getattr(torch, dtype, None)
+        return dtype if isinstance(dtype, torch.dtype) else None
+
+    def _resolve_device_map(
+        self,
+        model_class: type,
+        config: Any,
+        device_map: str,
+        max_memory: Optional[dict],
+        dtype: Optional[torch.dtype],
+    ) -> dict:
+        """Expand a string device_map ('auto', 'balanced', ...) to a concrete dict.
+
+        Builds a throwaway meta model to compute the module -> device mapping,
+        exactly as ``from_pretrained`` would, so each tensor's target GPU is known
+        *before* streaming starts. The meta model is built in the loading dtype so
+        the memory estimate matches (bfloat16 vs float32 is a 2x difference that
+        would otherwise spill layers to disk).
+        """
+        from transformers.integrations.accelerate import _get_device_map
+
+        previous = torch.get_default_dtype()
+        if dtype is not None and dtype.is_floating_point:
+            torch.set_default_dtype(dtype)
+        try:
+            with torch.device("meta"):
+                meta_model = model_class(config)
+            resolved = _get_device_map(meta_model, device_map, max_memory, hf_quantizer=None)
+        finally:
+            torch.set_default_dtype(previous)
+        del meta_model
+        return resolved
+
+    def _load_streamed(
+        self,
+        repo_id: str,
+        top_level: dict,
+        model_kwargs: dict,
+        concurrency: int = 16,
+        gpu_direct: bool = True,
+        lazy: bool = False,
+    ) -> torch.nn.Module:
+        """Load the weights through run:ai's ``SafetensorsStreamer``.
+
+        Instead of letting ``from_pretrained`` mmap the shards (4 KB page faults,
+        each worker blocking on its own CPU->GPU copy), the shards are read with
+        large sequential ``read()`` calls by run:ai's C++ threads and handed to
+        transformers as a lazy ``state_dict`` whose values stream on first access
+        (see `nnsight.modeling.loader`). ``from_pretrained(None, state_dict=...)``
+        still does the renaming, conversion, dtype casting and tying.
+
+        With ``gpu_direct`` (default) a string ``device_map`` is resolved up front
+        so the streaming cache can copy each tensor straight from the run:ai
+        buffer to its target GPU, making transformers' own ``.to(device)`` a
+        no-op. With ``gpu_direct=False`` tensors are cloned to CPU and
+        transformers' workers move them (the older, slower path).
+
+        Raises ``ImportError`` when run:ai isn't installed, or when no concrete
+        model class can be resolved -- the caller falls back to ``from_pretrained``.
+        """
+        from transformers import AutoConfig
+
+        from .loader import build_lazy_state_dict, resolve_shard_paths
+
+        model_kwargs = dict(model_kwargs)
+        trust = {k: top_level[k] for k in ("trust_remote_code",) if k in top_level}
+
+        shard_paths = resolve_shard_paths(repo_id, revision=self.revision or "main")
+        config = AutoConfig.from_pretrained(repo_id, revision=self.revision, **trust)
+        model_class = self._stream_model_class(config)
+        dtype = self._stream_dtype(model_kwargs, config)
+
+        # Placement: `device_map` is a pipeline-factory argument, so it arrived
+        # top-level; from_pretrained wants it, and the streaming cache wants it
+        # resolved to a concrete dict.
+        device_map = model_kwargs.pop("device_map", top_level.get("device_map"))
+        resolved = None
+        if gpu_direct:
+            if isinstance(device_map, str) and device_map in (
+                "auto", "balanced", "balanced_low_0", "sequential",
+            ):
+                resolved = self._resolve_device_map(
+                    model_class, config, device_map, model_kwargs.get("max_memory"), dtype
+                )
+            elif isinstance(device_map, dict):
+                resolved = device_map
+
+        state_dict = build_lazy_state_dict(
+            shard_paths,
+            concurrency=concurrency,
+            device_map=resolved,
+            torch_dtype=dtype if gpu_direct else None,
+            lazy=lazy,
+        )
+
+        return model_class.from_pretrained(
+            None,
+            config=config,
+            state_dict=state_dict,
+            revision=self.revision or "main",
+            device_map=resolved if resolved is not None else device_map,
+            **trust,
+            **model_kwargs,
+        )
 
     def _wrap(self, module: torch.nn.Module, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import pipeline
