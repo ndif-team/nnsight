@@ -1,0 +1,18 @@
+
+== H200 | network /work/nvme | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     18.42   0.77  1.00x    14908      377
+  HF from_pretrained (pread)       4     11.53   1.23  1.60x     2654     1248
+  run:ai GPU-direct                4      2.87   4.95  6.43x     8554     7871
+
+== H200 | network /work/nvme | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     99.93   0.57  1.00x    30761      408
+  HF from_pretrained (pread)       4     36.04   1.58  2.77x     1845     1498
+  run:ai GPU-direct                4     13.35   4.26  7.49x     4583     4299
+
+== H200 | network /work/nvme | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     52.06   1.17  1.00x    62320      381
+  HF from_pretrained (pread)       4     50.37   1.21  1.03x     5053     4020
+  run:ai GPU-direct                4     13.60   4.49  3.83x     7376     7099

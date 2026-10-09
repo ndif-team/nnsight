@@ -1,0 +1,143 @@
+{
+  "model": "Qwen/Qwen3-32B",
+  "model_size_gb": 61.02428637444973,
+  "gpus": [
+    0,
+    1
+  ],
+  "cache_mode": "warm",
+  "results": [
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 1,
+        "repeat": 0
+      },
+      "wall_time_s": 33.748148940037936,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 1249.33203125,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 2,
+        "repeat": 0
+      },
+      "wall_time_s": 32.85585393290967,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 1266.984375,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 32.5536025906913,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 1268.0234375,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 8,
+        "repeat": 0
+      },
+      "wall_time_s": 32.40846036374569,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 1258.34375,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 16,
+        "repeat": 0
+      },
+      "wall_time_s": 32.104286938905716,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 1279.55859375,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 32,
+        "repeat": 0
+      },
+      "wall_time_s": 31.417393431067467,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 1261.5,
+      "error": null
+    },
+    {
+      "experiment": "runai",
+      "config": {
+        "concurrency": 1,
+        "repeat": 0
+      },
+      "wall_time_s": 17.71349462866783,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 2158.97265625,
+      "error": null
+    },
+    {
+      "experiment": "runai",
+      "config": {
+        "concurrency": 2,
+        "repeat": 0
+      },
+      "wall_time_s": 23.05437221331522,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 2897.984375,
+      "error": null
+    },
+    {
+      "experiment": "runai",
+      "config": {
+        "concurrency": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 27.48578749690205,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 3430.57421875,
+      "error": null
+    },
+    {
+      "experiment": "runai",
+      "config": {
+        "concurrency": 8,
+        "repeat": 0
+      },
+      "wall_time_s": 25.59673978528008,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 4371.1171875,
+      "error": null
+    },
+    {
+      "experiment": "runai",
+      "config": {
+        "concurrency": 16,
+        "repeat": 0
+      },
+      "wall_time_s": 27.53988910559565,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 4081.0703125,
+      "error": null
+    },
+    {
+      "experiment": "runai",
+      "config": {
+        "concurrency": 32,
+        "repeat": 0
+      },
+      "wall_time_s": 25.827497072983533,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_cpu_mem_mb": 3149.890625,
+      "error": null
+    }
+  ]
+}

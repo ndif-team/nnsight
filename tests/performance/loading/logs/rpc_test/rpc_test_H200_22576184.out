@@ -1,0 +1,1017 @@
+== job 22576184 on gpue04.delta.ncsa.illinois.edu partition=gpuH200x8 gpu_tag=H200 gpus=0
+0, NVIDIA H200, 143771 MiB
+== control dir: /projects/bdnh/zwang83/nnsight/tests/performance/loading/logs/rpc_test/H200_22576184   (echo <label> > go | touch stop)
+
+################ ROUND 1 (baseline) start 11:50:53 ################
+  max_rpcs_in_flight=8  (x228)
+  max_pages_per_rpc=1024  (x228)
+  max_dirty_mb=2000  (x228)
+  checksums=1  (x228)
+  max_read_ahead_mb=1024  (x2)
+  max_read_ahead_per_file_mb=256  (x2)
+  max_read_ahead_whole_mb=4  (x2)
+  llite.dltawork-*.max_cached_mb: unreadable
+raw read: Qwen/Qwen3-32B, 17 shards, 61.0 GB
+  read() threads=1     16.03s    3.81 GB/s
+  read() threads=4      6.48s    9.42 GB/s
+  read() threads=8      5.88s   10.38 GB/s
+  read() threads=16     5.28s   11.55 GB/s
+raw read: Qwen/Qwen3-1.7B, 2 shards, 3.8 GB
+  read() threads=1      1.18s    3.21 GB/s
+  read() threads=4      0.90s    4.20 GB/s
+  read() threads=16     0.96s    3.94 GB/s
+  mmap   threads=1     91.18s    0.04 GB/s
+  mmap   threads=4     29.80s    0.13 GB/s
+  mmap   threads=16   104.29s    0.04 GB/s
+
+---- round 1 (baseline): Qwen/Qwen3-32B
+Downloading model (if needed): Qwen/Qwen3-32B
+Model:       Qwen/Qwen3-32B
+Model size:  61.0 GB
+GPUs:        [0]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      52.06s
+    bw:             1.17 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       62320 MB
+    peak_private:   381 MB
+    disk_read:      0.000 GiB
+    net_rx:         3.023 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      50.37s
+    bw:             1.21 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       5053 MB
+    peak_private:   4020 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.989 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      13.60s
+    bw:             4.49 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       7376 MB
+    peak_private:   7099 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.955 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      15.15s
+    bw:             4.03 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       7382 MB
+    peak_private:   7089 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.968 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 16, 'workers': 4, 'repeat': 0}
+    wall_time:      15.08s
+    bw:             4.05 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       7384 MB
+    peak_private:   7091 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.946 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 4, "repeat"...   52.06      1.17       62489      62489        62492        62320      381       
+hf_pread     {"workers": 4, "repeat"...   50.37      1.21       62489      62489        62492        5053       4020      
+gpu_direct   {"concurrency": 4, "wor...   13.60      4.49       62489      62489        62492        7376       7099      
+gpu_direct   {"concurrency": 8, "wor...   15.15      4.03       62489      62489        62492        7382       7089      
+gpu_direct   {"concurrency": 16, "wo...   15.08      4.05       62489      62489        62492        7384       7091      
+
+Results saved to logs/rpc_test/H200_22576184/round1_baseline/H200_nvme_Qwen3-32B_cold_20260930_115053.json
+
+---- round 1 (baseline): Qwen/Qwen3-30B-A3B
+Downloading model (if needed): Qwen/Qwen3-30B-A3B
+Model:       Qwen/Qwen3-30B-A3B
+Model size:  56.9 GB
+GPUs:        [0]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      99.93s
+    bw:             0.57 GB/s
+    peak_gpu_mem:   58255 MB
+    peak_gpu_alloc: 59023 MB
+    peak_gpu_resrv: 60566 MB
+    peak_rss:       30761 MB
+    peak_private:   408 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.924 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      36.04s
+    bw:             1.58 GB/s
+    peak_gpu_mem:   58282 MB
+    peak_gpu_alloc: 59050 MB
+    peak_gpu_resrv: 60566 MB
+    peak_rss:       1845 MB
+    peak_private:   1498 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.817 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      13.35s
+    bw:             4.26 GB/s
+    peak_gpu_mem:   58243 MB
+    peak_gpu_alloc: 59019 MB
+    peak_gpu_resrv: 64022 MB
+    peak_rss:       4583 MB
+    peak_private:   4299 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.806 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      14.12s
+    bw:             4.03 GB/s
+    peak_gpu_mem:   58241 MB
+    peak_gpu_alloc: 59014 MB
+    peak_gpu_resrv: 64022 MB
+    peak_rss:       5248 MB
+    peak_private:   4974 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.833 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 16, 'workers': 4, 'repeat': 0}
+    wall_time:      14.56s
+    bw:             3.91 GB/s
+    peak_gpu_mem:   58242 MB
+    peak_gpu_alloc: 59020 MB
+    peak_gpu_resrv: 63638 MB
+    peak_rss:       4613 MB
+    peak_private:   4328 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.802 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 4, "repeat"...   99.93      0.57       58255      59023        60566        30761      408       
+hf_pread     {"workers": 4, "repeat"...   36.04      1.58       58282      59050        60566        1845       1498      
+gpu_direct   {"concurrency": 4, "wor...   13.35      4.26       58243      59019        64022        4583       4299      
+gpu_direct   {"concurrency": 8, "wor...   14.12      4.03       58241      59014        64022        5248       4974      
+gpu_direct   {"concurrency": 16, "wo...   14.56      3.91       58242      59020        63638        4613       4328      
+
+Results saved to logs/rpc_test/H200_22576184/round1_baseline/H200_nvme_Qwen3-30B-A3B_cold_20260930_115053.json
+
+---- round 1 (baseline): Qwen/Qwen2.5-7B-Instruct
+Downloading model (if needed): Qwen/Qwen2.5-7B-Instruct
+Model:       Qwen/Qwen2.5-7B-Instruct
+Model size:  14.2 GB
+GPUs:        [0]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      18.42s
+    bw:             0.77 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       14908 MB
+    peak_private:   377 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.709 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      11.53s
+    bw:             1.23 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       2654 MB
+    peak_private:   1248 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.710 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      2.87s
+    bw:             4.95 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       8554 MB
+    peak_private:   7871 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.702 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      3.01s
+    bw:             4.72 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       8539 MB
+    peak_private:   8265 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.695 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 16, 'workers': 4, 'repeat': 0}
+    wall_time:      3.36s
+    bw:             4.22 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       7872 MB
+    peak_private:   7585 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.691 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 4, "repeat"...   18.42      0.77       14527      14527        14528        14908      377       
+hf_pread     {"workers": 4, "repeat"...   11.53      1.23       14527      14527        14528        2654       1248      
+gpu_direct   {"concurrency": 4, "wor...   2.87       4.95       14527      14527        14528        8554       7871      
+gpu_direct   {"concurrency": 8, "wor...   3.01       4.72       14527      14527        14528        8539       8265      
+gpu_direct   {"concurrency": 16, "wo...   3.36       4.22       14527      14527        14528        7872       7585      
+
+Results saved to logs/rpc_test/H200_22576184/round1_baseline/H200_nvme_Qwen2.5-7B-Instruct_cold_20260930_115053.json
+
+== H200 | network /work/nvme | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     18.42   0.77  1.00x    14908      377
+  HF from_pretrained (pread)       4     11.53   1.23  1.60x     2654     1248
+  run:ai GPU-direct                4      2.87   4.95  6.43x     8554     7871
+
+== H200 | network /work/nvme | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     99.93   0.57  1.00x    30761      408
+  HF from_pretrained (pread)       4     36.04   1.58  2.77x     1845     1498
+  run:ai GPU-direct                4     13.35   4.26  7.49x     4583     4299
+
+== H200 | network /work/nvme | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     52.06   1.17  1.00x    62320      381
+  HF from_pretrained (pread)       4     50.37   1.21  1.03x     5053     4020
+  run:ai GPU-direct                4     13.60   4.49  3.83x     7376     7099
+################ ROUND 1 (baseline) done 12:04:58 ################
+== waiting for logs/rpc_test/H200_22576184/go (next round) or logs/rpc_test/H200_22576184/stop
+
+################ ROUND 2 (baseline2) start 12:04:58 ################
+  max_rpcs_in_flight=8  (x228)
+  max_pages_per_rpc=1024  (x228)
+  max_dirty_mb=2000  (x228)
+  checksums=1  (x228)
+  max_read_ahead_mb=1024  (x2)
+  max_read_ahead_per_file_mb=256  (x2)
+  max_read_ahead_whole_mb=4  (x2)
+  llite.dltawork-*.max_cached_mb: unreadable
+raw read: Qwen/Qwen3-32B, 17 shards, 61.0 GB
+  read() threads=1     15.61s    3.91 GB/s
+  read() threads=4      6.28s    9.71 GB/s
+  read() threads=8      5.81s   10.51 GB/s
+  read() threads=16     5.24s   11.65 GB/s
+raw read: Qwen/Qwen3-1.7B, 2 shards, 3.8 GB
+  read() threads=1      1.02s    3.70 GB/s
+  read() threads=4      0.82s    4.62 GB/s
+  read() threads=16     0.83s    4.55 GB/s
+  mmap-seq     threads=1      1.99s    1.90 GB/s (torch copy threads=1)
+  mmap-seq     threads=4      1.64s    2.31 GB/s (torch copy threads=1)
+  mmap-seq     threads=16     1.67s    2.27 GB/s (torch copy threads=1)
+  mmap-scatter threads=1     38.81s    0.10 GB/s (torch copy threads=16)
+  mmap-scatter threads=4     29.75s    0.13 GB/s (torch copy threads=16)
+  mmap-scatter threads=16    30.66s    0.12 GB/s (torch copy threads=16)
+
+---- round 2 (baseline2): Qwen/Qwen3-32B
+Downloading model (if needed): Qwen/Qwen3-32B
+Model:       Qwen/Qwen3-32B
+Model size:  61.0 GB
+GPUs:        [0]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      42.65s
+    bw:             1.43 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       62540 MB
+    peak_private:   374 MB
+    disk_read:      0.000 GiB
+    net_rx:         3.019 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      51.70s
+    bw:             1.18 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       4085 MB
+    peak_private:   2760 MB
+    disk_read:      0.000 GiB
+    net_rx:         3.142 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      21.61s
+    bw:             2.82 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       8049 MB
+    peak_private:   7770 MB
+    disk_read:      0.000 GiB
+    net_rx:         3.174 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      24.38s
+    bw:             2.50 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       7086 MB
+    peak_private:   6809 MB
+    disk_read:      0.000 GiB
+    net_rx:         3.120 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 16, 'workers': 4, 'repeat': 0}
+    wall_time:      23.09s
+    bw:             2.64 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       6734 MB
+    peak_private:   6448 MB
+    disk_read:      0.000 GiB
+    net_rx:         3.195 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 4, "repeat"...   42.65      1.43       62489      62489        62492        62540      374       
+hf_pread     {"workers": 4, "repeat"...   51.70      1.18       62489      62489        62492        4085       2760      
+gpu_direct   {"concurrency": 4, "wor...   21.61      2.82       62489      62489        62492        8049       7770      
+gpu_direct   {"concurrency": 8, "wor...   24.38      2.50       62489      62489        62492        7086       6809      
+gpu_direct   {"concurrency": 16, "wo...   23.09      2.64       62489      62489        62492        6734       6448      
+
+Results saved to logs/rpc_test/H200_22576184/round2_baseline2/H200_nvme_Qwen3-32B_cold_20260930_120458.json
+
+---- round 2 (baseline2): Qwen/Qwen3-30B-A3B
+Downloading model (if needed): Qwen/Qwen3-30B-A3B
+Model:       Qwen/Qwen3-30B-A3B
+Model size:  56.9 GB
+GPUs:        [0]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      95.29s
+    bw:             0.60 GB/s
+    peak_gpu_mem:   58255 MB
+    peak_gpu_alloc: 59023 MB
+    peak_gpu_resrv: 60182 MB
+    peak_rss:       56553 MB
+    peak_private:   411 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.969 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      35.76s
+    bw:             1.59 GB/s
+    peak_gpu_mem:   58278 MB
+    peak_gpu_alloc: 59046 MB
+    peak_gpu_resrv: 60566 MB
+    peak_rss:       1849 MB
+    peak_private:   1458 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.828 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      13.28s
+    bw:             4.28 GB/s
+    peak_gpu_mem:   58240 MB
+    peak_gpu_alloc: 59011 MB
+    peak_gpu_resrv: 64022 MB
+    peak_rss:       4614 MB
+    peak_private:   4325 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.814 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      14.28s
+    bw:             3.98 GB/s
+    peak_gpu_mem:   58240 MB
+    peak_gpu_alloc: 59014 MB
+    peak_gpu_resrv: 64022 MB
+    peak_rss:       4621 MB
+    peak_private:   4281 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.838 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 16, 'workers': 4, 'repeat': 0}
+    wall_time:      15.19s
+    bw:             3.74 GB/s
+    peak_gpu_mem:   58243 MB
+    peak_gpu_alloc: 59021 MB
+    peak_gpu_resrv: 64022 MB
+    peak_rss:       4624 MB
+    peak_private:   4286 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.804 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 4, "repeat"...   95.29      0.60       58255      59023        60182        56553      411       
+hf_pread     {"workers": 4, "repeat"...   35.76      1.59       58278      59046        60566        1849       1458      
+gpu_direct   {"concurrency": 4, "wor...   13.28      4.28       58240      59011        64022        4614       4325      
+gpu_direct   {"concurrency": 8, "wor...   14.28      3.98       58240      59014        64022        4621       4281      
+gpu_direct   {"concurrency": 16, "wo...   15.19      3.74       58243      59021        64022        4624       4286      
+
+Results saved to logs/rpc_test/H200_22576184/round2_baseline2/H200_nvme_Qwen3-30B-A3B_cold_20260930_120458.json
+
+---- round 2 (baseline2): Qwen/Qwen2.5-7B-Instruct
+Downloading model (if needed): Qwen/Qwen2.5-7B-Instruct
+Model:       Qwen/Qwen2.5-7B-Instruct
+Model size:  14.2 GB
+GPUs:        [0]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      17.73s
+    bw:             0.80 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       14804 MB
+    peak_private:   383 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.725 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      11.84s
+    bw:             1.20 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       3706 MB
+    peak_private:   2341 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.709 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      3.05s
+    bw:             4.66 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       7923 MB
+    peak_private:   7630 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.707 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      3.12s
+    bw:             4.54 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       7934 MB
+    peak_private:   7640 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.701 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 16, 'workers': 4, 'repeat': 0}
+    wall_time:      3.16s
+    bw:             4.49 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       7933 MB
+    peak_private:   7640 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.702 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 4, "repeat"...   17.73      0.80       14527      14527        14528        14804      383       
+hf_pread     {"workers": 4, "repeat"...   11.84      1.20       14527      14527        14528        3706       2341      
+gpu_direct   {"concurrency": 4, "wor...   3.05       4.66       14527      14527        14528        7923       7630      
+gpu_direct   {"concurrency": 8, "wor...   3.12       4.54       14527      14527        14528        7934       7640      
+gpu_direct   {"concurrency": 16, "wo...   3.16       4.49       14527      14527        14528        7933       7640      
+
+Results saved to logs/rpc_test/H200_22576184/round2_baseline2/H200_nvme_Qwen2.5-7B-Instruct_cold_20260930_120458.json
+
+== H200 | network /work/nvme | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     17.73   0.80  1.00x    14804      383
+  HF from_pretrained (pread)       4     11.84   1.20  1.50x     3706     2341
+  run:ai GPU-direct                4      3.05   4.66  5.82x     7923     7630
+
+== H200 | network /work/nvme | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     95.29   0.60  1.00x    56553      411
+  HF from_pretrained (pread)       4     35.76   1.59  2.67x     1849     1458
+  run:ai GPU-direct                4     13.28   4.28  7.18x     4614     4325
+
+== H200 | network /work/nvme | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     42.65   1.43  1.00x    62540      374
+  HF from_pretrained (pread)       4     51.70   1.18  0.82x     4085     2760
+  run:ai GPU-direct                4     21.61   2.82  1.97x     8049     7770
+################ ROUND 2 (baseline2) done 12:16:49 ################
+== waiting for logs/rpc_test/H200_22576184/go (next round) or logs/rpc_test/H200_22576184/stop
+
+################ ROUND 3 (osc64_mdc128) start 13:13:21 ################
+  max_rpcs_in_flight=64  (x228)
+  max_pages_per_rpc=1024  (x228)
+  max_dirty_mb=2000  (x228)
+  checksums=1  (x228)
+  max_read_ahead_mb=1024  (x2)
+  max_read_ahead_per_file_mb=256  (x2)
+  max_read_ahead_whole_mb=4  (x2)
+  llite.dltawork-*.max_cached_mb: unreadable
+raw read: Qwen/Qwen3-32B, 17 shards, 61.0 GB
+  read() threads=1     15.80s    3.86 GB/s
+  read() threads=4      6.57s    9.29 GB/s
+  read() threads=8      5.72s   10.67 GB/s
+  read() threads=16     5.24s   11.64 GB/s
+raw read: Qwen/Qwen3-1.7B, 2 shards, 3.8 GB
+  read() threads=1      1.14s    3.31 GB/s
+  read() threads=4      0.89s    4.25 GB/s
+  read() threads=16     0.87s    4.34 GB/s
+  mmap-seq     threads=1      2.59s    1.46 GB/s (torch copy threads=1)
+  mmap-seq     threads=4      1.72s    2.20 GB/s (torch copy threads=1)
+  mmap-seq     threads=16     1.72s    2.20 GB/s (torch copy threads=1)
+  mmap-scatter threads=1     39.42s    0.10 GB/s (torch copy threads=16)
+  mmap-scatter threads=4     29.14s    0.13 GB/s (torch copy threads=16)
+  mmap-scatter threads=16    29.16s    0.13 GB/s (torch copy threads=16)
+
+---- round 3 (osc64_mdc128): Qwen/Qwen3-32B
+Downloading model (if needed): Qwen/Qwen3-32B
+Model:       Qwen/Qwen3-32B
+Model size:  61.0 GB
+GPUs:        [0]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      58.61s
+    bw:             1.04 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       62514 MB
+    peak_private:   379 MB
+    disk_read:      0.000 GiB
+    net_rx:         3.042 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      54.05s
+    bw:             1.13 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       4072 MB
+    peak_private:   3795 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.972 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      13.13s
+    bw:             4.65 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       7378 MB
+    peak_private:   7099 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.895 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      14.77s
+    bw:             4.13 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       7380 MB
+    peak_private:   7104 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.893 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 16, 'workers': 4, 'repeat': 0}
+    wall_time:      14.77s
+    bw:             4.13 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62492 MB
+    peak_rss:       8013 MB
+    peak_private:   7669 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.895 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 4, "repeat"...   58.61      1.04       62489      62489        62492        62514      379       
+hf_pread     {"workers": 4, "repeat"...   54.05      1.13       62489      62489        62492        4072       3795      
+gpu_direct   {"concurrency": 4, "wor...   13.13      4.65       62489      62489        62492        7378       7099      
+gpu_direct   {"concurrency": 8, "wor...   14.77      4.13       62489      62489        62492        7380       7104      
+gpu_direct   {"concurrency": 16, "wo...   14.77      4.13       62489      62489        62492        8013       7669      
+
+Results saved to logs/rpc_test/H200_22576184/round3_osc64_mdc128/H200_nvme_Qwen3-32B_cold_20260930_131321.json
+
+---- round 3 (osc64_mdc128): Qwen/Qwen3-30B-A3B
+Downloading model (if needed): Qwen/Qwen3-30B-A3B
+Model:       Qwen/Qwen3-30B-A3B
+Model size:  56.9 GB
+GPUs:        [0]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      101.60s
+    bw:             0.56 GB/s
+    peak_gpu_mem:   58256 MB
+    peak_gpu_alloc: 59024 MB
+    peak_gpu_resrv: 60566 MB
+    peak_rss:       58494 MB
+    peak_private:   393 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.891 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      35.20s
+    bw:             1.62 GB/s
+    peak_gpu_mem:   58276 MB
+    peak_gpu_alloc: 59044 MB
+    peak_gpu_resrv: 60566 MB
+    peak_rss:       1837 MB
+    peak_private:   841 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.808 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      18.92s
+    bw:             3.01 GB/s
+    peak_gpu_mem:   58238 MB
+    peak_gpu_alloc: 59010 MB
+    peak_gpu_resrv: 63638 MB
+    peak_rss:       4579 MB
+    peak_private:   4294 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.968 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      20.04s
+    bw:             2.84 GB/s
+    peak_gpu_mem:   58239 MB
+    peak_gpu_alloc: 59011 MB
+    peak_gpu_resrv: 63638 MB
+    peak_rss:       4605 MB
+    peak_private:   4293 MB
+    disk_read:      0.000 GiB
+    net_rx:         3.005 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 16, 'workers': 4, 'repeat': 0}
+    wall_time:      18.62s
+    bw:             3.05 GB/s
+    peak_gpu_mem:   58243 MB
+    peak_gpu_alloc: 59019 MB
+    peak_gpu_resrv: 64022 MB
+    peak_rss:       5648 MB
+    peak_private:   5339 MB
+    disk_read:      0.000 GiB
+    net_rx:         2.904 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 4, "repeat"...   101.60     0.56       58256      59024        60566        58494      393       
+hf_pread     {"workers": 4, "repeat"...   35.20      1.62       58276      59044        60566        1837       841       
+gpu_direct   {"concurrency": 4, "wor...   18.92      3.01       58238      59010        63638        4579       4294      
+gpu_direct   {"concurrency": 8, "wor...   20.04      2.84       58239      59011        63638        4605       4293      
+gpu_direct   {"concurrency": 16, "wo...   18.62      3.05       58243      59019        64022        5648       5339      
+
+Results saved to logs/rpc_test/H200_22576184/round3_osc64_mdc128/H200_nvme_Qwen3-30B-A3B_cold_20260930_131321.json
+
+---- round 3 (osc64_mdc128): Qwen/Qwen2.5-7B-Instruct
+Downloading model (if needed): Qwen/Qwen2.5-7B-Instruct
+Model:       Qwen/Qwen2.5-7B-Instruct
+Model size:  14.2 GB
+GPUs:        [0]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      20.67s
+    bw:             0.69 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       15006 MB
+    peak_private:   382 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.805 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      13.18s
+    bw:             1.08 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       4741 MB
+    peak_private:   4406 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.743 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      3.77s
+    bw:             3.76 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       7920 MB
+    peak_private:   7626 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.749 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      3.97s
+    bw:             3.57 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       7929 MB
+    peak_private:   7635 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.732 GiB
+  [cache] Evicted 4 shard files (14.2 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 16, 'workers': 4, 'repeat': 0}
+    wall_time:      3.63s
+    bw:             3.91 GB/s
+    peak_gpu_mem:   14527 MB
+    peak_gpu_alloc: 14527 MB
+    peak_gpu_resrv: 14528 MB
+    peak_rss:       7931 MB
+    peak_private:   7638 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.781 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 4, "repeat"...   20.67      0.69       14527      14527        14528        15006      382       
+hf_pread     {"workers": 4, "repeat"...   13.18      1.08       14527      14527        14528        4741       4406      
+gpu_direct   {"concurrency": 4, "wor...   3.77       3.76       14527      14527        14528        7920       7626      
+gpu_direct   {"concurrency": 8, "wor...   3.97       3.57       14527      14527        14528        7929       7635      
+gpu_direct   {"concurrency": 16, "wo...   3.63       3.91       14527      14527        14528        7931       7638      
+
+Results saved to logs/rpc_test/H200_22576184/round3_osc64_mdc128/H200_nvme_Qwen2.5-7B-Instruct_cold_20260930_131321.json
+
+== H200 | network /work/nvme | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     20.67   0.69  1.00x    15006      382
+  HF from_pretrained (pread)       4     13.18   1.08  1.57x     4741     4406
+  run:ai GPU-direct               16      3.63   3.91  5.70x     7931     7638
+
+== H200 | network /work/nvme | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4    101.60   0.56  1.00x    58494      393
+  HF from_pretrained (pread)       4     35.20   1.62  2.89x     1837      841
+  run:ai GPU-direct               16     18.62   3.05  5.45x     5648     5339
+
+== H200 | network /work/nvme | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     58.61   1.04  1.00x    62514      379
+  HF from_pretrained (pread)       4     54.05   1.13  1.08x     4072     3795
+  run:ai GPU-direct                4     13.13   4.65  4.46x     7378     7099
+################ ROUND 3 (osc64_mdc128) done 13:27:25 ################
+== waiting for logs/rpc_test/H200_22576184/go (next round) or logs/rpc_test/H200_22576184/stop

@@ -1,0 +1,8 @@
+  max_rpcs_in_flight=64  (x228)
+  max_pages_per_rpc=1024  (x228)
+  max_dirty_mb=2000  (x228)
+  checksums=1  (x228)
+  max_read_ahead_mb=1024  (x2)
+  max_read_ahead_per_file_mb=256  (x2)
+  max_read_ahead_whole_mb=4  (x2)
+  llite.dltawork-*.max_cached_mb: unreadable

@@ -1,0 +1,42 @@
+{
+  "model": "Qwen/Qwen3-1.7B",
+  "model_size_gb": 3.7844438031315804,
+  "results": [
+    {
+      "mode": "read",
+      "threads": 1,
+      "wall_time_s": 1.1780931949615479,
+      "bw_gbs": 3.2123467135849997
+    },
+    {
+      "mode": "read",
+      "threads": 4,
+      "wall_time_s": 0.9007397070527077,
+      "bw_gbs": 4.201484372787987
+    },
+    {
+      "mode": "read",
+      "threads": 16,
+      "wall_time_s": 0.959672475233674,
+      "bw_gbs": 3.943474363178013
+    },
+    {
+      "mode": "mmap",
+      "threads": 1,
+      "wall_time_s": 91.18388480413705,
+      "bw_gbs": 0.04150342805925152
+    },
+    {
+      "mode": "mmap",
+      "threads": 4,
+      "wall_time_s": 29.802109048701823,
+      "bw_gbs": 0.12698577127367536
+    },
+    {
+      "mode": "mmap",
+      "threads": 16,
+      "wall_time_s": 104.28647177433595,
+      "bw_gbs": 0.03628892356547152
+    }
+  ]
+}

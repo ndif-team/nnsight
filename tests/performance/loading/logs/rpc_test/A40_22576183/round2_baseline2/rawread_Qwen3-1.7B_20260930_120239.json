@@ -1,0 +1,66 @@
+{
+  "model": "Qwen/Qwen3-1.7B",
+  "model_size_gb": 3.7844438031315804,
+  "results": [
+    {
+      "mode": "read",
+      "threads": 1,
+      "wall_time_s": 2.1716913674026728,
+      "bw_gbs": 1.7426250617083532
+    },
+    {
+      "mode": "read",
+      "threads": 4,
+      "wall_time_s": 1.9085512370802462,
+      "bw_gbs": 1.9828882398363723
+    },
+    {
+      "mode": "read",
+      "threads": 16,
+      "wall_time_s": 1.694741194602102,
+      "bw_gbs": 2.233051167449852
+    },
+    {
+      "mode": "mmap-seq",
+      "threads": 1,
+      "torch_threads": 1,
+      "wall_time_s": 4.335590698290616,
+      "bw_gbs": 0.8728784764262144
+    },
+    {
+      "mode": "mmap-seq",
+      "threads": 4,
+      "torch_threads": 1,
+      "wall_time_s": 3.0626546288840473,
+      "bw_gbs": 1.235674361529473
+    },
+    {
+      "mode": "mmap-seq",
+      "threads": 16,
+      "torch_threads": 1,
+      "wall_time_s": 3.0403924146667123,
+      "bw_gbs": 1.2447221565465032
+    },
+    {
+      "mode": "mmap-scatter",
+      "threads": 1,
+      "torch_threads": 16,
+      "wall_time_s": 27.065660240128636,
+      "bw_gbs": 0.1398245514632084
+    },
+    {
+      "mode": "mmap-scatter",
+      "threads": 4,
+      "torch_threads": 16,
+      "wall_time_s": 23.094612925779074,
+      "bw_gbs": 0.16386695093327336
+    },
+    {
+      "mode": "mmap-scatter",
+      "threads": 16,
+      "torch_threads": 16,
+      "wall_time_s": 22.94464007904753,
+      "bw_gbs": 0.16493803302617238
+    }
+  ]
+}

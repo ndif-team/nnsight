@@ -1,0 +1,321 @@
+{
+  "model": "Qwen/Qwen3-32B",
+  "model_size_gb": 61.02428637444973,
+  "gpus": [
+    0,
+    1
+  ],
+  "cache_mode": "warm",
+  "results": [
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 1,
+        "repeat": 0
+      },
+      "wall_time_s": 11.620499309152365,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 61736.3359375,
+      "peak_private_mb": 595.78125,
+      "disk_read_gib": 1.52587890625e-05,
+      "net_rx_gib": 0.04122983943670988,
+      "net_tx_gib": 0.032976917922496796,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 2,
+        "repeat": 0
+      },
+      "wall_time_s": 11.101584546267986,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 61761.55859375,
+      "peak_private_mb": 629.015625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.000368315726518631,
+      "net_tx_gib": 0.0001484127715229988,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 11.1011219387874,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 59912.5546875,
+      "peak_private_mb": 638.3125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.00039770733565092087,
+      "net_tx_gib": 0.00012798048555850983,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 8,
+        "repeat": 0
+      },
+      "wall_time_s": 11.219285084865987,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 60420.9453125,
+      "peak_private_mb": 627.48828125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.00045339856296777725,
+      "net_tx_gib": 0.0001660604029893875,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 16,
+        "repeat": 0
+      },
+      "wall_time_s": 11.16549449507147,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 60940.41015625,
+      "peak_private_mb": 643.91015625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.00027731340378522873,
+      "net_tx_gib": 0.0001759575679898262,
+      "error": null
+    },
+    {
+      "experiment": "runai_stream",
+      "config": {
+        "concurrency": 1,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 14.66057035792619,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 10804.78515625,
+      "peak_private_mb": 10175.28125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0003817174583673477,
+      "net_tx_gib": 0.00018154922872781754,
+      "error": null
+    },
+    {
+      "experiment": "runai_stream",
+      "config": {
+        "concurrency": 2,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 12.803904601372778,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 11253.46875,
+      "peak_private_mb": 10109.93359375,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0005532139912247658,
+      "net_tx_gib": 0.00017104949802160263,
+      "error": null
+    },
+    {
+      "experiment": "runai_stream",
+      "config": {
+        "concurrency": 4,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 12.482783840037882,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 12334.83203125,
+      "peak_private_mb": 11857.34765625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0005884850397706032,
+      "net_tx_gib": 0.00018765591084957123,
+      "error": null
+    },
+    {
+      "experiment": "runai_stream",
+      "config": {
+        "concurrency": 8,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 12.047288655303419,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 12868.98828125,
+      "peak_private_mb": 11481.4453125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.000561881810426712,
+      "net_tx_gib": 0.00016893912106752396,
+      "error": null
+    },
+    {
+      "experiment": "runai_stream",
+      "config": {
+        "concurrency": 16,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 11.789823007769883,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 12651.75,
+      "peak_private_mb": 11416.26953125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.00044900551438331604,
+      "net_tx_gib": 0.00020433217287063599,
+      "error": null
+    },
+    {
+      "experiment": "runai_gpu_direct_unpinned",
+      "config": {
+        "concurrency": 1,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 11.870045695453882,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 6891.6640625,
+      "peak_private_mb": 5621.83984375,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0004397621378302574,
+      "net_tx_gib": 0.000199025496840477,
+      "error": null
+    },
+    {
+      "experiment": "runai_gpu_direct_unpinned",
+      "config": {
+        "concurrency": 2,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 9.580426784232259,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 8095.0,
+      "peak_private_mb": 6838.25390625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.00042367540299892426,
+      "net_tx_gib": 0.00010998174548149109,
+      "error": null
+    },
+    {
+      "experiment": "runai_gpu_direct_unpinned",
+      "config": {
+        "concurrency": 4,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 9.876496941782534,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 8859.85546875,
+      "peak_private_mb": 7548.828125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0004459414631128311,
+      "net_tx_gib": 0.00012294761836528778,
+      "error": null
+    },
+    {
+      "experiment": "runai_gpu_direct_unpinned",
+      "config": {
+        "concurrency": 8,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 9.776318949647248,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 8952.828125,
+      "peak_private_mb": 7129.24609375,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0004523014649748802,
+      "net_tx_gib": 0.000142623670399189,
+      "error": null
+    },
+    {
+      "experiment": "runai_gpu_direct_unpinned",
+      "config": {
+        "concurrency": 16,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 9.174882913008332,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_rss_mb": 9339.0625,
+      "peak_private_mb": 8093.8984375,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0015263240784406662,
+      "net_tx_gib": 0.0004711318761110306,
+      "error": null
+    },
+    {
+      "experiment": "runai_gpu_direct_pinned",
+      "config": {
+        "concurrency": 1,
+        "repeat": 0
+      },
+      "wall_time_s": 0,
+      "peak_gpu_mem_mb": 0.0,
+      "peak_rss_mb": 0.0,
+      "peak_private_mb": 0.0,
+      "disk_read_gib": null,
+      "net_rx_gib": null,
+      "net_tx_gib": null,
+      "error": "CUDA out of memory. Tried to allocate 250.00 MiB. GPU 0 has a total capacity of 44.43 GiB of which 10.81 MiB is free. Including non-PyTorch memory, this process has 44.41 GiB memory in use. Of the allocated memory 15.98 GiB is allocated by PyTorch, and 28.16 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    },
+    {
+      "experiment": "runai_gpu_direct_pinned",
+      "config": {
+        "concurrency": 2,
+        "repeat": 0
+      },
+      "wall_time_s": 0,
+      "peak_gpu_mem_mb": 0.0,
+      "peak_rss_mb": 0.0,
+      "peak_private_mb": 0.0,
+      "disk_read_gib": null,
+      "net_rx_gib": null,
+      "net_tx_gib": null,
+      "error": "CUDA out of memory. Tried to allocate 250.00 MiB. GPU 0 has a total capacity of 44.43 GiB of which 10.81 MiB is free. Including non-PyTorch memory, this process has 44.41 GiB memory in use. Of the allocated memory 15.98 GiB is allocated by PyTorch, and 28.16 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    },
+    {
+      "experiment": "runai_gpu_direct_pinned",
+      "config": {
+        "concurrency": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 0,
+      "peak_gpu_mem_mb": 0.0,
+      "peak_rss_mb": 0.0,
+      "peak_private_mb": 0.0,
+      "disk_read_gib": null,
+      "net_rx_gib": null,
+      "net_tx_gib": null,
+      "error": "CUDA out of memory. Tried to allocate 250.00 MiB. GPU 0 has a total capacity of 44.43 GiB of which 70.81 MiB is free. Including non-PyTorch memory, this process has 44.35 GiB memory in use. Of the allocated memory 15.92 GiB is allocated by PyTorch, and 28.16 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    },
+    {
+      "experiment": "runai_gpu_direct_pinned",
+      "config": {
+        "concurrency": 8,
+        "repeat": 0
+      },
+      "wall_time_s": 0,
+      "peak_gpu_mem_mb": 0.0,
+      "peak_rss_mb": 0.0,
+      "peak_private_mb": 0.0,
+      "disk_read_gib": null,
+      "net_rx_gib": null,
+      "net_tx_gib": null,
+      "error": "CUDA out of memory. Tried to allocate 250.00 MiB. GPU 0 has a total capacity of 44.43 GiB of which 230.81 MiB is free. Including non-PyTorch memory, this process has 44.20 GiB memory in use. Of the allocated memory 15.77 GiB is allocated by PyTorch, and 28.16 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    },
+    {
+      "experiment": "runai_gpu_direct_pinned",
+      "config": {
+        "concurrency": 16,
+        "repeat": 0
+      },
+      "wall_time_s": 0,
+      "peak_gpu_mem_mb": 0.0,
+      "peak_rss_mb": 0.0,
+      "peak_private_mb": 0.0,
+      "disk_read_gib": null,
+      "net_rx_gib": null,
+      "net_tx_gib": null,
+      "error": "CUDA out of memory. Tried to allocate 80.00 MiB. GPU 0 has a total capacity of 44.43 GiB of which 40.81 MiB is free. Including non-PyTorch memory, this process has 44.38 GiB memory in use. Of the allocated memory 15.95 GiB is allocated by PyTorch, and 28.16 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    }
+  ]
+}

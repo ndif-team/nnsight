@@ -1,0 +1,18 @@
+
+== A40 | network /work/nvme | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     36.78   0.39  1.00x    15109      421
+  HF from_pretrained (pread)       4     18.47   0.77  1.99x     2994     2545
+  run:ai GPU-direct               16      5.63   2.52  6.53x     8052     7578
+
+== A40 | network /work/nvme | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4    149.38   0.38  1.00x    49337      415
+  HF from_pretrained (pread)       4     60.39   0.94  2.47x     1931     1510
+  run:ai GPU-direct                8     30.02   1.89  4.98x     4766     4414
+
+== A40 | network /work/nvme | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     92.08   0.66  1.00x    62673      418
+  HF from_pretrained (pread)       4    103.51   0.59  0.89x     7124     5309
+  run:ai GPU-direct               16     27.92   2.19  3.30x     6702     6356

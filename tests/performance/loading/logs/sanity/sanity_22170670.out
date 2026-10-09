@@ -1,0 +1,116 @@
+0, NVIDIA A40, 46068 MiB
+1, NVIDIA A40, 46068 MiB
+transformers 5.17.0 nnsight 0.7.1.dev263+ga8ee93782.d20260918
+Downloading model (if needed): Qwen/Qwen3-30B-A3B
+Model:       Qwen/Qwen3-30B-A3B
+Model size:  56.9 GB
+GPUs:        [0, 1]
+Repeats:     1
+Experiments: ['hf', 'gpu_direct']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+
+  Verifying output correctness (prompt: 'The Eiffel Tower is in the city of')...
+    Loading hf...
+    note: 58303 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Loading gpu_direct...
+    note: 58259 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Baseline (hf): ' Paris' (id=12095)
+    gpu_direct: ' Paris' (id=12095) | logits MATCH (max diff: 0.00e+00) | token MATCH
+  PASS: All outputs match.
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 1, 'repeat': 0}
+    wall_time:      105.77s
+    bw:             0.54 GB/s
+    peak_gpu_mem:   58238 MB
+    peak_gpu_alloc: 59702 MB
+    peak_gpu_resrv: 60568 MB
+    peak_rss:       49545 MB
+    peak_private:   455 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.920 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      123.78s
+    bw:             0.46 GB/s
+    peak_gpu_mem:   58286 MB
+    peak_gpu_alloc: 59822 MB
+    peak_gpu_resrv: 62872 MB
+    peak_rss:       50350 MB
+    peak_private:   463 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.736 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 8, 'repeat': 0}
+    wall_time:      123.84s
+    bw:             0.46 GB/s
+    peak_gpu_mem:   58236 MB
+    peak_gpu_alloc: 59772 MB
+    peak_gpu_resrv: 62488 MB
+    peak_rss:       50355 MB
+    peak_private:   454 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.647 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      26.47s
+    bw:             2.15 GB/s
+    peak_gpu_mem:   58235 MB
+    peak_gpu_alloc: 59772 MB
+    peak_gpu_resrv: 68632 MB
+    peak_rss:       5011 MB
+    peak_private:   4667 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.634 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      25.24s
+    bw:             2.25 GB/s
+    peak_gpu_mem:   58240 MB
+    peak_gpu_alloc: 59786 MB
+    peak_gpu_resrv: 69784 MB
+    peak_rss:       4581 MB
+    peak_private:   4275 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.978 GiB
+  [cache] Evicted 16 shard files (56.9 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      27.03s
+    bw:             2.10 GB/s
+    peak_gpu_mem:   58241 MB
+    peak_gpu_alloc: 59782 MB
+    peak_gpu_resrv: 69400 MB
+    peak_rss:       4680 MB
+    peak_private:   4309 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.522 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 1, "repeat"...   105.77     0.54       58238      59702        60568        49545      455       
+hf           {"workers": 4, "repeat"...   123.78     0.46       58286      59822        62872        50350      463       
+hf           {"workers": 8, "repeat"...   123.84     0.46       58236      59772        62488        50355      454       
+gpu_direct   {"concurrency": 1, "wor...   26.47      2.15       58235      59772        68632        5011       4667      
+gpu_direct   {"concurrency": 4, "wor...   25.24      2.25       58240      59786        69784        4581       4275      
+gpu_direct   {"concurrency": 8, "wor...   27.03      2.10       58241      59782        69400        4680       4309      
+
+Results saved to logs/sanity/sanity_Qwen3-30B-A3B_22170670.json

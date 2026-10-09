@@ -1,0 +1,291 @@
+
+== A40 | network /work/nvme | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     16.80   0.84  1.00x    15065      413
+  HF from_pretrained (pread)       8     17.51   0.81  0.96x     4042     1277
+  run:ai stream (CPU clone)        4      6.89   2.06  2.44x    13824    11193
+  run:ai GPU-direct                4      5.43   2.61  3.09x     8913     8536
+  run:ai GPU-direct lazy           4      5.23   2.71  3.21x     8614     8294
+
+== A40 | network /work/nvme | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        1    105.09   0.54  1.00x    50911      446
+  HF from_pretrained (pread)       4     62.80   0.91  1.67x     3169     1652
+  run:ai stream (CPU clone)        4     36.70   1.55  2.86x    20833    19557
+  run:ai GPU-direct                4     40.76   1.40  2.58x     7211     5933
+  run:ai GPU-direct lazy           8     28.53   1.99  3.68x    12073    10802
+
+== A40 | network /work/nvme | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        1     63.29   0.96  1.00x    51487      425
+  HF from_pretrained (pread)       8     87.67   0.70  0.72x     3760     2264
+  run:ai stream (CPU clone)        4     31.89   1.91  1.98x    10118     9897
+  run:ai GPU-direct                4     25.22   2.42  2.51x     7633     7168
+  run:ai GPU-direct lazy           4     25.91   2.36  2.44x    10149     8638
+
+== A40 | network /work/nvme | warm cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4      9.57   1.48  1.00x    15082      412
+  HF from_pretrained (pread)       8      6.33   2.24  1.51x     5125     2936
+  run:ai stream (CPU clone)        4      4.22   3.36  2.27x    13148    10895
+  run:ai GPU-direct                4      2.75   5.16  3.48x     9471     9109
+  run:ai GPU-direct lazy           4      2.60   5.45  3.68x     9424     9077
+
+== A40 | network /work/nvme | warm cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        1     96.39   0.59  1.00x    51411      633
+  HF from_pretrained (pread)       4     14.49   3.92  6.65x     3478      780
+  run:ai stream (CPU clone)        8     22.04   2.58  4.37x    19201    18435
+  run:ai GPU-direct                4     14.01   4.06  6.88x     5894     5429
+  run:ai GPU-direct lazy           8     42.13   1.35  2.29x    10197     9783
+
+== A40 | network /work/nvme | warm cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     41.93   1.46  1.00x    62294      630
+  HF from_pretrained (pread)       8     26.95   2.26  1.56x     5524     1811
+  run:ai stream (CPU clone)        1     31.43   1.94  1.33x    11516    11269
+  run:ai GPU-direct                8     33.41   1.83  1.26x     9231     8802
+  run:ai GPU-direct lazy           8     33.41   1.83  1.25x    12203    11316
+
+== A40 | node-local /tmp | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     11.88   1.19  1.00x    15060      439
+  HF from_pretrained (pread)       4     11.40   1.24  1.04x     3883     1014
+  run:ai stream (CPU clone)        8      4.78   2.97  2.48x    13211    10253
+  run:ai GPU-direct                8      3.10   4.57  3.83x     9830     9505
+  run:ai GPU-direct lazy           8      3.16   4.49  3.76x     9485     8981
+
+== A40 | node-local /tmp | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     42.89   1.33  1.00x    58033      562
+  HF from_pretrained (pread)       4     36.61   1.55  1.17x     1989     1782
+  run:ai stream (CPU clone)        4     23.40   2.43  1.83x    20294    19655
+  run:ai GPU-direct                8     15.46   3.68  2.77x     7629     6946
+  run:ai GPU-direct lazy           4     15.73   3.61  2.73x    11789    11627
+
+== A40 | node-local /tmp | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     40.74   1.50  1.00x    62568      550
+  HF from_pretrained (pread)       4     53.31   1.14  0.76x     3694     2484
+  run:ai stream (CPU clone)        8     19.80   3.08  2.06x    12192    10902
+  run:ai GPU-direct                8     13.62   4.48  2.99x     8741     8593
+  run:ai GPU-direct lazy           8     13.65   4.47  2.98x    10970    10830
+
+== A40 | node-local /tmp | warm cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8      2.60   5.47  1.00x    14284      406
+  HF from_pretrained (pread)       8      6.00   2.36  0.43x     4090     1313
+  run:ai stream (CPU clone)        4      4.16   3.41  0.62x    14389    10760
+  run:ai GPU-direct                4      2.56   5.54  1.01x     9176     8851
+  run:ai GPU-direct lazy           4      2.50   5.68  1.04x     9057     8673
+
+== A40 | node-local /tmp | warm cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     12.53   4.54  1.00x    59025      464
+  HF from_pretrained (pread)       4     15.09   3.77  0.83x     3453     1855
+  run:ai stream (CPU clone)        1     16.86   3.37  0.74x    11478    11138
+  run:ai GPU-direct                1     12.05   4.72  1.04x     8726     8736
+  run:ai GPU-direct lazy           4     12.54   4.53  1.00x    11276    11119
+
+== A40 | node-local /tmp | warm cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA A40,NVIDIA A40
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     10.00   6.10  1.00x    58808      490
+  HF from_pretrained (pread)       8     86.10   0.71  0.12x     6972     2107
+  run:ai stream (CPU clone)        4     17.38   3.51  0.58x    10754     9898
+  run:ai GPU-direct                4      9.82   6.22  1.02x     8424     8147
+  run:ai GPU-direct lazy           4      9.80   6.23  1.02x    11836    11184
+
+== A100 | network /work/nvme | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     16.92   0.84  1.00x    15229      393
+  HF from_pretrained (pread)       8     17.35   0.82  0.98x     5072     1122
+  run:ai stream (CPU clone)        4      7.01   2.02  2.41x    13360    11817
+  run:ai GPU-direct                4      5.43   2.61  3.12x     9726     8403
+  run:ai GPU-direct lazy           4      5.42   2.62  3.12x     9634     7924
+
+== A100 | network /work/nvme | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        1    103.58   0.55  1.00x    46411      478
+  HF from_pretrained (pread)       4     60.26   0.94  1.72x     3213      818
+  run:ai stream (CPU clone)        4     38.95   1.46  2.66x    21962    20231
+  run:ai GPU-direct                8     42.43   1.34  2.44x     7114     5823
+  run:ai GPU-direct lazy           8     30.13   1.89  3.44x    11966    10666
+
+== A100 | network /work/nvme | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        1     61.94   0.99  1.00x    48041      442
+  HF from_pretrained (pread)       4    100.98   0.60  0.61x     6709     3877
+  run:ai stream (CPU clone)        4     34.24   1.78  1.81x    12061    11984
+  run:ai GPU-direct                8     27.06   2.26  2.29x     8162     7590
+  run:ai GPU-direct lazy           4     31.27   1.95  1.98x    11631    11095
+
+== A100 | network /work/nvme | warm cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8      9.52   1.49  1.00x    14955      410
+  HF from_pretrained (pread)       8      6.18   2.30  1.54x     5171     2509
+  run:ai stream (CPU clone)        4      4.39   3.23  2.17x    14156    13978
+  run:ai GPU-direct                4      2.80   5.06  3.39x     9094     8678
+  run:ai GPU-direct lazy           4      2.86   4.96  3.33x    10571    10269
+
+== A100 | network /work/nvme | warm cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     43.33   1.31  1.00x    58349      641
+  HF from_pretrained (pread)       4     14.41   3.95  3.01x     2346     1952
+  run:ai stream (CPU clone)        1     18.30   3.11  2.37x    12428    12078
+  run:ai GPU-direct                1     13.72   4.15  3.16x    10181     9839
+  run:ai GPU-direct lazy           1     13.69   4.16  3.17x    13681    13318
+
+== A100 | network /work/nvme | warm cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     45.65   1.34  1.00x    62510      646
+  HF from_pretrained (pread)       1     43.59   1.40  1.05x     4067     2235
+  run:ai stream (CPU clone)        8     41.54   1.47  1.10x    10578     9055
+  run:ai GPU-direct                8     32.54   1.88  1.40x     8302     7962
+  run:ai GPU-direct lazy           8     43.90   1.39  1.04x    12033    11402
+
+== A100 | node-local /tmp | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4      9.32   1.52  1.00x    15153      389
+  HF from_pretrained (pread)       8     10.31   1.38  0.90x     4077     1411
+  run:ai stream (CPU clone)        8      4.91   2.89  1.90x    14510    13926
+  run:ai GPU-direct                4      3.31   4.29  2.82x    10152     8998
+  run:ai GPU-direct lazy           8      3.33   4.26  2.80x     9711     8813
+
+== A100 | node-local /tmp | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     42.61   1.33  1.00x    58090      554
+  HF from_pretrained (pread)       4     36.17   1.57  1.18x     3184     1063
+  run:ai stream (CPU clone)        8     20.85   2.73  2.04x    21300    19272
+  run:ai GPU-direct                8     15.54   3.66  2.74x     5663     4987
+  run:ai GPU-direct lazy           8     15.62   3.64  2.73x    10523     9847
+
+== A100 | node-local /tmp | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     40.94   1.49  1.00x    62736      533
+  HF from_pretrained (pread)       8     56.24   1.09  0.73x     3805     1805
+  run:ai stream (CPU clone)        8     19.91   3.07  2.06x    11735    11464
+  run:ai GPU-direct                8     13.81   4.42  2.97x     8218     7741
+  run:ai GPU-direct lazy           4     14.66   4.16  2.79x     9615     9193
+
+== A100 | node-local /tmp | warm cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4      2.60   5.45  1.00x    14230      420
+  HF from_pretrained (pread)       8      5.94   2.39  0.44x     3096     1455
+  run:ai stream (CPU clone)        4      4.28   3.32  0.61x    14333    11165
+  run:ai GPU-direct                4      2.72   5.21  0.96x     9264     8910
+  run:ai GPU-direct lazy           4      2.75   5.16  0.95x     8805     8379
+
+== A100 | node-local /tmp | warm cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     12.14   4.69  1.00x    59043      442
+  HF from_pretrained (pread)       4     14.97   3.80  0.81x     1202     1610
+  run:ai stream (CPU clone)        1     17.43   3.26  0.70x    11817    11439
+  run:ai GPU-direct                1     13.00   4.37  0.93x    10802    10356
+  run:ai GPU-direct lazy           1     13.09   4.34  0.93x    11524    11118
+
+== A100 | node-local /tmp | warm cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA A100-SXM4-40GB,NVIDIA A100-SXM4-40GB
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     10.57   5.77  1.00x    57636      447
+  HF from_pretrained (pread)       8     87.18   0.70  0.12x     2959     2343
+  run:ai stream (CPU clone)        8     21.25   2.87  0.50x    10021    10315
+  run:ai GPU-direct                8     11.56   5.28  0.91x     7748     7341
+  run:ai GPU-direct lazy           8      9.86   6.19  1.07x    10885    10568
+
+== H200 | network /work/nvme | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4      8.38   1.69  1.00x    15030      400
+  HF from_pretrained (pread)       8     11.76   1.21  0.71x     3231     2579
+  run:ai stream (CPU clone)        4      3.86   3.67  2.17x    14057    11279
+  run:ai GPU-direct                4      2.81   5.05  2.98x     9605     9234
+  run:ai GPU-direct lazy           4      2.99   4.75  2.80x     9557     9186
+
+== H200 | network /work/nvme | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        1     77.75   0.73  1.00x    58895      431
+  HF from_pretrained (pread)       8     37.29   1.53  2.09x     3292     1116
+  run:ai stream (CPU clone)        4     22.66   2.51  3.43x    20213    19085
+  run:ai GPU-direct                4     17.70   3.21  4.39x     6449     5640
+  run:ai GPU-direct lazy           4     17.32   3.28  4.49x    10223     8666
+
+== H200 | network /work/nvme | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     36.63   1.67  1.00x    62975      430
+  HF from_pretrained (pread)       8     51.00   1.20  0.72x     6746     5771
+  run:ai stream (CPU clone)        4     16.65   3.66  2.20x     9666     9569
+  run:ai GPU-direct                4     14.48   4.21  2.53x     8236     7534
+  run:ai GPU-direct lazy           4     22.01   2.77  1.66x     8822     8215
+
+== H200 | network /work/nvme | warm cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8      5.50   2.58  1.00x    15005      402
+  HF from_pretrained (pread)       8      7.89   1.80  0.70x     3590     2493
+  run:ai stream (CPU clone)        8      2.92   4.86  1.89x    14407    11622
+  run:ai GPU-direct                4      1.96   7.24  2.81x     9536     9092
+  run:ai GPU-direct lazy           4      1.96   7.25  2.81x     9397     8960
+
+== H200 | network /work/nvme | warm cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     24.33   2.34  1.00x    58806      478
+  HF from_pretrained (pread)       4     19.68   2.89  1.24x     2290      776
+  run:ai stream (CPU clone)        8     16.84   3.38  1.45x    23812    23333
+  run:ai GPU-direct                4     10.91   5.21  2.23x     5054     4642
+  run:ai GPU-direct lazy           4     10.91   5.21  2.23x     9993     9582
+
+== H200 | network /work/nvme | warm cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     26.39   2.31  1.00x    62930      449
+  HF from_pretrained (pread)       8     30.98   1.97  0.85x     5039     3566
+  run:ai stream (CPU clone)        8     10.73   5.69  2.46x    12092     9117
+  run:ai GPU-direct                4      8.99   6.79  2.94x     9146     8771
+  run:ai GPU-direct lazy           4      9.79   6.23  2.70x    11257    10566
+
+== H200 | node-local /tmp | cold cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     12.81   1.11  1.00x    15067      387
+  HF from_pretrained (pread)       8     10.17   1.39  1.26x     3985     1670
+  run:ai stream (CPU clone)        8      3.95   3.59  3.25x    14446    14196
+  run:ai GPU-direct                8      2.78   5.10  4.60x     9822     9499
+  run:ai GPU-direct lazy           8      2.78   5.10  4.61x     9617     9293
+
+== H200 | node-local /tmp | cold cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     61.75   0.92  1.00x    58708      447
+  HF from_pretrained (pread)       4     31.65   1.80  1.95x     1992      968
+  run:ai stream (CPU clone)        8     17.37   3.27  3.55x    19584    18564
+  run:ai GPU-direct                8     11.50   4.95  5.37x     6855     6148
+  run:ai GPU-direct lazy           8     11.39   4.99  5.42x    10581     9894
+
+== H200 | node-local /tmp | cold cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     61.46   0.99  1.00x    62862      415
+  HF from_pretrained (pread)       8     41.41   1.47  1.48x     3765     2320
+  run:ai stream (CPU clone)        4     15.86   3.85  3.87x     8955     8565
+  run:ai GPU-direct                8     13.28   4.59  4.63x     8490     8044
+  run:ai GPU-direct lazy           4     11.68   5.23  5.26x     9761     9319
+
+== H200 | node-local /tmp | warm cache | Qwen2.5-7B-Instruct (14.2 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8      2.26   6.29  1.00x    14025      404
+  HF from_pretrained (pread)       8      7.81   1.82  0.29x     5081     1344
+  run:ai stream (CPU clone)        4      2.84   4.99  0.79x    12716    12123
+  run:ai GPU-direct                4      1.93   7.35  1.17x     9863     9465
+  run:ai GPU-direct lazy           4      1.96   7.23  1.15x    10667    10308
+
+== H200 | node-local /tmp | warm cache | Qwen3-30B-A3B (56.9 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        4     11.22   5.07  1.00x    58807      458
+  HF from_pretrained (pread)       8     20.35   2.79  0.55x     3524     1691
+  run:ai stream (CPU clone)        1     17.10   3.33  0.66x    11428    10778
+  run:ai GPU-direct                4     10.49   5.42  1.07x     6047     5630
+  run:ai GPU-direct lazy           4     10.44   5.45  1.07x    10877    10460
+
+== H200 | node-local /tmp | warm cache | Qwen3-32B (61.0 GB) | transformers 5.17.0 | NVIDIA H200,NVIDIA H200
+  experiment                    knob  wall (s)   GB/s  vs HF   RSS MB  priv MB
+  HF from_pretrained (mmap)        8     10.00   6.10  1.00x    61448      438
+  HF from_pretrained (pread)       8     31.44   1.94  0.32x     4551     2261
+  run:ai stream (CPU clone)        8     10.68   5.71  0.94x    12734     9471
+  run:ai GPU-direct                8      9.34   6.53  1.07x     9790     8306
+  run:ai GPU-direct lazy           8      9.25   6.60  1.08x    12145    11437
+wrote markdown tables to logs/baseline/tables.md
+
+wrote 540 rows to logs/baseline/baseline_all_configs.csv

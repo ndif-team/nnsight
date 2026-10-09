@@ -1,0 +1,295 @@
+{
+  "model": "Qwen/Qwen3-32B",
+  "model_size_gb": 61.02428637444973,
+  "gpus": [
+    0,
+    1
+  ],
+  "cache_mode": "warm",
+  "environment": {
+    "hostname": "gpub026.delta.ncsa.illinois.edu",
+    "python": "3.12.12",
+    "torch": "2.10.0",
+    "transformers": "5.17.0",
+    "safetensors": "0.8.0",
+    "accelerate": "1.15.0",
+    "huggingface_hub": "1.32.0",
+    "runai_model_streamer": "0.16.1",
+    "nnsight": "0.7.1.dev263+ga8ee93782.d20260918",
+    "cuda": "12.8",
+    "gpus": [
+      "NVIDIA A40",
+      "NVIDIA A40"
+    ],
+    "cpu_count": 64,
+    "hf_hub_cache": "/work/nvme/bdnh/zwang83/huggingface/hub",
+    "slurm_job_id": "22186450",
+    "slurm_partition": "gpuA40x4"
+  },
+  "results": [
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 1,
+        "repeat": 0
+      },
+      "wall_time_s": 57.840096078813076,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 62905.12890625,
+      "peak_private_mb": 629.86328125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.05916027911007404,
+      "net_tx_gib": 0.04772461671382189,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 41.92841689614579,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 62294.05859375,
+      "peak_private_mb": 630.03515625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0009477604180574417,
+      "net_tx_gib": 0.0005429964512586594,
+      "error": null
+    },
+    {
+      "experiment": "hf",
+      "config": {
+        "workers": 8,
+        "repeat": 0
+      },
+      "wall_time_s": 41.97766583785415,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 63161.7578125,
+      "peak_private_mb": 631.37890625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0005066506564617157,
+      "net_tx_gib": 0.0006327778100967407,
+      "error": null
+    },
+    {
+      "experiment": "hf_pread",
+      "config": {
+        "workers": 1,
+        "repeat": 0
+      },
+      "wall_time_s": 27.44008011324331,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 2532.35546875,
+      "peak_private_mb": 2191.15625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0003960719332098961,
+      "net_tx_gib": 0.0005692895501852036,
+      "error": null
+    },
+    {
+      "experiment": "hf_pread",
+      "config": {
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 27.322317746002227,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 5508.234375,
+      "peak_private_mb": 2005.0625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0003593694418668747,
+      "net_tx_gib": 0.000485837459564209,
+      "error": null
+    },
+    {
+      "experiment": "hf_pread",
+      "config": {
+        "workers": 8,
+        "repeat": 0
+      },
+      "wall_time_s": 26.95485580805689,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 5524.2421875,
+      "peak_private_mb": 1810.96484375,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 0.0004074517637491226,
+      "net_tx_gib": 0.004843726754188538,
+      "error": null
+    },
+    {
+      "experiment": "stream",
+      "config": {
+        "concurrency": 1,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 31.425667816307396,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 11515.69921875,
+      "peak_private_mb": 11269.48828125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 5.301241705194116,
+      "net_tx_gib": 0.035381436347961426,
+      "error": null
+    },
+    {
+      "experiment": "stream",
+      "config": {
+        "concurrency": 4,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 33.47221070015803,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 11147.015625,
+      "peak_private_mb": 9835.8203125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 6.047705782577395,
+      "net_tx_gib": 0.04761822707951069,
+      "error": null
+    },
+    {
+      "experiment": "stream",
+      "config": {
+        "concurrency": 8,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 34.57398067321628,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 10173.5703125,
+      "peak_private_mb": 9919.7265625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 5.917481945827603,
+      "net_tx_gib": 0.05855722539126873,
+      "error": null
+    },
+    {
+      "experiment": "gpu_direct",
+      "config": {
+        "concurrency": 1,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 73.81944990111515,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 8385.46484375,
+      "peak_private_mb": 8046.17578125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 7.0170009303838015,
+      "net_tx_gib": 0.20550185721367598,
+      "error": null
+    },
+    {
+      "experiment": "gpu_direct",
+      "config": {
+        "concurrency": 4,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 35.16072337888181,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 8810.58984375,
+      "peak_private_mb": 8709.08203125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 6.794075122103095,
+      "net_tx_gib": 0.09385666064918041,
+      "error": null
+    },
+    {
+      "experiment": "gpu_direct",
+      "config": {
+        "concurrency": 8,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 33.40869844192639,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 9231.22265625,
+      "peak_private_mb": 8802.46875,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 6.606054508127272,
+      "net_tx_gib": 0.07621327042579651,
+      "error": null
+    },
+    {
+      "experiment": "lazy",
+      "config": {
+        "concurrency": 1,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 99.4141283929348,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 12141.5703125,
+      "peak_private_mb": 9387.37890625,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 8.344288425520062,
+      "net_tx_gib": 0.31230925116688013,
+      "error": null
+    },
+    {
+      "experiment": "lazy",
+      "config": {
+        "concurrency": 4,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 41.38125636288896,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 12196.37109375,
+      "peak_private_mb": 11310.3359375,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 7.607740802690387,
+      "net_tx_gib": 0.1382858967408538,
+      "error": null
+    },
+    {
+      "experiment": "lazy",
+      "config": {
+        "concurrency": 8,
+        "workers": 4,
+        "repeat": 0
+      },
+      "wall_time_s": 33.41189002105966,
+      "peak_gpu_mem_mb": 62488.8232421875,
+      "peak_gpu_alloc_mb": 62488.8232421875,
+      "peak_gpu_reserved_mb": 62496.0,
+      "peak_rss_mb": 12202.83203125,
+      "peak_private_mb": 11315.64453125,
+      "disk_read_gib": 0.0,
+      "net_rx_gib": 7.018018579110503,
+      "net_tx_gib": 0.09325107466429472,
+      "error": null
+    }
+  ]
+}

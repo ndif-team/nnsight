@@ -1,0 +1,981 @@
+== job 22186450 on gpub026.delta.ncsa.illinois.edu partition=gpuA40x4 model=Qwen/Qwen3-32B gpu_tag=A40
+0, NVIDIA A40, 46068 MiB
+1, NVIDIA A40, 46068 MiB
+transformers 5.17.0 nnsight 0.7.1.dev263+ga8ee93782.d20260918
+nvme0n1  1.5T MO001600KWZQP
+
+########## tier=nvme ##########
+== cold
+Downloading model (if needed): Qwen/Qwen3-32B
+Model:       Qwen/Qwen3-32B
+Model size:  61.0 GB
+GPUs:        [0, 1]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'stream', 'gpu_direct', 'lazy']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+
+  Verifying output correctness (prompt: 'The Eiffel Tower is in the city of')...
+    Loading hf...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Loading gpu_direct...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Loading hf_pread...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Loading lazy...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Loading stream...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Baseline (hf): ' Paris' (id=12095)
+    gpu_direct: ' Paris' (id=12095) | logits MATCH (max diff: 0.00e+00) | token MATCH
+    hf_pread: ' Paris' (id=12095) | logits MATCH (max diff: 0.00e+00) | token MATCH
+    lazy: ' Paris' (id=12095) | logits MATCH (max diff: 0.00e+00) | token MATCH
+    stream: ' Paris' (id=12095) | logits MATCH (max diff: 0.00e+00) | token MATCH
+  PASS: All outputs match.
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 1, 'repeat': 0}
+    wall_time:      63.29s
+    bw:             0.96 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       51487 MB
+    peak_private:   425 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.270 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      69.74s
+    bw:             0.88 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       52460 MB
+    peak_private:   422 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.388 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 8, 'repeat': 0}
+    wall_time:      69.82s
+    bw:             0.87 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       53032 MB
+    peak_private:   427 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.339 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 1, 'repeat': 0}
+    wall_time:      89.85s
+    bw:             0.68 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       3665 MB
+    peak_private:   1875 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.950 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      88.15s
+    bw:             0.69 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       6673 MB
+    peak_private:   1690 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.968 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 8, 'repeat': 0}
+    wall_time:      87.67s
+    bw:             0.70 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       3760 MB
+    peak_private:   2264 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.944 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: stream
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] stream | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      38.66s
+    bw:             1.58 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       10502 MB
+    peak_private:   10226 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.021 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] stream | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      31.89s
+    bw:             1.91 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       10118 MB
+    peak_private:   9897 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.940 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] stream | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      34.38s
+    bw:             1.78 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       9610 MB
+    peak_private:   8870 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.082 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      31.56s
+    bw:             1.93 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       6733 MB
+    peak_private:   6172 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.083 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      25.22s
+    bw:             2.42 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       7633 MB
+    peak_private:   7168 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.942 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      26.73s
+    bw:             2.28 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       6053 MB
+    peak_private:   5791 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.042 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: lazy
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] lazy | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      35.74s
+    bw:             1.71 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       9365 MB
+    peak_private:   7566 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.160 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] lazy | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      25.91s
+    bw:             2.36 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       10149 MB
+    peak_private:   8638 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.981 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] lazy | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      26.44s
+    bw:             2.31 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       11495 MB
+    peak_private:   9628 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.058 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 1, "repeat"...   63.29      0.96       62489      62489        62496        51487      425       
+hf           {"workers": 4, "repeat"...   69.74      0.88       62489      62489        62496        52460      422       
+hf           {"workers": 8, "repeat"...   69.82      0.87       62489      62489        62496        53032      427       
+hf_pread     {"workers": 1, "repeat"...   89.85      0.68       62489      62489        62496        3665       1875      
+hf_pread     {"workers": 4, "repeat"...   88.15      0.69       62489      62489        62496        6673       1690      
+hf_pread     {"workers": 8, "repeat"...   87.67      0.70       62489      62489        62496        3760       2264      
+stream       {"concurrency": 1, "wor...   38.66      1.58       62489      62489        62496        10502      10226     
+stream       {"concurrency": 4, "wor...   31.89      1.91       62489      62489        62496        10118      9897      
+stream       {"concurrency": 8, "wor...   34.38      1.78       62489      62489        62496        9610       8870      
+gpu_direct   {"concurrency": 1, "wor...   31.56      1.93       62489      62489        62496        6733       6172      
+gpu_direct   {"concurrency": 4, "wor...   25.22      2.42       62489      62489        62496        7633       7168      
+gpu_direct   {"concurrency": 8, "wor...   26.73      2.28       62489      62489        62496        6053       5791      
+lazy         {"concurrency": 1, "wor...   35.74      1.71       62489      62489        62496        9365       7566      
+lazy         {"concurrency": 4, "wor...   25.91      2.36       62489      62489        62496        10149      8638      
+lazy         {"concurrency": 8, "wor...   26.44      2.31       62489      62489        62496        11495      9628      
+
+Results saved to logs/baseline/A40_nvme_Qwen3-32B_cold_20260918_092433.json
+== warm
+Downloading model (if needed): Qwen/Qwen3-32B
+Model:       Qwen/Qwen3-32B
+Model size:  61.0 GB
+GPUs:        [0, 1]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'stream', 'gpu_direct', 'lazy']
+run:ai:      available
+Cache mode:  warm
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 10.8s (5.7 GB/s)
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 12.4s (4.9 GB/s)
+
+============================================================
+Experiment: hf
+============================================================
+
+  [OK] hf | config={'workers': 1, 'repeat': 0}
+    wall_time:      57.84s
+    bw:             1.06 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       62905 MB
+    peak_private:   630 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.059 GiB
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      41.93s
+    bw:             1.46 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       62294 MB
+    peak_private:   630 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.001 GiB
+
+  [OK] hf | config={'workers': 8, 'repeat': 0}
+    wall_time:      41.98s
+    bw:             1.45 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       63162 MB
+    peak_private:   631 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.001 GiB
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 4.0s (15.4 GB/s)
+
+============================================================
+Experiment: hf_pread
+============================================================
+
+  [OK] hf_pread | config={'workers': 1, 'repeat': 0}
+    wall_time:      27.44s
+    bw:             2.22 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       2532 MB
+    peak_private:   2191 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      27.32s
+    bw:             2.23 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       5508 MB
+    peak_private:   2005 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+
+  [OK] hf_pread | config={'workers': 8, 'repeat': 0}
+    wall_time:      26.95s
+    bw:             2.26 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       5524 MB
+    peak_private:   1811 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 3.9s (15.5 GB/s)
+
+============================================================
+Experiment: stream
+============================================================
+
+  [OK] stream | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      31.43s
+    bw:             1.94 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       11516 MB
+    peak_private:   11269 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.301 GiB
+
+  [OK] stream | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      33.47s
+    bw:             1.82 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       11147 MB
+    peak_private:   9836 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.048 GiB
+
+  [OK] stream | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      34.57s
+    bw:             1.77 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       10174 MB
+    peak_private:   9920 MB
+    disk_read:      0.000 GiB
+    net_rx:         5.917 GiB
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 9.1s (6.7 GB/s)
+
+============================================================
+Experiment: gpu_direct
+============================================================
+
+  [OK] gpu_direct | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      73.82s
+    bw:             0.83 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       8385 MB
+    peak_private:   8046 MB
+    disk_read:      0.000 GiB
+    net_rx:         7.017 GiB
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      35.16s
+    bw:             1.74 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       8811 MB
+    peak_private:   8709 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.794 GiB
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      33.41s
+    bw:             1.83 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       9231 MB
+    peak_private:   8802 MB
+    disk_read:      0.000 GiB
+    net_rx:         6.606 GiB
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 9.3s (6.6 GB/s)
+
+============================================================
+Experiment: lazy
+============================================================
+
+  [OK] lazy | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      99.41s
+    bw:             0.61 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       12142 MB
+    peak_private:   9387 MB
+    disk_read:      0.000 GiB
+    net_rx:         8.344 GiB
+
+  [OK] lazy | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      41.38s
+    bw:             1.47 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       12196 MB
+    peak_private:   11310 MB
+    disk_read:      0.000 GiB
+    net_rx:         7.608 GiB
+
+  [OK] lazy | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      33.41s
+    bw:             1.83 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       12203 MB
+    peak_private:   11316 MB
+    disk_read:      0.000 GiB
+    net_rx:         7.018 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 1, "repeat"...   57.84      1.06       62489      62489        62496        62905      630       
+hf           {"workers": 4, "repeat"...   41.93      1.46       62489      62489        62496        62294      630       
+hf           {"workers": 8, "repeat"...   41.98      1.45       62489      62489        62496        63162      631       
+hf_pread     {"workers": 1, "repeat"...   27.44      2.22       62489      62489        62496        2532       2191      
+hf_pread     {"workers": 4, "repeat"...   27.32      2.23       62489      62489        62496        5508       2005      
+hf_pread     {"workers": 8, "repeat"...   26.95      2.26       62489      62489        62496        5524       1811      
+stream       {"concurrency": 1, "wor...   31.43      1.94       62489      62489        62496        11516      11269     
+stream       {"concurrency": 4, "wor...   33.47      1.82       62489      62489        62496        11147      9836      
+stream       {"concurrency": 8, "wor...   34.57      1.77       62489      62489        62496        10174      9920      
+gpu_direct   {"concurrency": 1, "wor...   73.82      0.83       62489      62489        62496        8385       8046      
+gpu_direct   {"concurrency": 4, "wor...   35.16      1.74       62489      62489        62496        8811       8709      
+gpu_direct   {"concurrency": 8, "wor...   33.41      1.83       62489      62489        62496        9231       8802      
+lazy         {"concurrency": 1, "wor...   99.41      0.61       62489      62489        62496        12142      9387      
+lazy         {"concurrency": 4, "wor...   41.38      1.47       62489      62489        62496        12196      11310     
+lazy         {"concurrency": 8, "wor...   33.41      1.83       62489      62489        62496        12203      11316     
+
+Results saved to logs/baseline/A40_nvme_Qwen3-32B_warm_20260918_092433.json
+
+== copying models--Qwen--Qwen3-32B from /work/nvme/bdnh/zwang83/huggingface/hub to /tmp/huggingface_22186450/hub
+copy took 160s; 62G
+
+########## tier=tmp ##########
+== cold
+Downloading model (if needed): Qwen/Qwen3-32B
+Model:       Qwen/Qwen3-32B
+Model size:  61.0 GB
+GPUs:        [0, 1]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'stream', 'gpu_direct', 'lazy']
+run:ai:      available
+Cache mode:  fadvise (FADV_DONTNEED on model shards)
+
+  Verifying output correctness (prompt: 'The Eiffel Tower is in the city of')...
+    Loading hf...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Loading gpu_direct...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Loading hf_pread...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Loading lazy...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Loading stream...
+    note: 62508 MB still allocated on GPU after unload (nnsight keeps a reference after a trace; harmless in a subprocess)
+    Baseline (hf): ' Paris' (id=12095)
+    gpu_direct: ' Paris' (id=12095) | logits MATCH (max diff: 0.00e+00) | token MATCH
+    hf_pread: ' Paris' (id=12095) | logits MATCH (max diff: 0.00e+00) | token MATCH
+    lazy: ' Paris' (id=12095) | logits MATCH (max diff: 0.00e+00) | token MATCH
+    stream: ' Paris' (id=12095) | logits MATCH (max diff: 0.00e+00) | token MATCH
+  PASS: All outputs match.
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 1, 'repeat': 0}
+    wall_time:      48.12s
+    bw:             1.27 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       62488 MB
+    peak_private:   547 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.031 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      41.14s
+    bw:             1.48 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       62851 MB
+    peak_private:   548 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.000 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf | config={'workers': 8, 'repeat': 0}
+    wall_time:      40.74s
+    bw:             1.50 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       62568 MB
+    peak_private:   550 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.001 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: hf_pread
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 1, 'repeat': 0}
+    wall_time:      53.96s
+    bw:             1.13 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       3670 MB
+    peak_private:   1996 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.001 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      53.31s
+    bw:             1.14 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       3694 MB
+    peak_private:   2484 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.001 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] hf_pread | config={'workers': 8, 'repeat': 0}
+    wall_time:      53.54s
+    bw:             1.14 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       5243 MB
+    peak_private:   2454 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.001 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: stream
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] stream | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      34.00s
+    bw:             1.79 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       11587 MB
+    peak_private:   10669 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.001 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] stream | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      20.79s
+    bw:             2.93 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       11119 MB
+    peak_private:   11037 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.001 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] stream | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      19.80s
+    bw:             3.08 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       12192 MB
+    peak_private:   10902 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.000 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: gpu_direct
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      29.25s
+    bw:             2.09 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       6651 MB
+    peak_private:   6464 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.000 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      14.43s
+    bw:             4.23 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       8152 MB
+    peak_private:   7984 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.000 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      13.62s
+    bw:             4.48 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       8741 MB
+    peak_private:   8593 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.000 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+============================================================
+Experiment: lazy
+============================================================
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] lazy | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      29.79s
+    bw:             2.05 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       8244 MB
+    peak_private:   8042 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.002 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] lazy | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      14.19s
+    bw:             4.30 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       9298 MB
+    peak_private:   9046 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.000 GiB
+  [cache] Evicted 17 shard files (61.0 GB) via FADV_DONTNEED
+
+  [OK] lazy | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      13.65s
+    bw:             4.47 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       10970 MB
+    peak_private:   10830 MB
+    disk_read:      61.024 GiB
+    net_rx:         0.001 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 1, "repeat"...   48.12      1.27       62489      62489        62496        62488      547       
+hf           {"workers": 4, "repeat"...   41.14      1.48       62489      62489        62496        62851      548       
+hf           {"workers": 8, "repeat"...   40.74      1.50       62489      62489        62496        62568      550       
+hf_pread     {"workers": 1, "repeat"...   53.96      1.13       62489      62489        62496        3670       1996      
+hf_pread     {"workers": 4, "repeat"...   53.31      1.14       62489      62489        62496        3694       2484      
+hf_pread     {"workers": 8, "repeat"...   53.54      1.14       62489      62489        62496        5243       2454      
+stream       {"concurrency": 1, "wor...   34.00      1.79       62489      62489        62496        11587      10669     
+stream       {"concurrency": 4, "wor...   20.79      2.93       62489      62489        62496        11119      11037     
+stream       {"concurrency": 8, "wor...   19.80      3.08       62489      62489        62496        12192      10902     
+gpu_direct   {"concurrency": 1, "wor...   29.25      2.09       62489      62489        62496        6651       6464      
+gpu_direct   {"concurrency": 4, "wor...   14.43      4.23       62489      62489        62496        8152       7984      
+gpu_direct   {"concurrency": 8, "wor...   13.62      4.48       62489      62489        62496        8741       8593      
+lazy         {"concurrency": 1, "wor...   29.79      2.05       62489      62489        62496        8244       8042      
+lazy         {"concurrency": 4, "wor...   14.19      4.30       62489      62489        62496        9298       9046      
+lazy         {"concurrency": 8, "wor...   13.65      4.47       62489      62489        62496        10970      10830     
+
+Results saved to logs/baseline/A40_tmp_Qwen3-32B_cold_20260918_092433.json
+== warm
+Downloading model (if needed): Qwen/Qwen3-32B
+Model:       Qwen/Qwen3-32B
+Model size:  61.0 GB
+GPUs:        [0, 1]
+Repeats:     1
+Experiments: ['hf', 'hf_pread', 'stream', 'gpu_direct', 'lazy']
+run:ai:      available
+Cache mode:  warm
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 5.5s (11.1 GB/s)
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 4.2s (14.5 GB/s)
+
+============================================================
+Experiment: hf
+============================================================
+
+  [OK] hf | config={'workers': 1, 'repeat': 0}
+    wall_time:      15.87s
+    bw:             3.85 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       59597 MB
+    peak_private:   517 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.055 GiB
+
+  [OK] hf | config={'workers': 4, 'repeat': 0}
+    wall_time:      10.16s
+    bw:             6.00 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       59749 MB
+    peak_private:   502 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+
+  [OK] hf | config={'workers': 8, 'repeat': 0}
+    wall_time:      10.00s
+    bw:             6.10 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       58808 MB
+    peak_private:   490 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 3.6s (16.9 GB/s)
+
+============================================================
+Experiment: hf_pread
+============================================================
+
+  [OK] hf_pread | config={'workers': 1, 'repeat': 0}
+    wall_time:      89.35s
+    bw:             0.68 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       3983 MB
+    peak_private:   2134 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.002 GiB
+
+  [OK] hf_pread | config={'workers': 4, 'repeat': 0}
+    wall_time:      86.52s
+    bw:             0.71 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       6959 MB
+    peak_private:   3496 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.002 GiB
+
+  [OK] hf_pread | config={'workers': 8, 'repeat': 0}
+    wall_time:      86.10s
+    bw:             0.71 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       6972 MB
+    peak_private:   2107 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.002 GiB
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 3.6s (17.0 GB/s)
+
+============================================================
+Experiment: stream
+============================================================
+
+  [OK] stream | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      18.40s
+    bw:             3.32 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       11885 MB
+    peak_private:   10752 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.001 GiB
+
+  [OK] stream | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      17.38s
+    bw:             3.51 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       10754 MB
+    peak_private:   9898 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.001 GiB
+
+  [OK] stream | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      17.97s
+    bw:             3.40 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       11300 MB
+    peak_private:   10920 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 2.4s (25.0 GB/s)
+
+============================================================
+Experiment: gpu_direct
+============================================================
+
+  [OK] gpu_direct | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      11.37s
+    bw:             5.37 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       7825 MB
+    peak_private:   7205 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+
+  [OK] gpu_direct | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      9.82s
+    bw:             6.22 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       8424 MB
+    peak_private:   8147 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+
+  [OK] gpu_direct | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      10.01s
+    bw:             6.09 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       8364 MB
+    peak_private:   7994 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+  [warmup] Reading 17 shard files (61.0 GB) into page cache...
+  [warmup] Done in 2.5s (24.6 GB/s)
+
+============================================================
+Experiment: lazy
+============================================================
+
+  [OK] lazy | config={'concurrency': 1, 'workers': 4, 'repeat': 0}
+    wall_time:      11.32s
+    bw:             5.39 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       8976 MB
+    peak_private:   8639 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+
+  [OK] lazy | config={'concurrency': 4, 'workers': 4, 'repeat': 0}
+    wall_time:      9.80s
+    bw:             6.23 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       11836 MB
+    peak_private:   11184 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+
+  [OK] lazy | config={'concurrency': 8, 'workers': 4, 'repeat': 0}
+    wall_time:      10.01s
+    bw:             6.09 GB/s
+    peak_gpu_mem:   62489 MB
+    peak_gpu_alloc: 62489 MB
+    peak_gpu_resrv: 62496 MB
+    peak_rss:       11075 MB
+    peak_private:   10805 MB
+    disk_read:      0.000 GiB
+    net_rx:         0.000 GiB
+
+============================================================
+SUMMARY
+============================================================
+Experiment   Config                       Wall (s)   BW (GB/s)  GPU (MB)   PkAlloc(MB)  PkResrv(MB)  RSS (MB)   Priv (MB) 
+--------------------------------------------------------------------------------------------------------------------------
+hf           {"workers": 1, "repeat"...   15.87      3.85       62489      62489        62496        59597      517       
+hf           {"workers": 4, "repeat"...   10.16      6.00       62489      62489        62496        59749      502       
+hf           {"workers": 8, "repeat"...   10.00      6.10       62489      62489        62496        58808      490       
+hf_pread     {"workers": 1, "repeat"...   89.35      0.68       62489      62489        62496        3983       2134      
+hf_pread     {"workers": 4, "repeat"...   86.52      0.71       62489      62489        62496        6959       3496      
+hf_pread     {"workers": 8, "repeat"...   86.10      0.71       62489      62489        62496        6972       2107      
+stream       {"concurrency": 1, "wor...   18.40      3.32       62489      62489        62496        11885      10752     
+stream       {"concurrency": 4, "wor...   17.38      3.51       62489      62489        62496        10754      9898      
+stream       {"concurrency": 8, "wor...   17.97      3.40       62489      62489        62496        11300      10920     
+gpu_direct   {"concurrency": 1, "wor...   11.37      5.37       62489      62489        62496        7825       7205      
+gpu_direct   {"concurrency": 4, "wor...   9.82       6.22       62489      62489        62496        8424       8147      
+gpu_direct   {"concurrency": 8, "wor...   10.01      6.09       62489      62489        62496        8364       7994      
+lazy         {"concurrency": 1, "wor...   11.32      5.39       62489      62489        62496        8976       8639      
+lazy         {"concurrency": 4, "wor...   9.80       6.23       62489      62489        62496        11836      11184     
+lazy         {"concurrency": 8, "wor...   10.01      6.09       62489      62489        62496        11075      10805     
+
+Results saved to logs/baseline/A40_tmp_Qwen3-32B_warm_20260918_092433.json
+== done

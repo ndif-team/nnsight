@@ -1,0 +1,30 @@
+{
+  "model": "Qwen/Qwen3-32B",
+  "model_size_gb": 61.02428637444973,
+  "results": [
+    {
+      "mode": "read",
+      "threads": 1,
+      "wall_time_s": 15.60665839817375,
+      "bw_gbs": 3.910144299793903
+    },
+    {
+      "mode": "read",
+      "threads": 4,
+      "wall_time_s": 6.283445528242737,
+      "bw_gbs": 9.71191460165584
+    },
+    {
+      "mode": "read",
+      "threads": 8,
+      "wall_time_s": 5.807176519185305,
+      "bw_gbs": 10.508426284760308
+    },
+    {
+      "mode": "read",
+      "threads": 16,
+      "wall_time_s": 5.236086260993034,
+      "bw_gbs": 11.654560932095178
+    }
+  ]
+}
