@@ -269,6 +269,28 @@ class TestAdHocCall:
         assert adhoc.shape == ref.shape
         assert _min_row_cosine(adhoc, ref) > 0.99
 
+    @pytest.mark.parametrize(
+        "path",
+        ["lm_head", "model.embed_tokens", "self_attn.qkv_proj", "mlp.gate_up_proj", "mlp.down_proj", "self_attn.o_proj"],
+    )
+    def test_param_is_the_whole_on_every_rank(self, vllm_qwen_ref, vllm_qwen_tp, ET_prompt, path):
+        """``param("weight")`` on a sharded engine equals the single-rank parameter: the
+        head and embedding reindexed out of their padded vocab shards, the merged
+        projections regrouped per component, the row-parallel ones concatenated
+        along their input axis."""
+
+        def whole(model):
+            with model.trace(ET_prompt, temperature=0.0, top_p=1):
+                module = model if path.startswith("model.") or path == "lm_head" else _submodule(model, path)
+                for part in (path.split(".") if module is model else []):
+                    module = getattr(module, part)
+                value = module.param("weight").detach().clone().save()
+            return value.float().cpu()
+
+        expected, actual = whole(vllm_qwen_ref), whole(vllm_qwen_tp)
+        assert actual.shape == expected.shape, (actual.shape, expected.shape)
+        assert torch.equal(actual, expected)
+
     @torch.no_grad()
     def test_column_parallel_call_returns_the_whole(
         self, vllm_qwen_ref, vllm_qwen_tp, ET_prompt

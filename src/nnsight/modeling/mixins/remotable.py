@@ -241,6 +241,10 @@ class Remotable(Meta):
         # only direct children), so each Module:<path> id resolves server-side.
         for envoy in self.modules():
             objects[f"Module:{envoy.path}"] = envoy._module
+            # A module the tree holds under several paths has one envoy and an
+            # alias at every other path; a request may name it by any of them.
+            for name in envoy._aliases:
+                objects[f"Module:{envoy.path}.{name}"] = envoy.__dict__[name]._module
         return objects
 
     def _remoteable_model_key(self) -> str:

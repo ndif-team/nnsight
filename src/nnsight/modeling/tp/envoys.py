@@ -24,9 +24,10 @@ It does mean the style's *input* transform runs too, which is why re-splitting
 the input is conditional: see
 [`SPLITS_ITS_OWN_INPUT`][nnsight.modeling.tp.envoys.SPLITS_ITS_OWN_INPUT].
 
-Parameters are left alone. ``layer.weight`` is the ``DTensor`` transformers made
-of it — this rank holds a slice, while ``.shape`` reports the whole — as it is
-anywhere else under transformers tensor parallelism.
+``layer.weight`` is the ``DTensor`` transformers made of it, this rank's slice
+under a whole ``.shape``, as it is anywhere else under transformers tensor
+parallelism. ``layer.param("weight")`` is the whole tensor; it is a collective, so
+every rank calls it together, as every rank runs the block.
 """
 
 from __future__ import annotations
@@ -112,6 +113,15 @@ class TPEnvoy(Envoy):
         if style in SHARDED_AFTER_CALL:
             result = _gather(result, mesh, _placement("shard"))
         return result
+
+    def _parameter(self, name: str) -> torch.Tensor:
+        """The whole parameter: a ``DTensor`` reassembled on every rank."""
+        from torch.distributed.tensor import DTensor
+
+        value = super()._parameter(name)
+        if isinstance(value, DTensor):
+            return value.full_tensor()
+        return value
 
 
 def tp_envoys() -> dict:

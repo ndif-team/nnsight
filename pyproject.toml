@@ -88,7 +88,7 @@ license-files = ["LICENSE"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-nnsight = ["config.yaml"]
+nnsight = ["config.yaml", "modeling/vllm/pp_tls_state.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

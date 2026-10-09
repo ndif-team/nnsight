@@ -75,6 +75,7 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `.inputs` | `(args, kwargs)` | All inputs to the module's forward. |
 | `.source` | `Source` | Operation-level access to the module's forward internals (see below). |
 | `.device` / `.devices` | `torch.device` / `set` | Device(s) of the module's parameters. |
+| `.param(name)` | `Tensor` | The parameter or buffer `name`, whole: the object `.weight` holds on one device, the ranks' slices reassembled under tensor parallelism. |
 | `._module` | `torch.nn.Module` | The wrapped module itself. Reach for it when you need the real object rather than the envoy — reading `config`, registering your own PyTorch hooks, `named_parameters()`, `requires_grad_(False)`. Not a copy: edits to it are edits to the model the tracer runs. |
 
 ## Envoy / module methods

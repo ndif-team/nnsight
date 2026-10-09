@@ -149,6 +149,9 @@ VALUES = [
     "skip_read_back",   # a .skip replacement is not gathered
     "skip_logits",
     "adhoc_lens",
+    "weight_whole_colwise",   # param("weight") reassembles a sharded parameter
+    "weight_whole_rowwise",
+    "weight_whole_embed",
 ]
 
 

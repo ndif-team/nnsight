@@ -106,7 +106,7 @@ about it:
 | Whole modules | no | `model.layers[i].output`, `mlp.output`, `norm.output` |
 | The LM head | no — gathered by transformers | `lm_head.output` |
 | Embeddings | whole, unless the plan shards them — see below | `embed_tokens.output` |
-| **Parameters** | **yes — not gathered** | `q_proj.weight`, `down_proj.weight` |
+| **Parameters** | `.weight` is this rank's slice; **`param("weight")` is the whole** | `q_proj.weight`, `down_proj.param("weight")` |
 | `.source` inside a sharded module | yes — a `DTensor` whose `.shape` is the whole and whose data is this rank's, see rule 4 | `q_proj.source.F_linear_0` |
 | `.source` in a parent that calls one | no — gather it yourself | `mlp.source.self_gate_proj_0` |
 | Anything between two sharded modules | no — gather it yourself | `mlp.act_fn.output`, `query_states_0` |
@@ -158,11 +158,21 @@ w.full_tensor()         # the real thing; every rank must call it, and it
                         # allocates the whole tensor on each of them
 ```
 
-Weights are what tensor parallelism exists to split, so nnsight does not quietly
-reassemble one — that would allocate the whole tensor on every rank, in the
-situation where memory was tight enough to reach for TP. Most torch operations
-handle a `DTensor` for you; `.to_local()` and `.full_tensor()` are there when you
-need to be explicit.
+Weights are what tensor parallelism exists to split, so the attribute stays this
+rank's slice: reassembling it on every rank would allocate the whole tensor in
+the situation where memory was tight enough to reach for TP. Ask for the whole
+explicitly with `param("weight")` (or any parameter or buffer name), which every
+rank calls together:
+
+```python
+with model.trace(prompt):
+    hidden = model.model.layers[-1].output[0]
+    logits = hidden @ model.lm_head.param("weight").T   # the whole head, on every rank
+```
+
+On one device `param("weight")` is the parameter itself, so a block written this way
+runs unchanged on a single GPU. Most torch operations handle a `DTensor` for
+you; `.to_local()` and `.full_tensor()` are there when you need to be explicit.
 
 **Reducing a sharded weight gives you this rank's answer, and no error says so.**
 `w.mean()`, `w.norm()`, `w.abs().max()` all return a `DTensor` with a `Partial`

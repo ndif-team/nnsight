@@ -88,6 +88,11 @@ def main() -> None:
 
     # A column-parallel output and a row-parallel input are the two sides that
     # actually carry a shard; both must arrive at full width.
+    # A parameter read whole: the DTensor's slices reassembled on every rank.
+    record("weight_whole_colwise", layer.mlp.gate_proj.param("weight"))
+    record("weight_whole_rowwise", layer.mlp.down_proj.param("weight"))
+    record("weight_whole_embed", model.model.embed_tokens.param("weight"))
+
     with model.trace(PROMPT):
         record("gate_proj_out", layer.mlp.gate_proj.output.save())
         record("down_proj_in", layer.mlp.down_proj.input.save())
