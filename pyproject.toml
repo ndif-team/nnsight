@@ -36,7 +36,10 @@ dependencies = [
     # only tensor parallelism needs a floor, and it checks for itself at load
     # (see `nnsight.modeling.tp.fragments.MINIMUM_TRANSFORMERS`) rather than
     # holding every other user to it.
-    "transformers",
+    # <5.19: 5.19 rebuilt tensor/expert parallelism (hybrid fsdp-tp weight
+    # meshes, the EP plan moved to `model.ep_plan`, per-style submeshes) and
+    # nnsight's TP path doesn't speak it yet. Lift the cap with issue #762.
+    "transformers<5.19",
     "huggingface-hub",
     # Remote execution on NDIF.
     "websocket-client",
