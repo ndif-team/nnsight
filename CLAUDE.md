@@ -46,6 +46,7 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 - [docs/usage/backward-and-grad.md](docs/usage/backward-and-grad.md) — `with tensor.backward():`
 - [docs/patterns/gradient-based-attribution.md](docs/patterns/gradient-based-attribution.md)
 - [docs/patterns/attribution-patching.md](docs/patterns/attribution-patching.md)
+- [docs/patterns/atp-star.md](docs/patterns/atp-star.md) — Q/K correction, GradDrop, and exact-verification building blocks
 
 ### "My model is too big for one GPU"
 - [docs/models/tensor-parallel.md](docs/models/tensor-parallel.md) — `transformers` tensor parallelism: `distributed_config=DistributedConfig(tp_size=N)` under `torchrun`, sharded activations gathered so the trace reads as it would on one GPU
