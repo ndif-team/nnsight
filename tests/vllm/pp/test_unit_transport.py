@@ -154,17 +154,36 @@ def test_a_relayed_value_is_sent_on_as_it_arrived():
     assert torch.equal(sent[5], torch.ones(3))
 
 
-def test_the_sync_scheduler_is_installed_only_where_async_scheduling_is_off():
+def test_the_scheduler_is_chosen_from_the_finished_config(monkeypatch):
+    """vLLM settles async scheduling after the engine's arguments are read
+    (it may pick Ray by itself), so the choice is made when the engine core
+    builds the scheduler, from the config it hands over."""
+    from types import SimpleNamespace
+
+    from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+
+    from nnsight.modeling.vllm.pp_scheduler import NNsightScheduler, pipeline_scheduler
+
+    built = []
+    for async_scheduling, expected in ((True, AsyncScheduler), (False, NNsightScheduler)):
+        # vLLM's construction needs a real engine; record the call instead.
+        monkeypatch.setattr(expected, "__init__", lambda self, *args, **kwargs: built.append((type(self), kwargs)))
+        config = SimpleNamespace(scheduler_config=SimpleNamespace(async_scheduling=async_scheduling))
+        scheduler = pipeline_scheduler(vllm_config=config, block_size=16)
+        assert type(scheduler) is expected
+        assert built[-1] == (expected, {"vllm_config": config, "block_size": 16})
+
+
+def test_every_pipeline_engine_gets_the_choosing_scheduler():
     from nnsight.modeling.vllm.vllm import VLLM
 
     def chosen(**kwargs):
-        return VLLM._pipeline_kwargs(VLLM, {"pipeline_parallel_size": 2, **kwargs}).get("scheduler_cls")
+        return VLLM._pipeline_kwargs(VLLM, kwargs).get("scheduler_cls")
 
+    for kwargs in ({}, {"distributed_executor_backend": "ray"}, {"async_scheduling": False}):
+        assert chosen(pipeline_parallel_size=2, **kwargs) == VLLM._SCHEDULER_CLS
     assert chosen() is None
-    assert chosen(distributed_executor_backend="mp") is None
-    assert chosen(distributed_executor_backend="ray") == VLLM._SCHEDULER_CLS
-    assert chosen(async_scheduling=False) == VLLM._SCHEDULER_CLS
-    assert VLLM._pipeline_kwargs(VLLM, {"async_scheduling": False}).get("scheduler_cls") is None
+    assert chosen(pipeline_parallel_size=2, scheduler_cls="my.Scheduler") == "my.Scheduler"
 
 
 def test_the_scheduler_passes_on_what_the_engine_core_gives_schedule(monkeypatch):

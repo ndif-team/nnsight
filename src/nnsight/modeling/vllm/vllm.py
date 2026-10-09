@@ -427,30 +427,15 @@ class VLLM(Remotable):
                 taps.append(f"model.{name}.source.{op}.{side}" if sourced else f"model.{name}.{side}")
         return tuple(taps)
 
-    _SCHEDULER_CLS = "nnsight.modeling.vllm.pp_scheduler.NNsightScheduler"
+    _SCHEDULER_CLS = "nnsight.modeling.vllm.pp_scheduler.pipeline_scheduler"
 
     def _pipeline_kwargs(self, kwargs: dict) -> dict:
-        """Under pipeline parallelism without async scheduling, the scheduler
-        that carries the later stages' values back to the earlier ones, the
-        way the engine returns its sampled tokens there (see `pp_scheduler`).
-
-        Only where async scheduling will be off: setting ``scheduler_cls``
-        replaces the scheduler vLLM picks, its AsyncScheduler included, and
-        with async scheduling the values travel by broadcast instead. vLLM
-        decides async scheduling after these arguments are read, so this asks
-        what it can see: an explicit ``async_scheduling=False``, or an executor
-        that does not support it (Ray). If vLLM turns async scheduling off for
-        another reason, the runner refuses to load (see its ``load_model``).
-        """
-        if kwargs.get("pipeline_parallel_size", 1) <= 1:
-            return kwargs
-        backend = kwargs.get("distributed_executor_backend")
-        sync = (
-            kwargs.get("async_scheduling") is False
-            or backend == "ray"
-            or (isinstance(backend, type) and not backend.supports_async_scheduling())
-        )
-        if sync:
+        """Under pipeline parallelism, the scheduler that carries the later
+        stages' values back to the earlier ones where the engine returns its
+        sampled tokens through the scheduler. Whether it does is settled by
+        vLLM after these arguments are read, so the choice is made when the
+        scheduler is built (see `pp_scheduler.pipeline_scheduler`)."""
+        if kwargs.get("pipeline_parallel_size", 1) > 1:
             kwargs.setdefault("scheduler_cls", self._SCHEDULER_CLS)
         return kwargs
 

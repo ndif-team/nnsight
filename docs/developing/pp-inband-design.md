@@ -66,10 +66,17 @@ stages before the last never run `sample_tokens`, so the last stage puts the
 same entries, on the host, on its `ModelRunnerOutput`; `NNsightScheduler`
 (`pp_scheduler.py`) keeps them by request and attaches them to the request's
 next `SchedulerOutput`, which every stage reads before its forward. A request
-that finishes has no next step, and the scheduler drops what it left. It is
-installed through vLLM's `scheduler_cls` only where async scheduling will be
-off (the Ray executor, or `async_scheduling=False`), because that setting
-replaces whatever scheduler vLLM would pick, its `AsyncScheduler` included.
+that finishes has no next step, and the scheduler drops what it left.
+Whether async scheduling is on is settled inside vLLM's config after the
+engine's arguments are read (it picks the Ray executor by itself inside a
+Ray placement group, and turns async scheduling off there), so nnsight does
+not install a scheduler class directly: `scheduler_cls` replaces whatever
+vLLM would pick, its `AsyncScheduler` included. Every pipeline engine gets
+`pp_scheduler.pipeline_scheduler`, which the engine core calls once with the
+finished config, and which builds vLLM's own `AsyncScheduler` when async
+scheduling is on and `NNsightScheduler` when it is off.
+`tests/vllm/pp/test_engine_scheduler.py` builds each case and checks the
+scheduler the engine core holds.
 
 **Filing.** Each stage files a forward payload's entries from stages before
 it and a backward payload's entries from stages after it, so a value is filed

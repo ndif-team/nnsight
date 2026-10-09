@@ -576,15 +576,18 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if not self.use_async_scheduling:
                 # The later stages' values go back through the scheduler on
                 # this engine (see pp_scheduler); the scheduler has to be ours.
-                from ..pp_scheduler import NNsightScheduler
+                from ..pp_scheduler import NNsightScheduler, pipeline_scheduler
 
                 configured = self.vllm_config.scheduler_config.get_scheduler_cls()
-                if not issubclass(configured, NNsightScheduler):
+                ours = configured is pipeline_scheduler or (
+                    isinstance(configured, type) and issubclass(configured, NNsightScheduler)
+                )
+                if not ours:
                     raise RuntimeError(
                         f"pipeline parallelism without async scheduling needs scheduler_cls="
-                        f"{NNsightScheduler.__module__}.{NNsightScheduler.__name__}, which carries "
+                        f"{pipeline_scheduler.__module__}.{pipeline_scheduler.__name__}, which carries "
                         f"the later stages' values back to the earlier ones; the engine was built "
-                        f"with {configured.__module__}.{configured.__name__}"
+                        f"with {configured.__module__}.{configured.__qualname__}"
                     )
             interleaver, meta_model = self._pipeline_interleaver(taps)
         else:

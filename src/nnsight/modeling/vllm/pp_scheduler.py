@@ -10,15 +10,35 @@ that broadcast, so the values take the tokens' route: the last stage puts
 them on its output, this scheduler keeps them by request, and the request's
 next scheduler output carries them to every stage. A request that finishes
 has no next output, and what it left is dropped with it.
+
+Whether async scheduling is on is settled inside vLLM's own config, after the
+engine's arguments are read: it turns it off for the Ray executor, which it
+may pick by itself (inside a Ray placement group), and for other reasons.
+So the choice is made where that is settled and the scheduler is built:
+`pipeline_scheduler`, installed as ``scheduler_cls`` on every pipeline engine,
+reads the finished config and builds vLLM's own AsyncScheduler or this one.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 
 BACKWARD = "nnsight_backward"
+
+
+def pipeline_scheduler(*args: Any, vllm_config: Any, **kwargs: Any) -> Scheduler:
+    """The scheduler of a pipeline engine, chosen from its finished config.
+
+    The engine core calls this where it would call a scheduler class, once,
+    with the config vLLM has resolved. With async scheduling the later
+    stages' values go back by broadcast, and vLLM's AsyncScheduler is built
+    unchanged; without it they go back through the scheduler.
+    """
+    cls = AsyncScheduler if vllm_config.scheduler_config.async_scheduling else NNsightScheduler
+    return cls(*args, vllm_config=vllm_config, **kwargs)
 
 
 class NNsightScheduler(Scheduler):
