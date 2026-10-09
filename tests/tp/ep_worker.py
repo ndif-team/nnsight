@@ -33,29 +33,29 @@ INPUT_IDS = [[1, 2, 3, 4, 5, 6]]
 LAYER = 0
 
 
-def build(ep: int):
+def build(world: int, repo: str, mode: str):
     from nnsight.modeling.tp import TPFragments
     from nnsight.modeling.transformers import TransformersModel
 
     kwargs = {}
-    if ep > 1:
+    if world > 1:
         from transformers.distributed import DistributedConfig
 
         kwargs["distributed_config"] = DistributedConfig(
-            tp_size=ep, enable_expert_parallel=True
+            tp_size=world, enable_expert_parallel=(mode == "ep")
         )
     else:
         kwargs["device_map"] = {"": "cpu"}
 
     model = TransformersModel(
-        REPO, task="text-generation", dispatch=True, dtype=torch.float32, **kwargs
+        repo, task="text-generation", dispatch=True, dtype=torch.float32, **kwargs
     )
 
     fragments = model.interleaver.fragments
     assert isinstance(fragments, TPFragments), type(fragments)
-    if ep > 1:
-        assert fragments.enabled, "expert-parallel model did not enable the TP path"
-        assert fragments.tp_rules, "expert-parallel model recorded no rules"
+    if world > 1:
+        assert fragments.enabled, "sharded MoE model did not enable the TP path"
+        assert fragments.tp_rules, "sharded MoE model recorded no rules"
     else:
         assert not fragments.enabled, "unsharded model enabled the TP path"
 
@@ -64,12 +64,19 @@ def build(ep: int):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ep", type=int, default=1)
+    parser.add_argument("--ep", type=int, default=1, help="world size")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--repo", default=REPO)
+    # "ep" turns expert parallelism on; "tp" shards a MoE model with plain
+    # tensor parallelism instead, where the experts must resolve to the style
+    # transformers *applied* (moe_tp_experts for Qwen3-MoE), not the EP plan's
+    # entry — the regression the tp_runs case in test_cpu_expert_parallel.py
+    # exists for.
+    parser.add_argument("--mode", choices=("ep", "tp"), default="ep")
     args = parser.parse_args()
 
     rank = int(os.environ.get("RANK", 0))
-    model = build(args.ep)
+    model = build(args.ep, args.repo, args.mode)
     layer = model.model.layers[LAYER]
     results: dict[str, torch.Tensor] = {}
 
@@ -78,10 +85,13 @@ def main() -> None:
 
     ids = torch.tensor(INPUT_IDS)
     with model.trace({"input_ids": ids}):
-        # The router is replicated: every rank computes the same thing, and the
-        # masking that makes it rank-specific happens in its own post-transform,
-        # after the handoff. So this must match the single-process run exactly.
-        record("router_logits", layer.mlp.router.output[0].save())
+        if args.mode == "ep":
+            # The router is replicated: every rank computes the same thing, and
+            # the masking that makes it rank-specific happens in its own
+            # post-transform, after the handoff. So this must match the
+            # single-process run exactly. (The tp-mode model names this module
+            # differently, so it is recorded in ep mode only.)
+            record("router_logits", layer.mlp.router.output[0].save())
         # The experts module holds only this rank's experts and produces its term
         # of the sum; a worker must be shown the sum.
         record("experts_out", layer.mlp.experts.output.save())

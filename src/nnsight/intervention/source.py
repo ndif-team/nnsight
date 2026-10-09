@@ -647,7 +647,17 @@ def _framework_forward(module: Any) -> bool:
     if "_hf_hook" in module.__dict__:
         return True
     forward = module.__dict__.get("forward")
-    return ".install_forward.<locals>." in getattr(forward, "__qualname__", "")
+    qualname = getattr(forward, "__qualname__", "")
+    if qualname.startswith("EpDispatchExpertsParallel."):
+        # The one TP wrapper that is kept as the body instead of rebuilt
+        # around the controller: it dispatches each token to its expert's
+        # owner rank and combines the answers before returning, so the
+        # handoff must sit outside it, where values are whole — inside, each
+        # rank holds only the tokens routed to its own experts, which no
+        # gather rule could reassemble. See the note under SIDES in
+        # nnsight.modeling.tp.fragments.
+        return False
+    return ".install_forward.<locals>." in qualname
 
 
 def module_body(module: Any) -> Callable:

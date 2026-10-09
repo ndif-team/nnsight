@@ -17,6 +17,11 @@ All three used to be refused outright. Two of them turn out to need no gather at
 all, and the third was already described — but nothing had ever run the path, so
 "refused" and "correct" were indistinguishable. This is what tells them apart.
 
+The suite also covers the other way to shard a MoE model — plain tensor
+parallelism, no EP — because the two configurations resolve the *same* experts
+module to different styles, and getting that resolution wrong is invisible to
+both the dense TP suite and the EP run (see `MOE_TP_REPO` below).
+
 Runs on CPU over gloo, like its tensor-parallel sibling, so CI covers it.
 """
 
@@ -51,7 +56,7 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _run(ep: int, out: str) -> None:
+def _run(world: int, out: str, mode: str = "ep", repo: str | None = None) -> None:
     env = {
         **os.environ,
         "PYTHONPATH": os.pathsep.join(
@@ -61,18 +66,20 @@ def _run(ep: int, out: str) -> None:
         "OMP_NUM_THREADS": "1",
     }
     command = [sys.executable]
-    if ep > 1:
+    if world > 1:
         command += [
             "-m", "torch.distributed.run",
-            f"--nproc_per_node={ep}",
+            f"--nproc_per_node={world}",
             f"--master_port={_free_port()}",
         ]
-    command += [WORKER, "--ep", str(ep), "--out", out]
+    command += [WORKER, "--ep", str(world), "--out", out, "--mode", mode]
+    if repo is not None:
+        command += ["--repo", repo]
 
     completed = subprocess.run(command, env=env, capture_output=True, text=True)
     if completed.returncode != 0:
         pytest.fail(
-            f"ep={ep} worker failed ({completed.returncode})\n"
+            f"{mode}={world} worker failed ({completed.returncode})\n"
             f"--- stdout ---\n{completed.stdout[-4000:]}\n"
             f"--- stderr ---\n{completed.stderr[-4000:]}"
         )
@@ -122,6 +129,74 @@ def test_the_ranks_agree(runs) -> None:
 )
 def test_rank0_matches_the_single_process_run(runs, name) -> None:
     reference, sharded = runs
+    drift = _rel(sharded[0][name], reference[name])
+    assert drift < DRIFT, (
+        f"{name}: relative error {drift:.2e} against the 1-process run "
+        f"(shapes {tuple(sharded[0][name].shape)} vs {tuple(reference[name].shape)}). "
+        "Order 1 means the value was not made whole; this is not drift."
+    )
+
+
+# A MoE model sharded with plain *tensor* parallelism — no expert parallelism.
+# This is its own case because the raw plans collide: Qwen3-MoE names
+# ``layers.*.mlp.experts`` as ``moe_tp_experts`` in ``tp_plan`` and as
+# ``ep_dispatch_experts`` in ``ep_plan``, and transformers applies the EP entry
+# only when ``ep_size > 1``. nnsight has to resolve styles the way they were
+# *applied*: merging ``ep_plan`` in unconditionally made this run resolve the
+# experts to a style transformers never installed, strip the real wrapper, and
+# die on ``aten._grouped_mm got mixed torch.Tensor and DTensor``.
+#
+# The model is generated here rather than pulled from the hub:
+# ``hf-internal-testing/tiny-random-Qwen3MoeForCausalLM`` predates 5.19's
+# ``mlp.router`` -> ``mlp.gate`` rename, so its router is *randomly
+# re-initialized on every load* and no two processes compute the same thing —
+# plain transformers already drifts 7e-2 from itself on it. A checkpoint saved
+# by the running transformers has no such skew, and needs no network.
+
+
+@pytest.fixture(scope="module")
+def moe_tp_repo(tmp_path_factory) -> str:
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    torch.manual_seed(0)
+    config = Qwen3MoeConfig(
+        vocab_size=128, hidden_size=64, intermediate_size=128,
+        moe_intermediate_size=32, num_hidden_layers=2, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=16, num_experts=4,
+        num_experts_per_tok=2, decoder_sparse_step=1, mlp_only_layers=[],
+    )
+    path = tmp_path_factory.mktemp("qwen3moe_tiny")
+    Qwen3MoeForCausalLM(config).float().save_pretrained(path)
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def tp_runs(tmp_path_factory, moe_tp_repo) -> tuple[dict, list[dict]]:
+    reference_dir = tmp_path_factory.mktemp("moe_tp1")
+    sharded_dir = tmp_path_factory.mktemp(f"moe_tp{EP_SIZE}")
+
+    _run(1, str(reference_dir), mode="tp", repo=moe_tp_repo)
+    _run(EP_SIZE, str(sharded_dir), mode="tp", repo=moe_tp_repo)
+
+    reference = torch.load(os.path.join(reference_dir, "rank0.pt"), weights_only=False)
+    sharded = [
+        torch.load(os.path.join(sharded_dir, f"rank{rank}.pt"), weights_only=False)
+        for rank in range(EP_SIZE)
+    ]
+    return reference, sharded
+
+
+def test_tp_only_moe_ranks_agree(tp_runs) -> None:
+    _, sharded = tp_runs
+    first, *rest = sharded
+    for rank, result in enumerate(rest, start=1):
+        for name, value in first.items():
+            assert torch.equal(value, result[name]), f"rank {rank} disagrees on {name}"
+
+
+@pytest.mark.parametrize("name", ["experts_out", "mlp_out", "logits", "edited_logits"])
+def test_tp_only_moe_matches_the_single_process_run(tp_runs, name) -> None:
+    reference, sharded = tp_runs
     drift = _rel(sharded[0][name], reference[name])
     assert drift < DRIFT, (
         f"{name}: relative error {drift:.2e} against the 1-process run "
