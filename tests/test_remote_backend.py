@@ -229,3 +229,57 @@ class TestBackendMeta:
         backend = _backend([Status.RUNNING, Status.COMPLETED], result={"out": 1})
         asyncio.run(backend.resolve())
         assert backend.meta is None
+
+    def test_new_blocking_job_does_not_expose_previous_jobs_meta(self, monkeypatch):
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test")
+        backend.meta = META
+
+        def request(_request, _tracer):
+            assert backend.meta is None
+            return None
+
+        monkeypatch.setattr(backend, "request", request)
+        backend(object())
+
+    def test_new_non_blocking_job_does_not_expose_previous_jobs_meta(
+        self, monkeypatch
+    ):
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test", blocking=False)
+        backend.meta = META
+
+        def serialize(_tracer):
+            assert backend.meta is None
+            return b"request"
+
+        monkeypatch.setattr(backend, "_serialize", serialize)
+        monkeypatch.setattr(
+            backend,
+            "_post",
+            lambda _request, _blob: ResponseModel(
+                id="new-job", status=Status.RECEIVED
+            ),
+        )
+        backend.submit(object())
+
+    def test_new_async_job_does_not_expose_previous_jobs_meta(self, monkeypatch):
+        backend = AsyncRemoteBackend(MODEL_KEY, host="http://ndif.test")
+        backend.meta = META
+
+        class Connection:
+            def recv(self):
+                return '{"session_id": "session"}'
+
+        def serialize(_tracer):
+            assert backend.meta is None
+            return b"request"
+
+        monkeypatch.setattr(backend, "_serialize", serialize)
+        monkeypatch.setattr(
+            "websocket.create_connection", lambda *_a, **_kw: Connection()
+        )
+        monkeypatch.setattr(backend, "send", lambda _request, _blob: None)
+        assert backend(object()) is backend
