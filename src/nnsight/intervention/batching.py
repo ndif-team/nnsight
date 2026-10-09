@@ -2,7 +2,7 @@
 
 ``with model.trace() as tracer:`` may contain several ``with tracer.invoke(x):``
 blocks. Their inputs are combined into a single batched forward, and each block's
-interventions see only *its* rows of every activation.
+interventions see its own rows of an activation the batcher can read the rows of.
 
 A [`Batcher`][nnsight.intervention.batching.Batcher] (one per trace) collects each invoke's input and assigns it a
 ``batch_group`` — a ``[start, size]`` row range in the combined batch. At run time
@@ -10,6 +10,16 @@ A [`Batcher`][nnsight.intervention.batching.Batcher] (one per trace) collects ea
 it reads, and [`Batcher.widen`][nnsight.intervention.batching.Batcher.widen] splices an edit back into the full tensor. The row math
 is dim-0 only; the model's `_batch` equalizes everything else (e.g. sequence
 length) when it builds the combined input.
+
+Which values that math applies to is decided by the leading dim, so it is a rule
+about shapes rather than about provenance. A value is scoped when its leading dim
+is the combined batch size, or a whole multiple of it — the multiple covers a model
+that folds tokens (or tokens and heads) into the batch axis before a module, as
+every transformers MoE block does ahead of its router. A leading dim that is
+neither is a layout this batcher cannot read: the value is served whole to every
+invoke, and a write to it — an in-place edit or a replacement — is reported (see
+[`Batcher.narrow`][nnsight.intervention.batching.Batcher.narrow]), because it acts
+on the whole batch rather than on the invoke that made it.
 
 Two consequences a block's author meets. Equalizing the sequence length pads every
 invoke out to the batch's longest input, so a position index counted from the left
@@ -23,6 +33,7 @@ row scoping nor that row check applies to it.
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -94,14 +105,24 @@ class Batcher:
         # assemble() lays them over the combined call.
         self.extra_kwargs: dict = {}
         self.total = 0
+        # Tensors served whole because no row rule matched, by id: the tensor, torch's
+        # version counter at the moment it was served, the location it came from and
+        # its leading dim. `_report_unscoped` turns an edit to one into a warning, and
+        # empties this — so what is held is one visit's unscoped values, no more.
+        self.unscoped: dict[int, tuple] = {}
 
     def narrow(self, value: Any, group: BatchGroup) -> Any:
         """Slice every batched tensor in ``value`` down to ``group``'s rows.
 
-        A tensor is batched only when its leading dim equals [`total`][nnsight.intervention.batching.Batcher.total] (the
-        combined batch size), so non-batched tensors pass through untouched. Returns
-        the whole value when not actually batching or for a groupless (empty) invoke.
+        A tensor is scoped when its leading dim is [`total`][nnsight.intervention.batching.Batcher.total] (the
+        combined batch size) or a whole multiple of it; anything else passes through
+        whole and is remembered, so a write to it warns rather than acting on the
+        whole batch silently. Returns the whole value when not actually batching or
+        for a groupless (empty) invoke.
         """
+        # An in-place edit doesn't come back through the batcher, so it can only be
+        # noticed after the fact — here, next time anything is served.
+        self._report_unscoped()
         if not self.batching or group is None:
             return value
         return apply(value, lambda tensor: self._narrow_tensor(tensor, group), torch.Tensor)
@@ -109,13 +130,21 @@ class Batcher:
     def _narrow_tensor(self, tensor: torch.Tensor, group: list) -> torch.Tensor:
         """Slice one batched tensor down to ``group``'s rows.
 
-        Base layout: a tensor whose leading dim is [`total`][nnsight.intervention.batching.Batcher.total] is a dim-0 stack of
-        every invoke's rows, so narrow it to ``[start, start + size)``; anything else
-        isn't batched and passes through. Overridden for non-stacked layouts.
+        Base layout: dim 0 stacks the invokes' rows, either one row per row of batch
+        (leading dim [`total`][nnsight.intervention.batching.Batcher.total]) or ``k``
+        of them — a model that flattens tokens into the batch axis before a module
+        (an MoE router's ``(B*T, D)``) keeps the invokes in the same order, ``k =
+        shape[0] // total`` rows each, so the group scales by ``k``. A leading dim
+        that is neither passes through whole and is remembered for
+        `_report_unscoped`. Overridden for non-stacked layouts.
         """
         start, size = group
-        if tensor.shape[0] == self.total:
-            view = tensor.narrow(0, start, size)
+        rows = tensor.shape[0] if tensor.ndim else 0
+        # A leading dim of a coincidental multiple (four experts, two invokes) is
+        # sliced too; the shape is all there is to go on.
+        k = rows // self.total if self.total and rows % self.total == 0 else 0
+        if k:
+            view = tensor.narrow(0, start * k, size * k)
             # Mark the slice so a `.backward()` gradient hook can tell it apart from a
             # user-made view: it isn't in the loss graph (the model runs on the full
             # batch), so its hook must redirect to the storage-owning base that is
@@ -123,7 +152,44 @@ class Batcher:
             # keeps saved activations cheap to serialize.
             view._nnsight_batch = True
             return view
+        self.unscoped[id(tensor)] = (
+            tensor, tensor._version, self._location(group), rows
+        )
         return tensor
+
+    def _location(self, group: list) -> str:
+        """Name the location whose value is being served to ``group``, for a warning.
+
+        The worker that asked for it is parked on it for the length of the narrow
+        (or widen), so its pending request names it; a value nobody asked for — a
+        `Cache` observation — has no such worker.
+        """
+        for mediator in self.envoy.interleaver.mediators:
+            if mediator.batch_group is group and mediator.pending is not None:
+                return f"`{mediator.pending.provider}`"
+        return "a value"
+
+    def _report_unscoped(self) -> None:
+        """Warn for any value served whole that has been edited in place since.
+
+        A value no row rule matched goes to every invoke as it is, so an in-place
+        edit to it acts on the whole batch — and, unlike a replacement, it never
+        passes through `widen`, so torch's version counter is the only thing that
+        records it happened.
+        """
+        if not self.unscoped:
+            return
+        for tensor, version, location, rows in self.unscoped.values():
+            if tensor._version == version:
+                continue
+            warnings.warn(
+                f"An in-place edit to {location} applies to every invoke: its "
+                f"leading dimension ({rows}) is neither the batch size "
+                f"({self.total}) nor a multiple of it, so nnsight served the whole "
+                "batch rather than this invoke's rows. Trace this input on its own, "
+                "or give the model a `_batcher_class` that knows the layout."
+            )
+        self.unscoped.clear()
 
     def widen(self, full: Any, group: BatchGroup, edited: Any) -> Any:
         """Splice ``edited`` (a block's rows) back into ``full`` (the whole batch).
@@ -133,6 +199,7 @@ class Batcher:
         `_widen_tensor`. Returns ``edited`` unchanged when not batching or for
         a groupless invoke.
         """
+        self._report_unscoped()
         if not self.batching or group is None:
             return edited
 
@@ -160,16 +227,29 @@ class Batcher:
     def _widen_tensor(self, full: torch.Tensor, group: list, edited: torch.Tensor) -> torch.Tensor:
         """Write ``edited`` into ``full``'s ``group`` rows (base dim-0-stack layout).
 
-        A tensor is batched only when its leading dim is [`total`][nnsight.intervention.batching.Batcher.total]; otherwise it
-        passes through. Overridden for non-stacked layouts.
+        The row rule is `_narrow_tensor`'s: the leading dim is
+        [`total`][nnsight.intervention.batching.Batcher.total] or a whole multiple of
+        it. Anything else has no rows this invoke owns, so there is nowhere to splice
+        the replacement — ``full`` stands, and the drop is warned about unless the
+        block handed back what it was given. Overridden for non-stacked layouts.
         """
-        if full.shape[0] != self.total:
-            return full
         start, size = group
+        rows = full.shape[0] if full.ndim else 0
+        k = rows // self.total if self.total and rows % self.total == 0 else 0
+        if not k:
+            if edited is not full:
+                warnings.warn(
+                    f"A replacement for {self._location(group)} was dropped: its "
+                    f"leading dimension ({rows}) is neither the batch size "
+                    f"({self.total}) nor a multiple of it, so nnsight can't tell "
+                    "which rows belong to this invoke. Trace this input on its own, "
+                    "or give the model a `_batcher_class` that knows the layout."
+                )
+            return full
         # cat (not in-place) keeps autograd correct for leaves/views and avoids
         # aliasing when `edited` is a narrowed view of `full`.
-        pre = full.narrow(0, 0, start)
-        post = full.narrow(0, start + size, self.total - start - size)
+        pre = full.narrow(0, 0, start * k)
+        post = full.narrow(0, (start + size) * k, rows - (start + size) * k)
         return torch.cat([pre, edited, post], dim=0)
 
     def gather_skip(self, running: Any, group: BatchGroup, replacement: Any) -> Any:

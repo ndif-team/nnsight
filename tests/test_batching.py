@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import warnings
 
 import pytest
 import torch
@@ -23,11 +24,19 @@ P1 = "the cat sat"
 P2 = "a much longer prompt appears here"
 MSG = "Madison Square Garden is located in the city of"  # greedily -> " New York City"
 ET = "The Eiffel Tower is in the city of"
+MOE = "hf-internal-testing/tiny-random-Qwen2MoeForCausalLM"
 
 
 @pytest.fixture(scope="module")
 def gpt2():
     return TransformersModel("gpt2", task="text-generation", dispatch=True)
+
+
+@pytest.fixture(scope="module")
+def moe():
+    # A mixture-of-experts block flattens (batch, seq, hidden) to (batch*seq, hidden)
+    # before its router, which is the layout row scoping has to follow.
+    return TransformersModel(MOE, task="text-generation", dispatch=True, dtype=torch.float32)
 
 
 class _MLP(nn.Module):
@@ -38,6 +47,32 @@ class _MLP(nn.Module):
 
     def forward(self, x):
         return self.fc2(torch.relu(self.fc1(x)))
+
+
+class _Flattened(nn.Module):
+    """Folds tokens into the batch axis before its submodule, the way a
+    transformers MoE block does ahead of its router: fc1 sees ``(batch*seq, 8)``."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(8, 8)
+
+    def forward(self, x):
+        batch, seq, hidden = x.shape
+        return self.fc1(x.reshape(-1, hidden)).reshape(batch, seq, hidden)
+
+
+class _Unscopable(nn.Module):
+    """Builds a value whose leading dim has nothing to do with the batch, so no row
+    rule can scope it to an invoke."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(8, 8)
+
+    def forward(self, x):
+        odd = torch.ones(3, 8)
+        return self.fc1(x) + odd.sum()
 
 
 class _BatchEnvoy(Envoy):
@@ -264,6 +299,155 @@ class TestWholeTensorWrites:
             envoy.fc1.output = torch.ones(5, 8)
             out = envoy.output.save()
         assert out.shape == (5, 8)
+
+
+class TestFlattenedRows:
+    """A model that folds tokens into the batch axis — every transformers MoE block
+    does it before its router — still gets per-invoke rows: the leading dim is a
+    whole multiple of the batch, so each invoke owns that many rows per row of
+    batch, in the same order."""
+
+    @torch.no_grad()
+    def test_each_invoke_reads_its_own_flattened_rows(self):
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_Flattened())
+        with envoy.trace() as tracer:
+            with tracer.invoke(torch.randn(1, 3, 8)):
+                a = envoy.fc1.output.save()
+            with tracer.invoke(torch.randn(2, 3, 8)):
+                b = envoy.fc1.output.save()
+        # 3 tokens per row of batch: 1x3 rows and 2x3 of the 9 the module sees.
+        assert a.shape == (3, 8) and b.shape == (6, 8)
+
+    @torch.no_grad()
+    def test_an_edit_lands_only_on_its_own_flattened_rows(self):
+        torch.manual_seed(0)
+        model = _Flattened()
+        envoy = _BatchEnvoy(model)
+        xa, xb = torch.randn(1, 3, 8), torch.randn(2, 3, 8)
+        with envoy.trace() as tracer:
+            with tracer.invoke(xa):
+                envoy.fc1.output[:] = 0
+                a = envoy.output.save()
+            with tracer.invoke(xb):
+                b = envoy.output.save()
+        assert bool((a == 0).all())
+        assert torch.allclose(b, model(xb), atol=1e-5)
+
+    @torch.no_grad()
+    def test_a_replacement_lands_only_on_its_own_flattened_rows(self):
+        torch.manual_seed(0)
+        model = _Flattened()
+        envoy = _BatchEnvoy(model)
+        xa, xb = torch.randn(1, 3, 8), torch.randn(2, 3, 8)
+        with envoy.trace() as tracer:
+            with tracer.invoke(xa):
+                envoy.fc1.output = torch.ones(3, 8)
+                a = envoy.output.save()
+            with tracer.invoke(xb):
+                b = envoy.output.save()
+        assert bool((a == 1).all())
+        assert torch.allclose(b, model(xb), atol=1e-5)
+
+
+class TestUnscopedWrites:
+    """A value whose leading dim is neither the batch size nor a multiple of it has
+    no rows this invoke owns, so it is served whole. Reading one is quiet; writing
+    to one acts on the whole batch (or, for a replacement, is dropped), and warns."""
+
+    @torch.no_grad()
+    def test_reading_an_unscopable_value_is_quiet(self):
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_Unscopable())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(1, 8)):
+                    odd = envoy.source.odd_0.output.save()
+                with tracer.invoke(torch.randn(1, 8)):
+                    envoy.output.save()
+        assert odd.shape == (3, 8)  # the whole thing, not this invoke's rows
+        assert not caught
+
+    @torch.no_grad()
+    def test_an_in_place_edit_warns(self):
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_Unscopable())
+        with pytest.warns(UserWarning, match="in-place edit to `model.source.odd_0.output`"):
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(1, 8)):
+                    envoy.source.odd_0.output[:] = 5
+                    envoy.output.save()
+                with tracer.invoke(torch.randn(1, 8)):
+                    envoy.output.save()
+
+    @torch.no_grad()
+    def test_a_replacement_warns_and_is_dropped(self):
+        torch.manual_seed(0)
+        model = _Unscopable()
+        envoy = _BatchEnvoy(model)
+        xa, xb = torch.randn(1, 8), torch.randn(1, 8)
+        with pytest.warns(UserWarning, match="replacement for `model.source.odd_0.output`"):
+            with envoy.trace() as tracer:
+                with tracer.invoke(xa):
+                    envoy.source.odd_0.output = torch.zeros(3, 8)
+                    a = envoy.output.save()
+                with tracer.invoke(xb):
+                    envoy.output.save()
+        # Nowhere to splice it, so the model ran on what it built itself.
+        assert torch.allclose(a, model(xa), atol=1e-5)
+
+
+class TestMoERouterScoping:
+    """The regression the row rules exist for: an MoE router's output is
+    ``(batch*seq, experts)``, so a per-invoke edit to it used to land on the whole
+    batch's rows — one invoke's forced routing moved the others' logits."""
+
+    @torch.no_grad()
+    def test_a_router_edit_reaches_only_its_own_invoke(self, moe):
+        router = moe.model.layers[0].mlp.gate
+        with moe.trace() as tracer:
+            with tracer.invoke(P1):
+                router.output[2][-1, :] = 0  # this invoke's last token -> expert 0
+                forced = moe.output.logits[0, -1].save()
+            with tracer.invoke(P2):
+                moe.output.logits.save()
+            with tracer.invoke(P1):  # control: same prompt, no edit
+                control = moe.output.logits[0, -1].save()
+        with moe.trace(P1):
+            router.output[2][-1, :] = 0
+            solo_forced = moe.output.logits[0, -1].save()
+        with moe.trace(P1):
+            solo = moe.output.logits[0, -1].save()
+
+        assert torch.allclose(forced, solo_forced, atol=1e-5)  # the edit landed here
+        assert not torch.allclose(forced, solo, atol=1e-5)  # and it did something
+        assert torch.allclose(control, solo, atol=1e-5)  # and nowhere else
+
+
+class TestForwardKwargs:
+    """Forward keywords on an invoke are the batch's, not that invoke's: one
+    forward call takes one set of them, so disagreeing invokes warn."""
+
+    @torch.no_grad()
+    def test_disagreeing_invokes_warn(self, gpt2):
+        with pytest.warns(UserWarning, match="disagree on the forward keyword 'output_hidden_states'"):
+            with gpt2.trace() as tracer:
+                with tracer.invoke(P1, output_hidden_states=True):
+                    gpt2.output.logits.save()
+                with tracer.invoke(P2, output_hidden_states=False):
+                    gpt2.output.logits.save()
+
+    @torch.no_grad()
+    def test_agreeing_invokes_are_quiet(self, gpt2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with gpt2.trace() as tracer:
+                with tracer.invoke(P1, output_hidden_states=True):
+                    gpt2.output.logits.save()
+                with tracer.invoke(P2, output_hidden_states=True):
+                    gpt2.output.logits.save()
+        assert not [w for w in caught if "forward keyword" in str(w.message)]
 
 
 class TestCacheAcrossInvokes:

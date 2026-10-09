@@ -549,7 +549,8 @@ value read in one invoke is guaranteed written into another only after the read.
 
 A single `with model.trace() as tracer:` can hold several `with tracer.invoke(x):`
 blocks, whose inputs are combined into one batched forward while each block's
-interventions see only *its* rows of every activation. Each invoke is one worker,
+interventions see its own rows of every activation the batcher can read the rows of
+(the leading dim decides it, see below). Each invoke is one worker,
 scoped to a `batch_group` — a `[start, size]` row range in the combined batch. The
 per-trace `Batcher` (`src/nnsight/intervention/batching.py`) collects the invokes,
 assigns each its group, and does the row math at run time.
@@ -559,8 +560,11 @@ The scoping is two mirror operations, driven from the worker's `handle`:
 - **On a read**, `Batcher.narrow(value, group)` slices every batched tensor down to
   the worker's rows before serving it — so an invoke over one prompt sees
   `output.shape[0] == 1` even though the real forward ran a batch of three. A tensor
-  counts as batched only when its leading dim equals the combined batch size, so
-  activations whose dim 0 is sequence length or hidden size pass through untouched.
+  counts as batched when its leading dim is the combined batch size or a whole
+  multiple of it (the token-flattened `(batch*seq, hidden)` an MoE router sees), so
+  activations whose dim 0 is sequence length or hidden size pass through untouched —
+  as does one batched on an axis the batcher cannot recognize, which is why a write
+  to a tensor it could not scope warns that it applies to the whole batch.
 - **On a write**, `Batcher.widen(full, group, edited)` splices the worker's edited
   rows back into the full batch — via `torch.cat` rather than in-place assignment, to
   keep autograd correct for leaf and view tensors and to avoid aliasing when the
@@ -1375,7 +1379,7 @@ The split of responsibility is clean. The **model** knows how to turn inputs int
 - `_batch_size(*inputs, **kwargs)` — how many batch rows an invoke contributes (`0` means params-only, e.g. an invoke that just sets `max_new_tokens=` and expects the actual data in other invokes). The base default counts any input as one row; batching models report the true row count of a prompt / list / tensor / encoding.
 - `_batch(invokes, fn)` — assemble the collected invokes into the combined `(args, kwargs)` the run will use. This is where sequence lengths are equalized (padding), because the Batcher's row math is dim-0 only.
 
-The `Batcher` (one per trace) does the rest. Each `add` records an invoke and assigns it a `batch_group` — a `[start, size]` row range in the combined batch. At run time `narrow` slices a full batched activation down to a block's rows when it reads, and `widen` splices an edit back into the full tensor. A tensor counts as batched only when its leading dim equals the combined `total`, so non-batched tensors pass through untouched. Crucially, narrowing only kicks in with two or more non-empty invokes — a lone invoke *is* the whole batch and sees every row untouched.
+The `Batcher` (one per trace) does the rest. Each `add` records an invoke and assigns it a `batch_group` — a `[start, size]` row range in the combined batch. At run time `narrow` slices a full batched activation down to a block's rows when it reads, and `widen` splices an edit back into the full tensor. A tensor counts as batched when its leading dim is the combined `total` or a whole multiple of it — the multiple covering a model that folds tokens into the batch axis before a module, as every transformers MoE block does ahead of its router — so a tensor shaped otherwise passes through untouched, and a write to one applies to the whole batch (or, for a replacement, is dropped) with a warning saying so. Crucially, narrowing only kicks in with two or more non-empty invokes — a lone invoke *is* the whole batch and sees every row untouched.
 
 A model picks its batcher through the `_batcher_class` class attribute (default `Batcher`). A model whose batch layout is not a plain dim-0 stack overrides `_narrow_tensor`/`_widen_tensor`. `DiffusionModel` does exactly this with `DiffusionBatcher`: a denoiser sees each prompt repeated `num_images_per_prompt` times and, under classifier-free guidance, the whole thing doubled (unconditional half then conditional half), so its batcher maps each invoke's plain `[start, size]` onto that expanded layout — reading and writing exactly the invoke's rows across both halves — by picking the case from the tensor's leading dim at run time.
 
