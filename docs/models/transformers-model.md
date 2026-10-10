@@ -111,6 +111,7 @@ TransformersModel(
 | `dtype` | Forwarded. A torch dtype, or a quantization name (`"nf4"`, `"int8"`, ...) — see [quantization.md](quantization.md). The transformers 4 spelling `torch_dtype` is still accepted. |
 | `device` | The single device to load onto (`"cpu"`, `"cuda:1"`, `0`). Defaults to the first accelerator. See [Choosing a device](#choosing-a-device). |
 | `device_map`, `trust_remote_code`, `attn_implementation`, ... | Forwarded to the pipeline / `from_pretrained`. `device_map` spreads a model across devices; a single-device map such as `"cpu"` is overridden by the pipeline's `device`. |
+| `config` | A config object, or a path to one, that the model is built from in place of the checkpoint's own, on the meta build and the real load alike. |
 | `rename` | Module-path aliases (see [Module renaming](#module-renaming)). |
 
 `kwargs` are split between the `pipeline(...)` factory's own parameters and `model_kwargs` automatically (`transformers.py`, `_split_pipeline_kwargs`), so anything HF accepts works.
