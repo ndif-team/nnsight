@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Optional
 
+import json
 import warnings
 
 import torch
@@ -95,10 +96,9 @@ _PERSISTENT = {
 _META_MODEL_KWARGS = ("trust_remote_code", "torch_dtype", "dtype", "attn_implementation")
 
 # Architecture-class suffix -> pipeline task, for inferring a task from a pre-loaded
-# module (the pipeline factory can only infer a task from a repo-id string).
+# module that is neither image-text-to-text nor generative (see `_infer_task`).
 _ARCH_TASK = {
     "ForCausalLM": "text-generation",
-    "ForConditionalGeneration": "text-generation",
     "ForMaskedLM": "fill-mask",
     "ForSequenceClassification": "text-classification",
     "ForTokenClassification": "token-classification",
@@ -107,16 +107,116 @@ _ARCH_TASK = {
 }
 
 
+# The task a config defaults to, from transformers' own auto mappings, in this
+# order: a config both register (Gemma 3, Llama 4, Qwen3.5, Mllama) is a
+# multimodal checkpoint whose whole model is the image-text-to-text class; the
+# causal-LM class it also maps to is the text tower alone.
+_CONFIG_TASKS = (
+    ("image-text-to-text", "AutoModelForImageTextToText"),
+    ("text-generation", "AutoModelForCausalLM"),
+)
+
+
+def _registers(config: Any, auto_name: str) -> bool:
+    """Whether ``auto_name`` builds this checkpoint's own architecture.
+
+    Being in the mapping is not enough on its own: BERT's config maps to a
+    ``BertLMHeadModel`` too, but a checkpoint saved as ``BertForMaskedLM`` is not
+    a text generator. So when the config names its architectures, the mapped
+    class has to be one of them. A remote-code config registers through its
+    ``auto_map``.
+    """
+    import transformers
+
+    if auto_name in (getattr(config, "auto_map", None) or {}):
+        return True
+    mapping = getattr(transformers, auto_name)._model_mapping
+    if type(config) not in mapping:
+        return False
+    names = getattr(config, "architectures", None)
+    built = mapping[type(config)]
+    built = built if isinstance(built, (list, tuple)) else (built,)
+    return not names or any(cls.__name__ in names for cls in built)
+
+
+def _task_from_config(config: Any) -> str:
+    """The task a checkpoint is loaded for when ``task=`` is not given.
+
+    Read from the config alone, never the Hub's ``pipeline_tag``: a repo's tag
+    can be missing or disagree with its architecture, and reading it needs the
+    network. Image-text-to-text when that auto class builds the checkpoint,
+    else text-generation when the causal-LM one does, else the first pipeline
+    task whose auto class builds exactly the architecture the config names
+    (``BertForMaskedLM`` -> fill-mask, ``WhisperForConditionalGeneration`` ->
+    automatic-speech-recognition, ...).
+
+    Raises:
+        ValueError: if none of those applies (T5, BART, ...).
+    """
+    for task, auto_name in _CONFIG_TASKS:
+        if _registers(config, auto_name):
+            return task
+    from transformers.models.auto.image_processing_auto import (
+        IMAGE_PROCESSOR_MAPPING_NAMES,
+    )
+    from transformers.pipelines import SUPPORTED_TASKS
+
+    # A bare base model (``AutoModel``'s class) is a feature extractor: of text,
+    # or of images when the config has an image processor. The other tasks
+    # built on ``AutoModel`` (zero-shot audio, ...) are never a default.
+    vision = getattr(config, "model_type", None) in IMAGE_PROCESSOR_MAPPING_NAMES
+    base = "image-feature-extraction" if vision else "feature-extraction"
+    for name in getattr(config, "architectures", None) or []:
+        for task, spec in SUPPORTED_TASKS.items():
+            for auto in spec.get("pt", ()):
+                if auto.__name__ == "AutoModel" and task != base:
+                    continue
+                mapping = auto._model_mapping
+                if type(config) in mapping:
+                    if getattr(mapping[type(config)], "__name__", None) == name:
+                        return task
+    raise ValueError(
+        f"Could not pick a pipeline task for a {type(config).__name__}; pass "
+        "task=... explicitly (e.g. TransformersModel(repo_id, "
+        "task='feature-extraction'))."
+    )
+
+
+def _task_class(config: Any, task: Optional[str]) -> Optional[type]:
+    """The model class ``task``'s auto classes build for ``config``, if known."""
+    from transformers.pipelines import check_task
+
+    try:
+        _, targeted, _ = check_task(task)
+    except Exception:  # noqa: BLE001 - unset or unknown task
+        return None
+    for auto in targeted["pt"]:
+        mapping = auto._model_mapping
+        if type(config) in mapping:
+            return mapping[type(config)]
+    return None
+
+
 def _infer_task(module: torch.nn.Module) -> str:
     """Infer a pipeline task from a pre-loaded module.
 
-    A generative model (``can_generate()`` — covers ``*ForCausalLM``,
-    ``*LMHeadModel``, ...) is text-generation; otherwise match the architecture
-    class-name suffix (``*ForMaskedLM`` -> fill-mask, ...).
+    An image-text-to-text class (the one that auto class maps the module's
+    config to) gets that task, so a pre-loaded multimodal wrapper gets its
+    processor. Otherwise a generative model (``can_generate()`` — covers
+    ``*ForCausalLM``, ``*LMHeadModel``, ...) is text-generation, and anything
+    else is matched by architecture class-name suffix (``*ForMaskedLM`` ->
+    fill-mask, ...).
     """
+    from transformers import AutoModelForImageTextToText
+
+    config = getattr(module, "config", None)
+    mapping = AutoModelForImageTextToText._model_mapping
+    if config is not None and type(config) in mapping:
+        if isinstance(module, mapping[type(config)]):
+            return "image-text-to-text"
     if getattr(module, "can_generate", lambda: False)():
         return "text-generation"
-    names = getattr(module.config, "architectures", None) or [type(module).__name__]
+    names = getattr(config, "architectures", None) or [type(module).__name__]
     for name in names:
         for suffix, task in _ARCH_TASK.items():
             if name.endswith(suffix):
@@ -124,6 +224,20 @@ def _infer_task(module: torch.nn.Module) -> str:
     raise ValueError(
         f"Could not infer a pipeline task for a pre-loaded {type(module).__name__}; "
         "pass task=... explicitly (e.g. TransformersModel(model, task='text-generation'))."
+    )
+
+
+def _config_for_task(repo_id: str, kwargs: dict, revision: Optional[str]) -> Any:
+    """The config a load builds from: a ``config=`` passed in, else the checkpoint's."""
+    from transformers import AutoConfig, PretrainedConfig
+
+    config = kwargs.get("config")
+    if isinstance(config, PretrainedConfig):
+        return config
+    return AutoConfig.from_pretrained(
+        config or repo_id,
+        revision=revision,
+        trust_remote_code=bool(kwargs.get("trust_remote_code", False)),
     )
 
 
@@ -230,7 +344,8 @@ class TransformersModel(HuggingFaceModel):
     """A model backed by a ``transformers.pipeline``, for any of its tasks.
 
     See the module docstring for what the pipeline is leaned on for. ``task`` picks
-    the pipeline (inferred from the checkpoint when unset). There are three ways to
+    the pipeline; when unset it is read from the checkpoint's config (see
+    `_task_from_config`), never the Hub. There are three ways to
     run it: `trace` runs one forward, `generate` generates through the
     model and returns token ids, and [`pipe`][nnsight.modeling.transformers.TransformersModel.pipe] runs the whole pipeline and
     returns what it postprocesses to (decoded text, labels, ...).
@@ -399,7 +514,7 @@ class TransformersModel(HuggingFaceModel):
 
     def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import AutoConfig, pipeline
-        from transformers.pipelines import check_task, get_task
+        from transformers.pipelines import check_task
 
         from .quantization import resolve_load_kwargs
 
@@ -428,11 +543,6 @@ class TransformersModel(HuggingFaceModel):
         }
         arch = {k: v for k, v in kwargs.items() if k in _META_MODEL_KWARGS}
 
-        # pipeline can't from_config, so resolve the task's model classes and
-        # build the meta model ourselves, then wrap it in a meta pipeline.
-        self.task = self.task or get_task(repo_id)
-        _, targeted, _ = check_task(self.task)
-
         # The config takes every kwarg, and keeps the ones it owns, the same split
         # from_pretrained makes (`return_unused_kwargs=True`): the implementation
         # selectors (`attn_implementation`, `experts_implementation`, and whatever
@@ -448,6 +558,11 @@ class TransformersModel(HuggingFaceModel):
             return_unused_kwargs=True,
             **{k: v for k, v in kwargs.items() if k != "quantization_config"},
         )
+
+        # pipeline can't from_config, so resolve the task's model classes and
+        # build the meta model ourselves, then wrap it in a meta pipeline.
+        self.task = self.task or _task_from_config(config)
+        _, targeted, _ = check_task(self.task)
 
         error = None
         for auto in targeted["pt"]:
@@ -489,6 +604,12 @@ class TransformersModel(HuggingFaceModel):
         # does not reach the base's `_load`, so the check has to be repeated
         # here -- the tensor-parallel server loads through *this* class.
         self._refuse_impossible_tp(repo_id, kwargs)
+
+        # Left to itself the pipeline would ask the Hub for the repo's tag.
+        if self.task is None:
+            self.task = _task_from_config(
+                _config_for_task(repo_id, kwargs, self.revision)
+            )
 
         # Also before the split: `dtype` is a pipeline-factory argument, so a
         # quantization name left in it would be handed to `pipeline()` rather
@@ -657,6 +778,41 @@ class TransformersModel(HuggingFaceModel):
             if value is not None:
                 objects[pid] = value
         return objects
+
+    def _remoteable_model_key(self) -> str:
+        """The repo id and revision, plus the task when it changes the model class.
+
+        The server builds its model from this key, with no ``task=`` of its own
+        unless the key carries one, so it picks the config's default
+        (`_task_from_config`). A task that builds a different class from that
+        default (``task="text-generation"`` on Llama 4) goes into the key, so
+        the server builds that class. Any other task leaves the key as it was,
+        so it still names the deployment already serving that model.
+        """
+        key = super()._remoteable_model_key()
+        if not hasattr(self, "_keyed_task"):
+            self._keyed_task = self._task_for_key()
+        if self._keyed_task is None:
+            return key
+        return json.dumps({**json.loads(key), "task": self._keyed_task})
+
+    def _task_for_key(self) -> Optional[str]:
+        # The checkpoint's config, not the built module's: a text tower built
+        # from a multimodal checkpoint carries only the text config.
+        try:
+            config = _config_for_task(self.repo_id, self.kwargs, self.revision)
+        except Exception:  # noqa: BLE001 - no readable config: key as before
+            return None
+        try:
+            default = _task_from_config(config)
+        except ValueError:
+            return self.task
+        if self.task == default:
+            return None
+        built = _task_class(config, self.task)
+        if built is not None and built is _task_class(config, default):
+            return None
+        return self.task
 
     def _remoteable_get_env(self) -> dict:
         """The per-request environment this model wants applied server-side.

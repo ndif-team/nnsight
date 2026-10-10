@@ -10,7 +10,7 @@ sources: [src/nnsight/modeling/transformers.py, src/nnsight/modeling/processing.
 
 ## What this is for
 
-`nnsight.TransformersModel` is the **primary** wrapper for any HuggingFace `transformers` model. It is backed by a `transformers.pipeline`, so it works for any task the pipeline factory knows — text generation, fill-mask, text/image classification, token classification, ASR, image-text-to-text (VLM) — and leans on the pipeline to tokenize, featurize, template chat, and pad batches. You pick the task (or let it be inferred from the checkpoint) and get the full NNsight tracing API. Two tasks are the exceptions under `trace`: `mask-generation`, whose preprocessing runs the model itself, and `keypoint-matching`, whose unit input is a pair of images that the list convention would split. Each is refused with a message naming its escape hatches — `model.pipe(...)` for the whole task, or a forward on an encoding you build with the model's own processor; see [Chunked tasks](#chunked-tasks).
+`nnsight.TransformersModel` is the **primary** wrapper for any HuggingFace `transformers` model. It is backed by a `transformers.pipeline`, so it works for any task the pipeline factory knows — text generation, fill-mask, text/image classification, token classification, ASR, image-text-to-text (VLM) — and leans on the pipeline to tokenize, featurize, template chat, and pad batches. You pick the task (or let it be read from the checkpoint's config) and get the full NNsight tracing API. Two tasks are the exceptions under `trace`: `mask-generation`, whose preprocessing runs the model itself, and `keypoint-matching`, whose unit input is a pair of images that the list convention would split. Each is refused with a message naming its escape hatches — `model.pipe(...)` for the whole task, or a forward on an encoding you build with the model's own processor; see [Chunked tasks](#chunked-tasks).
 
 Use it for anything you'd load from the HuggingFace Hub with an `AutoModel*` / `pipeline`. `LanguageModel` and `VisionLanguageModel` are now thin deprecated aliases over this class (see [language-model.md](language-model.md) / [vision-language-model.md](vision-language-model.md)).
 
@@ -19,7 +19,7 @@ Use it for anything you'd load from the HuggingFace Hub with an `AutoModel*` / `
 ```python
 from nnsight import TransformersModel
 
-# task is inferred from the checkpoint when omitted
+# task is read from the checkpoint's config when omitted
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 # or pin it explicitly
@@ -53,11 +53,13 @@ holds for `dispatch=True` and for a lazy model dispatched on first use. Check wi
 
 `DiffusionModel` loads through diffusers instead and works the other way round: there `device_map="cuda"` places the pipeline and `device=` is ignored (see [diffusion-model.md](diffusion-model.md)).
 
-Inferring the task asks the Hub for the checkpoint's metadata, and a fully cached
-checkpoint does not change that. Under `HF_HUB_OFFLINE=1` the first form raises
-`RuntimeError: You cannot infer task automatically within 'pipeline' when using
-offline mode`, so pass `task=` on an air-gapped machine or a cluster node with no
-outbound network.
+With no `task=`, the task comes from the checkpoint's config, never the Hub, so it
+works offline and from a local directory: `image-text-to-text` when
+`AutoModelForImageTextToText` builds the checkpoint's architecture (Gemma 3, Llama 4,
+Qwen3.5, Llava), else `text-generation` when `AutoModelForCausalLM` does, else the
+task the architecture's class name implies (`*ForMaskedLM` → `fill-mask`, ...); any
+other config raises and asks for `task=`. Pass `task="text-generation"` to get the
+text-only class of a config that registers both.
 
 transformers 5 has no `summarization`, `translation`, `text2text-generation`,
 `question-answering` or `image-to-text` pipeline, so a seq2seq checkpoint (T5, BART)
@@ -87,7 +89,7 @@ through those records reads as a no-op — measure through `generate` /
 TransformersModel(
     repo_id,                    # HF repo id string, or a pre-loaded torch.nn.Module
     *,
-    task=None,                  # pipeline task; inferred from the checkpoint if None
+    task=None,                  # pipeline task; read from the config if None
     tokenizer=None,             # supply one instead of letting the pipeline load it
     processor=None,             # multimodal processor (VLMs)
     image_processor=None,       # vision tasks
@@ -104,7 +106,7 @@ TransformersModel(
 | Parameter | Description |
 |-----------|-------------|
 | `repo_id` | A HuggingFace repo id string, or an already-instantiated `torch.nn.Module`. |
-| `task` | The pipeline task (`"text-generation"`, `"fill-mask"`, `"text-classification"`, `"image-classification"`, `"image-text-to-text"`, ...). If `None`, inferred from the checkpoint — which asks the Hub, so pass it explicitly when you are offline (see [Loading](#loading)). |
+| `task` | The pipeline task (`"text-generation"`, `"fill-mask"`, `"text-classification"`, `"image-classification"`, `"image-text-to-text"`, ...). If `None`, read from the checkpoint's config (see [Loading](#loading)). A pre-loaded module gets `image-text-to-text` when it is that task's class, else `text-generation` when it can generate. |
 | `tokenizer` / `processor` / `image_processor` / `feature_extractor` | Pass one to adopt it instead of letting the pipeline load it. Which of them a task uses varies; the unused ones stay `None` (`transformers.py`, `_preprocessor_sources`). |
 | `peft` | Repo id of a PEFT adapter grafted onto the base model at load. `model.load_adapter(repo_id)` does the same after construction, swaps to another adapter, or removes the current one with `None`. The adapter is attached in place, so every path of the base model still names the same module (`model.transformer.h[0].attn.c_attn` is now the adapter's layer, holding the original as `.base_layer`), and a trace written for the base model runs unchanged with an adapter. Prompt-learning adapters (prefix/prompt tuning), which wrap the forward instead, are refused. See `tests/test_language.py` for verified PEFT usage. |
 | `dispatch` | `True` loads real weights during `__init__`; `False` (default) builds the architecture on the `meta` device and loads weights lazily on the first `trace`/`generate`/`pipe`. |
