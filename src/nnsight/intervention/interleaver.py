@@ -425,6 +425,10 @@ class Mediator:
         # ([`event`][nnsight.intervention.interleaver.Mediator.event]) or move it (`tracer.iter`). A weakref so the worker
         # doesn't hold the mediator (which holds the worker) alive in a cycle.
         self.worker.mediator = weakref.ref(self)
+        if self.node is not None:
+            from .source import prebuild  # lazy: source imports this module
+
+            prebuild(self.node, self.lcls)
         self.pending = self.switch()
 
     def switch(self, *args: Any) -> Any:

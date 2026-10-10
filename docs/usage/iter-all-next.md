@@ -189,11 +189,9 @@ with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
   intervention lands one step late (see
   [../gotchas/iteration.md](../gotchas/iteration.md)).
 - **A wrong-order read can return the next step's value without raising.** Past
-  step 0 that holds for any location. For a `.source` op first touched inside the
-  loop it holds at step 0 too: reading `attn.output` and then an op inside `attn`
-  gives the op's steps 1, 2, … and one entry fewer than the loop count, with only
-  the closing "never reached" warning. Read in forward order, touch `.source`
-  before the trace, and assert parallel lists have equal lengths.
+  step 0 it binds to the next step, for any location, with only the closing "never
+  reached" warning. Read in forward order and assert parallel lists have equal
+  lengths.
 - **Regular-module access after the loop is out of order.** Those forward passes are
   already done, so requesting a module's `.output`/`.input` after the loop raises
   `OutOfOrderError`.

@@ -73,7 +73,7 @@ Iterating a `Source` yields its `SourceEnvoy`s in execution order: `[op.name for
 
 ## How rewriting works
 
-`Source(envoy)` calls `install_source(envoy)`, which:
+`Source(envoy)` calls `install_source(envoy)`. A trace calls it first: before a block's worker starts, `prebuild` walks the block's AST and installs source on every envoy whose `.source` (or an eproperty keyed into `source`) the block names, so a module is instrumented before its forward starts. A call already running keeps the plain forward, so a first access the walk could not see raises `OutOfOrderError` when the module's body is on the stack. `install_source`:
 
 1. `compiled(forward)` (cached per code object) parses the source, and `Instrument` — an `ast.NodeTransformer` — rewrites every `Call`:
    ```python
