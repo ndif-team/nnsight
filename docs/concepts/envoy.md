@@ -229,7 +229,7 @@ Each envoy holds a weak reference to the envoy whose `_children` holds it (`_par
 
 ## Module renaming (aliases)
 
-`rename={...}` on `NNsight`/`Envoy` binds aliases pointing at the same child envoy (`bind`, `aliasing.py`). A single-component path (`{"transformer": "gpt"}`) binds wherever it resolves; a multi-component path (`{"transformer.h": "layers"}`) binds on the envoy it resolves from. Aliases are ordinary attributes referencing the same object, so they survive a dispatch re-point with no rebuild.
+`rename={...}` on `NNsight`/`Envoy` binds aliases pointing at the same child envoy (`bind`, `aliasing.py`). A single-component path (`{"transformer": "gpt"}`) binds wherever it resolves; a multi-component path (`{"transformer.h": "layers"}`) binds on the envoy it resolves from. A dotted alias binds on the envoy its prefix names (`{"attn.c_proj": "attn.o_proj"}` puts `o_proj` on the attention, not the block). Aliases are ordinary attributes referencing the same object, so they survive a dispatch re-point with no rebuild.
 
 ## Overloaded submodule names
 
