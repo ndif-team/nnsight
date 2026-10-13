@@ -69,6 +69,7 @@ from typing import Any, Dict
 import torch
 
 from ...intervention.fragments import Fragments
+from ...intervention.source import BODY_FORWARD, install_controller
 from ...util import apply
 
 # What each side of a module is at the interleaver's handoff, per transformers
@@ -119,14 +120,15 @@ SIDES: Dict[str, Dict[str, str]] = {
 # ``moe_tp_experts`` pair in expert-parallel plans: its wrapper all-to-alls each
 # token to its expert's owner rank and combines the answers before returning.
 # Uniquely, that wrapper is *kept as the controller's body* rather than stripped
-# and rebuilt around it (`_framework_forward` in ``nnsight.intervention.source``
-# exempts it), because the tap must sit where the values mean something. Outside
-# the wrapper they are whole — hence the empty entry. Inside it, after the
-# all-to-all, each rank holds only the tokens routed to its own experts:
-# different shapes on every rank, neither a shard nor a partial, so no rule
-# could reassemble a tap placed there. Verified by the expert-parallel suite
-# (tests/tp/test_cpu_expert_parallel.py), which compares rank values —
-# including an edit of ``experts.output`` — against a single-process run.
+# and rebuilt around it (`TPFragments.instrument` flags it with ``BODY_FORWARD``
+# from ``nnsight.intervention.source``), because the tap must sit where the
+# values mean something. Outside the wrapper they are whole — hence the empty
+# entry. Inside it, after the all-to-all, each rank holds only the tokens routed
+# to its own experts: different shapes on every rank, neither a shard nor a
+# partial, so no rule could reassemble a tap placed there. Verified by the
+# expert-parallel suite (tests/tp/test_cpu_expert_parallel.py), which compares
+# rank values — including an edit of ``experts.output`` — against a
+# single-process run.
 #
 # ``embedding_rowwise`` is marked ! because the rule above is right and unreachable
 # in practice: a vocab-parallel embedding's value carries a ``_MaskPartial``
@@ -440,8 +442,6 @@ def _keep_tp_forward(envoy: Any, style: Any, mesh: Any) -> None:
     if module.__dict__.get(_TP_WRAPPED):
         return
 
-    from ...intervention.source import install_controller
-
     # Assigns `forward` only the first time; a later call from
     # `Interleaver.instrument` finds the state already there and just registers
     # its route, so the wrapper installed below survives.
@@ -617,11 +617,12 @@ class TPFragments(Fragments):
             )
 
         # ``ep_dispatch_experts`` keeps its wrapper as the controller's *body*
-        # (``_framework_forward`` in ``nnsight.intervention.source`` exempts it)
         # rather than having it rebuilt around the controller like every other
-        # style — see the note under `SIDES` for why — so there is nothing to
-        # put back here.
-        if style != "ep_dispatch_experts":
+        # style — see the note under `SIDES` for why. This runs before
+        # `install_controller` (and again on dispatch, harmlessly).
+        if style == "ep_dispatch_experts":
+            envoy._module.__dict__[BODY_FORWARD] = True
+        else:
             _keep_tp_forward(envoy, style_object, mesh)
 
         self.enabled = True
