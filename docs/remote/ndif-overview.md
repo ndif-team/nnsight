@@ -97,6 +97,8 @@ print(model.tokenizer.decode(logit))   # ' Paris'
 
 Sessions take it too: `model.session(remote="local")`. To confirm the dry run really serialized, read something unpicklable in the block (a `threading.Lock`): it fails with `TypeError: cannot pickle '_thread.lock' object` under `remote="local"` and runs fine without it. The dry run does not print the `CONFIG.APP.DEBUG` `[remote] payload: N bytes` line, so payload size can only be measured against a server.
 
+One thing it does not catch: a forgotten `.save()` passes silently, because client-side mutations still come back, so the most common remote mistake survives the dry run.
+
 A passing `remote="local"` run is strong evidence the real `remote=True` run will serialize and ship correctly. See `LocalSimulationBackend` (`src/nnsight/intervention/backends/local.py`).
 
 ## Gotchas

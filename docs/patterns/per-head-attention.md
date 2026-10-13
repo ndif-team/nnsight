@@ -55,9 +55,10 @@ one trace, see [ablation](ablation.md#sweep-every-head).
 
     `attn.output[0]` is the output *of* `c_proj`. `view(B, S, n_heads, head_dim)`
     succeeds on it but the slices are not heads: zeroing "head 4" there moves the
-    same logit by `-0.178` — the wrong sign. Across all 144 GPT-2 heads the two
-    deltas disagree in sign for about half (71). No error, just a plausible number
-    unrelated to the head.
+    same logit by `-0.178` — the wrong sign. Across all 144 GPT-2 heads on "The
+    Eiffel Tower is in the city of", the two disagree in sign for about half (61 by
+    the change in P(' Paris'); the exact count depends on the metric). No error,
+    just a plausible number unrelated to the head.
 
 ## Pattern B: per-head straight from `.source`
 
