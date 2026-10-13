@@ -60,6 +60,26 @@ In fp32 this is far below any real effect size; in **bf16** it is comparable to 
 metric quantum and can reorder a head ranking, so read a ranking metric through an
 fp32 head.
 
+## Comparing prompts: one trace, not a loop of traces
+
+Clean vs corrupt, baseline vs ablated, a sweep over a prompt set: write it as N
+invokes in one trace rather than `for p in prompts: with model.trace(p): ...`.
+Setup is paid once, an empty invoke applies one intervention to every prompt,
+invokes can share values, and with `remote=True` it is one job instead of N.
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke(prompt):
+        baseline = model.lm_head.output[:, -1, :].save()
+    with tracer.invoke(prompt):
+        model.transformer.h[9].mlp.output[:] = 0
+        ablated = model.lm_head.output[:, -1, :].save()
+# baseline -> ' Paris', ablated -> ' London' for "The Eiffel Tower is in the city of"
+```
+
+Key a sweep's results by what the loop varies (a dict), not by list position —
+see [Save by identity](#save-by-identity-not-by-position).
+
 ## Batched input (single invoke, list of strings)
 
 ```python

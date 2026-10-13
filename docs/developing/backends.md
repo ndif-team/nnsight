@@ -2,7 +2,7 @@
 title: Backends
 one_liner: A Backend decides what running a captured trace means — execute locally, ship to NDIF (blocking/non-blocking/async), or serialize-and-run for a local dry run.
 tags: [internals, dev]
-related: [docs/developing/tracing-pipeline.md, docs/developing/adding-a-new-backend.md, docs/developing/serialization.md]
+related: [docs/developing/tracing-pipeline.md, docs/developing/serialization.md]
 sources: [src/nnsight/tracing/backend.py, src/nnsight/intervention/backends/remote.py, src/nnsight/intervention/backends/local.py, src/nnsight/intervention/backends/display.py, src/nnsight/modeling/mixins/remotable.py]
 ---
 
@@ -75,7 +75,12 @@ deprecated alias overrides to return the canonical class, so a model wrapped as
 `LanguageModel` and one wrapped as `TransformersModel` produce the *same* key the
 server knows it by. For a `TransformersModel` the model-specific part carries the
 repo id, revision, *and* the resolved pipeline task, so each task of a checkpoint
-is its own key. The server reconstructs with `from_model_key`.
+is its own key — the server rebuilds the pipeline from the key instead of
+re-inferring one, and two tasks over one checkpoint (which can load different
+architecture classes) are two deployments. The suffix is JSON: `HuggingFaceModel`
+puts the canonical repo id and revision in it, `TransformersModel` adds `task`. The
+server reconstructs with `from_model_key`; `TestModelKey` in
+`tests/test_serialization.py` asserts all of this.
 
 ### RemoteBackend — NDIF over one websocket
 
@@ -181,29 +186,83 @@ land back in the caller's frame like an ordinary local trace.
 - `src/nnsight/modeling/mixins/remotable.py` — `Remotable.trace` (backend
   selection), `_remote_backend`, `to_model_key`.
 
-## Lifecycle (one trace, default backend)
+## Lifecycle
 
-1. User exits `with model.trace(...)`. `Tracer.__exit__` calls `self.backend(self)`.
-2. Default `Backend.__call__` calls `tracer.execute(tracer.info.code)`.
-3. `InterleavingTracer.execute` builds the batcher, makes the workers, and calls
-   `Envoy.interleave`, which runs the model interleaved with the workers.
-4. `push_result` writes saved values back; `__exit__`'s outermost `dec()` filters to
-   `.save()`-ed values.
+The default backend is step 4 of the
+[trace lifecycle](./architecture-overview.md#lifecycle--sequence): `Tracer.__exit__`
+calls `self.backend(self)`, and `Backend.__call__` runs `tracer.execute(...)`. For
+`remote=True`, `RemoteBackend.__call__` serializes and sends the trace instead; the
+block never runs locally.
 
-For `remote=True`, step 2 is replaced by `RemoteBackend.__call__` serializing and
-sending the trace; the block never runs locally.
+## Adding a backend
 
-## Extension points
+Subclass `Backend` when you want to change **what is done with the captured
+block** — log it, ship it, store it. A different inference engine is a new model
+class instead ([adding-a-new-runtime.md](./adding-a-new-runtime.md)).
 
-- **A new transport.** Subclass `Backend` (or `RemoteBackend` to reuse serialize/
-  send/download). See `docs/developing/adding-a-new-backend.md`.
-- **A stricter local simulation.** Trim `_SERVER_MODULES` or the path filters in
-  `LocalSimulationBackend._hide_local_modules`.
-- **Persistent transforms.** Not a backend concern here — use `model.edit()`
-  (`EditingTracer`), which stores a block as a replayed `Mediator`.
+When your `__call__(tracer)` runs, the block is already compiled:
+`tracer.info.code` is the body (a `CodeType`), `tracer.info.frame` the caller's
+live frame, and `tracer.node` the block's AST node (`None` after deserialization).
+Depth tracking and traceback cleanup stay in `Tracer.__exit__` around your call.
+
+**Run locally, but do something first:**
+
+```python
+from nnsight.tracing.backend import Backend
+
+class LoggingBackend(Backend):
+    def __init__(self, log_path="trace.log"):
+        self.log_path = log_path
+
+    def __call__(self, tracer):
+        code = tracer.info.code
+        with open(self.log_path, "a") as f:
+            f.write(f"{code.co_filename}:{code.co_firstlineno} {code.co_name}\n")
+        tracer.execute(code)                    # what the default backend does
+
+with model.trace("Hello", backend=LoggingBackend("nn.log")):
+    out = model.transformer.h[0].output.save()
+```
+
+The block's source text is in the cache the tracer already filled:
+`nnsight.tracing.globals.SOURCES[code.co_filename]`.
+
+**Skip local execution and ship it** (the shape of `RemoteBackend.request`):
+
+```python
+class MyRemoteBackend(Backend):
+    def __init__(self, model_key):
+        self.model_key = model_key
+
+    def __call__(self, tracer):
+        from nnsight.schema.request import RequestModel
+        from nnsight.ndif import pull_env
+        from nnsight.tracing.tracer import save
+        from nnsight.tracing.util import push
+
+        pull_env()                                         # register local modules by value
+        blob = RequestModel.serialize(tracer, compress=False)
+        result = my_transport.send(self.model_key, blob)   # your wire
+        for value in result.values():                      # push saves back like a local run
+            save(value)
+        push(tracer.info.frame, result)
+```
+
+Usually it is easier to subclass `RemoteBackend` and override only the transport
+(`send`/`request`/`poll`), keeping its serialize, status display and download
+helpers. An **async** backend follows `AsyncRemoteBackend`: `__call__` fires the
+request and returns `self`; the user then `await`s it or `async for`s it, and it
+returns the saves rather than pushing them into a frame. To model a different
+server environment for dry runs, subclass `LocalSimulationBackend` and adjust
+`_SERVER_MODULES` / `_hide_local_modules`.
+
+Wire it up with `model.trace(..., backend=MyBackend())`, or for a `remote=`-keyed
+backend, add a branch in your model's `Remotable._remote_backend`.
+
+`model.edit()` is not a backend concern: `EditingTracer` stores a block as a
+replayed `Mediator`.
 
 ## Related
 
 - `docs/developing/tracing-pipeline.md` — what the backend receives (`tracer.info`).
-- `docs/developing/adding-a-new-backend.md` — recipe for writing your own.
 - `docs/developing/serialization.md` — how the payload is (de)serialized.

@@ -263,7 +263,8 @@ If a worker stops before the model even starts (during `__enter__`'s `start`),
 
 ## Lifecycle / sequence
 
-For `with model.trace("hi"): hidden = model.layer.output.save()`:
+The interleaver's part of the [trace lifecycle](./architecture-overview.md#lifecycle--sequence)
+(its steps 6-8), for `with model.trace("hi"): hidden = model.layer.output.save()`:
 
 1. `Envoy.interleave` prepends any edits, then `with self.interleaver:` →
    `__enter__` sets `interleaving=True`, `start()`s the one worker, reindexes.

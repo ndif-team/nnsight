@@ -2,7 +2,7 @@
 title: SAEs and Auxiliary Modules
 one_liner: Wire a sparse autoencoder (or any auxiliary `nn.Module`) into a model and trace through it as a first-class submodule.
 tags: [pattern, interpretability, sae, dictionaries, extending]
-related: [docs/usage/edit.md, docs/usage/access-and-modify.md, docs/usage/skip.md, docs/usage/invoke-and-batching.md, docs/concepts/envoy.md, docs/developing/extending.md]
+related: [docs/usage/edit.md, docs/usage/access-and-modify.md, docs/usage/skip.md, docs/usage/invoke-and-batching.md, docs/developing/extending-envoy.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, tests/test_editing.py, tests/test_language.py]
 ---
 
@@ -27,7 +27,7 @@ Four patterns, in order of setup cost:
    `Envoy` subclass wired to a site via `envoys=`, so the SAE's features (or any
    derived quantity) read/write like a built-in `.output`.
 
-The same three patterns apply to transcoders, adapters, probes, and any other
+The same patterns apply to transcoders, adapters, probes, and any other
 "extra" module.
 
 ## When to use
@@ -175,24 +175,14 @@ module's own `.input` first (it is offered before the skip gate). See
 ## Pattern D: a first-class derived view via `eproperty`
 
 Patterns A–C compute or attach at the call site every trace. To make the SAE's
-features a *permanent, served* quantity — read like any built-in `.output` — give
-the site's `Envoy` a custom `eproperty`.
-
-An `eproperty` is the descriptor behind `.input` / `.output`; you can define your
-own. The decorated stub is the **preprocess**: it receives the raw value served at
-the module's location and returns what you read. Tagging it `@eproperty(key="output")`
-attaches it to the module's output location, so the preprocess can compute a
-derived view from the layer's activation. Put it on an `Envoy` subclass, then
-wire that subclass to the site with the `envoys=` argument, which maps a module
-**type** or a dotted **path suffix** to a custom `Envoy` class.
+features a permanent, served quantity — read like any built-in `.output` — give the
+site's `Envoy` a custom `eproperty` and map the site to it with `envoys=`:
 
 ```python
 from nnsight import Envoy
 from nnsight.intervention.eproperty import eproperty
 
 class SAEView(Envoy):
-    """Exposes a layer's SAE feature activations as a first-class `.features` view."""
-
     @eproperty(key="output")
     def features(self, value):                       # value = layer output [B, S, H]
         return torch.relu(self.sae.encoder(value))   # computed view of the served tensor
@@ -201,47 +191,19 @@ SAEView.sae = SAE(d_model, 4 * d_model).to(model.device)   # class-level, like a
 
 model = TransformersModel(
     "openai-community/gpt2", task="text-generation",
-    envoys={"transformer.h.6": SAEView}, dispatch=True,
+    envoys={"transformer.h.6": SAEView}, dispatch=True,   # a type key would wrap every block
 )
-
 with model.trace(prompt):
-    feats = model.transformer.h[6].features.save()   # SAE features, read like any activation
-
-print(feats.shape)                                   # torch.Size([1, 10, 3072])
+    feats = model.transformer.h[6].features.save()   # torch.Size([1, 10, 3072])
 ```
 
-`envoys={"transformer.h.6": SAEView}` matches the block at layer 6 by dotted path
-suffix (component-wise, not substring); a type key like `envoys={GPT2Block: SAEView}`
-would wrap *every* block instead. Modules not named by the map stay the base
-`Envoy`. `self._module` is the wrapped `torch.nn.Module` if you need to read config
-off it; here the SAE is a class attribute (shared by the subclass, like `n_heads`
-in the per-head example), so `self.sae` reaches it.
-
-### Aliasing view vs `.transform`
-
-Reading `.features` is safe on its own: the preprocess computes a fresh tensor and
-the layer's real output is untouched. To make edits to a view flow *back* into the
-model, whether you need a write-back callback depends on what the preprocess returns:
-
-- **Aliasing view — no `.transform`.** If the preprocess returns a view that shares
-  storage with the served tensor (a `.view()` / `.transpose()` reshape, as in the
-  per-head accessor), an in-place edit writes through for free.
-- **Computed value — add a `.transform`.** SAE features are a *computed*,
-  non-aliasing tensor, so edits to them never reach the model. Register a
-  `@features.transform` to map the edited view back to the layer's `[B, S, H]`
-  layout (e.g. `return self.sae.decoder(value)`); it fires once, after the read, and
-  is spliced in like a swap. Note that with a decode-based transform, a decode is
-  spliced in on *every* read (`decoder(encoder(x)) != x`), so add the transform only
-  when you actually want the SAE reconstruction to replace the layer — otherwise
-  keep `.features` read-only and do reconstruction with a plain `.output =`
-  assignment (Pattern A).
-
-The canonical, tested `eproperty` derived-view example is the per-head attention
-accessor in `tests/test_language.py` (`Heads` / `TestCustomEnvoys`) and
-`docs/patterns/per-head-attention.md`, where the reshape round-trips so its
-`.transform` cleanly writes head edits back. See `docs/concepts/envoy.md` and
-`docs/developing/extending.md` for the full `eproperty` surface (`preprocess` /
-`postprocess` / `transform` / `provide`) and the `envoys=` wiring.
+Reading `.features` leaves the layer's output untouched. SAE features are a
+computed tensor, so edits to them reach the model only through a
+`@features.transform` (e.g. `return self.sae.decoder(value)`) — and that splices the
+reconstruction in on *every* read, since `decoder(encoder(x)) != x`. Add one only
+when you want the reconstruction to replace the layer; otherwise keep `.features`
+read-only and reconstruct with a plain `.output =` (Pattern A). The full surface is
+in [extending-envoy.md](../developing/extending-envoy.md).
 
 ## Interpretation tips
 
@@ -381,7 +343,7 @@ an adapter. If you want to read it, route it through a module.
 - `docs/usage/access-and-modify.md` — `hook=True` and the `__call__` vs `forward` dispatch.
 - `docs/usage/skip.md` — replacing a module's output.
 - `docs/concepts/envoy.md` — the extension surface (`eproperty`, subclassing, attaching modules).
-- `docs/developing/extending.md` — custom served values and the `envoys=` wiring.
+- `docs/developing/extending-envoy.md` — custom served values and the `envoys=` wiring.
 - `docs/patterns/per-head-attention.md` — the tested `eproperty` derived-view example.
 - `tests/test_editing.py` — `TestEditingWithAttachment` worked adapter/SAE examples.
 - `tests/test_language.py` — `Heads` / `TestCustomEnvoys`, the `envoys=` + `eproperty` matrix.

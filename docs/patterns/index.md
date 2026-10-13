@@ -37,7 +37,6 @@ Change the model's internal state and observe the effect on output.
 
 Multiple prompts, multiple invokes, attribution in one batch.
 
-- [multi-prompt-comparison](multi-prompt-comparison.md) — Multiple `tracer.invoke(...)` in one trace, empty invokes for batch-wide ops, and `tracer.barrier(n)` for cross-invoke sharing.
 - [attribution-patching](attribution-patching.md) — Linear approximation of activation patching from corrupt-run gradients times clean-vs-corrupt activation differences.
 
 ## Gradients

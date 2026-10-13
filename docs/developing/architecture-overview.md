@@ -143,7 +143,7 @@ under a `BackwardsTracer` that routes `.grad` reads/writes through it
   are the two smallest examples.
 - **A new backend.** Subclass `Backend` and override `__call__`. Use it to change
   *what is done with the captured block* — remote transport, logging, simulation.
-  See [adding-a-new-backend.md](./adding-a-new-backend.md).
+  See [backends.md](./backends.md#adding-a-backend).
 - **A new model runtime.** Subclass `Envoy`/`NNsight` and override `_batch_size`
   / `_batch`; set `_batcher_class` if the batch layout is non-standard. The vLLM
   integration is the canonical example. See

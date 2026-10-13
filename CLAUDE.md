@@ -30,7 +30,7 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 ### "I want to run multiple prompts at once"
 - [docs/usage/invoke-and-batching.md](docs/usage/invoke-and-batching.md) — `tracer.invoke(...)`, batched lists, empty invokes
 - [docs/usage/barrier.md](docs/usage/barrier.md) — `tracer.barrier(n)` for cross-invoke value sharing
-- [docs/patterns/multi-prompt-comparison.md](docs/patterns/multi-prompt-comparison.md)
+- [docs/usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces](docs/usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces)
 
 ### "I want to bundle several traces / share values between them"
 - [docs/usage/session.md](docs/usage/session.md) — `with model.session():` (values flow across traces without `.save()`)

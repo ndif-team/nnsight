@@ -142,7 +142,8 @@ The padding is still there in the result, so decode with
 | Runs | one forward (`__call__`) | the model's `generate` | the whole task pipeline |
 | Iterations | 1 | one per new token | pipeline-defined |
 | Result | model output | **token ids** | pipeline **records** (text/labels) |
-| Sampling | n/a | the checkpoint's `generation_config` (may sample) | pipeline's `task_specific_params` apply |
+| Sampling | n/a | the checkpoint's `generation_config` (may sample) | that plus the pipeline's `task_specific_params` (may sample) |
+| Input | anything the forward takes | text, ids, tensor, encoding | what the task pipeline accepts (text, chat, images) |
 
 ## Remote generation
 

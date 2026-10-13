@@ -106,6 +106,10 @@ Four things differ from the HuggingFace path, and every one of them changes what
   out[0][-1] += v                          # additive steering at the last position
   ```
 
+  Scale a steering vector against the *median* per-token residual norm: the first
+  position is often an attention sink with a norm ~100× the rest, and on 8B-class
+  models a coefficient of ~1× that median already saturates.
+
 - **Clone what you keep.** A served value is the model's live buffer, and the next layer's fused
   add+norm rewrites it in place — `layers[8].output[0].save()` comes back holding a later layer's
   data. Reduce or `.clone()` before you save (`(out[0] + out[1]).mean(0).cpu().save()`). To have the
@@ -579,7 +583,7 @@ False ...}`.
 
 ## Gotchas
 
-- **Scripts need an `if __name__ == "__main__":` guard.** vLLM uses `spawn` for its EngineCore subprocess; without the guard the child re-runs your top-level `VLLM(...)` / `.trace(...)` and raises a bootstrapping `RuntimeError`. Notebooks are fine. This is a vLLM/multiprocessing requirement, not nnsight-specific.
+- **Scripts need an `if __name__ == "__main__":` guard.** Dispatching an engine initializes CUDA in your process, so vLLM forces the `spawn` start method for its workers (logging `We must use the spawn multiprocessing start method ... Reasons: CUDA is initialized`). Spawning re-imports the main module; without the guard the child re-runs your top-level `VLLM(...)` / `.trace(...)` and the engine core dies with `An attempt has been made to start a new process before the current process has finished its bootstrapping phase`. This holds on one card and `mode="sync"` as much as under tensor parallelism. Notebooks are fine. It is a vLLM/multiprocessing requirement, not nnsight-specific.
 
   ```python
   from nnsight.modeling.vllm import VLLM

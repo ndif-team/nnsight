@@ -80,7 +80,6 @@ as an edit).
 - `docs/developing/backends.md` — the `Backend` base and the existing backends
   (`RemoteBackend`, `AsyncRemoteBackend`, `LocalSimulationBackend`), and how a
   model selects one from `remote=`.
-- `docs/developing/adding-a-new-backend.md` — recipe for subclassing `Backend`.
 
 ### Extending
 

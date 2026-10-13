@@ -202,11 +202,8 @@ steering is working, the effect is just modest" rather than as a bug.
 
 #### On `VLLM`
 
-Activations have no batch axis and a decoder layer returns `(hidden, residual)`:
-`model.model.layers[L].output[0][-1] += direction * coef`, with `direction` moved onto the
-served tensor's device inside the block. Scale against the *median* per-token residual norm — the
-first position is often an attention sink with a norm 100× the rest, and on 8B-class models ~1×
-that median already saturates. See [What your block sees on vLLM](../models/vllm.md#what-your-block-sees-on-vllm).
+Indexing, the `(hidden, residual)` layer output and how to scale the vector differ;
+see [What your block sees on vLLM](../models/vllm.md#what-your-block-sees-on-vllm).
 
 #### `[:, -1, :]` means something different after the prefill
 
@@ -261,7 +258,7 @@ it out) to suppress refusal. Same pattern with `coef < 0` or projection
 
 - [activation-patching](activation-patching.md)
 - [ablation](ablation.md)
-- [multi-prompt-comparison](multi-prompt-comparison.md)
+- [invoke-and-batching](../usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces)
 - `docs/usage/generate.md` — generate returns token ids via `tracer.result`.
 - `docs/usage/iteration.md` — step-conditional steering during generation.
 - Turner et al. (2023), "Activation Addition".

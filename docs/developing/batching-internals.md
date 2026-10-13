@@ -176,9 +176,9 @@ See `docs/developing/vllm-integration.md` for the vLLM specifics.
 
 ## Lifecycle / sequence
 
-Per trace:
+The batcher's part of the [trace lifecycle](./architecture-overview.md#lifecycle--sequence), per trace:
 
-1. `InterleavingTracer.execute` creates `self.batcher = Batcher(envoy)` on the tracer.
+1. `InterleavingTracer.execute` creates `self.batcher = envoy._batcher_class(envoy, kwargs)` on the tracer.
 2. **Direct input** (`trace(x)`): `_batch_size(x) > 0`, so one `Mediator` is made
    and `self.batcher.add(x)` gives it a batch group.
    **Invoke mode** (`trace()`): the body is exec'd to collect `tracer.invoke(...)`

@@ -257,22 +257,9 @@ write-through mapping (PEP 667) and a plain `update` suffices.
 
 ## Lifecycle / sequence
 
-For `with model.trace("hi") as tracer: hidden = model.layer.output.save()`:
-
-1. `Envoy.trace("hi")` → `InterleavingTracer(self, "__call__", "hi")` — args stored.
-2. `with` enters → `__enter__` → `capture()`: `sys._getframe(2)` is the user frame;
-   `source` reads its file; `parse` finds the `with`; `build`+`compile` produce the
-   body code; `BLOCKS[key] = (node, code)`. Since the body has real code,
-   `skip_context` arms the `f_trace` hook.
-3. Python reaches `hidden = ...`; the hook raises `ExitTracingException`.
-4. `__exit__` swallows it, `inc()`, calls `self.backend(self)` → base `Backend`
-   → `tracer.execute(tracer.info.code)`.
-5. `InterleavingTracer.execute`: builds the `Batcher`; `_batch_size("hi")` > 0,
-   so one `Mediator` runs the whole block; `Envoy.interleave` runs the forward.
-6. The worker parks on `model.layer.output.i0`; the module's controller calls
-   `handle`, serving the value; the worker `.save()`s it and finishes.
-7. `push_result(frame, mediator.lcls)` writes back; `__exit__`'s outermost `dec()`
-   filters to `.save()`-ed names. `hidden` is now in the caller's frame.
+The end-to-end sequence for one trace, from `Envoy.trace` to `push_result`, is in
+[architecture-overview.md](./architecture-overview.md#lifecycle--sequence); the
+sections above detail its capture, compile and push steps.
 
 ## Extension points
 
@@ -280,7 +267,7 @@ For `with model.trace("hi") as tracer: hidden = model.layer.output.save()`:
   `execute()`. Override `build`/`compile` only if you need a different wrapping of
   the body (rare — nnsight's subclasses all leave the body compilation alone).
 - **A new backend.** Subclass `Backend`; the captured `tracer.info.code` is already
-  compiled. See `docs/developing/adding-a-new-backend.md`.
+  compiled. See `docs/developing/backends.md#adding-a-backend`.
 - **Source capture for a new context.** Add a branch in `Tracer.source` that
   produces text for a new filename shape (e.g. a hosted-notebook cell store).
 

@@ -74,74 +74,30 @@ self.api_key = api_key or CONFIG.API.APIKEY or ""
 
 In Colab, store the key as a Userdata secret named `NDIF_API_KEY`. When `NDIF_API_KEY` isn't set in the environment and no key is in the config file, `_from_env()` reads the secret via `google.colab.userdata.get("NDIF_API_KEY")` (`src/nnsight/schema/config.py:45`).
 
-## CONFIG settings
+## Other settings
 
-`CONFIG.API` (`src/nnsight/schema/config.py:12`):
-
-| Field | Default | Purpose |
-|-------|---------|---------|
-| `HOST` | `"https://api.ndif.us"` | Base URL for all NDIF requests. The websocket URL is derived (`https://…` → `wss://…`). Override with the `NDIF_HOST` env var or by assigning directly. |
-| `APIKEY` | `None` | Set via `set_default_api_key`, `NDIF_API_KEY`, or a Colab secret. |
-| `COMPRESS` | `True` | zstd-compress the request payload and decompress the result. |
-
-`CONFIG.APP` (`src/nnsight/schema/config.py:18`):
-
-| Field | Default | Purpose |
-|-------|---------|---------|
-| `DEBUG` | `False` | Verbose remote diagnostics: `[remote]` payload/result byte-size prints, plus each status printed on its own line (a persisted timeline) instead of one in-place spinner. Also settable via the `NNSIGHT_DEBUG` env var. |
-| `REMOTE_LOGGING` | `True` | Show the status display (spinner + RECEIVED/QUEUED/RUNNING/…) and the download progress bar. Set `False` for silent runs. |
-| `PYMOUNT` | `True` | Mount `.save()` onto every object so `value.save()` works in a trace. If `False` (or the optional C extension didn't build), use `nnsight.save(value)` instead. |
-
-Toggle and persist:
-
-```python
-from nnsight import CONFIG
-
-CONFIG.APP.REMOTE_LOGGING = False
-CONFIG.APP.DEBUG = True
-CONFIG.save()                       # write changes to the user config file
-```
+Compression, the remote status display and debug output are `CONFIG` fields; every
+field, its default and the config-file location are in
+[config.md](../reference/config.md). Set one and persist it with `CONFIG.save()`.
 
 ## Pointing at a different host
 
-NDIF has staging and self-hosted deployments. Three options:
+To use a different NDIF deployment (a self-hosted server, say), three options:
 
 ```python
 # Persistent
-CONFIG.API.HOST = "https://staging.api.ndif.us"
+CONFIG.API.HOST = "https://ndif.example.com"
 CONFIG.save()
 
 # Per-process, via env var
-#   export NDIF_HOST="https://staging.api.ndif.us"
+#   export NDIF_HOST="https://ndif.example.com"
 
 # Per-call: pass the host URL as `remote=`
-with model.trace("...", remote="https://self-hosted.example.com"):
+with model.trace("...", remote="https://ndif.example.com"):
     out = model.lm_head.output.save()
 ```
 
 When `remote` is a string other than `"local"`, `Remotable.trace` treats it as a host URL overriding `CONFIG.API.HOST` for that call (`src/nnsight/modeling/mixins/remotable.py:68`). The URL must start with `http://` or `https://`; `RemoteBackend.__init__` raises `ValueError` otherwise (`src/nnsight/intervention/backends/remote.py:70`).
-
-## Where the config file lives
-
-`CONFIG.save()` writes to the user config file, resolved by `_user_config_path()` (`src/nnsight/schema/config.py:37`):
-
-1. `$NNSIGHT_CONFIG` if set (a full path), else
-2. `$XDG_CONFIG_HOME/nnsight/config.yaml` (default `~/.config/nnsight/config.yaml`).
-
-Contents look like:
-
-```yaml
-API:
-  APIKEY: <your-key>
-  COMPRESS: true
-  HOST: https://api.ndif.us
-APP:
-  DEBUG: false
-  PYMOUNT: true
-  REMOTE_LOGGING: true
-```
-
-The shipped defaults live at `<nnsight-package-dir>/config.yaml` and are merged under your user file, so upgrading nnsight leaves your saved key alone — it's in `~/.config`, separate from the package.
 
 ## Gotchas
 

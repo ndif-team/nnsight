@@ -184,6 +184,23 @@ with model.trace() as tracer:
 
 See `docs/usage/invoke-and-batching.md`.
 
+### Ablating an MoE expert
+
+On vLLM, mask the expert's router logit: `mlp.gate.output[0][:, e] = -inf` (see
+[vllm-parallelism.md](../models/vllm-parallelism.md)).
+
+On **`TransformersModel`** the same line is a silent no-op. A transformers MoE block
+calls its router as `_, top_k_weights, top_k_index = self.gate(hidden_states)`, and
+element `[0]`, the logits, is discarded, so masking it changes nothing: setting all 64
+logits to `-inf` gives `max|delta| = 0.0`. Edit the *selection* there instead, by
+writing the routing weights or expert indices in `mlp.gate.output[1]` / `[2]`.
+
+Two further traps on that side. With `norm_topk_prob=False`, masking a weight rescales
+every surviving expert, so a never-selected expert can show a larger effect than a real
+below-median one; ablate by selection, not by weight. And the router's `.input` /
+`.output` have no batch axis (`(B*T, E)`), so per-token statistics over a padded batch
+quietly include the pad rows.
+
 ## Interpretation tips
 
 - **Compare logits, log-probs, or task accuracy** — not raw activation norms. The
@@ -217,6 +234,6 @@ See `docs/usage/invoke-and-batching.md`.
   activation instead of zeroing.
 - [attribution-patching](attribution-patching.md)
 - [per-head-attention](per-head-attention.md)
-- [multi-prompt-comparison](multi-prompt-comparison.md)
+- [invoke-and-batching](../usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces)
 - `docs/usage/access-and-modify.md`
 - `docs/usage/barrier.md`

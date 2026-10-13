@@ -66,60 +66,21 @@ assert tuple(hs.shape) == (1, 2, 768)
 
 ## The served values are `eproperty` descriptors
 
-`.input`, `.inputs`, and `.output` are `eproperty` descriptors — a small `property`
-subclass (`intervention/eproperty.py`) whose location is `"{self.path}.{key}"`. The
-decorated stub is the descriptor's **preprocess**: it takes the raw value the
-interleaver served at that location and returns what you read (`envoy.py`–`455`):
+`.input`, `.inputs` and `.output` are `eproperty` descriptors — a small `property`
+subclass (`intervention/eproperty.py`) over the location `"{self.path}.{key}"`:
 
-```python
-@eproperty(key="input")
-def inputs(self, value):                 # identity view of the whole (args, kwargs)
-    return value
+- **Reading** calls `Mediator.value(location)` — the worker parks until the model
+  reaches that location — and hands you the served value.
+- **Assigning** calls `Mediator.swap(location, value)`, and the model continues
+  with your value.
+- **In-place edits** (`model.layer.output[:] = 0`) work because the read returns the
+  live tensor and the module's controller returns whatever the worker left it as.
 
-@eproperty
-def input(self, value):                  # first-argument view over the same location
-    args, kwargs = value
-    return first_input(args, kwargs)
-
-@input.postprocess                       # write side: repack the lone arg
-def input(self, value):
-    args, kwargs = Mediator.value(f"{self.path}.input")
-    return replace_first_input(args, kwargs, value)
-
-@eproperty
-def output(self, value):                 # identity view of the module's output
-    return value
-```
-
-- **Reading** the descriptor calls `Mediator.value(location)` — the worker parks
-  until the model reaches `location` — then runs the stub (preprocess) on the
-  served value and hands you the result.
-- **Assigning** runs a registered `.postprocess` (if any) then calls
-  `Mediator.swap(location, value)` — the worker parks, and the model side
-  substitutes the value in.
-- **In-place edits** (`model.layer.output[:] = 0`) work because the identity
-  preprocess returns the live tensor and the module's controller returns whatever
-  the worker left it as.
-
-`.input` / `.inputs` share the key `"input"` (both address `"{path}.input"`):
-`.inputs` returns the whole `(args, kwargs)`; `.input` extracts the first argument
-(`first_input`) in its preprocess and repacks it (`replace_first_input`) in its
-`postprocess` on write.
-
-A third callback, `.transform`, is the write-back half of a *reshaping* preprocess.
-When a preprocess returns a reshaped/sliced view (e.g. a per-head split), in-place
-edits to that view are invisible to the model, so a `@output.transform` maps the
-edited view back to the model's layout, and its result is swapped in when the block
-next asks the model for anything, or at the end of the block. Until then a second read
-of the value is the same view, so `x.heads[:, 5] += f(x.heads)` edits one tensor. It
-fires whether or not the view was edited. The base `.input`/`.output` are identity
-views and register none — see the per-head example in `eproperty.py`.
-
-Accessing an eproperty **outside a trace** raises (`Mediator`):
-
-```
-ValueError: Cannot access `model.0.output` outside of interleaving
-```
+`.inputs` is the whole `(args, kwargs)`; `.input` is a first-argument view over the
+same location that repacks on write. Accessing any of them outside a trace raises
+``ValueError: Cannot access `model.0.output` outside of interleaving``. How to define
+your own (preprocess, `.postprocess`, `.transform`, `.provide`) is in
+[extending-envoy.md](../developing/extending-envoy.md).
 
 ## Calling a module inside a trace
 
@@ -138,104 +99,20 @@ with model.trace("The Eiffel Tower is in"):
 
 ## Extension surface
 
-By default every child envoy is the base `Envoy`, but a model can pass `envoys=` —
-a map from a module type or dotted path suffix to a custom `Envoy` subclass — so a
-chosen module gets a subclass that exposes a custom `eproperty` (e.g. a per-head
-`.heads` view; see [extending.md](../developing/extending.md) and
-[per-head-attention.md](../patterns/per-head-attention.md)). A path suffix matches
-the native path or any spelling of it under the `rename=` aliases, composed through
-ancestors (`"layers.0.self_attn"` under `rename={"transformer.h": "layers", "attn":
-"self_attn"}`), so one map can be written in the aliased names and reused across
-architectures. A `*` component matches any one path component, so `"layers.*"`
-names every entry of the container and not the container itself. You extend nnsight
-several ways:
-
-### 1. Subclass `NNsight` / `Envoy`
-
-For model-specific loading and input handling. Override `_batch_size` (how many batch rows an invoke's input is) and `_batch` (how to combine invokes into one forward) — base `Envoy` supports a single invoke; `TransformersModel` overrides both to batch text/tensors. This is how `TransformersModel`, `DiffusionModel`, and `VLLM` are built.
-
-### 2. Attach modules and watch them with `hook=True`
-
-Add any `nn.Module` as an attribute; it's auto-wrapped as a child envoy. Apply it (with `hook=True` so its internals are observable) inside an **edit** so it runs on every trace:
-
-```python
-model.transformer.h[0].adapter = MyAdapter()
-with model.edit() as (tracer, edited):
-    acts = edited.transformer.h[0].output
-    edited.transformer.h[0].output = edited.transformer.h[0].adapter(acts, hook=True)
-
-with edited.trace(prompt):
-    inner = edited.transformer.h[0].adapter.inner.output.save()   # now observable
-```
-
-### 3. Custom served values via `eproperty`
-
-A new served value is an `eproperty` on the model/runtime class, served from the
-driver side with its `.provide`. The descriptor goes on the class the envoy is
-built as: the model subclass (or the tracer) by default, or — for a chosen
-submodule — the `Envoy` subclass `envoys=` names for it. This is exactly how the
-vLLM wrapper adds `.logits` and `.samples` (`modeling/vllm/vllm.py`):
-
-```python
-class VLLM(Remotable):
-    @eproperty(description="pre-sampling logits for this step")
-    def logits(self, value):            # preprocess: identity view of the served logits
-        return value
-```
-
-Two things to know before writing one:
-
-- **`key="input"` serves the raw `(args, kwargs)` pair**, not a bare tensor — the same value
-  `.inputs` gives you. A preprocess on that key destructures it (`(x,), _ = value`) and a
-  transform repacks it (`return ((tensor,), {})`). A preprocess written against a bare tensor
-  fails on the pair, and a transform must always return a value of the *location's* shape:
-  on a tuple-returning module it returns the whole tuple.
-- **A preprocess that raises `AttributeError` is swallowed.** An `eproperty` is a `property`,
-  and a `property` getter raising `AttributeError` falls through to `__getattr__`, so the bug
-  resurfaces as `'Heads' object (nor its module) has attribute 'heads'` — blaming the
-  attribute you asked for rather than the line that failed. If a custom eproperty reports
-  itself missing, look inside its preprocess first.
-
-The read side is the descriptor; the produce side calls its `.provide` where the
-value is computed — in the vLLM model runner,
-`type(model).logits.provide(model, original_logits)`, which forwards to
-`model.interleaver.handle("model.logits", ...)` at the eproperty's own location.
-`tracer.result` is the same pattern with no `description` and a bare `"result"`
-location — `Envoy.interleave` serves it with `handle("result", result)` after the
-forward. A `description` is what surfaces an eproperty in the Envoy repr tree as
-`(logits): pre-sampling logits for this step`, with the stub's return annotation
-after an arrow when it has one (`(logits) -> Logits: ...`); `.input`/`.output` carry none, so they
-stay hidden.
-
-## Shared modules
-
-A module the tree reaches by two paths — a layer a wrapper keeps a second
-reference to (vLLM's MLA attention holds `q_proj`/`kv_b_proj`/`o_proj` under
-`self_attn` and again under `self_attn.mla_attn`), or tied weights — gets **one**
-envoy, at the first path, and the later name is bound as an alias to it, the way
-`torch.nn.Module.named_modules()` lists a shared module once. So the module has
-one location (`model...self_attn.q_proj.output`), every spelling reaches the same
-envoy, and `_aliases` on the aliasing parent records where it points.
-
-The container entry still counts: `layers[2]` and iteration walk every entry the
-wrapped `ModuleList` holds — including one whose module an earlier entry already
-brought in, and including a container rebuilt from blocks the tree already wraps
-(`model.transformer.h = nn.ModuleList(list(model.transformer._module.h)[:4])`).
-Each such entry names the one envoy at the module's first path.
-
-## Parent links
-
-Each envoy holds a weak reference to the envoy whose `_children` holds it (`_parent`), read through `envoy.parent` (`None` on the root); `envoy.root` follows it up to the model envoy. A shared module's envoy has the parent at its first path, and an alias is not a child, so it changes no parent. The link is weak, so a held envoy keeps none of its ancestors alive and `del model` frees the tree by refcounting. It is set as the child is built (`parent=` on `Envoy.__init__`), kept through a dispatch re-point (`_update` keeps the envoys), and left out of the pickled state: on unpickling a parent re-links its children, and an envoy shipped without its parent has none.
+- **Subclass `NNsight` / `Envoy`** for model-specific loading, input prep and
+  batching — see [extending.md](../developing/extending.md). This is how
+  `TransformersModel`, `DiffusionModel` and `VLLM` are built.
+- **Attach a module** as an attribute (it is auto-wrapped as a child envoy) and
+  apply it with `hook=True` inside an edit so its internals are observable — see
+  [edit.md](../usage/edit.md).
+- **Add a served value** with an `eproperty` on the model class, or on an `Envoy`
+  subclass that `envoys=` maps a module type or path suffix to (a per-head `.heads`
+  view, say) — see [extending-envoy.md](../developing/extending-envoy.md), which also
+  covers parent links, shared modules and submodules named `output`.
 
 ## Module renaming (aliases)
 
 `rename={...}` on `NNsight`/`Envoy` binds aliases pointing at the same child envoy (`bind`, `aliasing.py`). A single-component path (`{"transformer": "gpt"}`) binds wherever it resolves; a multi-component path (`{"transformer.h": "layers"}`) binds on the envoy it resolves from. A dotted alias binds on the envoy its prefix names (`{"attn.c_proj": "attn.o_proj"}` puts `o_proj` on the attention, not the block). Aliases are ordinary attributes referencing the same object, so they survive a dispatch re-point with no rebuild.
-
-## Overloaded submodule names
-
-A submodule may be named after a value nnsight serves: every BERT-style encoder has an `output` module. The submodule mounts as `E_<name>` and `.output` keeps its usual meaning, with a warning (`_mount_name`, `envoy.py`). The envoy that moved keeps its own path, so `named_modules()` still reports `...attention.output`, and the repr labels it `E_output/output`, the same `alias/name` form a `rename` uses. Attribute access is the only spelling that moved, and `get()` and `rename` go through it, so both are written against `E_output`. The plain name reaches the served value, which raises outside a trace, so a `rename` written against it fails at construction.
-
-nnsight used to do the opposite, keeping the name for the submodule and overriding the descriptor on a subclass synthesized per envoy. That class belonged to no module, so cloudpickle pickled it by value and choked on the descriptor inside, and no BERT-style model could run remotely.
 
 ## Gotchas
 

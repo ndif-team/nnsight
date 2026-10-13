@@ -1912,7 +1912,7 @@ every value you can read or write is an `eproperty` over one location string
 Extending nnsight means adding to one of those three layers. The recipe-style
 reference for all of this is `docs/developing/extending.md`; the developer deep-dives
 are `docs/developing/extending-envoy.md`, `docs/developing/adding-a-new-runtime.md`,
-and `docs/developing/adding-a-new-backend.md`.
+and `docs/developing/backends.md#adding-a-backend`.
 
 ### 10.1 Subclassing NNsight and Envoy
 
@@ -2223,7 +2223,7 @@ round-trips it through serialization to validate. You wire a backend in with
 `model.trace(..., backend=MyBackend())`, or, for a remote-style backend keyed off
 `remote=`, by adding a branch in your model's `Remotable._remote_backend`. The
 full recipe — including the async dual-call pattern and how saved values are
-pushed back — is `docs/developing/adding-a-new-backend.md`.
+pushed back — is `docs/developing/backends.md#adding-a-backend`.
 
 **Runtimes.** A new runtime subclasses the mixin chain from
 [Subclassing NNsight and Envoy](#101-subclassing-nnsight-and-envoy) and fills in

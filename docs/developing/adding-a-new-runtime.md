@@ -125,16 +125,10 @@ own method:
 
 ### Runtime-internal values — `eproperty`
 
-To expose an engine value that isn't a module output (logits, samples, telemetry),
-add an `eproperty` to your model class. The decorated stub is the read-side
-preprocess — `def logits(self, value): return value` for an identity view — and its
-location is `"{self.path}.{key}"`. Serve it where the value is produced, inside an
-open interleaver context, with the eproperty's `.provide`:
-`type(model).logits.provide(model, value)` (which forwards to
-`self.interleaver.handle(location, value)` and returns it, edited if a worker wrote
-back). Give it a `description=` to surface it in the model's repr. vLLM's
-`logits`/`samples` (`vllm.py`, served in `GPUModelRunner.py`) are the
-reference. Full recipe in [extending-envoy.md](./extending-envoy.md).
+An engine value that isn't a module output (logits, samples, telemetry) is an
+`eproperty` on your model class, served where it is produced with
+`type(model).<name>.provide(model, value)` — see
+[extending-envoy.md](./extending-envoy.md); vLLM's `logits`/`samples` are the reference.
 
 ### Remote support — the `Remotable` extension points
 
@@ -164,19 +158,15 @@ Inject a backend or `tracer_cls` from your `trace` override for non-standard
 execution (async streaming, HTTP serve). vLLM injects `AsyncVLLMBackend` +
 `VLLMTracer` for `mode="async"` and `LocalServeBackend` for `serve=url`
 (`vllm.py`). See [vllm-integration.md](./vllm-integration.md) and
-[adding-a-new-backend.md](./adding-a-new-backend.md).
+[backends.md](./backends.md#adding-a-backend).
 
 ## Lifecycle of a runtime trace
 
-1. `with model.trace(input)` — the tracer captures the block.
-2. On `__exit__`, the backend runs the compiled block; the batcher runs each
-   invoke's `_batch_size`/`_batch` to build the call input and per-invoke groups.
-3. `model.interleave(fn, *args, **kwargs)` runs (dispatching first if needed). `fn`
-   (your `_call`/`generate`/pipeline) executes the forward; each module's
-   controller calls `handle` to serve parked interventions; the batcher
-   narrows/widens per invoke.
-4. The run's return is served at `"result"`; saved values are pushed back into the
-   caller's frame.
+A runtime trace follows the [trace lifecycle](./architecture-overview.md#lifecycle--sequence).
+Your hooks enter at two points: the batcher calls each invoke's
+`_batch_size`/`_batch` to build the call input, and `model.interleave(fn, ...)`
+(dispatching first if needed) runs your `fn` — `_call`, `generate`, or a pipeline —
+as the forward.
 
 ## Reference implementations
 

@@ -55,12 +55,8 @@ with model.pipe("The Eiffel Tower is in the city of", max_new_tokens=3, do_sampl
     records = tracer.result.save()          # list of decoded-text records
 ```
 
-| | `model.generate(...)` | `model.pipe(...)` |
-|---|---|---|
-| Runs | the model's `generate` | the whole task pipeline |
-| Returns | token ids (tensor) | pipeline records (text/labels/...) |
-| Default sampling | the checkpoint's `generation_config` (may sample) | that plus the pipeline's `task_specific_params` (may sample) |
-| Input | text, ids, tensor, encoding | what the task pipeline accepts (text, chat, images) |
+The full comparison (what runs, iterations, result, sampling defaults, accepted
+input) is the table in [generate.md](generate.md#difference-vs-trace-and-pipe).
 
 ## Per-step interventions and early exit
 

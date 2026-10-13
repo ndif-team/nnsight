@@ -2,7 +2,7 @@
 title: Activation Patching
 one_liner: Replace activations from one run (e.g. clean) into another (e.g. corrupt) at a specific module to measure that component's causal contribution.
 tags: [pattern, interpretability, causal-mediation, patching]
-related: [docs/usage/barrier.md, docs/usage/invoke-and-batching.md, docs/patterns/attribution-patching.md, docs/patterns/multi-prompt-comparison.md]
+related: [docs/usage/barrier.md, docs/usage/invoke-and-batching.md, docs/patterns/attribution-patching.md]
 sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/barrier.py]
 ---
 
@@ -23,10 +23,8 @@ clean answer, that activation was sufficient to flip the model.
 
 In nnsight you do this with two `tracer.invoke(...)` calls in one `trace()`. Because
 both invokes touch the same module on the same forward, use a `tracer.barrier(n)` to
-synchronize the value hand-off — see `docs/usage/barrier.md`. On `VLLM` there is
-no barrier and no cross-invoke hand-off: save the clean activations in one trace and
-patch them in the next, index rows as `hs[POS]` (no batch axis), and write both
-elements of the layer's `(hidden, residual)` output — see
+synchronize the value hand-off — see `docs/usage/barrier.md`. On `VLLM`, patching
+takes two traces instead — see
 [Passing values between invokes](../models/vllm.md#passing-values-between-invokes).
 
 Tutorial mirror: https://nnsight.net/notebooks/tutorials/activation_patching/
@@ -290,7 +288,7 @@ swap the prompts and invoke order.
 
 - [attribution-patching](attribution-patching.md) — linear approximation that gets a
   whole causal map from one clean + one corrupt run.
-- [multi-prompt-comparison](multi-prompt-comparison.md)
+- [invoke-and-batching](../usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces)
 - [per-head-attention](per-head-attention.md)
 - `docs/usage/barrier.md`
 - `docs/usage/invoke-and-batching.md`

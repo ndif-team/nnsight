@@ -2,7 +2,7 @@
 title: Extending nnsight
 one_liner: Build custom models by subclassing NNsight/Envoy — batching, attached modules, loaders, custom batchers and tracers.
 tags: [dev, extending, envoy, library-development]
-related: [docs/usage/access-and-modify.md, docs/usage/invoke-and-batching.md, docs/usage/rename-modules.md]
+related: [docs/developing/extending-envoy.md, docs/usage/access-and-modify.md, docs/usage/invoke-and-batching.md, docs/usage/rename-modules.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, src/nnsight/modeling/base.py, src/nnsight/intervention/batching.py, src/nnsight/modeling/mixins/loadable.py, src/nnsight/modeling/transformers.py]
 ---
 
@@ -26,13 +26,6 @@ with a working default, so you override only the one you need. The surface is:
 5. Use the `Loadable` mixin to build the model from a repo id / config.
 6. Pass a custom `tracer_cls`.
 7. Define custom served values with the `eproperty` descriptor.
-
-> `.input` / `.inputs` / `.output` (and `tracer.result`) are `eproperty`
-> descriptors, and you can define your own. To attach a custom `eproperty` to a
-> **specific** module, pass `envoys=` (a map from a module type or dotted path
-> suffix to a custom `Envoy` subclass); otherwise a custom `eproperty` lives on a
-> class already used as an envoy (an `NNsight`/model subclass, the tracer, or
-> `VLLM`).
 
 ## Wrapping any module
 
@@ -220,121 +213,34 @@ with model.trace(x, tracer_cls=MyTracer):
 
 ## 7. Custom served values: `eproperty`
 
-`.output` / `.input` / `.inputs` and `tracer.result` are `eproperty` descriptors
-(`src/nnsight/intervention/eproperty.py`): reading one parks the worker until the
-model reaches that location (`"{path}.{key}"`) and returns the value there; writing
-one swaps a new value in. Define your own to expose a run-level value the model
-produces outside a module's own input/output.
-
-Decorate a stub with `@eproperty` (or `@eproperty(key=..., description=...)`). The
-stub **is the preprocess** — it maps the raw served value to what the user reads, so
-an identity view is just `return value`. `key` defaults to the method name; several
-eproperties can share a key to give different views of one location (that's how
-`inputs` shares `input`'s key). Three optional callbacks refine it:
-
-- `.postprocess` — runs on a *written* value before it's swapped in (e.g. repack a
-  lone `input` back into the `(args, kwargs)` the model expects).
-- `.transform` — the write-back for an edited preprocess *view*: when preprocess
-  hands back a reshaped/sliced view, in-place edits to it are invisible to the model
-  (which still holds the original), so a transform maps the edited view back to the
-  model's layout; the result is swapped in when the block next asks the model for
-  anything, or at the end of the block, edited or not. Until then a repeated read is
-  the same view. It takes `(self, view, raw)`: the edited view and the value as served, so a
-  view that is one element of a container can rebuild it.
-- `.provide(obj, value)` — serves the value from the model side (via
-  `interleaver.handle`), resuming a worker parked on that location. Call it from your
-  runtime where the value is produced.
-
-A `description=` surfaces the eproperty in the Envoy repr tree as
-`(name): description`; the plain built-in views carry no description and stay hidden.
-
-`VLLM` (`src/nnsight/modeling/vllm/vllm.py`) defines two this way, served from the
-model runner with `type(model).logits.provide(model, ...)`:
+`.output` / `.input` / `.inputs` and `tracer.result` are `eproperty` descriptors:
+reading one parks the worker until the model reaches `"{path}.{key}"`, writing one
+swaps a value in. Define your own on the model class — the decorated stub is the
+read-side preprocess — and serve it from wherever the value is produced with
+`.provide`:
 
 ```python
 from nnsight.intervention.eproperty import eproperty
 
-class VLLM(NNsight):
-    @eproperty(description="pre-sampling logits for this step")
-    def logits(self, value):        # preprocess: identity view
+class MyModel(NNsight):
+    @eproperty(description="per-step telemetry")
+    def telemetry(self, value):          # preprocess: identity view
         return value
 
-    @eproperty(description="token ids drawn from logits this step")
-    def samples(self, value):
-        return value
+# in the driver, inside the open interleaver context:
+value = type(model).telemetry.provide(model, value)   # returns it, edited if written
 ```
 
-A preprocess/transform pair gives a reshaped, writable view — e.g. per-head
-attention (from the `eproperty` docstring):
-
-```python
-class Heads(Envoy):
-    @eproperty(key="output")
-    def heads(self, value):                     # preprocess: [B,S,H] -> heads
-        b, s, h = value.shape
-        return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
-
-    @heads.transform
-    def heads(self, value, raw):                # write the edited heads back
-        b, nh, s, hd = value.shape
-        return value.transpose(1, 2).reshape(b, s, nh * hd)
-
-with model.trace(prompt):
-    model.attn.heads[:, 5] = 0                  # zero head 5; transform swaps it back
-```
-
-To attach this `.heads` accessor to specific modules, pass `envoys=` mapping the
-module type (or a dotted path suffix) to the subclass. `Heads` above reshapes a
-bare `[B, S, H]` tensor, so it fits a module whose `.output` is that tensor (an
-MLP); a module whose `.output` is a tuple (attention) indexes `value[0]` instead:
-
-```python
-from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
-
-model = TransformersModel(
-    "openai-community/gpt2", task="text-generation",
-    envoys={GPT2MLP: Heads}, dispatch=True,   # or {"mlp": Heads} by path suffix
-)
-```
-
-Non-matching modules stay the base `Envoy`. See
-[per-head-attention.md](../patterns/per-head-attention.md) for the attention
-(tuple-output) version.
-
-An eproperty that needs more than its own module's value reaches the rest of the
-tree through `self.parent` (the envoy one level up, `None` on the root) and
-`self.root` (the model envoy). Reads through them follow the same execution
-order as any other read, so a preprocess on attention can read the MLP that
-runs after it:
-
-```python
-class Attn(Envoy):
-    @eproperty(key="output")
-    def with_mlp(self, value):                  # attention output + the block's MLP output
-        return value[0] + self.parent.mlp.output
-
-model = TransformersModel(
-    "openai-community/gpt2", task="text-generation",
-    envoys={"attn": Attn}, dispatch=True,
-)
-with model.trace(prompt):
-    summed = model.transformer.h[1].attn.with_mlp.save()
-```
+To put a custom eproperty on specific submodules (a per-head `.heads` view), map
+them to an `Envoy` subclass with `envoys=`. The full surface — `.postprocess`,
+`.transform` for reshaped writable views, `envoys=` matching rules, `parent`/`root`
+— is [extending-envoy.md](extending-envoy.md).
 
 ## Gotchas
 
-- **`envoys=` targets specific modules.** Map a module type or dotted path suffix
-  to a custom `Envoy` subclass to attach a custom `eproperty` there; without it a
-  custom `eproperty` lives on the model subclass. A suffix matches the native
-  path or a `rename=` alias (`rename={"attn": "self_attn"}` lets
-  `envoys={"self_attn": Heads}` reach GPT-2's `attn`), and aliases compose
-  through ancestors, so with `rename={"transformer.h": "layers", ...}` the key
-  `"layers.0.self_attn"` names what `model.layers[0].self_attn` reaches. A `*`
-  component matches any one component: `"layers.*"` wraps every block, not the
-  container. A type or native-path match takes precedence over an alias match.
-  An alias from a class-keyed `rename` (`{GPT2Attention: "self_attn"}`) is a
-  spelling of that module only: `"self_attn"` matches it, `"self_attn.c_proj"`
-  matches nothing. Key the rename by name to reach what is under it.
+- **`envoys=` targets specific modules** by type or dotted path suffix (aliases
+  and `*` included); without it a custom `eproperty` lives on the model subclass.
+  Matching rules: [extending-envoy.md](extending-envoy.md#wiring-constraint-envoys).
 - **Batching needs both `_batch_size` and `_batch`,** and the failure lands at
   trace time, not construction time. With only the default, a second input invoke
   raises `NNsight does not support batching multiple invokes`.

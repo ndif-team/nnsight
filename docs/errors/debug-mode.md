@@ -93,36 +93,12 @@ with model.trace(prompt):
 
 ```python
 import nnsight
-nnsight.CONFIG.APP.DEBUG = True     # this process
+nnsight.CONFIG.APP.DEBUG = True     # this process; read when the exception is raised
 ```
 
-The flag is read when the exception is raised, so setting it after import works.
-
-On the command line, pass `-v` / `--verbose` (a plain `sys.argv` scan at import, so
-any launcher using `-v` — e.g. `pytest -v` — enables it too):
-
-```bash
-python your_script.py -v
-```
-
-Environment variable:
-
-```bash
-NNSIGHT_DEBUG=1 python your_script.py
-```
-
-Persist it to the user config file (`~/.config/nnsight/config.yaml`, or
-`$XDG_CONFIG_HOME/nnsight/config.yaml`, or `$NNSIGHT_CONFIG`):
-
-```python
-nnsight.CONFIG.APP.DEBUG = True
-nnsight.CONFIG.save()
-```
-
-`save()` writes the whole config to YAML and persists until you change it back and
-`save()` again. Default is `False`. `CONFIG.APP.REMOTE_LOGGING` (default `True`)
-controls the remote status display independently of `DEBUG`. See
-[docs/reference/config.md](../reference/config.md).
+Or `NNSIGHT_DEBUG=1`, or `-v` / `--verbose` on the command line (a plain `sys.argv`
+scan, so `pytest -v` enables it too). To persist it, and for every other setting, see
+[config.md](../reference/config.md).
 
 ## Errors from a deferring driver
 

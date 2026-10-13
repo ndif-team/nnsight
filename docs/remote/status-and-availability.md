@@ -95,13 +95,13 @@ nnsight.is_model_running("openai-community/gpt2", task="text-generation")
 
 ## Custom HOST
 
-If you've pointed `CONFIG.API.HOST` at a self-hosted or staging deployment, `status()` and `is_model_running()` query that host automatically (both go through `{CONFIG.API.HOST}/status`):
+If you've pointed `CONFIG.API.HOST` at another deployment, `status()` and `is_model_running()` query that host automatically (both go through `{CONFIG.API.HOST}/status`):
 
 ```python
 from nnsight import CONFIG
-CONFIG.API.HOST = "https://staging.api.ndif.us"
+CONFIG.API.HOST = "https://ndif.example.com"
 
-nnsight.status()    # queries staging
+nnsight.status()    # queries that host
 ```
 
 ## Gotchas

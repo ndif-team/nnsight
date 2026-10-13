@@ -41,7 +41,7 @@ CONFIG.save()                                 # explicit save
 
 | Name | Type | Default | What it does | When to change |
 |------|------|---------|--------------|----------------|
-| `API.HOST` | `str` | `"https://api.ndif.us"` | Base URL for NDIF requests (status, env, job submission, results). | Point at an internal NDIF deployment; or override per call with `remote="<host url>"`, or globally via `NDIF_HOST`. |
+| `API.HOST` | `str` | `"https://api.ndif.us"` | Base URL for NDIF requests (status, env, job submission, results); the websocket URL is derived from it (`https://…` → `wss://…`). | Point at an internal NDIF deployment; or override per call with `remote="<host url>"`, or globally via `NDIF_HOST`. |
 | `API.APIKEY` | `Optional[str]` | `None` | NDIF API key sent with every remote request. | Set via `CONFIG.set_default_api_key("...")`, the `NDIF_API_KEY` env var, or a Colab secret. |
 | `API.COMPRESS` | `bool` | `True` | zstandard-compress request payloads and result downloads for faster transfers. | Disable only when debugging the wire format / a compression issue. |
 
@@ -49,8 +49,8 @@ CONFIG.save()                                 # explicit save
 
 | Name | Type | Default | What it does | When to change |
 |------|------|---------|--------------|----------------|
-| `APP.DEBUG` | `bool` | `False` | When `True`, tracebacks keep nnsight's internal frames; when `False`, they are filtered to your own code. | Turn on to debug an exception you suspect is in nnsight internals. Also enabled by `NNSIGHT_DEBUG`. |
-| `APP.REMOTE_LOGGING` | `bool` | `True` | Whether `print(...)` from a remote run is streamed back as log events. | Disable to silence remote logs. |
+| `APP.DEBUG` | `bool` | `False` | When `True`, tracebacks keep nnsight's internal frames (when `False`, they are filtered to your own code), and remote runs are verbose: payload/result byte sizes, and each status on its own line instead of one in-place spinner. See [debug-mode.md](../errors/debug-mode.md). | Turn on to debug an exception you suspect is in nnsight internals. Also enabled by `NNSIGHT_DEBUG`. |
+| `APP.REMOTE_LOGGING` | `bool` | `True` | Show the remote status display (spinner + RECEIVED/QUEUED/RUNNING/LOG …) and the download progress bar; `print(...)` in a remote block arrives as `LOG` status here. | Disable for silent runs. |
 | `APP.PYMOUNT` | `bool` | `True` | Mount `.save()` onto every Python object (via the optional C extension) so `value.save()` works in a trace. When `False` (or the extension didn't build), use `nnsight.save(value)`. Mounting adds `.save` to all objects process-wide, so anything checking `hasattr(x, "save")` will see it. | Disable if you only use `nnsight.save()`, or a class's own `.save()` conflicts. |
 | `APP.DISABLE_CPP_BACKTRACE` | `bool` | `True` | At import, neutralize glibc `backtrace()` so a torch C++ error raised inside an interleaving greenlet surfaces as a normal Python exception instead of segfaulting the process. Empties torch's (rarely used) *C++* backtrace string process-wide; Python tracebacks and error messages are unaffected. Only glibc/x86-64 Linux is touched. | Turn off (via `NNSIGHT_DISABLE_CPP_BACKTRACE=0`) only if you need torch's C++ stack traces and accept the crash risk. |
 

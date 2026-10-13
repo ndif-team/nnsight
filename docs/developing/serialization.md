@@ -203,17 +203,8 @@ server actor's live objects.
 
 ### Model identity — `to_model_key`
 
-`Remotable.to_model_key()` (`remotable.py`) is
-`f"{to_import_path(self._remoteable_class())}:{self._remoteable_model_key()}"`.
-`_remoteable_class()` returns `type(self)` by default; deprecated aliases
-override it to the canonical class (`LanguageModel`/`VisionLanguageModel` return
-`TransformersModel`) so all three wrappings resolve to the one key the server
-knows. The model-specific suffix is JSON: `HuggingFaceModel` puts the canonical
-repo id and revision in it, and `TransformersModel` adds the resolved pipeline
-`task` — the server rebuilds the pipeline from the key instead of re-inferring
-one, and two tasks over one checkpoint (which can load different architecture
-classes) are two distinct keys, i.e. two deployments. `TestModelKey` in
-`tests/test_serialization.py` asserts all of this.
+The request names the model rather than serializing it; how that key is built is in
+[backends.md](./backends.md#model-identity-to_model_key).
 
 ## The response — `schema/response.py`
 
@@ -224,47 +215,19 @@ holds a presigned URL; the saves blob is downloaded separately and
 `torch.load`-ed into a `RESULT = Dict[str, Any]`. `pickle`/`unpickle` use
 `torch.save`/`torch.load` so tensors survive the wire.
 
-## The `remote="local"` dry run — `backends/local.py`
+## The `remote="local"` dry run
 
-`LocalSimulationBackend(Backend)` (`local.py`) exercises the entire remote path
-without a server. `model.trace(..., remote="local")` serializes the trace exactly
-as `RemoteBackend` would, then deserializes it **with the user's local
-(non-installed) modules hidden** — mimicking a server where the user's own source
-files don't exist — and runs the deserialized block against the real local model.
-If the block references a local function/class that wasn't shipped by value,
-deserialize raises `ModuleNotFoundError`, exactly as the server would.
+`LocalSimulationBackend` serializes and deserializes in-process with local modules
+hidden; see [backends.md](./backends.md#localsimulationbackend--a-serverless-dry-run).
+Both it and `RemoteBackend._serialize` call `pull_env()` first, which registers
+local, non-installed modules for by-value pickling so the user's own helpers ship.
 
-`_SERVER_MODULES` (`local.py`) is the allowlist of roots assumed present on
-NDIF and never hidden: `{"torch", "numpy", "transformers", "accelerate",
-"diffusers", "einops", "peft", "nnsight"}`. To simulate a stricter environment,
-edit this set. `TestLocalSimulation` / `TestServerExecution` in
-`tests/test_serialization.py` are the reference.
+## `save` and `mark`
 
-Note: `RemoteBackend._serialize` and `LocalSimulationBackend.__call__` both call
-`pull_env()` (from `nnsight.ndif`) first, which registers local, non-installed
-modules for by-value pickling so the server (or the simulated deserialize) doesn't
-hit `ModuleNotFoundError` on the user's own helpers.
-
-## `obj.save()` and the pymount C extension
-
-There are two ways to mark a value as saved inside a trace:
-
-- `nnsight.save(obj)` — a plain function.
-- `obj.save()` — a method mounted onto Python's base `object` type by the
-  `nnsight._c.py_mount` C extension (`src/nnsight/_c/py_mount.c`), which edits the
-  C-level method table because `object` rejects attribute assignment from Python.
-
-The extension is optional and built by `setup.py` (an `Extension` over
-`src/nnsight/_c/py_mount.c`). If no C compiler is available, setuptools silently
-skips it and `obj.save()` is unavailable — which is exactly why the Docker image
-installs `gcc`/`libc6-dev` so `.save()` works server-side. `nnsight.save(obj)`
-works either way. `tests/test_saving.py::TestSaveMethod` is skipped when the mount
-isn't built (`skipif(not save_mounted, ...)`).
-
-Both forms now **raise if called outside a running trace** — marking a value where
-no trace will read it is a mistake, not a silent no-op. The unguarded mechanism
-behind them is `mark()`, used internally by the remote and vLLM-serve backends to
-push a result home after a trace has already exited.
+`nnsight.save(obj)` and `obj.save()` (the optional C mount — see
+[testing.md](./testing.md#the-c-extension-save)) both raise outside a running trace.
+The unguarded mechanism behind them is `mark()`, which the remote and vLLM-serve
+backends use to push a result home after a trace has already exited.
 
 ## Lifecycle (NDIF round-trip)
 

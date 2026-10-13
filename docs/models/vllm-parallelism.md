@@ -54,18 +54,8 @@ with model.trace(prompt, temperature=0.0, max_tokens=6) as tracer:
         tops.append(logits[-1].topk(2).indices.clone())
 ```
 
-!!! warning "Masking the router logit is a vLLM recipe"
-    On **`TransformersModel`** the same line is a silent no-op. A transformers MoE block
-    calls its router as `_, top_k_weights, top_k_index = self.gate(hidden_states)`, and
-    element `[0]`, the logits, is discarded, so masking it changes nothing: setting all 64
-    logits to `-inf` gives `max|delta| = 0.0`. Edit the *selection* there instead, by
-    writing the routing weights or expert indices in `mlp.gate.output[1]` / `[2]`.
-
-    Two further traps on that side. With `norm_topk_prob=False`, masking a weight rescales
-    every surviving expert, so a never-selected expert can show a larger effect than a real
-    below-median one; ablate by selection, not by weight. And the router's `.input` /
-    `.output` have no batch axis (`(B*T, E)`), so per-token statistics over a padded batch
-    quietly include the pad rows.
+On `TransformersModel` the same router-logit mask is a silent no-op; see
+[ablating an MoE expert](../patterns/ablation.md#ablating-an-moe-expert).
 
 ## Hybrid (linear-attention) trunks
 
@@ -74,10 +64,8 @@ Qwen3-Next / Qwen3.5-style models interleave gated-delta-net layers with full-at
 ## vLLM versions
 
 Everything on this page was run on **0.27.1**. The `vllm` extra carries no upper
-bound, so `pip install "nnsight[vllm]"` takes whatever vLLM is current, and CI runs
-`pytest tests/ --ignore=tests/vllm` — `tests/vllm` needs a GPU and is run by hand
-against the release in the environment. Check the version you have rather than
-assuming a range. Two things about the engine you build are worth knowing, because
+bound, so `pip install "nnsight[vllm]"` takes whatever vLLM is current. Check the
+version you have rather than assuming a range. Two things about the engine you build are worth knowing, because
 nnsight arranges the first for you and the second is yours:
 
 - **The model runner.** vLLM 0.27 ships a second GPU model runner and defaults to
@@ -88,12 +76,5 @@ nnsight arranges the first for you and the second is yours:
   fail at the first collect with a missing method. The V2 runner is not
   instrumented.
 - **Workers are spawned, so a script needs an `if __name__ == "__main__":`
-  guard.** Dispatching an engine initializes CUDA in your process, and vLLM then
-  overrides `VLLM_WORKER_MULTIPROC_METHOD` to `spawn` itself, logging
-  `We must use the spawn multiprocessing start method ... Reasons: CUDA is
-  initialized`. Spawning re-imports the main module, so a `VLLM(...)` at module level
-  builds a second engine in the child and the engine core dies with
-  `An attempt has been made to start a new process before the current process has
-  finished its bootstrapping phase`. This is unconditional: one card and `mode="sync"`
-  hit it as readily as `tensor_parallel_size=8`. Notebooks have no main module to
-  re-import and are unaffected. See the gotcha on [the engine page](vllm.md).
+  guard** — on one card and `mode="sync"` as much as under tensor parallelism. See
+  [the engine page](vllm.md).

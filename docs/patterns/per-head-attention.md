@@ -2,7 +2,7 @@
 title: Per-Head Attention
 one_liner: Read and modify individual attention heads by reshaping the attention output, by reading the already-per-head tensor from `.source`, or by exposing a first-class `.heads` accessor with an `eproperty`.
 tags: [pattern, interpretability, attention, heads]
-related: [docs/patterns/attention-patterns.md, docs/usage/source.md, docs/patterns/ablation.md, docs/concepts/envoy.md, docs/developing/extending.md]
+related: [docs/patterns/attention-patterns.md, docs/usage/source.md, docs/patterns/ablation.md, docs/developing/extending-envoy.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, src/nnsight/intervention/source.py, tests/test_source.py, tests/test_language.py]
 ---
 
@@ -170,15 +170,10 @@ read or edit the per-head tensor.
 
 ## Pattern C: a first-class `.heads` accessor via `eproperty`
 
-For repeated use, expose the per-head view as its own served value. An `eproperty`
-is the descriptor behind `.input` / `.output`; you can define your own. The
-decorated stub is the **preprocess** — it takes the raw value served at the
-module's location and returns what you read. Put it on an `Envoy` subclass, then
-wire that subclass to a module with the `envoys=` argument, which maps a module
-**type** (or a dotted **path suffix**) to a custom `Envoy` class.
-
-Serve the **projection's input**, for the reason Pattern A's warning gives: that is
-the last point at which the hidden dimension still decomposes per head.
+For repeated use, expose the per-head view as its own served value: an `eproperty`
+on an `Envoy` subclass, wired to the output projection with `envoys=`. Serve the
+**projection's input**, for the reason Pattern A's warning gives: that is the last
+point at which the hidden dimension still decomposes per head.
 
 ```python
 import torch
@@ -220,57 +215,13 @@ the saved logits equal the source-op route's and the `c_proj.input` slice's
 bitwise: the same `+0.307` move of the `' floor'` logit, against `-0.178` for
 the post-projection reshape.
 
-Three things this example turns on, none of them guessable from the signature:
-
-- **A string key matches by dotted path suffix; a type key matches by class.**
-  `"attn.c_proj"` is the right key here because GPT-2's MLP has a `c_proj` too and
-  both are `Conv1D` — a type key would wrap the MLP projection as well. A suffix
-  also matches a `rename=` alias, composed through ancestors (`"layers.*.self_attn"`
-  under `rename={"transformer.h": "layers", "attn": "self_attn"}`), so the same map
-  can be written in standardized names and reused across architectures; `*` matches
-  any one path component.
-- **`key="input"` serves the raw `(args, kwargs)` pair**, not a bare tensor. The
-  preprocess destructures `(x,), _ = value`, and the transform has to hand back
-  the same shape: `((tensor,), {})`.
-- **`self._module` is the wrapped `torch.nn.Module`** — a `Conv1D` here, which
-  knows nothing about heads, so the count is a class attribute. Where the module
-  does carry it (an attention module has `num_heads`), read it from there.
-
-### Aliasing view vs `.transform`
-
-Whether you need a write-back callback depends on what the preprocess returns:
-
-- **Aliasing view.** `value.view(...)` shares storage with the served tensor, so an
-  in-place edit reaches the model without a `.transform`.
-- **Computed / non-aliasing value.** If the preprocess returns a copy (a
-  `.reshape()` that cannot view, a stack, an arithmetic result), in-place edits to
-  it never reach the model. Register a `@heads.transform` that maps the edited view
-  back to the module's real layout; it fires once, after the read, and is spliced
-  in like a swap.
-
-A `key="input"` preprocess is always in the second case, whatever it returns: the
-served value is a container, so something has to rebuild it. A module whose
-`.output` is a bare `[B, S, H]` tensor takes the same shape as the `Heads` example
-in `tests/test_language.py`:
-
-```python
-class Heads(Envoy):
-    n_heads = 12
-
-    @eproperty(key="output")
-    def heads(self, value):                     # [B, S, H] -> [B, n_heads, S, head_dim]
-        b, s, h = value.shape
-        return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
-
-    @heads.transform
-    def heads(self, value, raw):                # write the edited view back
-        b, nh, s, hd = value.shape
-        return value.transpose(1, 2).reshape(b, s, nh * hd)
-```
-
-See `docs/concepts/envoy.md` and `docs/developing/extending.md` for the full `eproperty`
-surface (`preprocess` / `postprocess` / `transform` / `provide`) and the `envoys=`
-wiring. `tests/test_language.py` (`TestCustomEnvoys`) is the worked, tested example.
+The key is the path suffix `"attn.c_proj"`, not the `Conv1D` type: GPT-2's MLP
+has a `c_proj` too, and a type key would wrap it as well. `key="input"` serves the
+raw `(args, kwargs)` pair, which is why the preprocess destructures it and the
+transform repacks it. Authoring details — `.transform`, `envoys=` matching rules,
+the `[B, S, H]` output variant — are in
+[extending-envoy.md](../developing/extending-envoy.md);
+`tests/test_language.py` (`TestCustomEnvoys`) is the tested example.
 
 ## Variations
 
@@ -336,5 +287,4 @@ gradient and sum over `head_dim` for a `[layer, head]` map. See
 - [activation-patching](activation-patching.md), [ablation](ablation.md).
 - [attribution-patching](attribution-patching.md) — per-head attribution maps.
 - `docs/usage/source.md` — how `.source` exposes intermediate ops.
-- `docs/concepts/envoy.md` — the extension surface (`eproperty`, subclassing `Envoy`).
-- `docs/developing/extending.md` — custom served values and the `envoys=` wiring.
+- `docs/developing/extending-envoy.md` — custom served values and the `envoys=` wiring.

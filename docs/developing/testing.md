@@ -21,12 +21,9 @@ The whole offline suite (everything except the two subtrees with hardware or
 version requirements):
 
 ```bash
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm --ignore=tests/tp
 ```
 
-- **`LD_LIBRARY_PATH`** points at the conda env's libs so the compiled C extension
-  (`nnsight._c.py_mount`, see below) and torch load their shared objects.
 - **`CUDA_VISIBLE_DEVICES=""`** forces CPU so the tests are deterministic and run
   without a GPU.
 - **`--ignore=tests/vllm`** skips the vLLM integration tests, which need a GPU and a
@@ -57,7 +54,8 @@ python -m pytest tests/test_language.py -k generation    # by name
 python -m pytest tests/test_saving.py -x                 # stop on first failure
 ```
 
-`tests/conftest.py` inserts `src/` on `sys.path` and defines one shared fixture:
+Tests import `nnsight` as installed (install the checkout editable); `tests/conftest.py`
+does not touch `sys.path`. It defines one shared fixture:
 `gpt2` (module-scoped, a dispatched `TransformersModel("openai-community/gpt2")`).
 Heavy models are shared fixtures; small ones are constructed inline per test file.
 
@@ -84,8 +82,8 @@ tests that assert the method form are guarded:
 ```
 
 If `tests/test_saving.py::TestSaveMethod` is skipped, rebuild the extension
-(`pip install -e .` in an env with `gcc`/`libc6-dev`) — server images install those
-precisely so `.save()` works remotely.
+(`pip install -e .` with a C compiler available). A server environment needs a C
+compiler for the same reason, or `.save()` is unavailable remotely.
 
 ## Offline models
 
@@ -151,7 +149,10 @@ carry no `test_` prefix precisely so pytest does not collect them.
 
 ### `tests/vllm/` (GPU + `vllm` required)
 
-Run separately: `python -m pytest tests/vllm/`. Its `conftest.py` sets
+Run separately: `python -m pytest tests/vllm/`. CI runs `pytest tests/ --ignore=tests/vllm`,
+so this subtree is never run automatically — run it by hand on a GPU against the
+vLLM release in your environment when you touch `modeling/vllm/` (the `vllm` extra
+has no upper bound). Its `conftest.py` sets
 `VLLM_ALLOW_INSECURE_SERIALIZATION=1` (only for the request-state tests, which ship a function to the workers through `collective_rpc`; tracing itself needs no such flag).
 Files: `test_tracing.py` (logits/generation/sampling/interventions/input forms/early
 stop/deferred errors/cache), `test_async.py` (async engine streaming),
