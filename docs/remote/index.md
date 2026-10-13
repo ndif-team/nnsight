@@ -3,7 +3,7 @@ title: Remote Execution on NDIF
 one_liner: Index for the docs/remote/ folder; pick a guide based on what you want to do with NDIF.
 tags: [remote, ndif, index]
 related: [docs/index.md, docs/usage/trace.md, docs/usage/generate.md]
-sources: [src/nnsight/modeling/mixins/remotable.py:19, src/nnsight/intervention/backends/remote.py:39, src/nnsight/ndif.py:197]
+sources: [src/nnsight/modeling/mixins/remotable.py, src/nnsight/intervention/backends/remote.py, src/nnsight/ndif.py]
 ---
 
 # Remote Execution on NDIF

@@ -3,7 +3,7 @@ title: NDIF Overview
 one_liner: What NDIF is, why the client model is on the meta device, job status values, what a job cost, and dry-running the remote path with remote="local".
 tags: [remote, ndif, architecture]
 related: [docs/remote/api-key-and-config.md, docs/remote/remote-trace.md, docs/remote/status-and-availability.md]
-sources: [src/nnsight/modeling/mixins/remotable.py:19, src/nnsight/intervention/backends/remote.py:39, src/nnsight/schema/response.py:13, src/nnsight/ndif.py:197]
+sources: [src/nnsight/modeling/mixins/remotable.py, src/nnsight/intervention/backends/remote.py, src/nnsight/schema/response.py, src/nnsight/ndif.py]
 ---
 
 # NDIF Overview

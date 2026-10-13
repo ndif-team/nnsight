@@ -48,6 +48,13 @@ value and returns whatever the worker parks on next, or `None` when the worker
 finishes (a greenlet is falsy once it has run to completion, which is what
 `Mediator.alive` tests).
 
+If the worker raises, `Mediator.switch` stashes its traceback on the exception as
+`__intervention_tb__` before the model's frames unwind on top; `Tracer.traceback`
+and `errors.capture_exception` prefer it, so the user sees their own line. Code
+running inside a worker reaches its own mediator with `getcurrent().mediator()`
+(a weakref set on the greenlet); `Mediator.current` wraps it, raising `Cannot
+access ... outside of interleaving` when no worker is running.
+
 ### The event protocol
 
 `Event` has four members:

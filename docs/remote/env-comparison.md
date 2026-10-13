@@ -3,7 +3,7 @@ title: Local vs Remote Environment Comparison
 one_liner: Diff your local Python environment against NDIF's to debug "works locally, fails remotely" issues.
 tags: [remote, ndif, debugging, environment]
 related: [docs/remote/register-local-modules.md, docs/remote/ndif-overview.md]
-sources: [src/nnsight/ndif.py:424, src/nnsight/ndif.py:364, src/nnsight/ndif.py:275, src/nnsight/ndif.py:307]
+sources: [src/nnsight/ndif.py]
 ---
 
 # Local vs Remote Environment Comparison

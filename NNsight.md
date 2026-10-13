@@ -15,7 +15,7 @@ This document explains the whole system: the problem it solves, the design
 principles behind it, and how the layers — tracing, interleaving, the envoy tree,
 the feature set, the model wrappers, remote execution — actually work. It favors the
 *why* and the mental model over exhaustive API listing; the recipe-style pages under
-[`docs/`](docs/) (routed by [`CLAUDE.md`](CLAUDE.md)) are the task reference, and the
+[`docs/`](docs/index.md) (routed by [`CLAUDE.md`](CLAUDE.md)) are the task reference, and the
 source is the final word. Where a section maps to a `docs/` page or a source file,
 it says so.
 

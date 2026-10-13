@@ -3,7 +3,7 @@ title: Remote Trace
 one_liner: Run a single forward-pass trace on NDIF by passing remote=True; the canonical first remote run and the request lifecycle.
 tags: [remote, ndif, trace]
 related: [docs/remote/index.md, docs/remote/remote-session.md, docs/remote/non-blocking-jobs.md, docs/usage/trace.md]
-sources: [src/nnsight/modeling/mixins/remotable.py:19, src/nnsight/intervention/backends/remote.py:39, src/nnsight/intervention/backends/remote.py:304]
+sources: [src/nnsight/modeling/mixins/remotable.py, src/nnsight/intervention/backends/remote.py]
 ---
 
 # Remote Trace

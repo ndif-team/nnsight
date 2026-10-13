@@ -85,8 +85,9 @@ modes share one serialize+send step:
 
 - **Blocking** (`blocking=True`, default) — `request` (`remote.py`) opens a
   websocket to `/subscribe`, takes the session id, POSTs the payload to `/request`,
-  then loops on `connection.recv()` until a `COMPLETED` status arrives, downloading
-  the result blob from a presigned URL and `torch.load`ing it. The saved values are
+  then loops on `connection.recv()` until a `COMPLETED` status arrives. The result
+  blob arrives inline as a binary websocket frame or as a presigned URL to download,
+  depending on its size, and is `torch.load`ed. The saved values are
   marked (`save`) and pushed back into the caller's frame, just like a local trace
   (`_push`, `remote.py`).
 - **Non-blocking** (`blocking=False`) — `submit` (`remote.py`) POSTs without a

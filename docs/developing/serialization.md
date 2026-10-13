@@ -176,8 +176,9 @@ The request names the model rather than serializing it; how that key is built is
 ## The response — `schema/response.py`
 
 `ResponseModel` carries a job's `id`, `status` (the `Status` enum in `response.py`),
-`description`, and `data`. On `COMPLETED`, `data` holds a presigned URL; the saves
-blob is downloaded separately and `torch.load`-ed, since `pickle`/`unpickle` use
+`description`, and `data`. On `COMPLETED`, the saves blob arrives either inline (a
+binary websocket frame) or, depending on its size, as a presigned URL in `data` that
+the client downloads; either way it is `torch.load`-ed, since `pickle`/`unpickle` use
 `torch.save`/`torch.load` so tensors survive the wire.
 
 ## The `remote="local"` dry run
@@ -191,7 +192,7 @@ local, non-installed modules for by-value pickling so the user's own helpers shi
 
 `nnsight.save(obj)` and `obj.save()` (the optional C mount — see
 [testing.md](./testing.md#the-c-extension-save)) both raise outside a running trace.
-The unguarded mechanism behind them is `mark()`, which the remote and vLLM-serve
+The unguarded mechanism behind them is `nnsight.tracing.tracer.mark()`, which the remote and vLLM-serve
 backends use to push a result home after a trace has already exited.
 
 ## Lifecycle (NDIF round-trip)
@@ -206,9 +207,9 @@ backends use to push a result home after a trace has already exited.
    persistent IDs resolve to the server's live model/tokenizer/module tree.
 4. **Execute.** The reconstructed tracer runs against the server-side model; saved
    values are collected.
-5. **Return.** Saves are `torch.save`-pickled, zstd-compressed, uploaded, and the
-   presigned URL is returned in a `COMPLETED` `ResponseModel`. The client downloads
-   and `torch.load`s them; `RemoteBackend._push` writes them into the caller's
+5. **Return.** Saves are `torch.save`-pickled, zstd-compressed, and returned with
+   `COMPLETED`: inline on the websocket or, depending on size, uploaded and sent as a
+   presigned URL the client downloads. The client `torch.load`s them; `RemoteBackend._push` writes them into the caller's
    `x = ...save()` variables.
 
 `LocalSimulationBackend` runs steps 1, 3, and 4 in-process.

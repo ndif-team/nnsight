@@ -30,7 +30,7 @@ too large for it via the [NDIF](https://ndif.us/) infrastructure. nnsight works 
 any PyTorch model and ships wrappers for HuggingFace, diffusers, and vLLM.
 
 > 📖 For how it works under the hood — tracing, interleaving, the envoy tree — read
-> **[NNsight.md](./NNsight.md)**. Task recipes live under [`docs/`](docs/).
+> **[NNsight.md](./NNsight.md)**. Task recipes live under [`docs/`](docs/index.md).
 
 ## Installation
 
@@ -131,7 +131,7 @@ with model.trace("The Eiffel Tower is in", remote=True):
 
 There's more — **source tracing** into a module's forward (`.source`), persistent
 **`edit()`**, **`skip()`**, **`scan()`** for shapes, **`cache()`**, **`session()`**,
-and the **vLLM** and **diffusion** runtimes. See [`docs/`](docs/) and
+and the **vLLM** and **diffusion** runtimes. See [`docs/`](docs/index.md) and
 [NNsight.md](./NNsight.md).
 
 ## Your own model
@@ -169,7 +169,7 @@ Give an agent up-to-date nnsight knowledge one of these ways:
 
 - **[nnsight.net](https://www.nnsight.net)** — tutorials, guides, API reference
 - **[NNsight.md](./NNsight.md)** — the design-and-implementation manual
-- **[CLAUDE.md](./CLAUDE.md)** + **[docs/](docs/)** — the task reference
+- **[docs/index.md](docs/index.md)** (routed for agents by [CLAUDE.md](./CLAUDE.md)) — the task reference
 - **[nnsight.net/status](https://nnsight.net/status/)** — models available on NDIF
 
 ## Citation

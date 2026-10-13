@@ -3,7 +3,7 @@ title: Remote Session
 one_liner: Bundle multiple traces into a single NDIF job to share one queue wait and pass values directly between traces.
 tags: [remote, ndif, session]
 related: [docs/remote/remote-trace.md, docs/remote/non-blocking-jobs.md, docs/remote/index.md]
-sources: [src/nnsight/modeling/mixins/remotable.py:35, src/nnsight/intervention/backends/remote.py:39]
+sources: [src/nnsight/modeling/mixins/remotable.py, src/nnsight/intervention/backends/remote.py]
 ---
 
 # Remote Session
@@ -87,6 +87,7 @@ The list is created on the server, mutated by each trace, and transmitted back a
 ## Gotchas
 
 - Sessions cut **queue** and **transport** overhead, not GPU time. A 5-minute session is still 5 minutes of compute.
+- **Sessions have a server-side time limit.** A session that runs past it is killed, so split a long sweep into several sessions.
 - Names the block reads from the enclosing scope **are** captured: every one is pickled into the request payload. They must be picklable, they arrive on CPU in their client dtype, and their size is added to your upload — the usual reason a sweep's payload gets large. Build data inside the block when you want it *off* the wire.
 - Iterating `for layer in model.model.layers:` inside a session is ordinary Python during block capture, same as local tracing — not a server-side loop.
 - **One trace fails → the whole session aborts.** If any inner trace raises, the job ends and no further traces run. Structure fault-tolerant pipelines as separate jobs.

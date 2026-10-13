@@ -3,7 +3,7 @@ title: NDIF Status and Availability
 one_liner: Check the NDIF service state and whether a specific model is currently running before submitting.
 tags: [remote, ndif, status]
 related: [docs/remote/index.md, docs/remote/api-key-and-config.md]
-sources: [src/nnsight/ndif.py:210, src/nnsight/ndif.py:308, src/nnsight/ndif.py:134]
+sources: [src/nnsight/ndif.py]
 ---
 
 # NDIF Status and Availability

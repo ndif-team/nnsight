@@ -3,7 +3,7 @@ title: Async Remote Jobs
 one_liner: Await a remote NDIF job from an event loop, or async-iterate its raw status updates.
 tags: [remote, ndif, async, asyncio]
 related: [docs/remote/remote-trace.md, docs/remote/non-blocking-jobs.md, docs/remote/index.md]
-sources: [src/nnsight/intervention/backends/remote.py:339, src/nnsight/intervention/backends/remote.py:394, src/nnsight/intervention/backends/remote.py:417]
+sources: [src/nnsight/intervention/backends/remote.py]
 ---
 
 # Async Remote Jobs

@@ -3,7 +3,7 @@ title: Non-Blocking Remote Jobs
 one_liner: Submit a remote trace or session, get the job ID immediately, and poll for the result later.
 tags: [remote, ndif, async]
 related: [docs/remote/remote-trace.md, docs/remote/remote-session.md, docs/remote/remote-async.md, docs/remote/index.md]
-sources: [src/nnsight/intervention/backends/remote.py:93, src/nnsight/intervention/backends/remote.py:263, src/nnsight/intervention/backends/remote.py:280]
+sources: [src/nnsight/intervention/backends/remote.py]
 ---
 
 # Non-Blocking Remote Jobs

@@ -1,6 +1,6 @@
 ---
 title: Session
-one_liner: `model.session()` wraps several traces in one scope so values pass between them without `.save()`.
+one_liner: "`model.session()` wraps several traces in one scope so values pass between them without `.save()`."
 tags: [usage, session, multi-trace]
 related: [docs/usage/trace.md, docs/usage/save.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/tracer.py]

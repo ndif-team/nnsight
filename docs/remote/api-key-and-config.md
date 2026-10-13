@@ -3,7 +3,7 @@ title: API Key and Configuration
 one_liner: Set the NDIF API key and tune host/logging/debug flags via CONFIG, env vars, or Colab userdata.
 tags: [remote, ndif, config]
 related: [docs/remote/index.md, docs/remote/remote-trace.md]
-sources: [src/nnsight/schema/config.py:12, src/nnsight/schema/config.py:74, src/nnsight/intervention/backends/remote.py:47]
+sources: [src/nnsight/schema/config.py, src/nnsight/intervention/backends/remote.py]
 ---
 
 # API Key and Configuration

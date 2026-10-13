@@ -131,8 +131,8 @@ them as invokes in one trace — see [invoke-and-batching](../usage/invoke-and-b
 - **Memory.** Patterns grow as `seq^2` per head per layer. For long contexts save
   only the heads / layers you need, and wrap read-only capture in `torch.no_grad()`
   — a saved pattern otherwise pins the whole forward graph.
-- Unpacking a tuple across `.save()` (`a, b = op.output.save()`) leaves both names
-  unbound. Save the tuple to one name and index it afterwards.
+- Don't unpack across `.save()` (`a, b = op.output.save()`); see
+  [save](../usage/save.md#gotchas).
 
 ## Related
 

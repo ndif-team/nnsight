@@ -29,8 +29,8 @@ CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm --ignore=tes
 - **`--ignore=tests/vllm`** skips the vLLM integration tests, which need a GPU and a
   `vllm` install.
 - **`--ignore=tests/tp`** skips the tensor-parallel tests. Drop it on transformers
-  **>= 5.16** and keep it below that: 5.16 rebuilt tensor parallelism on DTensor,
-  and `nnsight.modeling.tp` targets that build
+  **>= 5.19** and keep it below that: `nnsight.modeling.tp` targets 5.19's
+  distributed rework and refuses older releases
   (`MINIMUM_TRANSFORMERS`, `src/nnsight/modeling/tp/fragments.py`). On an older
   transformers `tests/tp/` errors at collection and
   `tests/test_tensor_parallel_rules.py` fails — 45 red results that say nothing
@@ -139,7 +139,7 @@ paths in `test_language.py` (`skipif(not peft_installed)`).
 | `test_tensor_parallel_rules.py` | the tensor-parallel rule table, checked without a GPU |
 | `test_login.py` | the `nnsight login` CLI entry point |
 
-### `tests/tp/` (transformers >= 5.16; two devices for the GPU files)
+### `tests/tp/` (transformers >= 5.19; two devices for the GPU files)
 
 Run separately: `python -m pytest tests/tp/`. `test_cpu_gloo.py` (tensor
 parallelism over gloo, so CI covers it at all) and `test_cpu_expert_parallel.py`

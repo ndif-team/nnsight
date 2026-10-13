@@ -3,7 +3,7 @@ title: Register Local Modules
 one_liner: Make local helper modules available inside remote intervention code by shipping their source with the request.
 tags: [remote, ndif, serialization]
 related: [docs/remote/remote-trace.md, docs/remote/env-comparison.md, docs/remote/ndif-overview.md]
-sources: [src/nnsight/ndif.py:31, src/nnsight/ndif.py:318, src/nnsight/intervention/backends/remote.py:249]
+sources: [src/nnsight/ndif.py, src/nnsight/intervention/backends/remote.py]
 ---
 
 # Register Local Modules

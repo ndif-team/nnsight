@@ -368,7 +368,7 @@ Every `HuggingFaceModel` is built with a `TPFragments` that stays inert until it
 instruments a module the model's own `tp_plan` names with `_device_mesh` set, so
 eager loading and the meta-then-`dispatch()` path both pick it up. The
 gather-serve-reshard bracketing is the interleaver's generic `Fragments` seam,
-shared with vLLM; see [interleaver-internals.md](../developing/interleaver-internals.md#handle-one-visit)
+shared with vLLM; see [interleaver-internals.md](../developing/interleaver-internals.md#handle--one-visit)
 and `src/nnsight/intervention/fragments.py`.
 
 ## Related

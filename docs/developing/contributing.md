@@ -78,7 +78,7 @@ Run the offline suite on CPU (details in [testing.md](./testing.md)):
 CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm --ignore=tests/tp
 ```
 
-Drop `--ignore=tests/tp` on transformers >= 5.16; below it the tensor-parallel
+Drop `--ignore=tests/tp` on transformers >= 5.19; below it the tensor-parallel
 tests fail for reasons unrelated to your change.
 
 Then, depending on what you touched, run the mirroring test file(s) — the suite is
@@ -96,7 +96,7 @@ laid out one file per concept:
 | `modeling/diffusion.py` | `tests/test_diffusion.py` |
 | `modeling/vlm.py` | `tests/test_vlm.py` |
 | `modeling/quantization.py` | `tests/test_quantization.py` |
-| `modeling/tp/` | `tests/test_tensor_parallel_rules.py`, `python -m pytest tests/tp/` (needs transformers >= 5.16) |
+| `modeling/tp/` | `tests/test_tensor_parallel_rules.py`, `python -m pytest tests/tp/` (needs transformers >= 5.19) |
 | anything you deprecate | `tests/test_deprecations.py` |
 | `intervention/backends/remote.py` | `tests/test_remote_backend.py`, `tests/test_serialization.py` (`remote="local"`) |
 | `modeling/vllm/` | `python -m pytest tests/vllm/` (needs GPU + `vllm`) |

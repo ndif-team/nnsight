@@ -87,7 +87,7 @@ model's forward pass: reading `.output` parks the greenlet until the model reach
 that module and the controller nnsight installs as the module's `forward` hands the
 value over; assigning to `.output` splices a value in. The event protocol is
 `VALUE`/`SWAP`/`SKIP`/`BARRIER`. The full picture is in [NNsight.md](./NNsight.md);
-the task docs are under [`docs/`](docs/), routed by [docs/index.md](docs/index.md).
+the task docs are under `docs/`, routed by [docs/index.md](docs/index.md).
 
 ## Making changes
 
@@ -113,7 +113,8 @@ Development happens on `dev`; `main` is the release branch. CI runs on every pul
 request and on pushes to `main` and `dev`.
 
 1. Branch from the latest `dev`: `git checkout -b my-feature origin/dev`.
-2. Make the change and add tests; run `CUDA_VISIBLE_DEVICES="" pytest tests/ -q --ignore=tests/vllm`.
+2. Make the change and add tests; run `CUDA_VISIBLE_DEVICES="" pytest tests/ -q --ignore=tests/vllm --ignore=tests/tp`
+   (drop `--ignore=tests/tp` on transformers >= 5.19).
    Update the docs the change affects (see [Documentation](#documentation)).
 3. Commit with an `area: summary` subject (e.g. `tracing: ...`, `docs: ...`) and open
    a PR against `dev`.
@@ -124,7 +125,7 @@ Which tests to run for what you touched, and the commit conventions in full:
 
 ## Documentation
 
-The docs under [`docs/`](docs/) exist so a reader — often a coding agent — can find
+The docs under [`docs/`](docs/index.md) exist so a reader — often a coding agent — can find
 the one page for their task and apply it without reading anything else. Keep them
 that way:
 

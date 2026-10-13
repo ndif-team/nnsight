@@ -3,7 +3,7 @@ title: Model Classes
 one_liner: Decision tree for picking the right nnsight model wrapper.
 tags: [models, index]
 related: [docs/index.md, docs/models/transformers-model.md, docs/models/tensor-parallel.md, docs/models/quantization.md, docs/models/nnsight-base.md, docs/models/diffusion-model.md, docs/models/vllm.md, docs/models/language-model.md, docs/models/vision-language-model.md]
-sources: [src/nnsight/__init__.py:53, src/nnsight/modeling/base.py:6, src/nnsight/modeling/transformers.py:161, src/nnsight/modeling/diffusion.py:38, src/nnsight/modeling/vllm/vllm.py:36, src/nnsight/modeling/language.py:19, src/nnsight/modeling/vlm.py:29]
+sources: [src/nnsight/__init__.py, src/nnsight/modeling/base.py, src/nnsight/modeling/transformers.py, src/nnsight/modeling/diffusion.py, src/nnsight/modeling/vllm/vllm.py, src/nnsight/modeling/language.py, src/nnsight/modeling/vlm.py]
 ---
 
 # Model Classes
@@ -44,6 +44,6 @@ Pick the model wrapper that matches what you have. All wrappers expose the same 
 
 ## Related
 
-- [docs/concepts/](../concepts/) — the underlying tracing / Envoy / interleaver model
-- [docs/remote/](../remote/) — running these on NDIF
+- [docs/concepts/](../concepts/index.md) — the underlying tracing / Envoy / interleaver model
+- [docs/remote/](../remote/index.md) — running these on NDIF
 - [docs/errors/symptom-index.md](../errors/symptom-index.md) — something broke

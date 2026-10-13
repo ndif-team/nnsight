@@ -1,6 +1,6 @@
 ---
 title: Backward and Gradients
-one_liner: with tensor.backward(): runs the real backward interleaved so .grad on tensors is readable and editable.
+one_liner: "`with tensor.backward():` runs the real backward interleaved so `.grad` on tensors is readable and editable."
 tags: [usage, backward, gradients]
 related: [docs/usage/access-and-modify.md, docs/usage/save.md, docs/usage/trace.md]
 sources: [src/nnsight/intervention/backward.py, src/nnsight/__init__.py]

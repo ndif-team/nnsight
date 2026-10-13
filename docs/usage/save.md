@@ -86,5 +86,6 @@ with model.trace("Hello"):
 - Forgetting `.save()` leaves the variable undefined after the block: `NameError` in a script, `UnboundLocalError` inside a function.
 - **A saved value comes back by its variable *name*, so bind it.** A value marked but never assigned (a bare `model.logits.save()` on its own line) has no local to return under, so it silently doesn't come back. Invisible locally, obvious on vLLM/remote/serve where you read it by name: `output.saves["logits"]` will be missing. Write `logits = model.logits.save()`.
 - **Nested traces don't need `.save()` between them.** Only the outermost boundary filters to saved values; an inner `model.trace()` inside a `model.session()` pushes all its locals up, so a value from one inner trace is usable in the next unsaved (not on `VLLM`, where each trace is its own request). Save only what leaves the session.
+- **Unpacking across `.save()` loses both values.** `a, b = x.output.save()` marks the tuple, which is never bound to a name, so `a` and `b` come back unbound. Save first, then unpack: `out = x.output.save()` inside the trace, `a, b = out` after it.
 - Saving the same value twice is harmless.
 - Mutating a saved tensor in place after the trace affects whatever it still aliases. Clone for isolation: `nnsight.save(x.clone())`.

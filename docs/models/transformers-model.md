@@ -146,7 +146,7 @@ print(ids.shape)                          # torch.Size([1, 13])  (10 prompt + 3 
 print(model.tokenizer.decode(ids[0]))     # "The Eiffel Tower is in the city of Paris, and"
 ```
 
-`generate` goes through the model and decodes with the checkpoint's own **`generation_config`** — not the `task_specific_params` `pipe` folds in. That config is the checkpoint's to set: gpt2 leaves it greedy, while many instruct checkpoints ship `do_sample=True` in it (`gemma-3-1b-it`, `Llama-3.1-8B-Instruct`, `Qwen3-4B-Instruct-2507` all do), so **generate samples on those unless you say otherwise**. Check `model.generation_config.do_sample`, and pass `do_sample=False` when you need determinism. Read the ids off `tracer.result` (preferred). `**kwargs` are forwarded to the model's `generate`, e.g. `max_new_tokens`, `num_return_sequences`, `generation_config=`.
+`generate` decodes with the checkpoint's own `generation_config`, which on many instruct checkpoints samples — pass `do_sample=False` for determinism (see [generate](../usage/generate.md#decoding-follows-the-checkpoints-generation_config)). Read the ids off `tracer.result`. `**kwargs` are forwarded to the model's `generate`, e.g. `max_new_tokens`, `num_return_sequences`, `generation_config=`.
 
 Called directly (no `with`), it just generates and returns the ids:
 
@@ -343,7 +343,7 @@ Reading, editing, gradients, `skip`, `tracer.cache` and `rename=` work as on any
 
 ## Remote
 
-`TransformersModel` is remoteable (`trace(..., remote=True)`; see [docs/remote/](../remote/)). `model.to_model_key()` is the repo id + revision, canonicalized via the Hub, plus the resolved pipeline task, so each task of a checkpoint is its own remote model and the server rebuilds the exact pipeline you traced. The deprecated aliases use this class's key with their pinned task, so they reach a deployment only when its task is `text-generation` / `image-text-to-text` respectively.
+`TransformersModel` is remoteable (`trace(..., remote=True)`; see [docs/remote/](../remote/index.md)). `model.to_model_key()` is the repo id + revision, canonicalized via the Hub, plus the resolved pipeline task, so each task of a checkpoint is its own remote model and the server rebuilds the exact pipeline you traced. The deprecated aliases use this class's key with their pinned task, so they reach a deployment only when its task is `text-generation` / `image-text-to-text` respectively.
 
 ## Related
 

@@ -276,7 +276,8 @@ Empty invokes always work.
 
 - **A trace whose only invoke is empty has nothing to run**: it contributes no
   rows, and on `TransformersModel` surfaces as `IndexError: list index out of
-  range` from the tokenizer.
+  range` from the tokenizer; on a bare `NNsight` the module is called with no
+  input, a `TypeError` (`forward() missing 1 required positional argument`).
 - **Direct input and invokes are alternatives, not a combination.** Opening
   `tracer.invoke(y)` inside `with model.trace(x)` raises `ValueError: Cannot invoke
   while the model is already running.`, because the direct input already started

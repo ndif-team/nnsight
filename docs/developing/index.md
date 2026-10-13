@@ -8,7 +8,7 @@ sources: []
 
 # Developing NNsight
 
-The internals reference for nnsight: source `file:line` citations, data flow
+The internals reference for nnsight: source citations, data flow
 between subsystems, and how to add tracers, backends, runtimes and served values.
 For running a trace, start in [`docs/usage/`](../usage/index.md); for the shorter
 mental models behind this machinery, read [`docs/concepts/`](../concepts/index.md)
