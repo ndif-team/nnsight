@@ -90,7 +90,6 @@ The list is created on the server, mutated by each trace, and transmitted back a
 - **Sessions have a server-side time limit.** A session that runs past it is killed, so split a long sweep into several sessions.
 - Names the block reads from the enclosing scope **are** captured: every one is pickled into the request payload. They must be picklable, they arrive on CPU in their client dtype, and their size is added to your upload — the usual reason a sweep's payload gets large. Build data inside the block when you want it *off* the wire.
 - Iterating `for layer in model.model.layers:` inside a session is ordinary Python during block capture, same as local tracing — not a server-side loop.
-- Weights, gradients, training and recursive `.source` need a trusted key; under a standard key they fail or silently no-op — see [remote-trace.md](./remote-trace.md#standard-and-trusted-keys).
 - **One trace fails → the whole session aborts.** If any inner trace raises, the job ends and no further traces run. Structure fault-tolerant pipelines as separate jobs.
 
 ## Related

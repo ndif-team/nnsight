@@ -123,9 +123,6 @@ A result container must be saved from inside the block — create it with
   them as one forward pass; the loops above batch ten and 32 at a time. Batched input is
   **left**-padded, so `[:, -1]` is the true final token of every row even when the
   prompts differ in length (see [invoke-and-batching.md](../usage/invoke-and-batching.md)).
-- **Works under a standard API key.** A sweep only reads and edits activations, so
-  the [trusted-key restrictions](../remote/remote-trace.md#standard-and-trusted-keys)
-  on weights, gradients and training do not apply.
 - **Sessions have a server-side time limit.** Split a long sweep into several
   sessions rather than one — see [remote-session.md](../remote/remote-session.md#gotchas).
 

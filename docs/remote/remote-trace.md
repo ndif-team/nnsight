@@ -95,17 +95,6 @@ with model.trace("...", backend=backend):
     out = model.lm_head.output.save()
 ```
 
-## Standard and trusted keys
-
-Under a standard API key NDIF runs your block sandboxed beside the model. Reading and editing activations works; anything that needs the weights does not:
-
-- Module weights and `model.device` / `module.device` read as `meta`: reading a weight raises `Cannot copy out of meta tensor`, and `.to(model.device)` silently drops the data.
-- Training through the model completes but never trains — the loss repeats bit-identically.
-- `.grad` and `backward()` raise `OutOfOrderError` naming a number.
-- Recursive `.source` raises `SourceNotAvailable`.
-
-A key NDIF has marked trusted lifts all four. To tell which you have, `print(module.device)` inside a block: `meta` means a standard key.
-
 ## Gotchas
 
 - **Mutating a variable created outside the block changes only the server's copy.** Create and `.save()` the value inside the block, or call `nnsight.save(outer)` inside it, which rebinds the client's name to the server's version — see [remote-session.md](./remote-session.md#saving-collections-built-across-traces).
