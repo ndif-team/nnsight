@@ -121,6 +121,7 @@ class RemoteBackend(Backend):
             print(f"[remote] {message}")
 
     def __call__(self, tracer: Optional[Tracer] = None) -> Optional[RESULT]:
+        self.meta = None
         # Non-blocking: submit on the first call (no job_id yet), poll thereafter.
         # A poll returns the saved values on COMPLETED, else None (still running);
         # call again to re-poll. See submit()/poll().
@@ -330,6 +331,7 @@ class RemoteBackend(Backend):
         each status response to the object store for [`poll`][nnsight.intervention.backends.remote.RemoteBackend.poll] to read. Returns
         None — call [`poll`][nnsight.intervention.backends.remote.RemoteBackend.poll] (or the backend again) to fetch the result.
         """
+        self.meta = None
         blob = self._serialize(tracer)
         request = RequestModel(
             model_key=self.model_key, compress=self.compress, env=self.env
@@ -442,6 +444,7 @@ class AsyncRemoteBackend(RemoteBackend):
 
         # Fire the request synchronously, then return without waiting: subscribe,
         # take the session id, POST the payload. Only the status stream is awaited.
+        self.meta = None
         blob = self._serialize(tracer)
         self.connection = websocket.create_connection(
             f"{self.ws_host}/subscribe",
