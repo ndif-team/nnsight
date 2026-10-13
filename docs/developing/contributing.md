@@ -10,16 +10,15 @@ sources: [STYLE.md, pyproject.toml, tests/]
 
 ## What this covers
 
-How work lands in this repo: the canonical style guide, branch and commit
-conventions, what to run before opening a PR, and how to update docs. The authoritative style document
-is [`STYLE.md`](../../STYLE.md) at the repository root — read it first; the notes
-here don't restate it.
+How work lands in this repo: the style guide, branch and commit conventions, what
+to run before opening a PR, and how to update docs. Setup, prerequisites, bug
+reports and community links are in the root [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
 ## Style: read `STYLE.md`
 
-[`STYLE.md`](../../STYLE.md) is the house style, written for humans and agents
-alike. Its philosophy drives every rule, so when a rule doesn't cover your case the
-philosophy tells you what to do. The load-bearing points:
+[`STYLE.md`](../../STYLE.md) at the repository root is the authoritative house
+style; when a rule doesn't cover your case, its philosophy section decides. The
+load-bearing points:
 
 - **Comment *why*, never *what*.** If a comment paraphrases the line under it,
   delete it. Say what the reader can't see: greenlet/weakref lifetimes, handoff
@@ -73,17 +72,14 @@ Co-Authored-By: <agent name> <noreply@anthropic.com>
 
 ## Before you open a PR
 
-Setup, prerequisites and bug reports are in the root
-[CONTRIBUTING.md](../../CONTRIBUTING.md). Run the offline suite on CPU (see
-[testing.md](./testing.md) for the details):
+Run the offline suite on CPU (details in [testing.md](./testing.md)):
 
 ```bash
 CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm --ignore=tests/tp
 ```
 
 Drop `--ignore=tests/tp` on transformers >= 5.16; below it the tensor-parallel
-tests are red for a reason that has nothing to do with your change (see
-[testing.md](./testing.md)).
+tests fail for reasons unrelated to your change.
 
 Then, depending on what you touched, run the mirroring test file(s) — the suite is
 laid out one file per concept:
@@ -96,7 +92,7 @@ laid out one file per concept:
 | `tracing/` | `tests/test_tracing.py` |
 | `intervention/batching.py` | `tests/test_batching.py` |
 | `intervention/fragments.py` | `tests/test_fragments.py` |
-| `modeling/transformers.py`, `modeling/huggingface.py` | `tests/test_language.py`, `tests/test_modeling.py`, `tests/test_encoder.py`, `tests/test_chunked_tasks.py`, `tests/test_construction_routing.py` |
+| `modeling/transformers.py`, `modeling/huggingface.py` | `tests/test_language.py`, `tests/test_modeling.py`, `tests/test_encoder.py`, `tests/test_encoder_decoder.py`, `tests/test_pretokenized.py`, `tests/test_chunked_tasks.py`, `tests/test_construction_routing.py` |
 | `modeling/diffusion.py` | `tests/test_diffusion.py` |
 | `modeling/vlm.py` | `tests/test_vlm.py` |
 | `modeling/quantization.py` | `tests/test_quantization.py` |
@@ -125,15 +121,3 @@ a reader — often a coding agent — who finds one page and applies it, so:
 
 The full standard is the Documentation section of the root
 [CONTRIBUTING.md](../../CONTRIBUTING.md#documentation).
-
-## Where the team is
-
-- **GitHub** — issues and PRs on the nnsight repository.
-- **Discord** — [discord.gg/6uFJmCSwW7](https://discord.gg/6uFJmCSwW7) — real-time help and design discussion.
-- **Forum** — [discuss.ndif.us](https://discuss.ndif.us) — longer-form questions.
-- **Docs** — [nnsight.net](https://nnsight.net).
-
-## Related
-
-- [`STYLE.md`](../../STYLE.md) — the canonical style guide
-- [testing.md](./testing.md) — full test inventory and how to run offline

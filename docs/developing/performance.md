@@ -30,8 +30,8 @@ you diff two trees.
 
 ```bash
 cd tests/performance
-PYTHONPATH=/path/to/old/nnsight/src   python interleave_bench.py --tag old
-PYTHONPATH=/path/to/ndif2/nnsight/src python interleave_bench.py --tag new
+PYTHONPATH=/path/to/old/nnsight/src python interleave_bench.py --tag old
+PYTHONPATH=/path/to/new/nnsight/src python interleave_bench.py --tag new
 python compare.py results/old.json results/new.json    # ratio new/old; >1 = slower
 ```
 
@@ -39,108 +39,37 @@ Each run writes `results/<tag>.json` and prints a summary. Every measurement is 
 median over many repeats after warmup, in microseconds, with the min alongside (the
 least scheduling-polluted floor).
 
-### What each benchmark isolates
+## Where overhead lives, and the benchmark that isolates it
 
-| Benchmark | Isolates |
-|---|---|
-| `baseline_forward` | the raw module forward, untraced — the floor every trace sits above |
-| `capture_warm` | an empty trace once its block is captured: interleave setup + teardown |
-| `capture_cold` | the same with the capture cache cleared each time — **cold minus warm is what parsing + compiling the block costs** (paid once per site per process) |
-| `invoke_scaling[k]` | one input invoke + `k-1` empty ones; the slope is the **per-invoke** cost |
-| `intervention_scaling[n]` | a trace saving `n` layer outputs; the slope is the **per-intervention** cost |
-| `read_output_warm` vs `read_source_warm` | reading a module's output vs one op inside its forward — the gap is steady-state `.source` overhead |
-| `source_first_access` | the first `.source` on a fresh model — **compiling the instrumented forward**, a one-time cost |
+The absolute numbers include the constant `baseline_forward` (the raw module
+forward, untraced), so the signal is in the **deltas**.
 
-The absolute numbers include the constant `baseline_forward`, so the signal is in
-the **deltas**: cold − warm is capture; the slope of a scaling sweep is the marginal
-cost; source − output is instrumentation.
+| Cost | Benchmark | What it is |
+|---|---|---|
+| Block capture, once per site per process | `capture_cold` − `capture_warm` | `Tracer` reads the `with` block's source and compiles it; the result is memoized by code location in `BLOCKS` (`tracing/globals.py`), so a warm site skips it |
+| Interleaver setup/teardown, per trace | `capture_warm` | an empty trace: building the run, starting and parking the workers, tearing them down |
+| Per invoke | slope of `invoke_scaling[k]` (one input invoke + `k-1` empty ones) | each `tracer.invoke(...)` builds a worker greenlet and registers it |
+| Per intervention | slope of `intervention_scaling[n]` (saving `n` layer outputs) | each `.output`/`.save()` parks a worker and serves it one value through `handle` |
+| `.source`, first access | `source_first_access` | compiling the instrumented forward, cached in `FORWARD_CACHE` (`source.py`); milliseconds against everything else's microseconds |
+| `.source`, steady state | `read_source_warm` − `read_output_warm` | reading one op vs the module's output; not separable at this scale |
 
-### A sample run (this repo, CPU, illustrative only)
+Rows at µs scale carry real run-to-run variance. Treat a ratio near 1.0 as "the
+same" and re-run before trusting a small difference.
 
-```
-single-shot (median of many):
-  baseline forward                 617 us
-  capture (warm)                    32 us      # empty trace over a no-op, cache warm
-  capture (cold)                   101 us      # +69 us to parse + compile the block
-  read a module output             935 us
-  read a source op (torch_relu_0)  960 us      # .source steady state, within noise
-  first source access             4185 us      # one-time: compiling the instrumented forward
-
-intervention scaling (median us):  0->930, 1->970, 8->1087, 32->1421
-invoke scaling (median us):        1->1009, 8->1128, 32->1377
-```
-
-Numbers are machine- and load-dependent; µs-scale rows carry real run-to-run
-variance. Across three back-to-back runs on the same idle machine, `baseline_forward`
-moved by 190 µs and the ordering of `read_output_warm` vs `read_source_warm`
-flipped — which is the point: at this scale the steady-state `.source` read is
-indistinguishable from reading the module's output, and the rows that hold their
-shape are the ones with a real gap (cold − warm, first source access). Treat a ratio
-near 1.0 as "the same" and re-run before trusting a small difference. Do not cite
-these figures as authoritative — regenerate them.
-
-## Where overhead lives
-
-- **Block capture (once per site per process).** `Tracer` reads the `with` block's
-  own source and compiles it. The compiled `(source, node)` is memoized keyed on the
-  block's code location in `BLOCKS` (`src/nnsight/tracing/globals.py`); a warm site
-  skips the parse/compile entirely. This is the cold − warm gap.
-- **Interleaver setup/teardown (per trace).** Building the `Interleaver`, scoping
-  each invoke, starting/parking the intervention greenlets (`Mediator`s), and tearing
-  them down. This dominates the warm empty-trace cost.
-- **Per invoke.** Each `tracer.invoke(...)` builds a worker greenlet, captures its
-  block, and registers it — the slope of `invoke_scaling`.
-- **Per intervention.** Each `.output`/`.save()` parks a worker and serves it one
-  value through `handle` — the slope of `intervention_scaling`, around 15 µs each
-  on the run above.
-- **`.source`.** First access compiles the instrumented forward
-  (`source_first_access`, a one-time cost cached in `FORWARD_CACHE`, `source.py`) —
-  the one clearly-visible number in the harness, milliseconds against everything
-  else's microseconds. Steady-state reads are not separable from reading the
-  module's output at this scale.
-
-## The biggest win: consolidate traces
-
-Each trace pays the setup cost regardless of how much it does inside. **Loop inside
-one trace, not multiple traces in a loop.**
-
-```python
-import nnsight
-
-# Bad — one trace per layer, pays setup N times
-hiddens = []
-for layer in model.transformer.h:
-    with model.trace(prompt):
-        h = layer.output.save()
-    hiddens.append(h)               # append after the trace, one saved value each
-
-# Good — one trace, setup paid once
-with model.trace(prompt):
-    hiddens = nnsight.save([layer.output for layer in model.transformer.h])
-```
+Each trace pays the setup cost regardless of what it does inside, so the biggest
+user-side win is looping inside one trace rather than tracing in a loop — see
+[invoke-and-batching.md](../usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces).
 
 ## When you benchmark
 
 - **Warm up** 2-3 iterations before measuring — the first trace at a site pays the
   full capture + compile.
-- **Define trace-using functions at module level in a real file.** Block capture
-  reads the block's source via `inspect`, so it does not work from `python -c "..."`
-  or a heredoc. (`interleave_bench.py` defines its toy modules at file scope for
-  exactly this reason.)
+- **Run from a real file.** Block capture reads the block's source
+  ([tracing-pipeline.md](./tracing-pipeline.md#source-extraction)).
 - **Bind loop variables.** `def fn(p=prompt): with model.trace(p): ...` — a closure
   over `prompt` captures the last value.
 - **GPU:** `torch.cuda.synchronize()` before and after each measurement.
 
-## Key files
-
-- `tests/performance/interleave_bench.py` — the benchmark (self-contained)
-- `tests/performance/compare.py` — side-by-side ratio of two runs
-- `tests/performance/README.md` — harness documentation
-- `src/nnsight/tracing/globals.py` — `BLOCKS`, the block capture cache
-- `src/nnsight/intervention/source.py` — `FORWARD_CACHE`, the instrumented-forward cache
-
 ## Related
 
-- [tracing-pipeline.md](./tracing-pipeline.md) — what block capture produces
-- [interleaver-internals.md](./interleaver-internals.md) — mediator/greenlet overhead
-- [testing.md](./testing.md) — running the suite
+- `tests/performance/README.md` — harness documentation.

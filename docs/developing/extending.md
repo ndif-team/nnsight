@@ -15,17 +15,11 @@ tree is built from, `NNsight` is the conventional wrapper for a whole model, and
 the higher-level classes (`TransformersModel`, `DiffusionModel`, ...) are
 specialized envoys that add loading/tokenization on top of the same behavior.
 
-So "extending nnsight" means **subclassing `NNsight`/`Envoy`** and overriding a few
-well-defined extension points. Each is an underscore-prefixed attribute or method
-with a working default, so you override only the one you need. The surface is:
-
-1. Override `_batch_size` / `_batch` to support batched invokes.
-2. Add methods/attributes to a model subclass.
-3. Attach standalone modules to the tree so they expose activations.
-4. Set `_batcher_class` to a `Batcher` subclass for a non-standard batch layout.
-5. Use the `Loadable` mixin to build the model from a repo id / config.
-6. Pass a custom `tracer_cls`.
-7. Define custom served values with the `eproperty` descriptor.
+So "extending nnsight" means **subclassing `NNsight`/`Envoy`** and overriding the
+extension point you need; each numbered section below is one. Each is an
+underscore-prefixed attribute or method with a working default. Plugging in a whole
+new inference engine is [adding-a-new-runtime.md](adding-a-new-runtime.md); a new
+backend is [backends.md](backends.md#adding-a-backend).
 
 ## Wrapping any module
 
@@ -174,11 +168,9 @@ class MyModel(NNsight):
     _batcher_class = MyBatcher                 # the whole installation
 ```
 
-`_batcher_class` is the only wiring needed — both the standard tracer and the vLLM
-tracer build the run's batcher as `envoy._batcher_class(envoy, kwargs)`.
-`DiffusionModel` is the reference override; `VLLMBatcher`
-(`src/nnsight/modeling/vllm/batching.py`) is the worked example of a genuinely
-different layout.
+The tracer builds the run's batcher from `_batcher_class`, so that line is the only
+wiring. `DiffusionModel` is the reference override; the row contract is in
+[batching-internals.md](batching-internals.md#subclassing-the-batcher).
 
 ## 5. Loading from a repo id / config — the `Loadable` mixin
 
@@ -213,11 +205,9 @@ with model.trace(x, tracer_cls=MyTracer):
 
 ## 7. Custom served values: `eproperty`
 
-`.output` / `.input` / `.inputs` and `tracer.result` are `eproperty` descriptors:
-reading one parks the worker until the model reaches `"{path}.{key}"`, writing one
-swaps a value in. Define your own on the model class — the decorated stub is the
-read-side preprocess — and serve it from wherever the value is produced with
-`.provide`:
+`.output` / `.input` / `.inputs` and `tracer.result` are `eproperty` descriptors.
+Define your own on the model class — the decorated stub is the read-side
+preprocess — and serve it where the value is produced with `.provide`:
 
 ```python
 from nnsight.intervention.eproperty import eproperty
@@ -231,23 +221,18 @@ class MyModel(NNsight):
 value = type(model).telemetry.provide(model, value)   # returns it, edited if written
 ```
 
-To put a custom eproperty on specific submodules (a per-head `.heads` view), map
-them to an `Envoy` subclass with `envoys=`. The full surface — `.postprocess`,
-`.transform` for reshaped writable views, `envoys=` matching rules, `parent`/`root`
-— is [extending-envoy.md](extending-envoy.md).
+`.postprocess`, `.transform` for reshaped writable views, putting an eproperty on
+specific submodules with `envoys=` (and its matching rules), and `parent`/`root`
+are in [extending-envoy.md](extending-envoy.md).
 
 ## Gotchas
 
-- **`envoys=` targets specific modules** by type or dotted path suffix (aliases
-  and `*` included); without it a custom `eproperty` lives on the model subclass.
-  Matching rules: [extending-envoy.md](extending-envoy.md#wiring-constraint-envoys).
 - **Batching needs both `_batch_size` and `_batch`,** and the failure lands at
   trace time, not construction time. With only the default, a second input invoke
   raises `NNsight does not support batching multiple invokes`.
-- **A batched write has to keep its rows.** The splice back into the combined
-  batch is a plain `cat`, and nothing checks the height: a replacement with a
-  different leading dim than the block owns builds a batch that is no longer the
-  model's, and the mismatch surfaces in some later module — or not at all.
+- **A batched write has to keep its rows.** Nothing checks the height of a
+  replacement; a wrong one surfaces in some later module, or not at all
+  ([batching-internals.md](batching-internals.md#widen--splicing-a-blocks-edit-back-into-the-batch)).
 - **A class-level attribute on an `Envoy`/`NNsight` subclass is shared across
   instances** — set per-instance config in `__init__`. (`_batcher_class` is meant
   to be class-level; per-instance config is not.)
@@ -259,6 +244,4 @@ them to an `Envoy` subclass with `envoys=`. The full surface — `.postprocess`,
 ## Related
 
 - [access-and-modify.md](../usage/access-and-modify.md) — the built-in `.output` / `.input`.
-- [invoke-and-batching.md](../usage/invoke-and-batching.md) — how `_batch_size` / `_batch`
-  feed batching.
 - [rename-modules.md](../usage/rename-modules.md) — aliasing module paths.

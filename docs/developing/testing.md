@@ -36,8 +36,7 @@ CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm --ignore=tes
   `tests/test_tensor_parallel_rules.py` fails — 45 red results that say nothing
   about your change.
 
-That collects 933 tests; 1031 with `tests/tp/` included. Config is minimal —
-`pyproject.toml` has only:
+Config is minimal — `pyproject.toml` has only:
 
 ```toml
 [tool.pytest.ini_options]
@@ -55,8 +54,9 @@ python -m pytest tests/test_saving.py -x                 # stop on first failure
 ```
 
 Tests import `nnsight` as installed (install the checkout editable); `tests/conftest.py`
-does not touch `sys.path`. It defines one shared fixture:
-`gpt2` (module-scoped, a dispatched `TransformersModel("openai-community/gpt2")`).
+does not touch `sys.path`. It defines one shared fixture: `gpt2` (module-scoped, a
+dispatched `TransformersModel("openai-community/gpt2", task="text-generation")` —
+the task is named so building it does not ask the Hub).
 Heavy models are shared fixtures; small ones are constructed inline per test file.
 
 **Name a subtree, or ignore the ones you are not running.** `tests/` has no
@@ -67,7 +67,7 @@ reaches second, whether or not `vllm` is installed. Running the two trees
 separately — or with the `--ignore` flags above — avoids it. `tests/vllm/` also
 has one file that reads a `vllm` submodule at import (`test_moe_batching.py`), so
 it errors at collection rather than skipping when `vllm` is absent; the rest of
-the subtree collects (207 tests) and skips at run time.
+the subtree collects and skips at run time.
 
 ## The C extension (`.save()`)
 
@@ -121,6 +121,8 @@ paths in `test_language.py` (`skipif(not peft_installed)`).
 | `test_modeling.py` | `_update`/meta device/loadable/meta/scan/import path/remotable/remote env, HF + Transformers construction, status display, backend threading |
 | `test_language.py` | `TransformersModel` (gpt2) — generation, activation edits, gradients, ad-hoc modules, input setting, source, early stop, iteration, session, cache |
 | `test_encoder.py` | encoder tasks (fill-mask, text-classification), padding, `pipe` |
+| `test_encoder_decoder.py` | encoder-decoder models (BART) padding on the right |
+| `test_pretokenized.py` | pretokenized inputs keep the model inputs a tokenizer produced |
 | `test_vision.py` | image-classification pipeline, `pipe` |
 | `test_vlm.py` | vision-language models + deprecated `VisionLanguageModel` |
 | `test_chat.py` | chat-formatted (role/content) input |
@@ -152,23 +154,27 @@ carry no `test_` prefix precisely so pytest does not collect them.
 Run separately: `python -m pytest tests/vllm/`. CI runs `pytest tests/ --ignore=tests/vllm`,
 so this subtree is never run automatically — run it by hand on a GPU against the
 vLLM release in your environment when you touch `modeling/vllm/` (the `vllm` extra
-has no upper bound). Its `conftest.py` sets
-`VLLM_ALLOW_INSECURE_SERIALIZATION=1` (only for the request-state tests, which ship a function to the workers through `collective_rpc`; tracing itself needs no such flag).
-Files: `test_tracing.py` (logits/generation/sampling/interventions/input forms/early
-stop/deferred errors/cache), `test_async.py` (async engine streaming),
-`test_async_ray.py` (the async loop driven over Ray), `test_serve.py`
-(the `nnsight-serve` HTTP path + GPU-less client), `test_tensor_parallel.py` (sharded
-read/edit), `test_deepseek.py` (a second sharded architecture — MLA + expert
-parallelism), `test_moe_batching.py` (deferred-reduce partials gather on read),
-`test_taps.py` (tracing an engine replaying CUDA graphs, at declared taps),
-`test_registration.py` (blocks installed on the engine, applying to every request),
-`test_chunked_prefill.py` (a traced prompt is prefilled whole),
-`test_preemption.py` (a preempted request comes back whole), `test_lora.py`
-(interventions on a request carrying an adapter),
-`test_requests.py` (client/worker cleanup, batch isolation, concurrency),
-`test_ray.py` (Ray executor). `redteam_repros.py` is deliberately not a `test_`
-module — it prints raw observations rather than asserting. TP tests use
-Qwen2.5-0.5B; single-rank tests use gpt2.
+has no upper bound). Its `conftest.py` sets `VLLM_ALLOW_INSECURE_SERIALIZATION=1`
+only for the request-state tests, which ship a function to the workers through
+`collective_rpc`; tracing needs no such flag, since the mediator payload is `bytes`
+in `SamplingParams.extra_args`. TP tests use Qwen2.5-0.5B; single-rank tests use gpt2.
+
+| File | Covers |
+|------|--------|
+| `test_tracing.py` | logits, generation, sampling, interventions, input forms, early stop, deferred errors, cache |
+| `test_async.py` / `test_async_ray.py` | async engine streaming; the async loop driven over Ray |
+| `test_ray.py` | the Ray executor |
+| `test_serve.py` | the `nnsight-serve` HTTP path and a GPU-less client |
+| `test_tensor_parallel.py` / `test_deepseek.py` | sharded read/edit; a second sharded architecture (MLA + expert parallelism) |
+| `test_moe_batching.py` | deferred-reduce partials gather on read |
+| `test_taps.py` | tracing an engine replaying CUDA graphs, at declared taps |
+| `test_registration.py` | blocks installed on the engine, applying to every request |
+| `test_chunked_prefill.py` / `test_preemption.py` | a traced prompt is prefilled whole; a preempted request comes back whole |
+| `test_lora.py` | interventions on a request carrying an adapter |
+| `test_requests.py` | client/worker cleanup, batch isolation, concurrency |
+
+`redteam_repros.py` is deliberately not a `test_` module — it prints raw
+observations rather than asserting.
 
 ## Conventions
 
@@ -179,8 +185,3 @@ Qwen2.5-0.5B; single-rank tests use gpt2.
 - **Prefer inline fakes** — define small `nn.Module`s in the test file. Keep only the
   expensive shared models in `conftest.py`.
 - **`importorskip` at the top** of an optional-dependency test file.
-
-## Related
-
-- [contributing.md](./contributing.md) — pre-PR routine and house style
-- [performance.md](./performance.md) — the `tests/performance/` benchmark harness

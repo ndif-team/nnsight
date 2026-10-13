@@ -8,41 +8,30 @@ sources: [src/nnsight/intervention/eproperty.py, src/nnsight/intervention/envoy.
 
 # Exposing New Values on an Envoy
 
-> **This page documents the `eproperty` descriptor.** `.input`, `.inputs`,
-> `.output`, and the runtime-internal values a runtime adds (`logits`, `samples`,
-> a custom telemetry read) are all `eproperty` descriptors
-> (`intervention/eproperty.py`); `.skip` is a method and `.source` a plain
-> property. This is the surface for exposing a *new* served value.
+How to expose a *new* served value — an engine value, a reshaped view, a value from
+another module — on an envoy, the model, or the tracer. Every served value is a
+location fed through `Interleaver.handle` ([the one
+primitive](./architecture-overview.md#the-one-primitive)); an `eproperty`
+(`src/nnsight/intervention/eproperty.py`) is the read/write descriptor over one
+location. `.input`, `.inputs`, `.output`, `tracer.result` and vLLM's
+`logits`/`samples` are all eproperties; `.skip` is a method (`Mediator.skip`) and
+`.source` a plain property.
 
-## The whole mechanism
+## The two sides
 
-The interleaver exposes exactly one primitive: a **location string** and
-`Interleaver.handle(location, value)`, which offers a produced value to every parked
-intervention at that location and returns whatever an intervention wrote back. A
-location is any string — a module path suffix like `"model.h.0.output"`, the run's
-`"result"`, or a runtime value like `"model.logits"`.
+- **Read side.** Reading the attribute runs `Mediator.value(location)` — parking the
+  worker until the model reaches it — then the descriptor's **preprocess**
+  (`__get__`). Writing runs an optional **postprocess**, then
+  `Mediator.swap(location, value)` (`__set__`). Reading then swapping the same
+  location in one trace works; both events drain in a single `handle`.
+- **Produce side.** `eproperty.provide(obj, value)` calls
+  `obj.interleaver.handle(location, value)` where the value is computed and returns
+  it, edited if a worker wrote back.
 
-An `eproperty` is the reusable read/write descriptor over one such location — a
-small subclass of `property` (`src/nnsight/intervention/eproperty.py`) with two
-ends:
-
-- **Read side (the API a user writes).** Reading the attribute runs
-  `Mediator.value(location)` (parking the worker until the model reaches it), then
-  passes the served value through the descriptor's **preprocess** and hands you the
-  result (`__get__`). Writing runs an optional **postprocess** and then
-  `Mediator.swap(location, value)` (`__set__`).
-- **Produce side (where the value exists).** `eproperty.provide(obj, value)` calls
-  `obj.interleaver.handle(location, value)` — serving the value to a parked worker
-  and returning it, edited if the worker wrote back.
-
-The location is `"{obj.path}.{key}"`, or just `key` when the host has no `path` (as
-for the tracer's `result`). A host is anything satisfying the `IEnvoy` protocol: it
-exposes an `interleaver` and an optional `path` — `path` is read
-via `getattr(obj, "path", "")`, so a tracer host that omits it falls back to the bare
-`key`. `Mediator.value` / `Mediator.swap` park the intervention greenlet until the
-interleaver reaches that location, then hand back the value (or substitute one).
-Reading then swapping the same location in one trace works — both events drain in a
-single `handle`.
+The location is `"{obj.path}.{key}"`, or the bare `key` when the host has no `path`
+(read via `getattr(obj, "path", "")`, as for the tracer's `"result"`). A host is
+anything satisfying the `IEnvoy` protocol: it exposes an `interleaver` and an
+optional `path`.
 
 ## Defining an eproperty
 
@@ -95,75 +84,31 @@ preprocess can legitimately fail.
 
 Two more callbacks refine the descriptor:
 
-- `@name.postprocess` (`eproperty.py`) — runs on a **written** value before it's
-  swapped in. `Envoy.input` uses it to repack a lone first argument back into the
-  full `(args, kwargs)` the model expects.
-- `@name.transform` (`eproperty.py`) — the write-back half of a *reshaping*
-  preprocess. A preprocess returning a `.view()` of the served tensor shares its
-  storage, so in-place edits reach the model with no transform. One returning a
-  copy (a `.reshape()` that cannot view, a stack, an arithmetic result) hides edits
-  from the model, which still holds the original — and a `key="input"` preprocess
-  is always in this case, since the served value is a container that something has
-  to rebuild. The transform maps the edited view back to the model's layout. The read binds a `WriteBack`
-  (`eproperty.py`) on the mediator, a swap the worker has not issued yet;
-  `Mediator.flush` issues it when the worker next moves on (its next request, in
-  `Mediator.event`, or the end of its block), tagged with the occurrence the view
-  was read at. Until then a repeated read of the value is answered with the view it
-  holds, so a statement that reads twice edits one tensor. It takes
-  `(self, view, raw)`,
-  the raw being the value as served: that is how a view that is a copy of one
-  element of a tuple gets the rest of the tuple back, since a transform cannot read
-  the location itself, firing on the model side after the read. A transform must
-  return a value of the *location's* shape: on a tuple-returning module it returns
-  the whole tuple. It fires whether or not the view was edited. `eproperty.py`'s
-  module docstring carries the canonical per-head example and the tuple one.
+- `@name.postprocess` — runs on a **written** value before it's swapped in.
+  `Envoy.input` uses it to repack a lone first argument back into the full
+  `(args, kwargs)` the model expects.
+- `@name.transform` — the write-back half of a *reshaping* preprocess. A preprocess
+  returning a `.view()` of the served tensor shares its storage, so in-place edits
+  reach the model with no transform. One returning a copy (a `.reshape()` that
+  cannot view, a stack, an arithmetic result — and always a `key="input"`
+  preprocess, since the served value is a container) hides edits from the model; the
+  transform maps the edited view back. It takes `(self, view, raw)`, `raw` being the
+  value as served, so a view of one tuple element can rebuild the rest of the tuple;
+  it must return a value of the *location's* shape, and fires whether or not the
+  view was edited.
 
-## How `.output` already works
+  The read binds a `WriteBack` on the mediator, a swap not issued yet;
+  `Mediator.flush` issues it when the worker next moves on (its next request, or the
+  end of its block), tagged with the occurrence the view was read at. Until then a
+  repeated read returns the same view, so a statement that reads twice edits one
+  tensor. `eproperty.py`'s module docstring has the canonical per-head and tuple
+  examples.
 
-`Envoy.output` is an identity-preprocess eproperty:
+## Serving a value that isn't a module output (vLLM `logits`/`samples`)
 
-```python
-@eproperty
-def output(self, value: Any) -> Object:
-    return value
-```
-
-Its location is `"{self.path}.output"`. The produce side is the controller
-installed by `Interleaver.instrument`, which calls
-`handle(f"{path}.output", output)` after the module runs. `.input`, `.inputs`, and
-`.skip` follow the identical pattern one location over. `SourceEnvoy`'s op-level
-`.output`/`.input`/`.inputs` (`src/nnsight/intervention/source.py`) are the same
-descriptors, keyed on an operation's path.
-
-## The canonical non-module example: `tracer.result`
-
-The model's own return value is not a module output, yet you can read it. It's an
-eproperty on the tracer with no `description` and — because the
-tracer has no `path` — a bare `"result"` location:
-
-```python
-class InterleavingTracer(Tracer):
-    @eproperty
-    def result(self, value):
-        return value
-```
-
-`Envoy.interleave` (`envoy.py`) serves it under that location after the forward:
-
-```python
-with self.interleaver:
-    result = fn(*args, **kwargs)
-    self.interleaver.handle("result", result)   # serve the run's return value
-```
-
-That's the entire pattern for a value that isn't a module input/output: an
-eproperty, and a `handle` (or `.provide`) where the value is produced.
-
-## Adding a runtime-internal value (the vLLM `logits`/`samples` pattern)
-
-vLLM surfaces the logits and sampled tokens — engine-internal values, not module
-outputs — as eproperties on the model class, each given a `description` so they show
-in the repr (`src/nnsight/modeling/vllm/vllm.py`):
+vLLM surfaces the logits and sampled tokens — engine-internal values — as
+eproperties on the model class, each with a `description` so they show in the repr
+(`src/nnsight/modeling/vllm/vllm.py`):
 
 ```python
 class VLLM(Remotable):
@@ -176,27 +121,28 @@ class VLLM(Remotable):
         return value
 ```
 
-The produce side lives where the engine computes those values — in the model runner,
-inside an open interleaver context — and uses the eproperty's own `.provide` so the
-two sides can't drift out of sync
-(`src/nnsight/modeling/vllm/model_runners/GPUModelRunner.py`):
+The model runner serves them where the engine computes them, inside an open
+interleaver context, through the eproperty's own `.provide` so the two sides cannot
+drift (`src/nnsight/modeling/vllm/model_runners/GPUModelRunner.py`):
 
 ```python
-# logits phase
-logits = type(model).logits.provide(model, original)
-
-# sampling phase
+logits = type(model).logits.provide(model, original)            # "model.logits"
 sampler_output.sampled_token_ids = type(model).samples.provide(
     model, sampler_output.sampled_token_ids
 )
 ```
 
-`.provide(model, value)` forwards to `model.interleaver.handle("model.logits", value)`
-(the location the read side parks on), returns the value edited if an intervention
-wrote to it. So a user writes `logits = model.logits.save()` inside a trace, and the
-runner's `provide` serves it. No registration table — a descriptor and a `.provide`.
+A user's `model.logits.save()` parks on `"model.logits"` and the runner's `provide`
+serves it — no registration table. The built-ins are the same pattern:
+`Envoy.output` is an identity eproperty fed by the module's controller with
+`handle(f"{path}.output", output)`; `tracer.result` is one on `InterleavingTracer`,
+fed by `Envoy.interleave` with `handle("result", result)` after the forward;
+`SourceEnvoy`'s op-level `.output`/`.input`/`.inputs` are the same descriptors keyed
+on an operation's path. A value that is an operation *inside* a forward needs
+nothing new — `.source` already addresses every call site
+([source-internals.md](./source-internals.md)).
 
-## Wiring constraint: `envoys=`
+## Giving a submodule a custom envoy: `envoys=`
 
 An `eproperty` only works on a class that is actually used as an envoy — the base
 `Envoy`, an `NNsight`/model subclass, `SourceEnvoy`, the tracer, or a runtime model
@@ -252,7 +198,9 @@ How a key matches:
   spelling of that module only: `"self_attn"` matches it, `"self_attn.c_proj"`
   matches nothing. Key the rename by name to reach what is under it.
 
-## Reaching other modules: `parent` and `root`
+## The envoy tree
+
+### Reaching other modules: `parent` and `root`
 
 An eproperty that needs more than its own module's value reaches the rest of the
 tree through `self.parent` (the envoy one level up, `None` on the root) and
@@ -278,7 +226,7 @@ without its parent has none. Being weak, it keeps no ancestor alive, so `del mod
 frees the tree by refcounting. A shared module's envoy has the parent at its first
 path; an alias is not a child and changes no parent.
 
-## Shared modules
+### Shared modules
 
 A module the tree reaches by two paths — a layer a wrapper keeps a second
 reference to (vLLM's MLA attention holds `q_proj`/`kv_b_proj`/`o_proj` under
@@ -294,7 +242,7 @@ brought in, and including a container rebuilt from blocks the tree already wraps
 (`model.transformer.h = nn.ModuleList(list(model.transformer._module.h)[:4])`).
 Each such entry names the one envoy at the module's first path.
 
-## Submodules named after a served value
+### Submodules named after a served value
 
 A submodule may be named after a value nnsight serves: every BERT-style encoder has
 an `output` module. The submodule mounts as `E_<name>` and `.output` keeps its usual
@@ -306,36 +254,3 @@ against `E_output`. The plain name reaches the served value, which raises outsid
 trace, so a `rename` written against it fails at construction. The mount is a plain
 attribute rather than a per-envoy subclass overriding the descriptor, which keeps the
 envoy picklable by reference for remote runs.
-
-## Recipe
-
-1. **Add an eproperty to the model/runtime class (or the tracer).** Decorate a stub
-   that takes `(self, value)` and returns what the user should read (`return value`
-   for an identity view). Give it a `description` if it should appear in the repr; a
-   `key=` only if it must share another location.
-2. **Serve it where produced.** Wherever the value is computed, inside an open
-   interleaver context, call `type(obj).<name>.provide(obj, value)` and use the
-   return (an intervention may have edited it). Equivalently, `handle(location, ...)`
-   directly.
-3. **(Optional) refine it.** Add a `@name.postprocess` if writes need repacking, or
-   a `@name.transform` if the preprocess returns a reshaped view users will edit.
-
-That's the full extension surface. If the value is an operation *inside* a forward
-(not a whole-module or engine value), you don't add anything — `.source` already
-makes every call site addressable (see [source-internals.md](./source-internals.md)).
-
-## Key files
-
-- `src/nnsight/intervention/eproperty.py` — the `eproperty` descriptor: the stub
-  (preprocess), `postprocess`, `transform`, `__get__`/`__set__`, `provide`
-- `src/nnsight/intervention/envoy.py` — the `.input`/`.inputs`/`.output` eproperties;
-  `Envoy.interleave` serving `"result"`; `Envoy.__repr__` surfacing described eproperties
-- `src/nnsight/intervention/tracer.py` — `result` eproperty
-- `src/nnsight/intervention/interleaver.py` — `Mediator.value`/`swap`/`skip`, `Interleaver.handle`, `Interleaver.instrument`
-- `src/nnsight/modeling/vllm/vllm.py` — `logits`/`samples` eproperties (a real runtime example)
-
-## Related
-
-- [interleaver-internals.md](./interleaver-internals.md) — `handle` and the event protocol in depth
-- [source-internals.md](./source-internals.md) — operation-level locations
-- [adding-a-new-runtime.md](./adding-a-new-runtime.md) — where a runtime plugs its values in

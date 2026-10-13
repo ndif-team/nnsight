@@ -10,10 +10,8 @@ sources: [src/nnsight/tracing/tracer.py, src/nnsight/tracing/backend.py, src/nns
 
 ## What this covers
 
-The map for everything else in `docs/developing/`: which layer owns what, and
-where to go for each one. It turns a `with model.trace(...): ...` block into a
-coordinated execution of intervention code and a real forward pass, and hands off
-to the page that covers each layer in depth.
+Which layer turns a `with model.trace(...): ...` block into intervention code
+interleaved with a real forward pass, and which page covers each layer.
 
 Two facts frame the whole design:
 
@@ -137,25 +135,9 @@ under a `BackwardsTracer` that routes `.grad` reads/writes through it
 
 ## Extension points
 
-- **A new tracer type.** Subclass `Tracer` (or `InterleavingTracer`) and override
-  `execute()` to control how the compiled body runs. `ScanningTracer` (adds a
-  fake-tensor mode) and `EditingTracer` (stores the block instead of running it)
-  are the two smallest examples.
-- **A new backend.** Subclass `Backend` and override `__call__`. Use it to change
-  *what is done with the captured block* — remote transport, logging, simulation.
-  See [backends.md](./backends.md#adding-a-backend).
-- **A new model runtime.** Subclass `Envoy`/`NNsight` and override `_batch_size`
-  / `_batch`; set `_batcher_class` if the batch layout is non-standard. The vLLM
-  integration is the canonical example. See
-  [adding-a-new-runtime.md](./adding-a-new-runtime.md).
-- **A new envoy value.** Add an `eproperty` to a custom `Envoy`/model subclass (or
-  the tracer) — the decorated stub is the read-side preprocess — and feed its
-  location from your driver with the eproperty's `.provide` (which calls
-  `interleaver.handle(...)`). See [extending-envoy.md](./extending-envoy.md).
-
-## Related
-
-- [tracing-pipeline.md](./tracing-pipeline.md) — capture, parse, build, compile, execute.
-- [interleaver-internals.md](./interleaver-internals.md) — the greenlet park/switch event loop.
-- [controller.md](./controller.md) — the per-module controller: the handoff, the skip gate, the source-instrumented body.
-- [backends.md](./backends.md) — the backend classes.
+| To add | Override | Page |
+|---|---|---|
+| A tracer type | `Tracer.execute()` (`ScanningTracer`, `EditingTracer` are the smallest examples) | [extending.md](./extending.md#6-custom-tracer) |
+| A backend | `Backend.__call__` — what is done with the captured block | [backends.md](./backends.md#adding-a-backend) |
+| A model runtime | `_batch_size` / `_batch`, `_batcher_class` | [adding-a-new-runtime.md](./adding-a-new-runtime.md) |
+| A served value | an `eproperty`, fed with its `.provide` | [extending-envoy.md](./extending-envoy.md) |

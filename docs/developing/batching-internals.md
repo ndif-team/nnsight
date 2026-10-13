@@ -16,10 +16,6 @@ and each block's interventions see only *its* rows of every activation. This doc
 walks the `Batcher` (one per trace), the `batch_group` row ranges, and the
 `narrow`/`widen`/`gather_skip`/`assemble_skip` operations the interleaver drives.
 
-Everything lives in `src/nnsight/intervention/batching.py`, plus the two model-side
-extension points `_batch_size` and `_batch` on `Envoy`
-(`src/nnsight/intervention/envoy.py`).
-
 ## Architecture
 
 ### Two halves: model-side prep and the per-trace Batcher
@@ -30,7 +26,8 @@ extension points `_batch_size` and `_batch` on `Envoy`
   the collected invokes into one call. The base `Envoy` treats any input as a
   single row and passes a lone invoke straight through; batching two or more raises
   `NotImplementedError` unless a model overrides `_batch` (e.g.
-  `TransformersModel`, which tokenizes and pads).
+  `TransformersModel`, which tokenizes and pads). One input invoke plus any number
+  of empty invokes still works without `_batch`.
 - **Per-trace** — the `Batcher` (`batching.py`) is constructed once per trace in
   `InterleavingTracer.execute` (`tracer.py`), as
   `self.envoy._batcher_class(self.envoy, self.kwargs)`, and set on the interleaver. It
@@ -42,8 +39,9 @@ extension points `_batch_size` and `_batch` on `Envoy`
 `Batcher.add(*inputs, **kwargs)` (`batching.py`) records one invoke and returns
 its `batch_group`:
 
-- Calls `_batch_size`; a size of `0` (empty invoke) records `None` and returns
-  `None` — it contributes no rows and sees the whole batch.
+- Calls `_batch_size`; a size of `0` — params only (e.g. `max_new_tokens=`) or an
+  empty `invoke()` — returns `None` (a groupless worker that sees the whole batch)
+  and folds the kwargs into `extra_kwargs`.
 - Otherwise assigns `[self.total, size]`, appends the raw `(inputs, kwargs)` to
   `invokes`, and advances `total`.
 
@@ -56,7 +54,7 @@ interleaver reads it to scope that worker's reads/writes.
 `Batcher.batching` (`batching.py`) is `True` only once **two or more** non-empty
 invokes have been added (`len(self.invokes) > 1`). With a single invoke, `narrow`
 and `widen` are no-ops — a lone invoke *is* the whole batch, so it sees every row
-untouched. (vLLM subclasses the batcher rather than forcing batching on through a flag.)
+untouched.
 
 ### narrow — scoping a read to a block's rows
 
@@ -130,12 +128,7 @@ combined output is built from the invokes' replacements alone:
   `Interleaver.handle` calls `assemble_skip` once, after the mediator loop
   (`interleaver.py`).
 
-### add / assemble — building the combined forward input
-
-`Batcher.add(*inputs, **kwargs)` records one input set and returns its `batch_group`.
-A set with no rows — params only (e.g. `max_new_tokens=`) or an empty `invoke()` —
-returns `None` (a groupless, whole-batch worker) and folds its kwargs into
-`extra_kwargs`.
+### assemble — building the combined forward input
 
 `Batcher.assemble(fn)` hands the row-contributing `invokes` to
 `Envoy._batch(invokes, fn)`, which produces the `(args, kwargs)` for the run — for
@@ -161,56 +154,29 @@ line is the whole installation. The diffusion and vLLM runtimes do this:
 - vLLM's flat-token layout narrows on token ranges during the forward and prompt
   ranges after, and gathers/scatters tensor-parallel shards.
 
-See `docs/developing/vllm-integration.md` for the vLLM specifics.
-
-## Key files / classes
-
-- `src/nnsight/intervention/batching.py` — `Batcher` (per-trace batching state):
-  `add`, `batching`, `assemble`, `narrow`/`_narrow_tensor`, `widen`/`_widen_tensor`,
-  `gather_skip`, `assemble_skip`; plus `SkipParts` and `concat`.
-- `src/nnsight/intervention/envoy.py` — `_batch_size`, `_batch`, `_batcher_class`.
-- `src/nnsight/intervention/tracer.py` — `InterleavingTracer.execute` (builds the
-  batcher, adds the direct-input worker); `Invoker.execute` (adds an invoke worker).
-- `src/nnsight/intervention/interleaver.py` — `Mediator.handle` (calls
-  narrow/widen/gather_skip).
+See [vllm-integration.md](vllm-integration.md) for the vLLM specifics, and
+[extending.md](extending.md#4-custom-batcher-for-non-standard-batch-layouts) for a
+worked custom batcher.
 
 ## Lifecycle / sequence
 
 The batcher's part of the [trace lifecycle](./architecture-overview.md#lifecycle--sequence), per trace:
 
-1. `InterleavingTracer.execute` creates `self.batcher = envoy._batcher_class(envoy, kwargs)` on the tracer.
-2. **Direct input** (`trace(x)`): `_batch_size(x) > 0`, so one `Mediator` is made
-   and `self.batcher.add(x)` gives it a batch group.
-   **Invoke mode** (`trace()`): the body is exec'd to collect `tracer.invoke(...)`
-   sub-blocks; each `Invoker.execute` calls `self.tracer.batcher.add(...)` and appends
-   a worker.
-3. `execute` calls `Envoy.interleave(fn, batcher=self.batcher, **params)`; interleave
-   registers it on the interleaver (`interleaver.batcher`, for the run) and calls
-   `batcher.assemble(fn)` to build the combined `(args, kwargs)` before running
-   `fn(*args, **kwargs)`.
-4. During the forward, each module controller's `handle` iterates workers; each
-   `Event.VALUE` narrows to the worker's rows, each `Event.SWAP` widens back.
-5. After the forward, `push_result` returns each worker's saved values; `cancel`
-   clears the interleaver's batcher (the tracer's `self.batcher` goes with the trace).
+1. `InterleavingTracer.execute` creates `self.batcher = envoy._batcher_class(envoy, kwargs)`.
+2. **Direct input** (`trace(x)`): one `Mediator`, given its group by
+   `batcher.add(x)`. **Invoke mode** (`trace()`): the body is exec'd to collect
+   `tracer.invoke(...)` sub-blocks; each `Invoker.execute` calls `batcher.add(...)`
+   and appends a worker.
+3. `Envoy.interleave(fn, batcher=...)` sets `interleaver.batcher` and calls
+   `batcher.assemble(fn)` to build the combined `(args, kwargs)`.
+4. During the forward, each `Event.VALUE` narrows to the worker's rows and each
+   `Event.SWAP` widens back.
+5. `cancel` clears the interleaver's batcher.
 
-Verified: two invokes of prompts `"a b c"` and `"x"` each see their own row —
-`model.transformer.h[0].output.shape` is `[1, 3, 768]` in **both** blocks (the batch
-dim is narrowed to 1; the shorter prompt is padded to the combined sequence length
-by `_batch`).
-
-## Extension points
-
-- **A new runtime with custom batching.** Override `_batch_size`/`_batch` on the
-  model class. See `docs/developing/adding-a-new-runtime.md`.
-- **Same input format, different tensor layout.** Subclass `Batcher`, override
-  `_narrow_tensor`/`_widen_tensor` (and `gather_skip`/`assemble_skip`), and set
-  `_batcher_class = YourBatcher` on the model class.
-- **Single-input-only model.** Leave `_batch` unimplemented; a second input invoke
-  raises a clear `NotImplementedError`, and one input invoke plus any number of
-  empty invokes still works.
+For example, invokes of `"a b c"` and `"x"` both see
+`model.transformer.h[0].output.shape == [1, 3, 768]`: the batch dim is narrowed to
+1, and `_batch` padded the shorter prompt to the combined length.
 
 ## Related
 
-- `docs/developing/interleaver-internals.md` — how `narrow`/`widen` are driven from `Mediator.handle`.
-- `docs/developing/vllm-integration.md` — the vLLM flat-token batcher.
-- `docs/concepts/batching-and-invokers.md` — the mental-model version.
+- [batching-and-invokers.md](../concepts/batching-and-invokers.md) — the mental-model version.
