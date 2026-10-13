@@ -17,21 +17,21 @@ Up: [docs/index.md](../index.md) — all sections.
 - [trace](trace.md) — `model.trace(input)`: single forward pass with interventions.
 - [generate](generate.md) — `model.generate(input, max_new_tokens=N)`: multi-token generation through the model; returns **token ids** (`tracer.result`), with the checkpoint's own `generation_config` (which may sample).
 - [pipe](pipe.md) — `model.pipe(input, ...)`: run the whole task pipeline; returns its **records** (decoded text, labels, ...).
-- [scan](scan.md) — `model.scan(input)`: validate shapes / interventions under `FakeTensorMode` (no real compute, no dispatch).
-- [edit](edit.md) — `model.edit(inplace=...)`: persist interventions onto the model so they fire on every future trace.
-- [session](session.md) — `model.session()`: bundle multiple traces into one scope that shares values (and one remote round trip).
+- [scan](scan.md) — `model.scan(input)`: shapes and intervention validity without loading weights or running real compute.
+- [edit](edit.md) — `model.edit(inplace=...)`: persistent / always-on interventions that fire on every future trace (steering, LoRA/SAE attach).
+- [session](session.md) — `model.session()`: multiple traces or loops over prompts in one scope that shares values (and one remote round trip).
 
 ## Inputs and batching
 
-- [invoke-and-batching](invoke-and-batching.md) — `tracer.invoke(input)` to add inputs (one greenlet worker per invoke), empty invokes for whole-batch operations.
-- [barrier](barrier.md) — `tracer.barrier(n)` to synchronize cross-invoke variable sharing on the same module.
+- [invoke-and-batching](invoke-and-batching.md) — `tracer.invoke(input)`: several prompts in one forward, padding and positions, activation patching across prompts, empty invokes for whole-batch operations.
+- [barrier](barrier.md) — `tracer.barrier(n)`: activation patching across prompts at the same module (cross-invoke sharing).
 - [rename-modules](rename-modules.md) — `rename={...}` aliases for ergonomic module paths.
 
 ## Reading and writing values
 
 - [save](save.md) — `nnsight.save(...)` / `obj.save()`: persist a value across the trace boundary.
 - [access-and-modify](access-and-modify.md) — `.output` / `.input` / `.inputs`: reading values and writing them back (in-place vs replacement, tuple outputs).
-- [source](source.md) — `module.source.<op>.output`: hook intermediate operations inside a module's forward.
+- [source](source.md) — `module.source.<op>.output`: operations inside a module's forward, e.g. attention scores before softmax.
 - [cache](cache.md) — `tracer.cache(modules=..., include_inputs=...)`: bulk activation cache that accumulates across generation steps.
 
 ## Generation control
@@ -42,8 +42,8 @@ Up: [docs/index.md](../index.md) — all sections.
 
 ## Gradients
 
-- [backward-and-grad](backward-and-grad.md) — `with tensor.backward():` (a nested interleaving session) and `.grad` access.
+- [backward-and-grad](backward-and-grad.md) — `with tensor.backward():` and `.grad`: gradients of activations, gradient attribution, editing gradients.
 
 ## Control flow
 
-- [conditionals-and-loops](conditionals-and-loops.md) — Plain Python `if` / `for` inside a trace.
+- [conditionals-and-loops](conditionals-and-loops.md) — plain Python `if` / `for` inside a trace, branching on tensor values.

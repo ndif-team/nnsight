@@ -8,21 +8,12 @@ sources: [src/nnsight/intervention/aliasing.py, src/nnsight/intervention/envoy.p
 
 # Rename Modules
 
-## What this is for
-
 Different architectures name the same role differently (`transformer.h` vs
 `model.layers` vs `gpt_neox.layers`). The `rename={...}` constructor kwarg installs
-aliases so your intervention code is portable across model families.
-
-An alias is an ordinary attribute pointing at the **same** child Envoy object — not
-a copy — so the original path keeps working, iteration doesn't double-count, and
-`Cache` keys resolve through aliases too.
-
-## When to use / when not to use
-
-- Use when writing analysis code that should work across HuggingFace architectures.
-- Use to mount a deep subtree at a shorter path.
-- Use to give a role a stable name across models.
+aliases so intervention code is portable across model families, or so a deep
+subtree is reachable at a shorter path. An alias is an ordinary attribute pointing
+at the **same** child Envoy — not a copy — so the original path keeps working and
+iteration doesn't double-count.
 
 ## Canonical pattern
 
@@ -65,41 +56,6 @@ shape:
 | **List** (`["mdl", "backbone"]`) | Multiple aliases for the same path. |
 | **Dotted** (`"attn.o_proj"`) | Binds on the envoy the prefix names, which the key's path must start with: `{"attn.c_proj": "attn.o_proj"}` binds `o_proj` on each block's `attn`. |
 
-Verified behaviors:
-
-```python
-# single component: alias on every block
-g = TransformersModel("openai-community/gpt2", dispatch=True, rename={"mlp": "my_mlp"})
-g.transformer.h[0].my_mlp is g.transformer.h[0].mlp        # True
-
-# subtree mount on the root
-g = TransformersModel("openai-community/gpt2", dispatch=True, rename={"transformer.h": "layers"})
-g.layers[0] is g.transformer.h[0]                          # True
-
-# deep path mounts on the root
-g = TransformersModel("openai-community/gpt2", dispatch=True, rename={"transformer.h.3.mlp": "my_mlp"})
-g.my_mlp is g.transformer.h[3].mlp                          # True
-
-# leading dot: binds where it resolves (under transformer), not on the root
-g = TransformersModel("openai-community/gpt2", dispatch=True, rename={".h": "layers"})
-g.transformer.layers[0] is g.transformer.h[0]              # True
-
-# a `*` component: the backbone's own name is not spelled
-g = TransformersModel("openai-community/gpt2", dispatch=True, rename={"*.h": "layers"})
-g.layers[0] is g.transformer.h[0]                          # True
-
-# a class key: the alias follows what each block holds, not what it is called
-from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
-g = TransformersModel("openai-community/gpt2", dispatch=True, rename={GPT2Attention: "self_attn"})
-g.transformer.h[0].self_attn is g.transformer.h[0].attn    # True
-
-# a dotted alias: binds on the attention and on the MLP, not on the block
-g = TransformersModel("openai-community/gpt2", dispatch=True,
-                      rename={"attn.c_proj": "attn.o_proj", "mlp.c_proj": "mlp.down_proj"})
-g.transformer.h[0].attn.o_proj is g.transformer.h[0].attn.c_proj    # True
-g.transformer.h[0].mlp.down_proj is g.transformer.h[0].mlp.c_proj   # True
-```
-
 A dotted alias is for a name that means different modules under different parents.
 GPT-2 spells both the attention's output projection and the MLP's down projection
 `c_proj`, so `{"c_proj": "o_proj"}` gives the MLP an `o_proj` too, and
@@ -129,7 +85,8 @@ print(model)
 
 ## Cache keys honor the rename
 
-`tracer.cache(...)` resolves navigation against the (renamed) envoy tree:
+`tracer.cache(...)` navigation resolves against the renamed tree, and path keys
+keep the original names:
 
 ```python
 g = TransformersModel("openai-community/gpt2", dispatch=True, rename={"mlp": "my_mlp"})
@@ -140,14 +97,11 @@ cache.transformer.h[0].my_mlp.output                 # via alias
 cache["model.transformer.h.0.mlp"].output            # original path — same value
 ```
 
-You can also index a renamed `ModuleList` entry by its alias string:
-`cache.model.h["second_layer"]` when `rename={"1": "second_layer"}`. See
-[cache.md](cache.md).
+A renamed `ModuleList` entry is indexable by its alias string:
+`cache.model.h["second_layer"]` when `rename={"1": "second_layer"}`.
 
 ## Gotchas
 
-- **Aliases bind on every envoy where the key resolves** — a single-component key
-  (`{"mlp": "my_mlp"}`) renames the `mlp` on *every* block, not just the first.
 - **A key that names nothing is skipped, not an error.** That is what lets one
   `rename` cover architectures that spell a module differently:
   `{"attn": "att", "self_attn": "att"}` binds whichever of the two exists.
@@ -158,8 +112,8 @@ You can also index a renamed `ModuleList` entry by its alias string:
   (`output`, `input`, `trace`, ...), a sibling module, an alias an earlier key
   already claimed, or a name on the **wrapped model** (`config`, `weight`,
   `eval`, and every other `nn.Module` attribute) — would leave the original
-  reachable only through the tree, not by name. That is reported when the model is built rather than surfacing later as
-  an intervention landing on the wrong module:
+  reachable only through the tree, not by name. That is reported when the model is
+  built rather than surfacing later as an intervention landing on the wrong module:
 
   ```
   ValueError: `rename` alias 'embed' for 'head' would shadow a child module of
@@ -173,12 +127,3 @@ You can also index a renamed `ModuleList` entry by its alias string:
   rather than picking one; `*` is for a component whose name varies
   (`"*.h"`), not for naming every entry. To give every entry's child a name,
   key the child (`{"attn": "self_attn"}`).
-- **A dotted key mounts on the root; a leading-dot key mounts where it resolves;
-  a dotted alias mounts on the envoy its prefix names.** Pick the form that
-  matches where you want to reach the alias.
-
-## Related
-
-- [trace.md](trace.md)
-- [access-and-modify.md](access-and-modify.md)
-- [cache.md](cache.md)

@@ -2,23 +2,13 @@
 title: Generate
 one_liner: Multi-token generation through the model; returns token ids (`tracer.result`). Decoding follows the checkpoint's `generation_config`.
 tags: [usage, tracing, generation]
-related: [docs/usage/trace.md, docs/usage/pipe.md, docs/usage/iteration.md, docs/usage/invoke-and-batching.md]
+related: [docs/usage/trace.md, docs/usage/pipe.md, docs/usage/iteration.md, docs/usage/invoke-and-batching.md, docs/usage/save.md]
 sources: [src/nnsight/modeling/transformers.py, src/nnsight/intervention/tracer.py]
 ---
 
 # Generate
 
-## What this is for
-
-`model.generate(input, max_new_tokens=N, ...)` traces multi-token autoregressive generation. It runs the model's own `generate` (each new token is one forward pass) and returns the **generated token ids** — read them off `tracer.result`. Interventions in the block run against every forward the decode loop makes; use `tracer.iter` to target a particular step.
-
-Generate goes **through the model**, not the task's pipeline. It takes the same inputs a forward does (text, token ids, a tensor, or an encoding) and decodes with the checkpoint's own **`generation_config`** — not the `task_specific_params` a pipeline would apply. That config is the checkpoint's to set: gpt2 leaves it greedy, and many instruct checkpoints put `do_sample=True` in it, so **generate samples on those unless you say otherwise**. Pass `do_sample=False` when you need determinism. To get the pipeline's decoded records instead, use `model.pipe(...)` — see `docs/usage/pipe.md`.
-
-## When to use / when not to use
-
-- Use for autoregressive generation where you want token ids and/or per-step interventions.
-- Use `model.pipe(...)` when you want the task pipeline's decoded output (text, labels). See `docs/usage/pipe.md`.
-- Use `model.trace(...)` for a single forward pass.
+`model.generate(input, max_new_tokens=N, ...)` traces autoregressive generation. It runs the model's own `generate` (one forward per new token) and returns the **generated token ids** on `tracer.result`. Interventions in the block run against the decode loop's forwards; target particular steps with [`tracer.iter`](iteration.md). It takes the same inputs a forward does (text, token ids, a tensor, an encoding). For the task pipeline's decoded records use [pipe](pipe.md); for one forward, [trace](trace.md).
 
 ## Canonical pattern
 
@@ -34,78 +24,41 @@ print(ids.shape)                          # torch.Size([1, 13])  (10 prompt + 3 
 print(model.tokenizer.decode(ids[0]))     # The Eiffel Tower is in the city of Paris, and
 ```
 
-The result is a `[batch, seq]` tensor of ids — the whole prompt plus completion.
+The result is a `[batch, seq]` tensor of ids — prompt plus completion. `tracer.result` is served during the run, so read it inside the block; afterwards it raises ``ValueError: Cannot access `result` outside of interleaving``. Without a `with`, `ids = model.generate("Hello", max_new_tokens=3)` just returns the ids.
 
 ## Decoding follows the checkpoint's `generation_config`
 
-Generating through the model uses the checkpoint's settings, not the pipeline's `task_specific_params` (which for gpt2 ask for `do_sample=True`). gpt2's own config is greedy, so two generates match:
-
-```python
-with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as t:
-    a = t.result.save()
-with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as t:
-    b = t.result.save()
-# torch.equal(a, b) -> True
-```
-
-A checkpoint whose `generation_config` sets `do_sample=True` samples instead — `gemma-3-1b-it`, `Llama-3.1-8B-Instruct` and `Qwen3-4B-Instruct` all ship it, with a `temperature` and `top_p` beside it. The same two generates then come back different, and a logit lens or a probe reading the run disagrees with the tokens it produced. Check `model.generation_config.do_sample`, and pass `do_sample=False` for a deterministic run:
+Generate decodes with the checkpoint's own `generation_config`, not the `task_specific_params` a pipeline would apply. gpt2's is greedy; many instruct checkpoints (`gemma-3-1b-it`, `Llama-3.1-8B-Instruct`, `Qwen3-4B-Instruct`) set `do_sample=True` with a `temperature` and `top_p`, so **generate samples on those unless you say otherwise** — two identical generates differ, and a logit lens or probe reading the run disagrees with the tokens it produced. Check `model.generation_config.do_sample`, and pass `do_sample=False` for determinism:
 
 ```python
 with model.generate("The Eiffel Tower is in the city of", max_new_tokens=12, do_sample=False) as tracer:
     ids = tracer.result.save()
 ```
 
-Ask for sampling explicitly if you want it: `model.generate(..., do_sample=True, top_k=50)`. Sampled generation is reproducible from a plain `torch.manual_seed(n)` immediately before the call — inside a trace or outside one:
+Sampled generation (`do_sample=True, top_k=50`) is reproducible from a plain `torch.manual_seed(n)` immediately before the call.
+
+## Extra kwargs go straight to the model's `generate`
+
+Anything the tracer does not consume is forwarded — `do_sample`, `temperature`, `top_p`, `num_return_sequences`, `generation_config=`, stopping criteria — and whatever HF returns lands on `tracer.result`:
 
 ```python
-import torch
+with model.generate(
+    prompt, max_new_tokens=3,
+    return_dict_in_generate=True, output_scores=True,
+) as tracer:
+    out = tracer.result.save()
 
-torch.manual_seed(0)
-with model.generate("The Eiffel Tower is in the city of", max_new_tokens=5, do_sample=True, top_k=50) as tracer:
-    a = tracer.result.save()
-torch.manual_seed(0)
-with model.generate("The Eiffel Tower is in the city of", max_new_tokens=5, do_sample=True, top_k=50) as tracer:
-    b = tracer.result.save()
-# torch.equal(a, b) -> True
+out.sequences        # [batch, prompt + new]
+out.scores           # one [batch, vocab] tensor per generated step
 ```
 
-## Accessing the result
+That is the way to get per-step logits without reading `lm_head` under `tracer.iter`.
 
-```python
-# Preferred: tracer.result
-with model.generate("Hello", max_new_tokens=5) as tracer:
-    ids = tracer.result.save()
-
-# Deprecated: reading the finished ids through the generator passthrough
-with model.generate("Hello", max_new_tokens=5):
-    ids = model.generator.output.save()   # NNsightDeprecationWarning
-```
-
-The generated ids are passed through a `Generator` module so a worker parked on `model.generator.output` receives them. It is the same tensor `tracer.result` gives, prompt ids included, and reading it warns:
-
-```
-NNsightDeprecationWarning: model.generator.output is deprecated; use
-tracer.result instead (model.generator.streamer.output still gives per-step tokens).
-```
-
-`tracer.result` is served during the run, so it has to be read inside the block — after the `with` block it raises ``ValueError: Cannot access `result` outside of interleaving``.
-
-## Per-step interventions
-
-```python
-import nnsight
-
-with model.generate("Hello", max_new_tokens=5) as tracer:
-    per_step = nnsight.save([])
-    for step in tracer.iter[:5]:
-        per_step.append(model.output.logits[0, -1].argmax(dim=-1))
-```
-
-A loop must not ask for a step the run does not make: `iter[:5]` is right here because `max_new_tokens=5` and nothing ends the generation sooner. See `docs/usage/iteration.md` for the forms and `docs/usage/iteration.md#pitfalls` for what happens when a loop outruns the run.
+**Bound the run, and the loops over it.** Always pass `max_new_tokens=` (or a `generation_config`). It is an upper bound: a `tracer.iter` loop that asks for more steps than the run makes is cut short with a warning and the code after it is dropped. `min_new_tokens=N` holds the run to N steps by suppressing EOS. See [iteration](iteration.md#the-one-rule).
 
 ## Per-step tokens (streamer)
 
-`model.generator.streamer.output` gives the tokens as they are decoded — the prompt arrives as one block, then one new token per step:
+`model.generator.streamer.output` gives tokens as they are decoded — the prompt as one block, then one new token per step:
 
 ```python
 import nnsight
@@ -117,9 +70,11 @@ with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as t
 # [tuple(s.shape) for s in steps] -> [(1, 10), (1,), (1,)]
 ```
 
+Reading the finished ids through `model.generator.output` is deprecated (`NNsightDeprecationWarning`); use `tracer.result`.
+
 ## Batched generation
 
-Pass a list of prompts, or use `tracer.invoke(...)` per prompt. Shorter prompts are left-padded up to the longest:
+Pass a list of prompts, or one `tracer.invoke(...)` per prompt. Shorter prompts are left-padded, and the padding stays in the result:
 
 ```python
 with model.generate(
@@ -128,14 +83,12 @@ with model.generate(
 ) as tracer:
     ids = tracer.result.save()
 # ids.shape -> torch.Size([2, 10])
-# row 0: 'The Eiffel Tower is in the middle of'
 # row 1: '<|endoftext|>' * 6 + 'Paris, France,'
 ```
 
-The padding is still there in the result, so decode with
-`skip_special_tokens=True` (or slice the row) unless you want it.
+Decode with `skip_special_tokens=True`, or slice each row by its own token count.
 
-## Difference vs `trace` and `pipe`
+## `trace` vs `generate` vs `pipe`
 
 | Aspect | `model.trace(...)` | `model.generate(...)` | `model.pipe(...)` |
 |---|---|---|---|
@@ -145,64 +98,8 @@ The padding is still there in the result, so decode with
 | Sampling | n/a | the checkpoint's `generation_config` (may sample) | that plus the pipeline's `task_specific_params` (may sample) |
 | Input | anything the forward takes | text, ids, tensor, encoding | what the task pipeline accepts (text, chat, images) |
 
-## Remote generation
-
-```python
-with model.generate("Hello", max_new_tokens=5, remote=True) as tracer:
-    ids = tracer.result.save()
-```
-
-`remote=True` serializes the trace and runs it on NDIF; `tracer.result` is shipped back.
-
-## Called directly (no block)
-
-Without a `with`, `generate` just generates and still returns the ids:
-
-```python
-ids = model.generate("Hello", max_new_tokens=3)   # torch.Tensor
-```
-
-## Extra kwargs go straight to the model's `generate`
-
-Anything the tracer does not consume is forwarded to `model.generate` —
-`do_sample`, `temperature`, `top_p`, `num_return_sequences`,
-`generation_config=`, stopping criteria — and whatever it returns is what lands
-on `tracer.result`. So the return type is yours to choose:
-
-```python
-# default: token ids
-with model.generate(prompt, max_new_tokens=3) as tracer:
-    ids = tracer.result.save()
-
-# ask HF for the full output object and you get it, scores included
-with model.generate(
-    prompt, max_new_tokens=3,
-    return_dict_in_generate=True, output_scores=True,
-) as tracer:
-    out = tracer.result.save()
-
-out.sequences        # [batch, prompt + new]
-out.scores           # one [batch, vocab] tensor per generated step
-```
-
-That is the way to get per-step logits out of a traced generation without
-reading `lm_head` under `tracer.iter`.
-
-Two of those kwargs decide how many steps an iteration loop may ask for:
-`max_new_tokens=N` is an upper bound, and `min_new_tokens=N` holds the
-generation to N steps by suppressing EOS until then.
+`remote=True` runs a generate on NDIF like a trace; see [remote-trace](../remote/remote-trace.md).
 
 ## Gotchas
 
-- **A `tracer.iter` loop must not ask for a step the run does not make.** A bound the run meets is fine and the code after the loop runs; a loop that outruns the run — bounded or open — warns, keeps what it saved, and drops the statements after the loop, so the result looks complete while being shorter than the bound. `max_new_tokens` is an upper bound, so pass `min_new_tokens=` when the loop's bound has to hold, and check the `len()` of what you collected. See `docs/usage/iteration.md#pitfalls`.
-- Always pass a stop bound (`max_new_tokens=` or a `generation_config`).
-- Within a step, modules must still be accessed in forward-pass order — inside an iteration loop an out-of-order read or write can bind to the *next* step instead of raising. A `.source` op first touched inside the loop does this even at step 0. Compare list lengths and per-step shapes (see `docs/usage/iteration.md#pitfalls`).
-- Reading `model.generator.output` for the finished ids is deprecated — use `tracer.result`.
-
-## Related
-
-- `docs/usage/trace.md`
-- `docs/usage/pipe.md`
-- `docs/usage/iteration.md`
-- `docs/usage/invoke-and-batching.md`
-- `docs/usage/save.md`
+- Within a step, modules must still be read in forward-pass order. Inside an iteration loop an out-of-order read or write can bind to the *next* step instead of raising; see [iteration pitfalls](iteration.md#pitfalls).

@@ -2,26 +2,17 @@
 title: Iteration — iter / all
 one_liner: Target intervention code at specific generation steps with `for step in tracer.iter[...]` and `tracer.all()`.
 tags: [usage, generation, iteration]
-related: [docs/usage/generate.md, docs/errors/out-of-order-error.md, docs/usage/source.md, docs/usage/invoke-and-batching.md]
+related: [docs/usage/generate.md, docs/errors/out-of-order-error.md, docs/errors/module-never-fired.md, docs/usage/source.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/intervention/iterator.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/interleaver.py]
 ---
 
 # Iteration — `tracer.iter` / `tracer.all()`
 
-## What this is for
-
-In `model.generate(...)`, the model runs forward once per generated token, so each
-module is reached once per step. **Iteration APIs bind a stretch of trace body to a
-chosen range of those steps:**
-
-- `for step in tracer.iter[slice | int | list]:` — loop the body over the selected
-  step(s). Inside the body, every `.output` / `.input` read binds to the current
-  step, and `step` is the real integer index.
-- `tracer.all()` — shorthand for `tracer.iter[:]` (every step).
-
-For a single forward (`model.trace(x)`) there is only step 0, so you don't need
-these.
-
+In `model.generate(...)` the model runs forward once per generated token, so each
+module is reached once per step. `for step in tracer.iter[...]:` binds the loop
+body to the selected steps: every `.output` / `.input` read inside binds to the
+current step, and `step` is the real integer index. `tracer.all()` is
+`tracer.iter[:]`. A single forward (`model.trace(x)`) has only step 0.
 
 ## Canonical pattern
 
@@ -51,59 +42,27 @@ with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
         hidden.append(model.transformer.h[-1].output)
 ```
 
-## Variations
+## Selecting steps
 
-### Slice — bounded range
-
-```python
-with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
-    out = nnsight.save([])
-    for step in tracer.iter[1:3]:                  # steps 1 and 2 only
-        out.append(model.lm_head.output)
-```
-
-### Int — single step
-
-```python
-with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
-    for step in tracer.iter[0]:                    # only the prefill step
-        first = model.lm_head.output.save()
-```
-
-### List — explicit steps
+The selector is a slice, an int, or a list; only the loop header changes:
 
 ```python
 with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
     out = nnsight.save([])
-    for step in tracer.iter[[0, 2, 4]]:            # those steps only
+    for step in tracer.iter[1:3]:      # steps 1 and 2
+    # for step in tracer.iter[0]:          only the prefill step
+    # for step in tracer.iter[[0, 2, 4]]:  those steps only
         out.append(model.lm_head.output)
 ```
 
-### Per-step conditional
+`step` is a plain int, so `if step == 2:` inside the body targets one step of a
+wider loop. Negative steps raise `ValueError` (`tracer.iter step cannot be
+negative: -1`); there is no "last step" shorthand.
 
-`step` is the actual integer index, so a plain Python `if` works:
-
-```python
-with model.generate("Hello", max_new_tokens=5, do_sample=False) as tracer:
-    for step in tracer.iter[:5]:
-        if step == 2:
-            model.transformer.h[0].output[:] = 0
-        # other steps pass through
-```
-
-## How it works
-
-`tracer.iter` returns an `Iterations` object; subscripting selects the range
-(`iterator.py`). Looping over it walks the running mediator's `iteration` pointer
-across the selected steps — before each yield it pins `iteration` so the first read
-in the body binds to that occurrence, and the pin then relaxes: the rest of the
-body's requests follow the model. Restoring the pointer on exit therefore restores
-a relaxed pointer, so a read placed after a nested inner loop binds to the step the
-*inner* loop left the model on, not the outer step it is written under — measured
-at step 3 for an inner `tracer.iter[[3]]` inside an outer `tracer.iter[1:2]`. Nest
-loops only when the outer body reads nothing after the inner one; the same
-relaxation is behind [the out-of-order pitfalls below](#an-out-of-order-body-shifts-by-a-step).
-`tracer.all()` is `tracer.iter[:]`.
+`with tracer.iter[...]:` (the block form) is deprecated
+(`NNsightDeprecationWarning`); unlike the loop it silently truncates an over-run
+and lets the code after it run. Use `for step in tracer.iter[...]:`.
+`model.iter` / `model.all()` are deprecated too.
 
 ## The one rule
 
@@ -172,20 +131,6 @@ Values saved inside the loop survive either way. `tracer.result` cannot move bel
 the `with` block instead: it is served during the run, so reading it afterwards
 raises ``ValueError: Cannot access `result` outside of interleaving``.
 
-## Deprecated: the `with` form
-
-`with tracer.iter[...]:` still works but emits an `NNsightDeprecationWarning`. It
-does the same thing the long way — the loop is moved inside, re-running the block
-per step — with one visible difference: because it owns the loop, it catches its
-own over-run, truncates to the steps that ran, and lets the code after the block
-run silently. Prefer `for step in tracer.iter[...]:`.
-
-```python
-with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
-    with tracer.iter[:3]:            # NNsightDeprecationWarning
-        x = model.transformer.h[0].output.save()
-```
-
 ## Pitfalls
 
 ### An out-of-order body shifts by a step
@@ -250,33 +195,22 @@ Touch `.source` before the trace, and assert parallel lists have equal lengths.
 ### `tracer.iter[N]` counts occurrences
 
 `tracer.iter[N]` binds to occurrence `N` of each location. A top-level block fires
-once per step, so occurrence `N` is step `N`. A module called `k` times within one
-forward (a recurrent inner module, an expert loop) fires `k` occurrences per step,
-so occurrence `N` lands inside a step. Count calls per forward with
-`print(parent.source)` to translate steps into occurrences.
+once per step, so occurrence `N` is step `N`. A module or `.source` op called `k`
+times within one forward (a recurrent inner module, an MoE expert loop) fires `k`
+occurrences per step, so occurrence `N` lands inside a step. Count calls per
+forward with `print(parent.source)` to translate steps into occurrences.
+
+### Nested loops
+
+A read placed after a nested inner loop binds to the step the *inner* loop left the
+model on, not the outer step it is written under. Nest loops only when the outer
+body reads nothing after the inner one.
 
 ## Gotchas
 
 - **An open loop whose body reads no module never returns.** Nothing parks the
-  worker, so the index generator spins with no warning and no timeout. Bound the
-  loop, or read something inside it.
-- **Negative step values raise `ValueError`** (`tracer.iter step cannot be
-  negative: -1`) — there is no "last step" shorthand.
-- **Order the body the way the forward runs** — earlier layers before later ones,
-  a submodule before the block containing it. Out of order, writes land and reads
-  come back a step late (see [Pitfalls](#an-out-of-order-body-shifts-by-a-step)).
-- **Regular-module access after the loop is out of order.** Those forward passes are
-  already done, so requesting a module's `.output`/`.input` after the loop raises
+  worker, so it spins with no warning and no timeout. Bound the loop, or read
+  something inside it.
+- **Regular-module access after the loop is out of order.** Those forward passes
+  are done, so a module's `.output`/`.input` after the loop raises
   `OutOfOrderError`.
-- **Source-op iteration counts invocations, not forward passes.** An op that fires
-  once per forward is indexed per generation step; an op that loops within one
-  forward (e.g. an MoE expert loop) is indexed per fire. See [source.md](source.md).
-- **`model.iter` / `model.all()` are deprecated** — use `tracer.iter` /
-  `tracer.all()`.
-
-## Related
-
-- [generate.md](generate.md) — generation context.
-- [../errors/module-never-fired.md](../errors/module-never-fired.md) — a location the run never reached.
-- [source.md](source.md) — how `.source` interacts with iteration.
-- [invoke-and-batching.md](invoke-and-batching.md) — per-invoke iteration.

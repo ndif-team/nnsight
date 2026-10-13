@@ -8,22 +8,12 @@ sources: [src/nnsight/intervention/backward.py, src/nnsight/__init__.py]
 
 # Backward and Gradients
 
-## What this is for
-
 `with tensor.backward():` runs the real backward pass **interleaved** with the body
 of the `with` block, so the block can read and replace the `.grad` of any tensor as
-the gradient reaches it. nnsight patches `torch.Tensor.backward` at import time; a
-bare `tensor.backward()` (no `with` block) falls through to vanilla PyTorch
-unchanged.
-
-A backward trace is almost always **nested inside a forward trace**, so the tensors
-whose gradients you want are the real ones produced during the run.
-
-## When to use / when not to use
-
-- Use to read or modify the gradient of a specific tensor during backprop.
-- Use for gradient-based attribution or optimization through a frozen model.
-- Skip if you only need the loss — plain `loss.backward()` (no `with`) still works.
+the gradient reaches it — for gradient attribution, or optimization through a
+frozen model. It is almost always nested inside a forward trace, so the tensors
+whose gradients you want are the real ones produced during the run. A bare
+`tensor.backward()` (no `with`) is vanilla PyTorch and returns `None`.
 
 ## Canonical pattern
 
@@ -44,15 +34,16 @@ with model.trace("Hello world"):
 print(g.shape)   # torch.Size([1, 2, 768])
 ```
 
-Reading `hs.grad` parks the block until autograd produces that gradient; assigning
-`hs.grad = ...` replaces the gradient that flows onward.
+Reading `hs.grad` waits until autograd produces that gradient; assigning
+`hs.grad = ...` replaces the gradient that flows onward. Gradient errors name the
+tensor by a numeric id rather than a module path.
 
 ## Variations
 
 ### Read gradients in reverse-forward order
 
 Gradients flow backward through the model, so request `.grad` in the reverse of the
-forward order — later layers first:
+forward order — later layers first; the other order raises `OutOfOrderError`:
 
 ```python
 with model.trace("Hello world"):
@@ -77,6 +68,10 @@ with model.trace("Hello world"):
 # g2 == 2 * g1
 ```
 
+Every backward but the last needs `retain_graph=True`, including backwards in
+different invokes of one trace (they share one forward, so one graph). Without it
+the second raises `RuntimeError: Trying to backward through the graph a second time`.
+
 ### Gradients inside a batched invoke
 
 Reading `.grad` on an activation captured in a `tracer.invoke(...)` block works even
@@ -92,29 +87,8 @@ with model.trace() as tracer:
             grad = hidden.grad.save()   # this invoke's rows only
 ```
 
-The activation an invoke reads is a slice-view of the full batch (not itself in the
-loss graph), so nnsight redirects the autograd hook to the full-batch tensor
-and recovers this invoke's rows — no extra work on your part. Position indices in a
-batch follow the batch's padding, which
-[invoke-and-batching.md](invoke-and-batching.md) describes.
-
-The invokes share one forward and therefore one autograd graph, so a second
-backward anywhere in the same trace needs `retain_graph=True` on the earlier ones:
-
-```python
-with model.trace() as tracer:
-    with tracer.invoke("The Eiffel Tower is in"):
-        a = model.transformer.h[-1].output
-        with model.output.logits.sum().backward(retain_graph=True):
-            g_a = a.grad.norm().save()
-    with tracer.invoke("The Great Wall is in"):
-        b = model.transformer.h[-1].output
-        with model.output.logits.sum().backward():
-            g_b = b.grad.norm().save()
-```
-
-Without it the second one raises
-`RuntimeError: Trying to backward through the graph a second time`.
+nnsight recovers this invoke's rows from the full-batch gradient for you. Position
+indices follow the batch's padding ([invoke-and-batching](invoke-and-batching.md)).
 
 ### Read-only gradients without the ordering rule
 
@@ -154,30 +128,18 @@ with loss.backward():
 # g == tensor([4., 6.])
 ```
 
-## How `.grad` access works
-
-For the duration of one backward run, `torch.Tensor.grad` is replaced by a
-property. Reading `t.grad` registers a self-removing autograd hook on `t` (once per
-tensor) and parks the block on the location `f"{id(t)}.grad"`; when autograd fires
-the hook, the gradient is served to the block. Writing `t.grad = v` swaps a
-replacement into that same channel. Because the location is keyed by `id(tensor)`,
-gradient errors show a numeric id rather than a module path.
-
 ## Limits
 
 **`model.generate()` produces no gradients.** HuggingFace decorates
-`GenerationMixin.generate` with `@torch.no_grad()`, so activations inside a
-generation trace come back with `requires_grad=False` and opening a backward block
-there raises:
+`GenerationMixin.generate` with `@torch.no_grad()` (wrapping the call in
+`torch.enable_grad()` does not help), so opening a backward block there raises:
 
 ```
 NotImplementedError: This tensor does not require grad, so a backward session
 cannot produce gradients: nothing the block reads can ever receive one.
 ```
 
-Wrapping the call in `torch.enable_grad()` does not change this — the decorator is
-applied inside `generate` and wins. For gradients over generated tokens, run a loop
-of `model.trace` calls over the growing prefix and take the backward in each:
+Run a loop of `model.trace` calls over the growing prefix and take the backward in each:
 
 ```python
 tokens = model.tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
@@ -192,18 +154,11 @@ for step in range(3):
     tokens = torch.cat([tokens, logits[:, -1].argmax(-1, keepdim=True)], dim=-1)
 ```
 
-**A frozen model produces no gradients.** After `model.requires_grad_(False)` there
-is nothing for autograd to accumulate into, and a backward block raises the same
-`NotImplementedError`. Once you inject a tensor that does require grad — a steering
-vector, an adapter — gradients exist from that point *downstream* only; reading
-`.grad` on an activation upstream of the injection raises
+**A frozen model produces no gradients either.** After `model.requires_grad_(False)`
+a backward block raises the same `NotImplementedError`. Once you inject a tensor
+that requires grad (a steering vector, an adapter), gradients exist downstream of
+it only; `.grad` upstream raises
 `RuntimeError: cannot register a hook on a tensor that doesn't require gradient`.
-
-**The model's parameter gradients accumulate across traces.** Each backward adds
-into `param.grad` the way it does in ordinary PyTorch. Zero them between steps, or
-freeze the model and differentiate only what you injected, if you do not want that
-memory held. It is the only thing that grows across a long loop: neither the trace
-nor `model.session()` retains anything per iteration.
 
 ## In-place writes after the forward has moved on
 
@@ -225,56 +180,39 @@ with model.trace("Hello world"):
         grad = later.grad.norm().save()
 ```
 
-In-place editing is not itself a problem for autograd. At the interception point
-`hs *= 2`, `hs[:] = hs * 2` and `model.transformer.h[6].output = hs * 2` produce the
-same forward result and all differentiate. They differ only in what `hs` goes on to
-name: the in-place forms leave it aliased to the edited value, so `hs.grad` is the
-gradient at the edit; the replacement leaves `hs` as the tensor from before the
-edit, so its gradient carries the edit's own chain rule (here, a factor of 2).
-Position is what breaks a backward, not form. A forward-only trace gives no signal,
-so compare logits with and without the edit when an intervention seems to do
-nothing.
+Position breaks a backward, not form: at the interception point `hs *= 2`,
+`hs[:] = hs * 2` and `model.transformer.h[6].output = hs * 2` all differentiate.
+They differ only in what `hs` names afterwards — the in-place forms alias the
+edited value, so `hs.grad` is the gradient at the edit; after the replacement `hs`
+is the pre-edit tensor, so its gradient carries the edit's chain rule (here, a
+factor of 2). When an intervention seems to do nothing, compare logits with and
+without it.
 
 ## Gotchas
 
-- **Request `.grad` on the tensor you captured directly** — not on a slice or index
-  of it (`hs.grad`, not `hs[0].grad`). An indexing view is a new tensor whose
-  gradient isn't the one autograd delivers, and requesting it raises
-  `OutOfOrderError`.
-- **Access gradients in reverse-forward order.** Requesting an earlier-forward
-  tensor's grad before a later one raises `OutOfOrderError`.
-- **Only `.grad` is meaningful inside the backward block.** The forward pass is over
-  by the time autograd runs; capture any `.output` / `.input` before the
-  `with tensor.backward():`.
+- **Parameter gradients accumulate across traces**, as in ordinary PyTorch. Zero
+  them between steps, or freeze the model and differentiate only what you
+  injected. Nothing else grows across a long loop of traces or a session.
+- **Request `.grad` on the tensor you captured directly** (`hs.grad`, not
+  `hs[0].grad`). An indexing view is a new tensor whose gradient autograd never
+  delivers, and requesting it raises `OutOfOrderError`.
+- **Only `.grad` is meaningful inside the backward block.** The forward is over by
+  then; capture any `.output` / `.input` before `with tensor.backward():`.
 - **An activation needs no `requires_grad_(True)`.** A tensor read from `.output`
-  or `.input` is already a non-leaf carrying a `grad_fn`, and calling
-  `requires_grad_(True)` on it leaves it exactly as it was. The only tensor that
-  needs the call is a leaf you construct yourself — a scaled embedding baseline
-  for integrated gradients, or a steering vector you are optimizing.
-- **A gradient is readable only while the block is open.** Once it closes, `t.grad`
-  is `None` again (PyTorch's non-leaf `.grad` warning is the only signal), so
-  `.save()` what you want before leaving.
-- **A gradient that never arrives raises rather than hangs.** Asking for the
-  `.grad` of a tensor autograd never reaches — a branch off the metric's path, for
-  instance — surfaces `OutOfOrderError` at the end of the run.
-- **A backward block cannot be nested inside another backward block.** The outer
-  block's hook is still registered while the inner one runs, and re-firing it on
-  the parked worker surfaces from inside autograd as
-  `ValueError: cyclic parent chain`, naming nothing you wrote. Write the two as
-  siblings — one block after the other, `retain_graph=True` on the earlier (plus
+  or `.input` already carries a `grad_fn`. Only a leaf you construct yourself (an
+  integrated-gradients baseline, a steering vector you optimize) needs the call.
+- **A gradient is readable only while the block is open.** Afterwards `t.grad` is
+  `None` again (PyTorch's non-leaf `.grad` warning is the only signal), so
+  `.save()` what you want inside.
+- **A gradient that never arrives raises rather than hangs.** `.grad` of a tensor
+  off the metric's path surfaces `OutOfOrderError` at the end of the run.
+- **A backward block cannot be nested inside another.** It surfaces from inside
+  autograd as `ValueError: cyclic parent chain`, naming nothing you wrote. Write
+  the two as siblings, `retain_graph=True` on the earlier (plus
   `create_graph=True` when the second differentiates the first's gradient).
 - **Interventions inside a gradient-checkpointed segment never reach the
-  backward.** `torch.utils.checkpoint` runs the segment twice and the block served
-  the first pass, so the recompute — the one autograd differentiates — runs
-  unmodified: the forward output is right and the parameter gradients inside the
-  segment are wrong, with nothing to signal it. Turn checkpointing off while
-  tracing (`model.gradient_checkpointing_disable()` on HuggingFace,
+  backward.** `torch.utils.checkpoint` recomputes the segment unmodified for
+  autograd, so the forward output is right and the parameter gradients inside the
+  segment are silently wrong. Turn checkpointing off while tracing
+  (`model.gradient_checkpointing_disable()` on HuggingFace,
   `model.set_grad_checkpointing(False)` on timm).
-- **A bare `tensor.backward()` is untouched** — it runs vanilla PyTorch and returns
-  `None`.
-
-## Related
-
-- [access-and-modify.md](access-and-modify.md) — forward-pass `.output` / `.input`.
-- [trace.md](trace.md)
-- [save.md](save.md)
