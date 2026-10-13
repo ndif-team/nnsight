@@ -172,6 +172,20 @@ with model.trace() as tracer:
 Rename it (`eiffel_h5`) and the patch takes. A cross-invoke handoff with no error
 *and* no effect is this, not a barrier problem — a missing barrier raises.
 
+## Code between invokes runs first
+
+Statements in the trace body outside every invoke run **before** any invoke worker
+starts, so they cannot read a name an invoke binds — they raise
+`NameError: name 'x' is not defined` inside the trace. Create the accumulator
+before the invokes with `nnsight.save({})` and write into it inside them:
+
+```python
+with model.trace() as tracer:
+    res = nnsight.save({})                    # not: x = ... in the invoke, y = x * 2 out here
+    with tracer.invoke("The Eiffel Tower is in"):
+        res["eiffel"] = model.transformer.h[0].output.sum()
+```
+
 ## Rows, padding, and getting values back
 
 Rows sit in the batch in invoke **declaration** order: concatenating each
@@ -201,7 +215,7 @@ the same length.
 
 Indexing from the right (`[:, -1]`) is stable, because the padding is on the left.
 For any other position, work out the offset from that invoke's own token count, or
-from the attention mask.
+from the [attention mask](#reducing-over-real-tokens-the-attention-mask).
 
 Pad positions are not blank. The attention mask keeps them from affecting the real
 positions, but the model still computes values there, often with a *larger* norm
@@ -212,6 +226,21 @@ A batched `generate` returns the padding too. With `max_new_tokens=5` and inputs
 of 5 and 18 tokens, `tracer.result` is `[2, 23]`, and decoding the short row prints
 thirteen `<|endoftext|>` ahead of its prompt. Slice a row by its own token count
 rather than by one offset shared across the batch.
+
+### Reducing over real tokens: the attention mask
+
+To reduce over a padded batch's real tokens only, read the mask from the root
+model's inputs inside the trace:
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke(["Hello", "The Eiffel Tower is located in the city of"]):
+        args, kwargs = model.inputs
+        mask = kwargs["attention_mask"]
+        hidden = model.transformer.h[6].output
+        m = mask.to(hidden.device, hidden.dtype).unsqueeze(-1)
+        means = ((hidden * m).sum(1) / m.sum(1)).save()   # matches each prompt run alone
+```
 
 ### Save by identity, not by position
 

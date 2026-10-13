@@ -1,6 +1,6 @@
 # nnsight — Agent Guide
 
-**Start at [docs/index.md](docs/index.md)**, the router for every docs section. Find the one page for the task and read it before writing code. Something broke? Start at [docs/errors/symptom-index.md](docs/errors/symptom-index.md); for an exception or warning, look its message up in [docs/errors/index.md](docs/errors/index.md).
+**Start at [docs/index.md](docs/index.md)**, the router for every docs section. Find the one page for the task and read it before writing code. Something broke? Start at [docs/errors/symptom-index.md](docs/errors/symptom-index.md); for an exception or warning — including a plain `NameError` on a name used after a block — look its message up in [docs/errors/index.md](docs/errors/index.md).
 
 ## Contributing
 
@@ -25,6 +25,8 @@
 | Pick a model class (HF, any `nn.Module`, diffusers, vLLM) | [models/index.md](docs/models/index.md) |
 | Fit a model too big for one GPU | [models/tensor-parallel.md](docs/models/tensor-parallel.md), [models/quantization.md](docs/models/quantization.md) |
 | Run on NDIF | [remote/index.md](docs/remote/index.md), [remote/remote-trace.md](docs/remote/remote-trace.md) |
+| Ablate or sweep attention heads | [patterns/per-head-attention.md](docs/patterns/per-head-attention.md), [patterns/ablation.md](docs/patterns/ablation.md) |
+| Sweep many prompts (local or NDIF) | [patterns/remote-dataset-sweep.md](docs/patterns/remote-dataset-sweep.md) |
 | Run a research technique (logit lens, patching, ablation, steering, probing, SAEs) | [patterns/index.md](docs/patterns/index.md) |
 | Port code written for nnsight before 0.8 | [reference/migrating-to-0.8.md](docs/reference/migrating-to-0.8.md) |
 | Look up an exact API name or a `CONFIG` setting | [reference/api-quick-reference.md](docs/reference/api-quick-reference.md), [reference/config.md](docs/reference/config.md) |
@@ -33,7 +35,7 @@
 
 ## Before writing nnsight code
 
-- **Nothing a trace body assigns survives the block unless it is saved, and a save must be inside the block and bound to a name** (`logits = model.logits.save()`). See [usage/save.md](docs/usage/save.md).
+- **Nothing a trace body assigns survives the block unless it is saved, and a save must be inside the block and bound to a name** (`logits = model.output.logits.save()`). See [usage/save.md](docs/usage/save.md).
 - **A module's `.output` is the real object it returns** — a plain tensor for a GPT-2 block, a tuple for attention. Edit a tuple's tensors in place or rebuild the tuple. See [usage/access-and-modify.md](docs/usage/access-and-modify.md).
 - **Read modules in forward order within an invoke**, a submodule before the block containing it; out of order raises `OutOfOrderError`. See [errors/out-of-order-error.md](docs/errors/out-of-order-error.md).
 - **A `tracer.iter` loop must not ask for more steps than the run makes**; it is cut short with a warning and the code after it is dropped. Check `len()` of what you collect. See [usage/iteration.md](docs/usage/iteration.md).

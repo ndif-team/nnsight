@@ -37,13 +37,17 @@ layer's request:
 # wrong: model.output runs the whole model, so h[8] has already fired
 with model.trace(prompt):
     logits = model.output.logits.save()
-    hidden = model.model.layers[8].output.save()   # OutOfOrderError
+    hidden = model.transformer.h[8].output.save()   # OutOfOrderError
 
 # right: activations first, model.output last
 with model.trace(prompt):
-    hidden = model.model.layers[8].output.save()
+    hidden = model.transformer.h[8].output.save()
     logits = model.output.logits.save()
 ```
+
+Reverse-order reads often come with a stray `[0]` on a GPT-2 block's output,
+which is a plain tensor, not a tuple — see
+[tuple outputs](../usage/access-and-modify.md#tuple-outputs).
 
 The `.i0` suffix on the location is the occurrence tag — which visit of that
 location the request targets. Without `tracer.iter`, it is always `.i0`; in a

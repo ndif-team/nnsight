@@ -257,7 +257,9 @@ in [extending-envoy.md](../developing/extending-envoy.md).
   lengths mixes real activations with pad ones. At GPT-2's layer 6 a pad
   position's residual carries about eight times the norm of a real one, so a
   max-activating-example search reports a pad position as a feature's best example.
-  Index the activation with the batch's `attention_mask` before ranking or fitting.
+  Index the activation with the batch's `attention_mask` before ranking or fitting
+  (see [the masked
+  reduction](../usage/invoke-and-batching.md#reducing-over-real-tokens-the-attention-mask)).
   The ratio is architecture-specific (pythia-70m's pad residuals are *smaller*). See
   [invoke-and-batching.md](../usage/invoke-and-batching.md#rows-padding-and-getting-values-back).
 

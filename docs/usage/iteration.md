@@ -64,6 +64,19 @@ negative: -1`); there is no "last step" shorthand.
 and lets the code after it run. Use `for step in tracer.iter[...]:`.
 `model.iter` / `model.all()` are deprecated too.
 
+## Steps vs tokens
+
+Step 0 is the prefill: a layer's output there is `[B, prompt_len, H]`. Every later
+step runs one new position against the KV cache, so it is `[B, 1, H]` — per-step
+states cannot be `torch.stack`ed directly; take `[:, -1]` of each first. Step *k*'s
+forward produces generated token *k*. A write to layer L's output on step *k*
+changes that step's logits (steering steps 5–10 first changes the sampling of
+token 5) and reaches later steps only through the KV cache of layers above L;
+layers ≤ L stay bit-identical to baseline until a generated token differs.
+
+A body that saves an output and also writes it in the same step saves the written
+value — clone what you save ([save](save.md#gotchas)).
+
 ## The one rule
 
 **A loop must not ask for a step the run does not make.** A bound the run meets

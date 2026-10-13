@@ -21,6 +21,7 @@ look its message up in [index.md](index.md).
 | The whole block did nothing, no output at all | `model.trace(x)` / `model.scan(x)` called without `with` | [A run method called without `with`](#a-run-method-called-without-with) |
 | Only one forward ran when you asked for several | A generation kwarg passed to `trace()` | [Generation kwargs on trace()](#generation-kwargs-on-trace) |
 | A name after the block is undefined (`UnboundLocalError`, `NameError`) | Not saved, or the block unwound before reaching it | [docs/usage/save.md](../usage/save.md), [module-never-fired.md](module-never-fired.md) |
+| `NameError` **inside** the trace body, on a name an invoke saved | Trace-body code between invokes runs before the invoke workers | [docs/usage/invoke-and-batching.md](../usage/invoke-and-batching.md#code-between-invokes-runs-first) |
 | A saved list is empty, but only when running remotely | The elements were saved, not the container | [docs/usage/save.md](../usage/save.md) |
 | `.grad` is `None` | Read outside a `with metric.backward():` block | [.grad outside a backward block](#grad-outside-a-backward-block) |
 | Per-step writes in a loop land one step late, or a per-step list is one entry short with shapes one step ahead and a "was never reached" warning | A `tracer.iter` body that reads a later location before an earlier one (or a `.source` op first touched inside the loop) | [docs/usage/iteration.md](../usage/iteration.md#pitfalls) |

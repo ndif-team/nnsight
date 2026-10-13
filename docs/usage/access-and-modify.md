@@ -94,6 +94,8 @@ with model.trace("Hello world"):
     logits = model.output.logits.save()
 ```
 
+On the root model, `model.inputs` kwargs carry the tokenizer's `attention_mask` — the way to mask pad positions out of a reduction ([invoke-and-batching](invoke-and-batching.md#reducing-over-real-tokens-the-attention-mask)).
+
 ## Cloning before modification
 
 In-place edits happen on the live tensor, so reading `.output` again afterwards returns the modified value. Clone to keep a pre-edit copy:

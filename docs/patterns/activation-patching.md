@@ -77,6 +77,17 @@ patched  corrupt: P(Paris)=0.064 P(Rome)=0.006
 GPT-2 small is near-degenerate on the corrupt prompt (`' Rome'` ranks only 4th), so
 compare probabilities or the logit difference, not the top token.
 
+!!! warning "Do not score with raw logits"
+
+    GPT-2's logits carry a large shared offset that moves between prompts. On this
+    pair the clean `' Paris'` logit (`-92.09`) is *below* the corrupt one (`-91.96`),
+    so a raw-logit "recovery" has the wrong sign. Use probability, log-prob, or the
+    `Paris - Rome` logit difference (`+2.42` clean, `-1.49` corrupt), normalized as
+    `(patched - corrupt) / (clean - corrupt)`.
+
+The value handed across by the barrier needs no `.clone()`: the write lands
+correctly without it. Clone only when you will also modify the source tensor.
+
 ## Variations
 
 ### Sweep over layers
@@ -97,6 +108,34 @@ for layer in range(len(model.transformer.h)):
 ```
 
 `P(Paris)` decays monotonically from `0.064` at layer 0 to `0.003` at layer 11.
+
+The same sweep fits in **one** trace: one clean invoke, one corrupt invoke per layer
+and a baseline, with one barrier round per layer (see
+[barrier](../usage/barrier.md#several-sites-one-round-each-and-fence-every-read)).
+It matches the per-layer traces to every printed digit:
+
+```python
+import nnsight
+
+N = len(model.transformer.h)
+with model.trace() as tracer:
+    barrier = tracer.barrier(N + 1)              # the clean invoke + one per layer
+    results = nnsight.save({})
+    with tracer.invoke(clean):
+        hs = []
+        for block in model.transformer.h:
+            hs.append(block.output)
+            barrier()                            # round L: layer L is ready
+    for layer in range(N):
+        with tracer.invoke(corrupt):
+            for r in range(N):                   # attend every round, write in its own
+                barrier()
+                if r == layer:
+                    model.transformer.h[layer].output[:, SUBJECT, :] = hs[layer][:, SUBJECT, :]
+            results[layer] = model.lm_head.output[0, -1].softmax(-1)[paris].item()
+    with tracer.invoke(corrupt):                 # baseline: no barrier
+        results["baseline"] = model.lm_head.output[0, -1].softmax(-1)[paris].item()
+```
 
 !!! warning "A whole-span residual sweep measures reach, not location"
 
@@ -128,6 +167,7 @@ for layer in range(0, 12, 2):
         for pos in range(len(corrupt_ids)):
             with tracer.invoke(corrupt):
                 model.transformer.h[layer].output[:, pos, :] = clean_resid[layer][:, pos, :]
+                # .detach(): drop the graph so the saved values don't retain it
                 row.append(model.output.logits[0, -1].softmax(-1)[paris].detach())
     grid.append([float(x) for x in row])
 
@@ -157,9 +197,17 @@ positions are flat everywhere, which is what the sweep alone could not show.
 
 ### Patch the last position instead
 
-`SUBJECT = slice(-1, None)` asks "is the *final* prediction sensitive to this
-layer?" On this pair it stays flat through layer 7, then rises to the full clean
-`0.070`. Patching the subject localizes the *source* of a fact; patching the last
+Patch the final position instead of the subject to ask "is the *final* prediction
+sensitive to this layer?" — the corrupt invoke of the per-layer sweep becomes:
+
+```python
+barrier()
+model.transformer.h[layer].output[:, -1, :] = hs_clean[:, -1, :]
+logits = model.lm_head.output[:, -1, :].save()
+```
+
+On this pair `P(Paris)` stays near the corrupt `0.003` through layer 7 (`0.007`),
+then rises to the full clean `0.070` by layer 11. Patching the subject localizes the *source* of a fact; patching the last
 position tests the *sensitivity* of the final prediction.
 
 ### Per-head or sub-block patching

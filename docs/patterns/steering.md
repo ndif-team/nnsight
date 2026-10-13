@@ -46,8 +46,11 @@ with model.trace() as tracer:
             neg_acts.append(model.transformer.h[LAYER].output[:, -1, :])
 
 direction = torch.cat(list(pos_acts)).mean(0) - torch.cat(list(neg_acts)).mean(0)
-direction = direction / direction.norm()                # [768]
+direction = (direction / direction.norm()).detach()     # [768]
 ```
+
+`.detach()` matters: saved activations carry `requires_grad=True`, so an attached
+vector drags its autograd graph into every run you add it to.
 
 ## Canonical pattern
 
@@ -143,6 +146,18 @@ every step   :  I was told that the bread was good. I was told
 
 The prefill-only run *does* differ from the baseline, which is why a missing
 per-step application reads as "the effect is just modest" rather than as a bug.
+
+To steer only part of the generation, slice the steps. Step 0 is the prefill, so
+this applies the vector on decode steps 5–10; a write at layer L on step k changes
+the token step k emits, and reaches earlier layers' states only from step k+1 (see
+[iteration](../usage/iteration.md#steps-vs-tokens)):
+
+```python
+with model.generate(prompt, max_new_tokens=20, min_new_tokens=20, do_sample=False) as tracer:
+    for step in tracer.iter[5:11]:
+        model.transformer.h[LAYER].output[:, -1, :] += direction * coef
+    ids = tracer.result.save()
+```
 
 With the KV cache, each decode step's activation covers only the token just
 produced, so `[:, -1, :]` is the last prompt token on step 0 and the new token after;

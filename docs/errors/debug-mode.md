@@ -12,28 +12,27 @@ sources: [src/nnsight/tracing/util.py, src/nnsight/tracing/tracer.py, src/nnsigh
 
 Intervention code runs in a worker interleaved with the model's forward pass, so a
 raw traceback is buried under nnsight's own machinery. When a trace body raises,
-nnsight drops the frames whose file lives inside the nnsight package and keeps
-everything else.
-
-For an error raised in the block itself that leaves three frames, ending on the
-line you wrote:
+nnsight strips the worker and interleaving frames. A few nnsight frames from the
+`with` statement's exit remain; the last frame is the line you wrote:
 
 ```
   File "script.py", line 22, in <module>
     with model.trace(prompt):
-  File "…/nnsight/tracing/tracer.py", line 521, in __exit__
+  File "…/nnsight/intervention/tracer.py", line 109, in __exit__
+    return super().__exit__(exc_type, exc_value, exc_traceback)
+  File "…/nnsight/tracing/tracer.py", line 589, in __exit__
     raise exception.with_traceback(
   File "script.py", line 23, in <module>
     h = model.transformer.h[100].output.save()
-IndexError: list index out of range
+AttributeError: 'Envoy' object (nor its module) has attribute '100'. Did you mean: '10'?
 ```
 
 The exception **type is preserved** — the real exception propagates, with no
-wrapper class, so `except IndexError:` around the `with` catches it.
+wrapper class, so `except AttributeError:` around the `with` catches it.
 
 ## Reading a traceback that ends inside torch
 
-Only *nnsight's* frames are dropped. Frames from torch, transformers, and your own
+Only nnsight's own frames are stripped. Frames from torch, transformers, and your own
 helper functions all stay, so a failure that happens inside the model because of
 what an intervention wrote arrives with the model's stack intact:
 

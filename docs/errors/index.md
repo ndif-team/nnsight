@@ -10,7 +10,8 @@ sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py
 
 Up: [docs/index.md](../index.md) — all sections.
 
-Find the message you saw. If nothing raised and the result is wrong or missing, use
+Find the message you saw. If nothing raised and the result is wrong or missing, or
+the error is plain Python rather than an nnsight type and is not listed below, use
 [symptom-index.md](symptom-index.md) instead.
 
 Tracebacks from a trace block are cleaned so the top frames are your own code; the
@@ -25,6 +26,17 @@ exception type is preserved, so `except ValueError:` still works.
 | `OutOfOrderError` | the same message, for a location the model never reached (module didn't fire, skipped parent) | [module-never-fired.md](module-never-fired.md) |
 | `OutOfOrderError` | ``'<id>.grad.i0' was requested …`` — a numeric location is a `.grad` | [backward-and-grad.md](../usage/backward-and-grad.md) |
 | `UserWarning` | ``'<location>' was never reached: the loop asked for a step the run did not make, so it was cut short …`` | [iteration.md](../usage/iteration.md#the-one-rule) |
+
+The first two rows share one message. If the same invoke read a later location
+before this one, it was asked in the wrong order; if nothing later was read, the
+module never fired.
+
+## Plain Python errors
+
+| Exception | Message | Doc |
+|---|---|---|
+| `NameError` / `UnboundLocalError` | ``name 'X' is not defined`` (or ``cannot access local variable 'X' …``) on a name used **after** the trace block — it was not saved, so it never bound back | [save.md](../usage/save.md) |
+| `NameError` | the same, **inside** the trace body, on a name an invoke saved — code between invokes runs before the invokes do | [invoke-and-batching.md](../usage/invoke-and-batching.md#code-between-invokes-runs-first) |
 
 ## Context and setup
 

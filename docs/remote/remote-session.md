@@ -82,7 +82,7 @@ print(len(means))   # 12
 
 The list is created on the server, mutated by each trace, and transmitted back at the end. A plain client-side list wouldn't come back.
 
-`blocking=False` works on sessions too — see [non-blocking-jobs.md](./non-blocking-jobs.md#sessions).
+`blocking=False` works on sessions too — see [non-blocking-jobs.md](./non-blocking-jobs.md#sessions). To dry-run a session offline, pass `remote="local"` — see [ndif-overview.md](./ndif-overview.md#dry-run-the-remote-path-with-remotelocal).
 
 ## Gotchas
 

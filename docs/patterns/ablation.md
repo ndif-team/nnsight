@@ -69,12 +69,14 @@ with model.trace(prompt):
 
 Zero the head's slice of the output projection's *input*, where the hidden dimension
 still decomposes per head. Do not reshape `attn.output[0]`: that is post-projection,
-and its column slices are not heads (see
-[per-head-attention](per-head-attention.md)).
+and its column slices are not heads — zeroing "layer 0 head 10" there leaves
+P(Paris) at `0.067`, barely moved, where the correct slice below drops it to `0.0059`
+(see [per-head-attention](per-head-attention.md)).
 
 ```python
 HEAD = 4
-head_dim = model.transformer.h[0].attn._module.head_dim   # not n_embd // n_head
+# read it from the module — equals n_embd // n_head on GPT-2, but not on GQA/Gemma-style models
+head_dim = model.transformer.h[0].attn._module.head_dim
 
 with model.trace(prompt):
     lo, hi = HEAD * head_dim, (HEAD + 1) * head_dim
@@ -82,6 +84,27 @@ with model.trace(prompt):
     logits = model.lm_head.output[:, -1, :].save()
 
 # P(Paris) = 0.065  (baseline 0.070)
+```
+
+### Sweep every head
+
+One invoke per (layer, head) plus a baseline, all in one trace — one batched forward
+pass instead of 144 (0.12 s against 3.12 s for a loop of traces):
+
+```python
+import nnsight
+
+with model.trace() as tracer:
+    probs = nnsight.save({})
+    with tracer.invoke(prompt):
+        probs["baseline"] = model.lm_head.output[0, -1].softmax(-1)[paris].item()
+    for layer in range(len(model.transformer.h)):
+        for head in range(model.config.n_head):
+            with tracer.invoke(prompt):
+                model.transformer.h[layer].attn.c_proj.input[:, :, head * head_dim:(head + 1) * head_dim] = 0
+                probs[layer, head] = model.lm_head.output[0, -1].softmax(-1)[paris].item()
+
+# baseline 0.070; largest effects: (0, 10) -> 0.0059, (0, 0) -> 0.1105 (ablating it *raises* P)
 ```
 
 ### Mean ablation

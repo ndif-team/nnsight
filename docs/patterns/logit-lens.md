@@ -28,60 +28,64 @@ On `VLLM` the lens goes through the model's logits path instead — see
 
 ## Canonical pattern
 
+One trace decodes every layer, tracks one target token, and checks the wiring:
+
 ```python
+import torch
 import nnsight
 from nnsight.modeling.transformers import TransformersModel
 
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 prompt = "The Eiffel Tower is in the city of"
+paris = model.tokenizer.encode(" Paris")[0]
 
 with model.trace(prompt):
-    # Apply final ln + unembedding to every block's residual output.
-    layer_top_tokens = nnsight.save([])
+    top, p_paris = nnsight.save([]), nnsight.save([])
     for block in model.transformer.h:
         hs = block.output                    # residual stream: a plain [B, S, hidden] tensor
-        logits = model.lm_head(model.transformer.ln_f(hs))
-        layer_top_tokens.append(logits[:, -1, :].argmax(dim=-1))
-
-decoded = [model.tokenizer.decode(tok[0]) for tok in layer_top_tokens]
-for i, tok in enumerate(decoded):
-    print(f"layer {i:2d}: {tok!r}")
-
-assert decoded[:6] == [" the"] * 6
-assert decoded[-2:] == [" Paris", " Paris"]
-```
-
-```
-layer  0: ' the'
-...
-layer  5: ' the'
-layer  6: ' East'
-layer  7: ' Ing'
-layer  8: ' Rome'
-layer  9: ' London'
-layer 10: ' Paris'
-layer 11: ' Paris'
-```
-
-A block's `.output` is the residual tensor itself — `block.output[0]` indexes the
-batch, not a tuple.
-
-## Check the wiring
-
-Applied to the *last* block, the lens is the model's own final computation, so it has
-to reproduce the model's logits exactly. One line says whether the norm, the head and
-the block output you picked are the right three — run it before you plot anything:
-
-```python
-import torch
-
-with model.trace(prompt):
+        probs = model.lm_head(model.transformer.ln_f(hs))[0, -1].softmax(-1)
+        top.append(probs.argmax().item())
+        p_paris.append(probs[paris].item())
+    # wiring check: the lens on the last block must be the model's own logits
     lens = model.lm_head(model.transformer.ln_f(model.transformer.h[-1].output)).save()
     real = model.output.logits.save()
 
 assert torch.equal(lens, real), (lens - real).abs().max()
+for i, (t, p) in enumerate(zip(top, p_paris)):
+    print(f"layer {i:2d}: {model.tokenizer.decode(t)!r:<10} P(' Paris') = {p:.4f}")
 ```
+
+```
+layer  0: ' the'     P(' Paris') = 0.0000
+layer  1: ' the'     P(' Paris') = 0.0000
+layer  2: ' the'     P(' Paris') = 0.0000
+layer  3: ' the'     P(' Paris') = 0.0000
+layer  4: ' the'     P(' Paris') = 0.0001
+layer  5: ' the'     P(' Paris') = 0.0004
+layer  6: ' East'    P(' Paris') = 0.0014
+layer  7: ' Ing'     P(' Paris') = 0.0028
+layer  8: ' Rome'    P(' Paris') = 0.0255
+layer  9: ' London'  P(' Paris') = 0.2484
+layer 10: ' Paris'   P(' Paris') = 0.1834
+layer 11: ' Paris'   P(' Paris') = 0.0700
+```
+
+`P(' Paris')` peaks at layer 9 (`0.248`), where `' London'` is still top-1; `' Paris'`
+only becomes top-1 at layer 10, and the final layer is *less* confident (`0.070`)
+than either. Argmax alone shows none of that.
+
+A block's `.output` is the residual tensor itself — `block.output[0]` indexes the
+batch, not a tuple. Re-reading `h[-1].output` after the loop has already passed it is
+allowed: forward order constrains only the *first* read of a module in an invoke (see
+[out-of-order-error](../errors/out-of-order-error.md)).
+
+## Check the wiring
+
+Applied to the *last* block, the lens is the model's own final computation, so it has
+to reproduce the model's logits exactly. The `torch.equal` line above says whether the
+norm, the head and the block output you picked are the right three — keep it in
+before you plot anything.
 
 `True` on GPT-2, SmolLM2-135M, Qwen2.5-0.5B and pythia-70m. A `False` means one of
 three things, all of which produce a plot rather than an error if you skip this:
@@ -109,30 +113,6 @@ That is bit-identical to `model.output.logits` at the last layer. Check
 `final_logit_softcapping` to `None`.
 
 ## Variations
-
-### Probability of a target token across layers
-
-```python
-target_id = model.tokenizer.encode(" Paris")[0]
-
-with model.trace(prompt):
-    target_probs = nnsight.save([])
-    for block in model.transformer.h:
-        logits = model.lm_head(model.transformer.ln_f(block.output))
-        target_probs.append(logits[:, -1, :].softmax(dim=-1)[:, target_id])
-
-for i, p in enumerate(target_probs):
-    print(f"layer {i:2d}: P(' Paris') = {p.item():.3f}")
-```
-
-```
-layer  8: P(' Paris') = 0.025
-layer  9: P(' Paris') = 0.248
-layer 10: P(' Paris') = 0.183
-layer 11: P(' Paris') = 0.070
-```
-
-The probability peaks at layer 9 then settles — argmax alone would hide that.
 
 ### Tuned lens
 

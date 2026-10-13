@@ -86,19 +86,23 @@ for 500 examples is gigabytes; the score you wanted from it is kilobytes.
 # wrong — ships every hidden state home to compute one number
 with model.session(remote=True):
     states = nnsight.save([])
-    for prompt in prompts:
-        with model.trace(prompt):
-            states.append(model.transformer.h[6].output.save())
-score = torch.stack([s[0, -1] @ probe for s in states]).mean()
+    for start in range(0, len(prompts), 32):
+        with model.trace(prompts[start : start + 32]):
+            states.append(model.transformer.h[6].output)
+score = torch.cat([s[:, -1] @ probe for s in states]).mean()
 
-# right — the reduction runs next to the weights
+# right — the reduction runs next to the weights; only floats come back
 with model.session(remote=True):
     scores = nnsight.save([])
-    for prompt in prompts:
-        with model.trace(prompt):
-            hidden = model.transformer.h[6].output
-            scores.append((hidden[0, -1] @ probe.to(hidden.device, hidden.dtype)).item())
+    for start in range(0, len(prompts), 32):
+        with model.trace(prompts[start : start + 32]):
+            hidden = model.transformer.h[6].output[:, -1]          # [B, hidden]
+            scores.extend((hidden @ probe.to(hidden.device, hidden.dtype)).tolist())
 ```
+
+For a reduction over tokens rather than the last position, average only the real
+ones — see the masked mean in
+[invoke-and-batching](../usage/invoke-and-batching.md#reducing-over-real-tokens-the-attention-mask).
 
 Note `probe.to(hidden.device, hidden.dtype)`: `probe` was built on the client, so
 it arrives on the CPU in float32 regardless of how the server holds the model. See
@@ -116,7 +120,7 @@ A result container must be saved from inside the block — create it with
 - **One session, not a loop of traces**, with `remote=True` on the session only —
   see [remote-session](../remote/remote-session.md).
 - **Batch inside the session.** Passing a list of strings to `model.trace` runs
-  them as one forward pass; the loop above batches ten at a time. Batched input is
+  them as one forward pass; the loops above batch ten and 32 at a time. Batched input is
   **left**-padded, so `[:, -1]` is the true final token of every row even when the
   prompts differ in length (see [invoke-and-batching.md](../usage/invoke-and-batching.md)).
 - **Sessions have a server-side time limit.** Split a long sweep into several

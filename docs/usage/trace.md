@@ -99,4 +99,4 @@ assert result is out
 
 - Values you want after the block **must** be marked with `.save()` / `nnsight.save(...)`; see [save](save.md). Plain `if` / `for` work inside the body; see [conditionals-and-loops](conditionals-and-loops.md).
 - The traced body must start on its own line (not on the `with` line); combining context managers on one line — `with torch.no_grad(), model.trace(...):` — is fine.
-- Tracebacks are cleaned of nnsight's own frames, so an `OutOfOrderError` or a missed barrier comes back as three frames ending on the line that waited. An ordinary error raised inside the body still carries the torch and transformers frames under it — your line is there, at the bottom of the pile.
+- Tracebacks are cleaned of most of nnsight's own frames, so an `OutOfOrderError` or a missed barrier comes back as a short traceback — the `with` line, a couple of nnsight tracer `__exit__` frames, and last the line that waited. An ordinary error raised inside the body still carries the torch and transformers frames under it — your line is there, at the bottom of the pile.

@@ -10,6 +10,8 @@ sources: [src/nnsight/tracing/tracer.py]
 
 Variables assigned inside a tracing context (`model.trace`, `model.generate`, `model.pipe`, `model.scan`, `model.session`, `tensor.backward`) do **not** escape the with-block unless they are marked as saved. Mark every value you want to read after the block with `nnsight.save(value)` or `value.save()`; values you only use inside the body need nothing.
 
+Using an unsaved name after the block raises `NameError: name 'hidden' is not defined` (`UnboundLocalError` inside a function) — the fix is a save inside the block.
+
 ## Canonical pattern
 
 ```python
@@ -83,9 +85,8 @@ with model.trace("Hello"):
 
 ## Gotchas
 
-- Forgetting `.save()` leaves the variable undefined after the block: `NameError` in a script, `UnboundLocalError` inside a function.
-- **A saved value comes back by its variable *name*, so bind it.** A value marked but never assigned (a bare `model.logits.save()` on its own line) has no local to return under, so it silently doesn't come back. Invisible locally, obvious on vLLM/remote/serve where you read it by name: `output.saves["logits"]` will be missing. Write `logits = model.logits.save()`.
+- **A saved value comes back by its variable *name*, so bind it.** A value marked but never assigned (a bare `model.output.logits.save()` on its own line) has no local to return under, so it silently doesn't come back. Invisible locally, obvious on vLLM/remote/serve where you read it by name: `output.saves["logits"]` will be missing. Write `logits = model.output.logits.save()`.
 - **Nested traces don't need `.save()` between them.** Only the outermost boundary filters to saved values; an inner `model.trace()` inside a `model.session()` pushes all its locals up, so a value from one inner trace is usable in the next unsaved (not on `VLLM`, where each trace is its own request). Save only what leaves the session.
 - **Unpacking across `.save()` loses both values.** `a, b = x.output.save()` marks the tuple, which is never bound to a name, so `a` and `b` come back unbound. Save first, then unpack: `out = x.output.save()` inside the trace, `a, b = out` after it.
 - Saving the same value twice is harmless.
-- Mutating a saved tensor in place after the trace affects whatever it still aliases. Clone for isolation: `nnsight.save(x.clone())`.
+- A saved tensor aliases the live one: writing it in place later in the trace (or after it) changes what you saved. Clone for isolation: `nnsight.save(x.clone())`.

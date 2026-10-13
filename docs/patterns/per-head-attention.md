@@ -27,7 +27,8 @@ from nnsight.modeling.transformers import TransformersModel
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 n_heads  = model.config.n_head
-head_dim = model.transformer.h[0].attn._module.head_dim   # not n_embd // n_heads
+# read it from the module — equals n_embd // n_head on GPT-2, but not on GQA/Gemma-style models
+head_dim = model.transformer.h[0].attn._module.head_dim
 LAYER, HEAD = 5, 4
 prompt = "The cat sat on the"
 lo, hi = HEAD * head_dim, (HEAD + 1) * head_dim
@@ -45,8 +46,10 @@ with model.trace(prompt):
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
-On this prompt, ablating layer 5 head 4 moves the baseline's top-token (`' floor'`)
-logit by `+0.307`.
+Writing in place into a module's `.input`, as the ablation does, is supported: the
+edit lands in the tensor `c_proj` receives. On this prompt, ablating layer 5 head 4
+moves the baseline's top-token (`' floor'`) logit by `+0.307`. To sweep every head in
+one trace, see [ablation](ablation.md#sweep-every-head).
 
 !!! warning "Do not reshape `attn.output[0]`"
 

@@ -28,7 +28,7 @@ The result is a `[batch, seq]` tensor of ids — prompt plus completion. `tracer
 
 ## Decoding follows the checkpoint's `generation_config`
 
-Generate decodes with the checkpoint's own `generation_config`, not the `task_specific_params` a pipeline would apply. gpt2's is greedy; many instruct checkpoints (`gemma-3-1b-it`, `Llama-3.1-8B-Instruct`, `Qwen3-4B-Instruct`) set `do_sample=True` with a `temperature` and `top_p`, so **generate samples on those unless you say otherwise** — two identical generates differ, and a logit lens or probe reading the run disagrees with the tokens it produced. Check `model.generation_config.do_sample`, and pass `do_sample=False` for determinism:
+Generate decodes with the checkpoint's own `generation_config`, not the `task_specific_params` a pipeline would apply. gpt2's is greedy; many instruct checkpoints (`gemma-3-1b-it`, `Llama-3.1-8B-Instruct`, `Qwen3-4B-Instruct`) set `do_sample=True` with a `temperature` and `top_p`, so **generate samples on those unless you say otherwise** — two identical generates differ, and a logit lens or probe reading the run disagrees with the tokens it produced. Check `model.generation_config.do_sample` (`None`, as on gpt2, means unset, i.e. greedy), or simply pass `do_sample=False` for determinism:
 
 ```python
 with model.generate("The Eiffel Tower is in the city of", max_new_tokens=12, do_sample=False) as tracer:
