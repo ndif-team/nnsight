@@ -8,6 +8,8 @@ sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/tracer.py]
 
 # Patterns Index
 
+Up: [docs/index.md](../index.md) — all sections.
+
 Recipe-style pages, one technique per file. Each opens with the smallest working
 example, then variations, then interpretation tips and gotchas. All examples use a
 small open-weights model — `TransformersModel("openai-community/gpt2", dispatch=True)`
@@ -15,7 +17,7 @@ small open-weights model — `TransformersModel("openai-community/gpt2", dispatc
 
 For the underlying API (`tracer.invoke`, `tensor.backward`, `edit`, `skip`,
 `source`), see `docs/usage/index.md`. If something is breaking, start at
-`docs/errors/`.
+[errors/symptom-index.md](../errors/symptom-index.md).
 
 ## Look at activations
 
@@ -33,9 +35,13 @@ Change the model's internal state and observe the effect on output.
 - [ablation](ablation.md) — Zero / mean / noise ablate specific components, positions, or features and measure the change.
 - [steering](steering.md) — Add a precomputed direction to the residual stream to push behavior in a target direction.
 
+## Read what is encoded
+
+- [probing](probing.md) — Train a linear classifier on activations to test what is decodable, where in depth it appears, and whether the model uses it.
+
 ## Compare runs
 
-Multiple prompts, multiple invokes, attribution in one batch.
+Attribution across a clean and a corrupt run. (Several prompts in one trace: [invoke-and-batching](../usage/invoke-and-batching.md).)
 
 - [attribution-patching](attribution-patching.md) — Linear approximation of activation patching from corrupt-run gradients times clean-vs-corrupt activation differences.
 

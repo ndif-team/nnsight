@@ -6,6 +6,8 @@ tags: [reference]
 
 # Reference
 
+Up: [docs/index.md](../index.md) — all sections.
+
 Fast-lookup tables for nnsight. Use these when you already know what you are looking for and just need the exact name, signature, or value.
 
 | Doc | Purpose |

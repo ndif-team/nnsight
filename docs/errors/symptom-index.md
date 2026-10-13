@@ -8,9 +8,11 @@ sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py
 
 # Symptom Index
 
-[index.md](index.md) is keyed by exception class, which only helps once you have
-an exception. This page is keyed by what you *saw*. The first table is the one
-worth reading: those failures raise nothing, so nothing routes you to a page.
+Up: [docs/index.md](../index.md) — all sections.
+
+Start here when something broke. This page is keyed by what you *saw*; the table
+below is for failures that raise nothing, so nothing else routes you to a page. For
+an exception or warning, look its message up in [index.md](index.md).
 
 ## Nothing raised — the result is wrong or missing
 
@@ -22,29 +24,19 @@ worth reading: those failures raise nothing, so nothing routes you to a page.
 | A name after the block is undefined (`UnboundLocalError`, `NameError`) | Not saved, or the block unwound before reaching it | [docs/usage/save.md](../usage/save.md), [module-never-fired.md](module-never-fired.md) |
 | A saved list is empty, but only when running remotely | The elements were saved, not the container | [docs/usage/save.md](../usage/save.md) |
 | `.grad` is `None` | Read outside a `with metric.backward():` block | [.grad outside a backward block](#grad-outside-a-backward-block) |
-| Per-step writes in a loop land one step late | A `tracer.iter` body that reads a later location before an earlier one — silent unless a shifted request runs off the end of the run | [out-of-order-error.md](out-of-order-error.md) |
+| Per-step writes in a loop land one step late | A `tracer.iter` body that reads a later location before an earlier one — silent unless a shifted request runs off the end of the run | [docs/usage/iteration.md](../usage/iteration.md#an-out-of-order-body-shifts-by-a-step) |
+| A per-step list is shorter than the loop bound, and code after the loop never ran | The loop asked for steps the run did not make (EOS, stop string) | [docs/usage/iteration.md](../usage/iteration.md#the-one-rule) |
+| A cross-invoke patch raises nothing and changes nothing | A name from the enclosing scope shadows the one the producer invoke binds | [docs/usage/invoke-and-batching.md](../usage/invoke-and-batching.md#writing-a-value-use-a-barrier) |
+| An in-place edit does nothing (or a backward then fails on an in-place version check) | The write came after a later module was already read | [docs/usage/backward-and-grad.md](../usage/backward-and-grad.md#in-place-writes-after-the-forward-has-moved-on) |
+| Every later trace is changed, not just the one that edited | A write to a `.weight` is permanent | [docs/usage/access-and-modify.md](../usage/access-and-modify.md#weight-edits-are-permanent) |
 | A per-step list from `tracer.iter` is one entry short, its shapes one step ahead, ending with a "was never reached" warning | A wrong-order read in the loop body, e.g. a `.source` op read after its module's `.output` | [docs/usage/iteration.md](../usage/iteration.md#pitfalls) |
 | Shapes are plausible but the numbers are for one batch row | `.output[0]` on a module whose output is a plain tensor | [docs/usage/access-and-modify.md](../usage/access-and-modify.md#tuple-outputs) |
 | A name you never saved comes back bound anyway | `save` marks by object identity | [save-outside-trace.md](save-outside-trace.md) |
 
 ## Something raised
 
-| What you saw | Where |
-|---|---|
-| `OutOfOrderError: '<location>.i0' was requested but the model already ran past it` | [out-of-order-error.md](out-of-order-error.md) |
-| `UserWarning: '<location>.iN' was never reached: the loop asked for a step the run did not make …` | [module-never-fired.md](module-never-fired.md) |
-| `ValueError: Cannot access '<location>' outside of interleaving` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
-| `ValueError: trace() needs an input, or at least one 'with tracer.invoke(...)' block` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
-| `ValueError: save() was called outside a trace. …` | [save-outside-trace.md](save-outside-trace.md) |
-| `ValueError: Cannot invoke while the model is already running.` | [invoke-during-execution.md](invoke-during-execution.md) |
-| ``ValueError: A traced `with` block cannot start with `try:` …`` | [with-block-not-found.md](with-block-not-found.md#a-trace-body-that-starts-with-try) |
-| ``ValueError: The body of a traced `with` must start on its own line …`` | [with-block-not-found.md](with-block-not-found.md#a-body-on-the-with-line) |
-| `ValueError: A barrier was never reached by every block it waits for …` | [docs/usage/barrier.md](../usage/barrier.md) |
-| ``WithBlockNotFoundError: nnsight found no `with` statement at …`` / ``no source for …`` | [with-block-not-found.md](with-block-not-found.md) |
-| `SyntaxError: 'return' outside function` | [with-block-not-found.md](with-block-not-found.md#return-inside-a-trace-body) |
-| `NotImplementedError: <Class> does not support batching multiple invokes` | [batching-not-implemented.md](batching-not-implemented.md) |
-| `AttributeError: module 'nnsight' has no attribute 'list' / 'apply' / 'session' / …` | [docs/reference/migrating-to-0.8.md](../reference/migrating-to-0.8.md) |
-| `AttributeError: 'Tensor' object has no attribute 'value'` | [docs/reference/migrating-to-0.8.md](../reference/migrating-to-0.8.md) |
+Look the message up in [index.md](index.md), which is keyed by exception and
+warning text.
 
 ---
 
@@ -133,5 +125,5 @@ See [docs/usage/backward-and-grad.md](../usage/backward-and-grad.md).
 
 ## Related
 
-- [index.md](index.md) — the same errors keyed by exception class.
+- [index.md](index.md) — exceptions and warnings, keyed by message.
 - [debug-mode.md](debug-mode.md) — when the traceback itself is the problem.

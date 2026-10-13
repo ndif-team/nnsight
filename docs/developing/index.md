@@ -18,17 +18,7 @@ the library. If you are looking for "how do I run a trace," start in
 `docs/usage/`; for the mental models behind the machinery, start in
 `docs/concepts/`.
 
-## The one-paragraph model
-
-`with model.trace(x): ...` does **not** run its body inline. A `Tracer` captures
-the block's source, compiles the body to a standalone code object, and — on
-`__exit__` — runs it *interleaved* with the model's forward pass. The body runs in
-a **greenlet** (a `Mediator`); it parks whenever it reads or writes an activation
-(`model.layer.output`), the model runs until a module's controller reaches that location,
-the value is handed to the worker (edited on the way back if the worker wrote to
-it), and the worker resumes. One `Interleaver` owns the controllers and the workers; a
-`Backend` decides what "run the block" means (execute locally, ship to NDIF, store
-as an edit).
+Up: [docs/index.md](../index.md) — all sections.
 
 ## What this covers
 
@@ -36,8 +26,9 @@ as an edit).
   and compile the body, run it through a backend, and push results back into the
   caller's frame. Model-agnostic; no torch.
 - **Interleaving** (`src/nnsight/intervention/interleaver.py`) — greenlet workers
-  (`Mediator`) coordinated with the model's forward pass via PyTorch hooks
-  (`Interleaver`), using the `Event` protocol (`VALUE`/`SWAP`/`SKIP`/`BARRIER`).
+  (`Mediator`) coordinated with the model's forward pass by a controller installed
+  as each module's `forward` (`Interleaver`), using the `Event` protocol
+  (`VALUE`/`SWAP`/`SKIP`/`BARRIER`).
 - **Envoy** (`src/nnsight/intervention/envoy.py`) — the module proxy that exposes
   `.input`/`.output`/`.source`/`.skip` and drives `interleave()`.
 - **Batching** (`src/nnsight/intervention/batching.py`) — combine several
@@ -50,7 +41,8 @@ as an edit).
 ### Big picture
 
 - `docs/developing/architecture-overview.md` — top-down map: Tracer → Backend →
-  Interleaver → Mediator (greenlet) → PyTorch hooks → Envoy.
+  Interleaver → Mediator (greenlet) → controller → Envoy, and the one trace
+  lifecycle walkthrough.
 - `docs/developing/tracing-pipeline.md` — capture → parse → build → compile →
   execute, `Scope`, the skip hook, the per-site cache.
 
@@ -78,8 +70,8 @@ as an edit).
 ### Backends
 
 - `docs/developing/backends.md` — the `Backend` base and the existing backends
-  (`RemoteBackend`, `AsyncRemoteBackend`, `LocalSimulationBackend`), and how a
-  model selects one from `remote=`.
+  (`RemoteBackend`, `AsyncRemoteBackend`, `LocalSimulationBackend`), how a
+  model selects one from `remote=`, and how to add your own.
 
 ### Extending
 
@@ -93,21 +85,19 @@ as an edit).
   engine in via the modeling mixins.
 - `docs/developing/serialization.md` — source-based serialization for remote runs.
 
+### Runtimes
+
+- `docs/developing/vllm-integration.md` — the vLLM runtime: model runner, batcher,
+  how interventions ride on engine requests.
+
 ### Reference
 
 - `docs/developing/performance.md` — where overhead lives and how to measure it.
 - `docs/developing/testing.md` — running the suite offline; what each test covers.
 - `docs/developing/contributing.md` — house style, branch/commit conventions.
 
-### Related concept docs
-
-The `docs/concepts/` folder holds the shorter, mental-model versions of several of
-these topics — `deferred-execution.md`, `threading-and-mediators.md`,
-`interleaver-and-controller.md`, `batching-and-invokers.md`, `source-tracing.md`,
-`envoy.md`. Read those first if you want the "why" before the "how".
-
 ## Related
 
-- `docs/concepts/index.md` — mental models for the same machinery.
-- `docs/models/index.md` — the model classes (`NNsight`, `TransformersModel`,
-  `DiffusionModel`, `VLLM`) that wrap the intervention layer.
+- `docs/concepts/index.md` — the shorter mental-model versions of these topics; read
+  those first for the "why" before the "how".
+- `docs/models/index.md` — the model classes that wrap the intervention layer.

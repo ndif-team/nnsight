@@ -1,12 +1,14 @@
 ---
 title: Concepts Index
-one_liner: Mental-model docs for nnsight's capture, greenlet-interleaving, hook, and source machinery.
+one_liner: Mental-model docs for nnsight's capture, greenlet-interleaving, controller, and source machinery.
 tags: [concept, index]
 related: [docs/usage/index.md, docs/reference/index.md]
 sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/source.py, src/nnsight/tracing/tracer.py]
 ---
 
 # Concepts Index
+
+Up: [docs/index.md](../index.md) — all sections.
 
 Foundational mental models for working with nnsight. Read these in order for a top-down picture of how `with model.trace(...)` actually runs.
 

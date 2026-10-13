@@ -2,11 +2,13 @@
 title: Model Classes
 one_liner: Decision tree for picking the right nnsight model wrapper.
 tags: [models, index]
-related: [docs/models/transformers-model.md, docs/models/tensor-parallel.md, docs/models/quantization.md, docs/models/nnsight-base.md, docs/models/diffusion-model.md, docs/models/vllm.md, docs/models/language-model.md, docs/models/vision-language-model.md]
+related: [docs/index.md, docs/models/transformers-model.md, docs/models/tensor-parallel.md, docs/models/quantization.md, docs/models/nnsight-base.md, docs/models/diffusion-model.md, docs/models/vllm.md, docs/models/language-model.md, docs/models/vision-language-model.md]
 sources: [src/nnsight/__init__.py:53, src/nnsight/modeling/base.py:6, src/nnsight/modeling/transformers.py:161, src/nnsight/modeling/diffusion.py:38, src/nnsight/modeling/vllm/vllm.py:36, src/nnsight/modeling/language.py:19, src/nnsight/modeling/vlm.py:29]
 ---
 
 # Model Classes
+
+Up: [docs/index.md](../index.md) — all sections.
 
 ## What this is for
 
@@ -25,6 +27,9 @@ Pick the model wrapper that matches what you have. All wrappers expose the same 
 
 - You need **production throughput, continuous batching, or async streaming** with NNsight interventions.
   - See [docs/models/vllm.md](vllm.md). Class: `nnsight.modeling.vllm.VLLM`.
+  - An edit every request on the engine runs, including other clients': [vllm-editing.md](vllm-editing.md).
+  - Streaming with `mode="async"`, or one engine behind HTTP (`nnsight-serve`): [vllm-serving.md](vllm-serving.md).
+  - Tensor parallelism, MoE and hybrid models on vLLM, and version notes: [vllm-parallelism.md](vllm-parallelism.md).
 
 - Your model is **too big for one GPU** and you want to trace it split across several with `transformers` tensor parallelism (one process per GPU, launched with `torchrun`).
   - See [docs/models/tensor-parallel.md](tensor-parallel.md). Still `TransformersModel` — pass `distributed_config=DistributedConfig(tp_size=N)`; sharded activations are gathered for you.
@@ -50,7 +55,7 @@ Pick the model wrapper that matches what you have. All wrappers expose the same 
 | `LanguageModel` *(deprecated)* | `nnsight` | → `TransformersModel(task="text-generation")` | `transformers.pipeline` |
 | `VisionLanguageModel` *(deprecated)* | `nnsight` | → `TransformersModel(task="image-text-to-text")` | `transformers.pipeline` |
 
-All HF-backed wrappers support lazy loading: `dispatch=False` (default) downloads only configs and builds a meta-tensor architecture; `dispatch=True` loads real weights immediately. Real weights also load automatically on the first `.trace()` / `.generate()` / `.pipe()` call. `.scan()` never dispatches.
+Lazy loading (`dispatch=`) is described in [transformers-model.md](transformers-model.md).
 
 ## Related
 
