@@ -8,16 +8,15 @@ worker sees them and re-split before the model's own forward carries on.
 
 Two facts make this cheap to arrange.
 
-**transformers labels the shards for us**, in one of two ways, because it has
-used both. Up to 5.15 ``apply_tensor_parallelism`` stamped every module it
-sharded with ``_hf_tp_plan`` (the style name) and ``_hf_device_mesh``. 5.16
-rebuilt tensor parallelism on DTensor and stamps nothing: the plan stays on the
-*model* as ``_tp_plan`` — glob patterns over module paths — with the mesh at
-``_device_mesh``, and each module is resolved against it by transformers' own
-matcher. Either way which side of which module carries a shard is read off the
-model, not guessed. These rules are handed every envoy through ``instrument`` as
-the tree is built, so they record themselves — and learn whether there is
-anything to do at all — right there.
+**transformers labels the shards for us.** The plan lives on the *model* — glob
+patterns over module paths in ``tp_plan``/``ep_plan``, with the mesh at
+``_device_mesh`` — and each module is resolved against it by transformers' own
+matcher, so which side of which module carries a shard is read off the model,
+not guessed. These rules are handed every envoy through ``instrument`` as the
+tree is built, so they record themselves — and learn whether there is anything
+to do at all — right there. (A transformers old enough to stamp each module
+with ``_hf_tp_plan`` instead, or newer than the floor's shapes in other ways,
+is refused — see `MINIMUM_TRANSFORMERS` below.)
 
 **nnsight sees the pre-collective value.** The interleaver's handoff runs inside
 a module's forward — after the style's input transform, before its output one —
@@ -30,9 +29,8 @@ module's own output transform completes the picture: a shard's slice, or — for
 partial — the whole on rank 0 and zeros elsewhere, which its reduce turns into
 exactly the (possibly edited) whole on every rank.
 
-Keeping the handoff *inside* those transforms is arranged differently per
-backend. 5.15 registered them as torch pre/post hooks, which bracket a forward on
-their own. 5.16 applies a style by replacing ``module.forward`` with a wrapper —
+Keeping the handoff *inside* those transforms takes one arrangement:
+transformers applies a style by replacing ``module.forward`` with a wrapper —
 the same slot nnsight's controller uses — so `_keep_tp_forward` installs the
 controller first and re-wraps it, restoring that order. Without it the module
 keeps its sharded weights but loses the code that makes its inputs match them,
@@ -40,7 +38,7 @@ and the first matmul dies with ``got mixed torch.Tensor and DTensor``.
 
 The rules describe module *boundaries*. A ``.source`` value between two ops
 inside a forward can be a shard split on an axis that moves through the forward,
-so a boundary rule cannot say what it is. On the DTensor backend such a value
+so a boundary rule cannot say what it is. Such a value
 often carries its own placement — ``full_tensor`` then reassembles it correctly
 whatever axis holds the shard, which is why the gather believes a value's own
 placement over the rule whenever it has one. When it does not (transformers takes
@@ -153,15 +151,14 @@ UNSUPPORTED: Dict[str, str] = {
     "mla_kv_a_proj": "MLA split kv projection",
 }
 
-# The oldest transformers this supports. 5.16 rebuilt tensor parallelism on
-# DTensor: the plan moved from a per-module ``_hf_tp_plan`` stamp to the model's
-# ``_tp_plan``, the style's transforms moved from forward hooks into a wrapper
-# that replaces ``module.forward``, and the ``all_gather``/``split`` helpers were
-# removed. Supporting both shapes at once meant two detection paths and two
-# descriptions of one handoff; 5.15's own TP had a separate defect anyway (5.14.1
-# sharded a tied LM head's hook but not its weight, returning logits ``tp_size``
-# times too wide). One backend, described once.
-MINIMUM_TRANSFORMERS = "5.16.0"
+# The oldest transformers this supports. This module reads exactly the shapes
+# 5.19's distributed rework produces — named (pp, fsdp, tp) hybrid meshes, the
+# EP plan on its own ``model.ep_plan``, ``ep_dispatch_experts``,
+# ``_get_parameter_plan`` — and earlier releases differ in every one of them.
+# Tracking those differences meant per-version branches in the mesh handling,
+# the plan merge and the test workers; one backend, described once, and the
+# rest refused here rather than half-supported.
+MINIMUM_TRANSFORMERS = "5.19.0"
 
 
 class UnsupportedTransformersVersion(RuntimeError):
@@ -183,8 +180,8 @@ def _check_transformers_version() -> None:
     from packaging.version import Version
 
     installed = transformers.__version__
-    # Compared on the release numbers alone, so a `5.15.0.dev0` — which a plain
-    # `>=` sorts *below* 5.15.0, pre-releases coming first — counts as 5.15. A
+    # Compared on the release numbers alone, so a `5.19.0.dev0` — which a plain
+    # `>=` sorts *below* 5.19.0, pre-releases coming first — counts as 5.19. A
     # dev build of the fixed series is the normal way to be running it early;
     # refusing those would make an editable transformers checkout unusable.
     if Version(installed).release >= Version(MINIMUM_TRANSFORMERS).release:
@@ -218,11 +215,10 @@ def _whole_tensor(tensor: torch.Tensor, mesh: Any, placement: Any) -> torch.Tens
     shard, which a rule cannot know once a ``view`` or ``transpose`` has moved it —
     so it is always believed over the rule.
 
-    Written on DTensor rather than on ``transformers``' ``all_gather``/``split``,
-    which is where this used to go: 5.16 rebuilt tensor parallelism on DTensor and
-    removed both, and depending on a neighbour's private helpers is what made a
-    routine upstream release silently disable the whole path. These are equivalent
-    — an all-gather concatenating on the last dim, an all-reduce summing — and
+    Written on DTensor rather than on transformers' private collective helpers:
+    depending on a neighbour's internals is what once let a routine upstream
+    release silently disable the whole path. These are equivalent — an
+    all-gather concatenating on the last dim, an all-reduce summing — and
     depend on nothing but ``torch``.
     """
     from torch.distributed.tensor import DTensor
@@ -550,8 +546,8 @@ class TPFragments(Fragments):
         self.tp_rules: Dict[str, Any] = {}
         #: Module path -> (style name, mesh), for the ad-hoc-call bracket in
         #: `nnsight.modeling.tp.envoys`. Recorded here because this is where the
-        #: style is resolved: 5.16 stamps nothing on the module, so an envoy
-        #: cannot read it back off one.
+        #: style is resolved: transformers stamps nothing on the module, so
+        #: an envoy cannot read it back off one.
         self.tp_styles: Dict[str, Any] = {}
         #: (root envoy path, the applied plan, the tp submesh collectives run
         #: on) on a DTensor-backend transformers, recorded when the root envoy
@@ -585,10 +581,10 @@ class TPFragments(Fragments):
         if self._plan is None:
             mesh = device_mesh(module)
             plan = getattr(module, "tp_plan", None)
-            # 5.19 moved expert-parallel entries out of ``tp_plan`` into their
-            # own ``ep_plan`` (on 5.16-5.18, and for a dense model, there is no
-            # such attribute and ``tp_plan`` is the whole story). Both are the
-            # *raw* plans, set at init whether or not expert parallelism is on,
+            # Expert-parallel entries live in their own ``ep_plan`` (empty on
+            # a dense model, where ``tp_plan`` is the whole story). Both are
+            # the *raw* plans, set at init whether or not expert parallelism
+            # is on,
             # and they can name the same module with different styles —
             # Qwen3-MoE's experts are ``moe_tp_experts`` in one and
             # ``ep_dispatch_experts`` in the other. transformers applies
@@ -602,6 +598,12 @@ class TPFragments(Fragments):
             if ep_plan and getattr(distributed, "ep_size", 1) > 1:
                 plan = {**(plan or {}), **ep_plan}
             if mesh is not None and plan:
+                # The first sharded model seen is the moment to refuse a
+                # transformers below the floor: 5.16-5.18 carry a plan and a
+                # mesh too, but in shapes this module no longer reads.
+                # (On <= 5.15 there is no model-level plan at all; those are
+                # caught off the per-module stamp in `_style_of`.)
+                _check_transformers_version()
                 self._plan = (envoy.path, plan, mesh)
 
         found = self._style_of(envoy)
@@ -665,15 +667,8 @@ class TPFragments(Fragments):
 
         # transformers' own matcher, not a reimplementation of its globbing: the
         # plan's keys wildcard layer numbers, and a private copy of that rule is
-        # exactly the kind of drift this module keeps being broken by. Being
-        # private, the matcher itself drifts too: 5.19 renamed it (and its
-        # ``tp_plan`` parameter to ``plan`` — hence positional args below).
-        try:
-            from transformers.distributed.tensor_parallel import _get_parameter_plan
-        except ImportError:  # transformers < 5.19
-            from transformers.distributed.tensor_parallel import (
-                _get_parameter_tp_plan as _get_parameter_plan,
-            )
+        # exactly the kind of drift this module keeps being broken by.
+        from transformers.distributed.tensor_parallel import _get_parameter_plan
 
         style = _get_parameter_plan(name, plan, is_weight=False)
         if style is None:

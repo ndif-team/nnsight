@@ -116,22 +116,18 @@ def requested_tp_size(distributed_config: Any) -> Optional[int]:
 def requested_expert_parallel(distributed_config: Any) -> bool:
     """Whether this ``distributed_config`` asks for expert parallelism.
 
-    Accepts the dataclass or a plain dict, because transformers does. Both
-    spellings are read: 5.19 asks with ``ep_size=N`` and deprecates
-    ``enable_expert_parallel`` (removal slated for 5.20, after which only the
-    size exists), while 5.16-5.18 have only the flag.
+    Accepts the dataclass or a plain dict, because transformers does. Read off
+    ``ep_size`` alone: the deprecated ``enable_expert_parallel`` spelling is
+    folded into ``ep_size`` by ``DistributedConfig`` itself (verified on 5.19,
+    for the dataclass and ``from_dict`` both), and 5.20 removes it.
     """
     if distributed_config is None:
         return False
     if isinstance(distributed_config, dict):
         size = distributed_config.get("ep_size")
-        flag = distributed_config.get("enable_expert_parallel")
     else:
         size = getattr(distributed_config, "ep_size", None)
-        flag = getattr(distributed_config, "enable_expert_parallel", False)
-    if isinstance(size, int) and size > 1:
-        return True
-    return bool(flag)
+    return isinstance(size, int) and size > 1
 
 
 def check_tp_request(

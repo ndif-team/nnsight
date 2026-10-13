@@ -379,19 +379,19 @@ inert on a model that is not sharded — so this is safe to pass unconditionally
 `tp_envoys()` is what makes `model.lm_head(hidden)` return a whole tensor rather
 than this rank's slice.
 
-## Requires transformers >= 5.16
+## Requires transformers >= 5.19
 
-5.16 rebuilt tensor parallelism on DTensor. The sharding plan moved from a stamp
-on each sharded module to a single `_tp_plan` on the model, and the style's
-collectives moved from forward hooks into a wrapper around `module.forward`.
-nnsight reads the layout the way that backend describes it, so on an older
-transformers it would find nothing sharded — and that does not fail, it hands
-intervention code one rank's slice as though it were the whole tensor. nnsight
-refuses to load rather than let that through. The refusal is not always worded
-as a version: on transformers 5.15 the load stops at
-`ModuleNotFoundError: No module named 'transformers.distributed.tensor_parallel'`,
-which is the 5.16 backend not being there. Check `transformers.__version__`
-before reading further into it.
+nnsight reads the exact shapes of 5.19's distributed backend — the named
+`(pp, fsdp, tp)` device mesh, the expert plan on its own `model.ep_plan`, the
+`ep_dispatch_experts` style — and earlier releases differ in each of them, so
+sharding on one is refused with `UnsupportedTransformersVersion` the moment a
+sharded model is seen, rather than half-supported. The refusal exists because
+the failure it prevents is silent: a backend whose layout nnsight cannot read
+does not error, it hands intervention code one rank's slice as though it were
+the whole tensor. On a transformers old enough to predate the DTensor backend
+entirely (≤ 5.15) the load stops earlier, at `ModuleNotFoundError: No module
+named 'transformers.distributed.tensor_parallel'` — check
+`transformers.__version__` before reading further into that one.
 
 ## A checkpoint that cannot be split at all
 
@@ -460,23 +460,16 @@ model = TransformersModel(
 )
 ```
 
-On transformers 5.16-5.18 the spelling is `enable_expert_parallel=True` instead
-of `ep_size=` — 5.19 deprecates the flag and 5.20 removes it; nnsight reads
-both.
-
-Traces read the same as any other. On 5.19 the expert plan is one style,
+Traces read the same as any other. The expert plan is one style,
 `ep_dispatch_experts`: its wrapper sends each token to the rank that owns its
 expert and combines the answers before returning, so at the trace's vantage
 point everything is already whole — the router's output is replicated and never
 masked, and `experts.output` is the full combined tensor on every rank,
 readable and editable like anything else. (Printing `experts.source` shows that
 dispatch wrapper's own steps; most of them hold per-rank token batches of
-different shapes, and only the final output transform is whole.) On 5.16-5.18
-the plan is instead the trio `ep_router` (replicated, masked after the
-handoff), `grouped_gemm` (parameters only) and `moe_tp_experts` (this rank's
-term of a sum, reduced for you).
+different shapes, and only the final output transform is whole.)
 
-Two side effects of the 5.19 EP load are normal: transformers wraps the model
+Two side effects of the EP load are normal: transformers wraps the model
 with FSDP2 even at `fsdp_size=1`, and the pipeline then prints a long "The
 model 'FSDP...ForCausalLM' is not supported for text-generation" warning on
 every rank — it is cosmetic, the load and the traces are unaffected.
@@ -492,7 +485,7 @@ other shipped configs carry, all-reduces inside its own forward), and every
 read and edit behaves as above.
 
 One caveat on the non-default path: overriding the plan by hand to the legacy
-masked trio (`ep_router` + `moe_tp_experts` on 5.19) gives correct outputs, but
+masked trio (`ep_router` + `moe_tp_experts`) gives correct outputs, but
 `experts.inputs` then holds each rank's *masked, local* routing — per-rank
 values with no warning. The default plans on every version do not do this.
 
