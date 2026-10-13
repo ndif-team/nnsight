@@ -148,8 +148,10 @@ The prefill-only run *does* differ from the baseline, which is why a missing
 per-step application reads as "the effect is just modest" rather than as a bug.
 
 To steer only part of the generation, slice the steps. Step 0 is the prefill, so
-this applies the vector on decode steps 5–10; a write at layer L on step k changes
-the token step k emits, and reaches earlier layers' states only from step k+1 (see
+this applies the vector on decode steps 5–10; a write at layer L on step k reaches
+the layers above L at once, so it can change the token step k emits, and carries to
+later steps through their KV cache. Layers ≤ L stay bit-identical to the unsteered
+run until a generated token actually differs (see
 [iteration](../usage/iteration.md#steps-vs-tokens)):
 
 ```python

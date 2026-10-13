@@ -16,6 +16,12 @@ nnsight's interleaved backward exactly as they do locally
 ([backward-and-grad](../usage/backward-and-grad.md)) — what changes is that the
 loop, the optimizer and the parameters all have to live on the server.
 
+!!! warning "Remote training needs a trusted API key"
+
+    Under a standard key the loop completes but never trains: the loss repeats
+    bit-identically every step, with no error. Assert the loss moves. See
+    [standard and trusted keys](../remote/remote-trace.md#standard-and-trusted-keys).
+
 ## The shape
 
 Everything goes inside one `session(remote=True)`. The optimizer never crosses the
