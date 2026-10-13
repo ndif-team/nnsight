@@ -55,7 +55,3 @@ model = TransformersModel("openai-community/gpt2", dispatch=True)
 ## Control flow
 
 - [conditionals-and-loops](conditionals-and-loops.md) — Plain Python `if` / `for` inside a trace.
-
-## Extending nnsight
-
-- [extending](../developing/extending.md) — Custom `Envoy` subclasses, attaching modules to the tree, and integration patterns for new runtimes.

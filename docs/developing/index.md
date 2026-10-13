@@ -84,6 +84,9 @@ as an edit).
 
 ### Extending
 
+- `docs/developing/extending.md` — subclass `NNsight`/`Envoy`: batching
+  (`_batch_size`/`_batch`), attached modules, a custom `Batcher`, `Loadable`, a
+  custom tracer.
 - `docs/developing/extending-envoy.md` — the extension surface for new hookable
   values: an `eproperty` descriptor on a model/runtime subclass, served from the
   driver with its `.provide`.

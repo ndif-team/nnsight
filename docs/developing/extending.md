@@ -1,7 +1,7 @@
 ---
 title: Extending nnsight
 one_liner: Build custom models by subclassing NNsight/Envoy — batching, attached modules, loaders, custom batchers and tracers.
-tags: [usage, extending, envoy, library-development]
+tags: [dev, extending, envoy, library-development]
 related: [docs/usage/access-and-modify.md, docs/usage/invoke-and-batching.md, docs/usage/rename-modules.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, src/nnsight/modeling/base.py, src/nnsight/intervention/batching.py, src/nnsight/modeling/mixins/loadable.py, src/nnsight/modeling/transformers.py]
 ---
