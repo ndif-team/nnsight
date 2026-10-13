@@ -2,7 +2,7 @@
 title: Usage Index
 one_liner: Recipe-style docs for every user-facing nnsight feature, one sharp page per topic.
 tags: [usage, index]
-related: [docs/concepts/index.md, docs/gotchas/index.md, docs/reference/index.md]
+related: [docs/concepts/index.md, docs/errors/symptom-index.md, docs/reference/index.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/tracer.py]
 ---
 

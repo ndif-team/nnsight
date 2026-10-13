@@ -141,7 +141,7 @@ or `config` — those are added by the HF-backed subclasses, as are `.generate()
   its controller rather than stacking (`tests/test_modeling.py` `TestUpdate`,
   `tests/test_multiple_wrappers.py`).
 - **Module access order matters.** Inside a single invoke, reading `.output` of a
-  later layer before an earlier one can deadlock — see [docs/gotchas/](../gotchas/).
+  later layer before an earlier one raises `OutOfOrderError` — see [out-of-order-error.md](../errors/out-of-order-error.md).
 - **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` errors
   when there is no active trace, and reading `model.output` outside one gives
   `Cannot access 'model.output' outside of interleaving`.

@@ -109,6 +109,10 @@ with model.trace("Hello world"):
     ) + model.transformer.h[0].attn.output[1:]
 ```
 
+Both forms work anywhere, including writing a value from another invoke after a
+barrier (`out[0][:, -1, :] = clean`). Use the in-place form to modify the values that are
+there, and the rebuilt tuple when a new tensor (a reshape, a stack) takes the element's place.
+
 ## `.input` vs `.inputs`
 
 `.inputs` returns the raw `(args, kwargs)` tuple captured before the module runs. `.input` is a convenience returning the first positional argument (or the first kwarg value if there are none) — built on top of `.inputs`. Setting `.input` correctly repacks into `(args, kwargs)`:
@@ -187,6 +191,29 @@ with model.trace("Hello World"):
 
 The submodule keeps its real path, so `named_modules()` still lists it as `...attention.output`. Everything that reaches it by name goes through the attribute, so `get("...attention.E_output")` and `rename={"...attention.E_output": ...}` use the new name.
 
+## Weight edits are permanent
+
+Editing an activation is scoped to the run; editing a **weight** is not, and the syntax
+looks the same. `.output` is a value handed to you for the run, but `.weight` is the
+module's real `nn.Parameter`, so a write to it is an ordinary in-place mutation of the
+loaded model that every later trace sees. There is no warning.
+
+```python
+with model.trace(ids):
+    model.transformer.h[5].output[:] = 0           # activation: this run only
+with model.trace(ids):
+    model.transformer.wte.weight[100] = 0.0        # weight: permanent
+```
+
+Save and restore around a weight edit (`saved = w[100].clone()` ... `w.data[100] = saved`
+in a `finally`), or use [`model.edit()`](edit.md), which is reversible with
+`clear_edits()`. Do deliberate weight edits (ROME-style) outside a trace so the
+permanence is visible at the call site.
+
+Before dispatch, parameters are **meta** tensors — correct shape and dtype, no storage.
+Shape-preserving arithmetic on them succeeds and fails somewhere later, in torch's words
+rather than nnsight's. Pass `dispatch=True` (or run a trace) before reading weights.
+
 ## Module skipping / source access
 
 - `module.skip(replacement)` bypasses a module's compute — see `docs/usage/skip.md`.
@@ -198,6 +225,8 @@ The submodule keeps its real path, so `named_modules()` still lists it as `...at
 - For tuple-returning modules, `module.output[0] = x` is a `__setitem__` on a tuple and fails. Use `module.output[0][:] = x` (in-place on the first element) or rebuild the tuple and assign to `module.output`.
 - Reading `.output` returns the real runtime tensor — `print`, `.shape`, `.mean()`, `.item()` all work; there is no proxy to unwrap.
 - Replacing an activation with a tensor built from scratch (`torch.zeros_like(...)`) severs autograd there: replace a whole block's output and upstream `.grad` reads fail loudly; replace a bypassed submodule's output (MLP, attention) and they succeed with silently partial gradients. Derive the replacement from the old value, or write in place.
+- A module you call yourself inside a trace (an attached SAE, adapter or LoRA) is invisible to the trace unless called with `hook=True`; reading its submodules otherwise ends in `OutOfOrderError`. Modules the model calls itself are always watched. See [edit.md](edit.md) for attaching one.
+- A tensor you build inside the block (`torch.randn(768)`) is on CPU; only the inputs passed to `trace` are moved for you. Derive it from the activation it combines with — `torch.randn(hs.shape[-1], device=hs.device, dtype=hs.dtype)` — or you get `Expected all tensors to be on the same device`. Under `device_map="auto"` each layer can be on a different device.
 - Outside interleaving, `.output` raises `ValueError: Cannot access ... outside of interleaving`. Use `model.scan(...)` for shapes without execution.
 
 ## Related

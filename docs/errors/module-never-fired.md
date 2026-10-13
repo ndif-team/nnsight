@@ -1,12 +1,12 @@
 ---
-title: A Module Value Was Never Provided
+title: A Module Never Fired
 one_liner: "At the end of a run a worker was still parked on a location the model never reached — the module didn't fire (OutOfOrderError), or a loop asked for more steps than the run made (a warning and a cut-short loop)."
 tags: [error, execution-order, dangling-worker]
 related: [docs/errors/out-of-order-error.md, docs/errors/cannot-access-outside-interleaving.md, docs/usage/iteration.md, docs/usage/scan.md, docs/concepts/threading-and-mediators.md]
 sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/iterator.py]
 ---
 
-# A Module Value Was Never Provided
+# A Module Never Fired
 
 This is the **late** flavor of `OutOfOrderError`: the model ran to the end while a
 worker was still parked, waiting for a location that never came. Same exception
@@ -51,20 +51,10 @@ fixes below).
 
 ### 2. A loop asked for more steps than the run made
 
-`for step in tracer.iter[:8]` against a three-step generation, or against one that
-stops early on an EOS, leaves the worker parked inside the loop body on a step
-that never comes. Unwinding it takes the worker out *at the loop*, so every
-statement the block has after the loop is discarded.
-
-Bounded and open loops end the same way: the warning above, the loop's saved
-values kept, the statements after it dropped. An open loop has no end of its own
-— outrunning the model is how it finishes — while a bounded loop cut short hands
-back fewer values than the bound named. Either way the result looks complete, so
-check the `len()` of what you collected, or hold the run to the count.
-
-A body that reads locations out of order inside a loop strands the worker one
-occurrence past the loop's own selection, and surfaces here too — see
-[out-of-order-error.md](out-of-order-error.md) for how to tell the two apart.
+A `tracer.iter` loop — bounded or open — that asks for a step the run does not make
+is cut short with the `UserWarning` above: saved values kept, statements after the
+loop dropped. An out-of-order loop body produces the same warning. Both are covered
+in [iteration.md](../usage/iteration.md#the-one-rule).
 
 ## Fix
 
@@ -86,61 +76,6 @@ See [docs/usage/scan.md](../usage/scan.md).
 or `inspect.getsource(type(module).forward)` shows what actually runs — branches,
 eval-mode short-circuits, and dispatch hide behind the module tree.
 
-### Hold the run to the step count you loop over
-
-A bound only holds if the generation makes that many steps, so pin both ends. On
-transformers that is `min_new_tokens=`; on vLLM it is `min_tokens=` or
-`ignore_eos=True`. Neither holds a run that a **stop string** ends — a
-`stop_strings=["Paris"]` generation still stops where it stops, and the loop is
-still cut short — so a run with stop conditions wants `tracer.all()` instead of a
-bound.
-
-```python
-# WRONG — when an EOS stops this run after 3 steps, the loop warns, len(hs) == 3,
-# and `ids` is never bound — the statement after the loop did not run
-with model.generate("Hi", max_new_tokens=8) as tracer:
-    hs = nnsight.save([])
-    for step in tracer.iter[:8]:
-        hs.append(model.transformer.h[-1].output[0, -1])
-    ids = tracer.result.save()
-```
-
-```python
-# FIXED — min_new_tokens holds the generation to the count the loop asks for
-with model.generate("Hi", max_new_tokens=3, min_new_tokens=3) as tracer:
-    hs = nnsight.save([])
-    for step in tracer.iter[:3]:
-        hs.append(model.transformer.h[-1].output[0, -1])
-    ids = tracer.result.save()
-```
-
-If you do not know the step count in advance, loop with `tracer.all()` and move
-whatever follows the loop out of that block — the loop's own saved values survive:
-
-```python
-with model.generate("Hi", max_new_tokens=8) as tracer:
-    hs = nnsight.save([])
-    for step in tracer.all():
-        hs.append(model.transformer.h[-1].output[0, -1])
-print(len(hs))      # however many steps the run made
-```
-
-Anything that has to read a location, `tracer.result` included, goes in a separate
-invoke rather than after the `with` — outside the block there is no run to read
-from, so `tracer.result` there raises
-``ValueError: Cannot access `result` outside of interleaving``. Give the input to
-an invoke rather than to `generate` so there is room for a second one:
-
-```python
-with model.generate(max_new_tokens=8) as tracer:
-    with tracer.invoke("Hi"):
-        hs = nnsight.save([])
-        for step in tracer.all():
-            hs.append(model.transformer.h[-1].output[0, -1])
-    with tracer.invoke():
-        ids = tracer.result.save()
-```
-
 ### Don't read children of a skipped module
 
 ```python
@@ -161,5 +96,5 @@ with model.trace("Hi"):
 
 - [out-of-order-error.md](out-of-order-error.md) — the eager "asked in the wrong order" flavor of the same class.
 - [docs/usage/scan.md](../usage/scan.md) — verify a module fires.
-- [docs/usage/iteration.md](../usage/iteration.md) — bounded vs open iteration.
+- [docs/usage/iteration.md](../usage/iteration.md) — loops that outrun the run, and how to hold a run to a count.
 - [docs/usage/source.md](../usage/source.md) — read inside-the-forward execution order.

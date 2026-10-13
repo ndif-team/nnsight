@@ -133,7 +133,7 @@ assert result is out
 
 ## Gotchas
 
-- Inside one invoke, modules **must** be accessed in forward-pass order — the worker parks on each request until the model reaches it. Out-of-order access raises `OutOfOrderError`. See `docs/gotchas/order-and-deadlocks.md`.
+- Inside one invoke, modules **must** be accessed in forward-pass order — the worker parks on each request until the model reaches it. Out-of-order access raises `OutOfOrderError`. See `docs/errors/out-of-order-error.md`.
 - Values you want after the block **must** be marked with `.save()` / `nnsight.save(...)`. See `docs/usage/save.md`.
 - `with model.trace():` with no input and no invoke is a `ValueError`.
 - Standard Python `if` / `for` works inside the body — the greenlet worker sees real tensors. See `docs/usage/conditionals-and-loops.md`.

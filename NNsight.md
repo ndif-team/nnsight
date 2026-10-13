@@ -1138,7 +1138,7 @@ Two ways this goes wrong, both worth internalizing:
 
 A comprehension follows the same one rule: `hiddens = nnsight.save([b.output for b in model.transformer.h])` — save the whole list, keep the elements raw.
 
-**Two forms, and when to prefer each.** `x.save()` is mounted on *every* Python object by an optional C extension gated by `CONFIG.APP.PYMOUNT` (default on). Tensors read from `.output`/`.input` always carry `.save()`; but for plain Python values (ints, lists, `torch.Size`) the method exists only if the extension built, so `nnsight.save(x)` — a plain function with no mount dependency — is the safe choice there. When in doubt, use `nnsight.save(x)`. (`docs/usage/save.md`, `docs/gotchas/save.md`.)
+**Two forms, and when to prefer each.** `x.save()` is mounted on *every* Python object by an optional C extension gated by `CONFIG.APP.PYMOUNT` (default on). Tensors read from `.output`/`.input` always carry `.save()`; but for plain Python values (ints, lists, `torch.Size`) the method exists only if the extension built, so `nnsight.save(x)` — a plain function with no mount dependency — is the safe choice there. When in doubt, use `nnsight.save(x)`. (`docs/usage/save.md`, `docs/usage/save.md`.)
 
 Saving nests cleanly. Only the *outermost* trace filters to saved values; an inner trace pushes all its locals up to the enclosing block. This is what makes [sessions](#611-sessions) and [gradient blocks](#66-gradients) let values flow without a `save` at every boundary.
 

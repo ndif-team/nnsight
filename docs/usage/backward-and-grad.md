@@ -177,7 +177,20 @@ cannot produce gradients: nothing the block reads can ever receive one.
 
 Wrapping the call in `torch.enable_grad()` does not change this — the decorator is
 applied inside `generate` and wins. For gradients over generated tokens, run a loop
-of `model.trace` calls over the growing prefix and take the backward in each.
+of `model.trace` calls over the growing prefix and take the backward in each:
+
+```python
+tokens = model.tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
+grads = []
+for step in range(3):
+    with model.trace(tokens):
+        hs = model.transformer.h[-1].output
+        with model.output.logits[0, -1].max().backward():
+            g = hs.grad.norm().save()
+        logits = model.output.logits.save()
+    grads.append(g)
+    tokens = torch.cat([tokens, logits[:, -1].argmax(-1, keepdim=True)], dim=-1)
+```
 
 **A frozen model produces no gradients.** After `model.requires_grad_(False)` there
 is nothing for autograd to accumulate into, and a backward block raises the same
@@ -191,6 +204,36 @@ into `param.grad` the way it does in ordinary PyTorch. Zero them between steps, 
 freeze the model and differentiate only what you injected, if you do not want that
 memory held. It is the only thing that grows across a long loop: neither the trace
 nor `model.session()` retains anything per iteration.
+
+## In-place writes after the forward has moved on
+
+Reading a later module's output advances the forward past the earlier one. An
+in-place write to the earlier tensor after that point lands on a value the model
+has already consumed: on a forward-only trace it silently changes nothing, and
+under a backward it trips autograd's version counter:
+
+```
+RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [...] is at version 1; expected version 0 instead.
+```
+
+```python
+with model.trace("Hello world"):
+    hs = model.transformer.h[6].output
+    hs *= 2                                 # edit while the forward is still here
+    later = model.transformer.h[8].output   # moving `hs *= 2` below this line breaks it
+    with model.output.logits.sum().backward():
+        grad = later.grad.norm().save()
+```
+
+In-place editing is not itself a problem for autograd. At the interception point
+`hs *= 2`, `hs[:] = hs * 2` and `model.transformer.h[6].output = hs * 2` produce the
+same forward result and all differentiate. They differ only in what `hs` goes on to
+name: the in-place forms leave it aliased to the edited value, so `hs.grad` is the
+gradient at the edit; the replacement leaves `hs` as the tensor from before the
+edit, so its gradient carries the edit's own chain rule (here, a factor of 2).
+Position is what breaks a backward, not form. A forward-only trace gives no signal,
+so compare logits with and without the edit when an intervention seems to do
+nothing.
 
 ## Gotchas
 

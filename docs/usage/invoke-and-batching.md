@@ -189,8 +189,26 @@ someone will edit: insert one line above the read and it turns into a `NameError
 with no other warning.
 
 **Use a name that exists nowhere outside the invokes.** Each block starts from a
-copy of the surrounding scope and checks that copy first, so if `clean` is already
-bound out there, the consumer reads the *old* value. Nothing raises.
+copy of the surrounding scope and checks that copy first; a sibling's bind reaches
+it only when the name is not already in the copy. So a name left over from an
+earlier notebook cell or the enclosing function shadows the one the producer binds,
+and nothing raises — the write lands the wrong tensor:
+
+```python
+donor = torch.zeros(768)                 # left over from an earlier cell
+
+with model.trace() as tracer:
+    barrier = tracer.barrier(2)
+    with tracer.invoke("The Eiffel Tower is in"):
+        donor = model.transformer.h[5].output[:, -1].clone()
+        barrier()
+    with tracer.invoke("The Colosseum is in"):
+        barrier()
+        model.transformer.h[5].output[:, -1] = donor    # the zeros, not the clone
+```
+
+Rename it (`eiffel_h5`) and the patch takes. A cross-invoke handoff with no error
+*and* no effect is this, not a barrier problem — a missing barrier raises.
 
 ## Rows, padding, and getting values back
 
@@ -351,4 +369,3 @@ class BatchEnvoy(Envoy):
 - [access-and-modify.md](access-and-modify.md)
 - [skip.md](skip.md)
 - [session.md](session.md) — sharing values across whole traces.
-- [gotchas/cross-invoke.md](../gotchas/cross-invoke.md)

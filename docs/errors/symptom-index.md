@@ -2,7 +2,7 @@
 title: Symptom Index
 one_liner: Start from what you observed — including the failures that raise nothing at all — and get to the page that explains it.
 tags: [error, index, silent-failure]
-related: [docs/errors/index.md, docs/gotchas/index.md, docs/usage/save.md, docs/usage/iteration.md]
+related: [docs/errors/index.md, docs/usage/save.md, docs/usage/iteration.md]
 sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py]
 ---
 
@@ -23,8 +23,8 @@ worth reading: those failures raise nothing, so nothing routes you to a page.
 | A saved list is empty, but only when running remotely | The elements were saved, not the container | [docs/usage/save.md](../usage/save.md) |
 | `.grad` is `None` | Read outside a `with metric.backward():` block | [.grad outside a backward block](#grad-outside-a-backward-block) |
 | Per-step writes in a loop land one step late | A `tracer.iter` body that reads a later location before an earlier one — silent unless a shifted request runs off the end of the run | [out-of-order-error.md](out-of-order-error.md) |
-| A per-step list from `tracer.iter` is one entry short, its shapes one step ahead, ending with a "was never reached" warning | A wrong-order read in the loop body, e.g. a `.source` op read after its module's `.output` | [../gotchas/iteration.md](../gotchas/iteration.md) |
-| Shapes are plausible but the numbers are for one batch row | `.output[0]` on a module whose output is a plain tensor | [docs/gotchas/types-and-values.md](../gotchas/types-and-values.md) |
+| A per-step list from `tracer.iter` is one entry short, its shapes one step ahead, ending with a "was never reached" warning | A wrong-order read in the loop body, e.g. a `.source` op read after its module's `.output` | [docs/usage/iteration.md](../usage/iteration.md#pitfalls) |
+| Shapes are plausible but the numbers are for one batch row | `.output[0]` on a module whose output is a plain tensor | [docs/usage/access-and-modify.md](../usage/access-and-modify.md#tuple-outputs) |
 | A name you never saved comes back bound anyway | `save` marks by object identity | [save-outside-trace.md](save-outside-trace.md) |
 
 ## Something raised
@@ -78,7 +78,7 @@ with model.trace(prompt):
 
 The tell is a metric that does not move. Before trusting any intervention
 result, check that an absurd version of it (zero the whole residual stream)
-changes the output — see [docs/gotchas/modification.md](../gotchas/modification.md).
+changes the output — see [docs/usage/access-and-modify.md](../usage/access-and-modify.md).
 
 ## A run method called without `with`
 
@@ -208,5 +208,4 @@ def hidden_state(prompt):
 ## Related
 
 - [index.md](index.md) — the same errors keyed by exception class.
-- [docs/gotchas/index.md](../gotchas/index.md) — the traps that are not errors.
 - [debug-mode.md](debug-mode.md) — when the traceback itself is the problem.

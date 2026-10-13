@@ -200,7 +200,7 @@ place a module's `.source` is touched, an op read after `attn.output` does not
 raise: it binds to the op's next call, so the list holds steps 1, 2, … and comes
 up one short. Touching `attn.source` before the trace makes that read raise
 `OutOfOrderError` instead. See
-[../gotchas/iteration.md](../gotchas/iteration.md).
+[iteration.md](iteration.md#pitfalls).
 
 ## Values that aren't calls: a loop's running state
 

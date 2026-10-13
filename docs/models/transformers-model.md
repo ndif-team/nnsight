@@ -373,7 +373,7 @@ with model.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
 # per_step[0] is the full prompt; per_step[1:] are one cached token each
 ```
 
-Within a step, read locations in forward order. A wrong-order read in the loop can bind to the next step instead of raising; see [../gotchas/iteration.md](../gotchas/iteration.md).
+Within a step, read locations in forward order. A wrong-order read in the loop can bind to the next step instead of raising; see [iteration.md](../usage/iteration.md#pitfalls).
 
 ## Interventions
 

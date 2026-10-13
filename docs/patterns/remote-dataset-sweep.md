@@ -2,7 +2,7 @@
 title: Sweeping a Dataset Remotely
 one_liner: Load the data on NDIF instead of shipping it, loop over it inside one session, and bring back only the reduction.
 tags: [pattern, remote, ndif, dataset, session]
-related: [docs/remote/remote-session.md, docs/gotchas/remote.md, docs/patterns/remote-training.md]
+related: [docs/remote/remote-session.md, docs/remote/remote-trace.md#gotchas, docs/patterns/remote-training.md]
 sources: [src/nnsight/intervention/serialization.py, src/nnsight/modeling/mixins/remotable.py]
 ---
 
@@ -120,7 +120,7 @@ with model.session(remote=True):
 
 Note `probe.to(hidden.device, hidden.dtype)`: `probe` was built on the client, so
 it arrives on the CPU in float32 regardless of how the server holds the model. See
-[gotchas/remote.md](../gotchas/remote.md).
+[remote-trace.md](../remote/remote-trace.md#gotchas).
 
 ## Accumulating into an outer variable
 
@@ -162,4 +162,4 @@ Without the `nnsight.save(results)`, the appends land on the server's copy and y
 
 - [remote-training.md](remote-training.md) — the same shape, with an optimizer in the loop.
 - [docs/remote/remote-session.md](../remote/remote-session.md) — sessions as one request.
-- [docs/gotchas/remote.md](../gotchas/remote.md) — what crosses the wire, and in which direction.
+- [docs/remote/remote-trace.md](../remote/remote-trace.md#gotchas) — what crosses the wire, and in which direction.

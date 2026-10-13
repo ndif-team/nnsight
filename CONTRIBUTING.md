@@ -105,7 +105,7 @@ its history); comments only where the logic isn't self-evident; keep changes foc
   optional dependencies.
 - To collect values across a trace, **save the container** and store raw values —
   `xs = nnsight.save([]); xs.append(model...output)` — never `xs.append(x.save())`
-  (see [docs/gotchas/save.md](docs/gotchas/save.md)).
+  (see [docs/usage/save.md](docs/usage/save.md)).
 
 ## Submitting changes
 

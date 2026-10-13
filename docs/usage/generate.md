@@ -2,7 +2,7 @@
 title: Generate
 one_liner: Multi-token generation through the model; returns token ids (`tracer.result`). Decoding follows the checkpoint's `generation_config`.
 tags: [usage, tracing, generation]
-related: [docs/usage/trace.md, docs/usage/pipe.md, docs/usage/iteration.md, docs/gotchas/iteration.md, docs/usage/invoke-and-batching.md]
+related: [docs/usage/trace.md, docs/usage/pipe.md, docs/usage/iteration.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/modeling/transformers.py, src/nnsight/intervention/tracer.py]
 ---
 
@@ -101,7 +101,7 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
         per_step.append(model.output.logits[0, -1].argmax(dim=-1))
 ```
 
-A loop must not ask for a step the run does not make: `iter[:5]` is right here because `max_new_tokens=5` and nothing ends the generation sooner. See `docs/usage/iteration.md` for the forms and `docs/gotchas/iteration.md` for what happens when a loop outruns the run.
+A loop must not ask for a step the run does not make: `iter[:5]` is right here because `max_new_tokens=5` and nothing ends the generation sooner. See `docs/usage/iteration.md` for the forms and `docs/usage/iteration.md#pitfalls` for what happens when a loop outruns the run.
 
 ## Per-step tokens (streamer)
 
@@ -193,9 +193,9 @@ generation to N steps by suppressing EOS until then.
 
 ## Gotchas
 
-- **A `tracer.iter` loop must not ask for a step the run does not make.** A bound the run meets is fine and the code after the loop runs; a loop that outruns the run — bounded or open — warns, keeps what it saved, and drops the statements after the loop, so the result looks complete while being shorter than the bound. `max_new_tokens` is an upper bound, so pass `min_new_tokens=` when the loop's bound has to hold, and check the `len()` of what you collected. See `docs/gotchas/iteration.md`.
+- **A `tracer.iter` loop must not ask for a step the run does not make.** A bound the run meets is fine and the code after the loop runs; a loop that outruns the run — bounded or open — warns, keeps what it saved, and drops the statements after the loop, so the result looks complete while being shorter than the bound. `max_new_tokens` is an upper bound, so pass `min_new_tokens=` when the loop's bound has to hold, and check the `len()` of what you collected. See `docs/usage/iteration.md#pitfalls`.
 - Always pass a stop bound (`max_new_tokens=` or a `generation_config`).
-- Within a step, modules must still be accessed in forward-pass order — inside an iteration loop an out-of-order read or write can bind to the *next* step instead of raising. A `.source` op first touched inside the loop does this even at step 0. Compare list lengths and per-step shapes (see `docs/gotchas/iteration.md`).
+- Within a step, modules must still be accessed in forward-pass order — inside an iteration loop an out-of-order read or write can bind to the *next* step instead of raising. A `.source` op first touched inside the loop does this even at step 0. Compare list lengths and per-step shapes (see `docs/usage/iteration.md#pitfalls`).
 - Reading `model.generator.output` for the finished ids is deprecated — use `tracer.result`.
 
 ## Related
@@ -203,6 +203,5 @@ generation to N steps by suppressing EOS until then.
 - `docs/usage/trace.md`
 - `docs/usage/pipe.md`
 - `docs/usage/iteration.md`
-- `docs/gotchas/iteration.md`
 - `docs/usage/invoke-and-batching.md`
 - `docs/usage/save.md`

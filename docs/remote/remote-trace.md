@@ -134,7 +134,10 @@ with model.trace("...", backend=backend):
 
 ## Gotchas
 
-- Variables created **outside** the trace and mutated inside it won't be transmitted back. Create and `.save()` the value *inside* the block — see [remote-session.md](./remote-session.md).
+- Variables created **outside** the trace and mutated inside it won't be transmitted back — the mutation happens on the server's copy. Create and `.save()` the value *inside* the block, or call `nnsight.save(outer)` inside it, which rebinds the client's name to the server's version — see [remote-session.md](./remote-session.md).
+- **Tensors from the client arrive as they were locally: CPU, usually float32.** The server's model is half-precision and may be sharded across GPUs, and an undispatched client model reports `meta` as its device, so nothing can be hard-coded. Derive device and dtype from an activation at run time, per use: `hidden[:, -1] += direction.to(hidden.device, hidden.dtype)`. Tensors built inside the block (`torch.randn(...)`) default to CPU float32 too.
+- **A class you ship must call `super(MyClass, self).__init__()`.** Bare `super()` needs a hidden `__class__` cell that only a class body creates; the server rebuilds the class from source outside one, so it raises `RuntimeError: super(): __class__ cell not found`.
+- **`nnsight.compare()` returns an object** — `print(nnsight.compare())` or you see nothing. An editable install shows a version mismatch even when the code is identical, because only the `.dist-info` metadata differs. See [env-comparison.md](./env-comparison.md).
 - The model identifier passed to `TransformersModel` must match an NDIF deployment. Run `nnsight.is_model_running("...")` before submitting.
 - A GPT-2 block's `.output` is a plain tensor `(batch, seq, hidden)` in current transformers — `model.transformer.h[i].output` selects the first batch row. Attention submodules still return a tuple; don't assume — check `model.transformer.h[i].source`.
 - A `LOG` line that prints a multi-megabyte tensor floods the websocket. Print summaries, not raw tensors.

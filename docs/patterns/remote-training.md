@@ -2,7 +2,7 @@
 title: Training a Parameter Remotely
 one_liner: Run the whole optimizer loop inside one remote session — parameters created on the server's device, and only the trained weights come home.
 tags: [pattern, remote, ndif, training, lora, session]
-related: [docs/patterns/remote-dataset-sweep.md, docs/usage/backward-and-grad.md, docs/gotchas/remote.md]
+related: [docs/patterns/remote-dataset-sweep.md, docs/usage/backward-and-grad.md, docs/remote/remote-trace.md#gotchas]
 sources: [src/nnsight/modeling/mixins/remotable.py, src/nnsight/intervention/serialization.py]
 ---
 
@@ -154,4 +154,4 @@ decimal on consecutive steps means the same thing.
 
 - [remote-dataset-sweep.md](remote-dataset-sweep.md) — the same session shape without an optimizer.
 - [docs/usage/backward-and-grad.md](../usage/backward-and-grad.md) — how `with tensor.backward():` interleaves.
-- [docs/gotchas/remote.md](../gotchas/remote.md) — device, dtype, and what crosses the wire.
+- [docs/remote/remote-trace.md](../remote/remote-trace.md#gotchas) — device, dtype, and what crosses the wire.

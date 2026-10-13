@@ -118,15 +118,32 @@ float(total)            # GuardOnDataDependentSymNode
 Only the conversion to a real number raises. A threshold, a comparison, or a `float()` deep in
 a helper is where the error finally lands.
 
-**Anything about the values.** Branching on fake content
-(`if (out > 0).all():`) raises `GuardOnDataDependentSymNode`; see
-`docs/gotchas/types-and-values.md`.
+**Anything about the values.** Branching on fake content raises
+`GuardOnDataDependentSymNode: Could not guard on data-dependent expression ...` —
+fake mode cannot decide a data-dependent boolean, and nnsight does not paper over it
+with a branch that silently always takes one arm. Branch on shapes and dtypes, which
+are real `torch.Size` / `int` values; for content-dependent branching run a `trace`:
+
+```python
+with model.scan("Hello world"):
+    out = model.transformer.h[0].output
+    if out.shape[-1] > 1000:          # fine — an int
+        wide = nnsight.save(True)
+    # if (out > 0).all(): ...         # raises under scan
+```
 
 A `FakeTensor` you save out of the block does not become invalid when the scan exits — that is
 the trap. `.shape`, `.dtype`, `.sum()`, `.mean() + 1`, `.cpu()`, `.tolist()` all keep working
 and keep handing back fake tensors. What fails is anything that needs a real number:
 `float(hs.sum())` raises `GuardOnDataDependentSymNode`, `.numpy()` raises, and mixing it with
 a real tensor raises `FakeTensorDeviceMismatchError`. Save the *shape*, not the fake tensor.
+
+## Values in a trace are real tensors
+
+Only `scan` hands out fake tensors. Inside `model.trace(...)`, `.output` / `.input`
+return the actual `torch.Tensor` (or tuple) the module produced — not a proxy.
+`print`, `.shape`, `.mean()`, `.device` and arithmetic work directly; there is no
+`.value` to resolve and nothing to unwrap. To use a value after the block, `.save()` it.
 
 ## Gotchas
 

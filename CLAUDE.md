@@ -83,7 +83,7 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 
 ### "Something is broken / I got an error"
 - [docs/errors/index.md](docs/errors/index.md) — exception → cause → fix table
-- [docs/gotchas/index.md](docs/gotchas/index.md) — most common ways things go wrong
+- [docs/errors/symptom-index.md](docs/errors/symptom-index.md) — most common ways things go wrong
 - [docs/errors/debug-mode.md](docs/errors/debug-mode.md) — tracebacks and `CONFIG.APP.DEBUG`
 
 ---

@@ -56,4 +56,4 @@ All HF-backed wrappers support lazy loading: `dispatch=False` (default) download
 
 - [docs/concepts/](../concepts/) — the underlying tracing / Envoy / interleaver model
 - [docs/remote/](../remote/) — running these on NDIF
-- [docs/gotchas/](../gotchas/) — cross-cutting pitfalls
+- [docs/errors/symptom-index.md](../errors/symptom-index.md) — something broke

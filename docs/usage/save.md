@@ -136,7 +136,8 @@ with model.trace("Hello", remote=True):
 
 - Forgetting `.save()` is the most common footgun — the variable is undefined after `__exit__`: `NameError` in a script, `UnboundLocalError` inside a function.
 - **A saved value comes back by its variable *name*, so bind it.** `push_result` returns the body's *locals*, filtered to the saved ones — a value marked but never assigned to a name (a bare `model.logits.save()` on its own line) has no local to return, so it silently doesn't come back. This is invisible locally (you just never read it) but obvious on vLLM/remote/serve, where you read it by name: `output.saves["logits"]` will be missing. Always write `logits = model.logits.save()`.
-- **Saving outside a trace raises** — do it inside the `with` block.
+- **Saving outside a trace raises** — do it inside the `with` block ([save-outside-trace.md](../errors/save-outside-trace.md)).
+- **Nested traces don't need `.save()` between them.** Only the outermost boundary filters to saved values; an inner `model.trace()` inside a `model.session()` pushes all its locals up, so a value from one inner trace is usable in the next unsaved (not on `VLLM`, where each trace is its own request). Save only what leaves the session.
 - `nnsight.save()` is safe to call on the same value multiple times — the saved set is keyed by `id()`.
 - Mutating a saved tensor in-place after the trace exits affects whatever it still aliases. Clone for isolation: `nnsight.save(x.clone())`.
 - Save is required inside `model.scan(...)` too — it is a tracing context.
