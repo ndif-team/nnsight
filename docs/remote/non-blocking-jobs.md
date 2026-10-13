@@ -1,9 +1,9 @@
 ---
 title: Non-Blocking Remote Jobs
-one_liner: Submit a remote trace, get the job ID immediately, and poll for the result later.
+one_liner: Submit a remote trace or session, get the job ID immediately, and poll for the result later.
 tags: [remote, ndif, async]
 related: [docs/remote/remote-trace.md, docs/remote/remote-session.md, docs/remote/remote-async.md, docs/remote/index.md]
-sources: [src/nnsight/intervention/backends/remote.py:93, src/nnsight/intervention/backends/remote.py:263, src/nnsight/intervention/backends/remote.py:280]
+sources: [src/nnsight/intervention/backends/remote.py]
 ---
 
 # Non-Blocking Remote Jobs
@@ -28,46 +28,26 @@ from nnsight import TransformersModel
 model = TransformersModel("meta-llama/Llama-3.1-70B")
 
 with model.trace("Hello", remote=True, blocking=False) as tracer:
-    output = model.lm_head.output.save()
+    embeds = model.model.embed_tokens.output.save()
+    logits = model.lm_head.output.save()
 
-# The trace context submitted the job and exited. tracer.backend is the
-# RemoteBackend, now holding the job id.
 backend = tracer.backend
 print(backend.job_id)     # 'a3e1…' — id assigned by NDIF
 print(backend.status)     # Status.RECEIVED
 
-# Poll until done. backend() returns None until COMPLETED, then the saves dict.
-while True:
-    result = backend()
-    if result is not None:
-        break
+# backend() returns None until COMPLETED, then the saves dict.
+while (result := backend()) is None:
     print(f"status: {backend.status.name}")
     time.sleep(1)
 
-print(result.keys())            # dict_keys(['output'])
-print(result['output'].shape)
+result["embeds"].shape    # keyed by the saved variable's name
+result["logits"].shape
 ```
 
-How it works (`src/nnsight/intervention/backends/remote.py:93`):
+How it works:
 
-- The trace's `__exit__` calls the backend once with the tracer. With `job_id` still `None`, that runs `submit()` — a POST to `{HOST}/request` **without** a websocket; the server records each status to its object store. It stores the returned `job_id` and returns `None`.
-- Each later `backend()` call runs `poll()`: an HTTP GET against `{HOST}/response/{job_id}` (`src/nnsight/intervention/backends/remote.py:280`). It returns the deserialized saves dict on `COMPLETED`, raises `RemoteError` on `ERROR`, and returns `None` while the job is still running (or before its first status lands — a 404).
-
-## Result shape
-
-The returned dict is keyed by the saved variable's name in your trace:
-
-```python
-with model.trace("Hello", remote=True, blocking=False) as tracer:
-    embeds = model.transformer.wte.output.save()
-    logits = model.lm_head.output.save()
-
-backend = tracer.backend
-# ...later...
-result = backend()
-result['embeds'].shape
-result['logits'].shape
-```
+- The trace's `__exit__` calls the backend once. With `job_id` still `None`, that runs `submit()` — a POST to `{HOST}/request` **without** a websocket. It stores the returned `job_id` and returns `None`.
+- Each later `backend()` call runs `poll()`: a GET against `{HOST}/response/{job_id}`. It returns the saves dict on `COMPLETED`, raises `RemoteError` on `ERROR`, and returns `None` while the job is still running (or before its first status lands). Saved values are **not** pushed back into your variables — read them from the returned dict.
 
 ## Reattaching to an existing job
 
@@ -76,18 +56,14 @@ If you've stored the job id, construct a poll-only backend later and fetch the r
 ```python
 from nnsight.intervention.backends.remote import RemoteBackend
 
-backend = RemoteBackend(
-    model.to_model_key(),
-    blocking=False,
-    job_id="a3e1…",       # the stored job id
-)
+backend = RemoteBackend(model.to_model_key(), blocking=False, job_id="a3e1…")
 
-result = backend()        # GET /response/{job_id}; None until COMPLETED, then the saves
+result = backend()        # polls, since job_id is set; None until COMPLETED
 ```
 
-Because `job_id` is already set, the first `backend()` polls rather than submitting. `backend.poll()` is the underlying call (`src/nnsight/intervention/backends/remote.py:280`).
+## Sessions
 
-## Sessions also support blocking=False
+`blocking=False` works on `model.session(...)` the same way:
 
 ```python
 with model.session(remote=True, blocking=False) as session:
@@ -100,15 +76,12 @@ result = session.backend()   # poll: None until done, then the saves dict
 
 ## Gotchas
 
-- **`backend()` does not advance status on its own** — there's no background polling thread. Each call fetches whatever status the server last recorded. Call once after a long wait and you may jump straight from `RECEIVED` to the completed result, observing no intermediate states.
-- `backend.status` is updated only by a `backend()` (poll) call; it holds the most recent `Status`.
-- `backend()` blocks for one HTTP round-trip per call. Sleep between polls; don't hammer it.
-- `print(...)` statements stream live over the websocket in blocking mode, but in non-blocking mode you only see whatever status the last poll fetched.
+- **Status advances only when you poll.** There's no background thread: each `backend()` call (one HTTP round-trip) fetches whatever status the server last recorded and updates `backend.status`. Call once after a long wait and you may jump straight from `RECEIVED` to the result. Sleep between polls; don't hammer it.
+- `print(...)` output from the block streams live only in blocking mode; non-blocking, you see only whatever status the last poll fetched.
 - Completed-but-unfetched results may be garbage-collected server-side after a TTL. Fetch and store the result promptly.
 
 ## Related
 
 - [remote-trace.md](./remote-trace.md) — blocking-mode default.
-- [remote-session.md](./remote-session.md) — bundling multiple traces; also supports `blocking=False`.
+- [remote-session.md](./remote-session.md) — bundling multiple traces.
 - [remote-async.md](./remote-async.md) — await a job from an event loop instead of polling.
-- [ndif-overview.md](./ndif-overview.md) — full lifecycle including the HTTP/websocket split.

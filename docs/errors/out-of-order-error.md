@@ -2,7 +2,7 @@
 title: OutOfOrderError
 one_liner: "OutOfOrderError: '<location>' was requested but the model already ran past it — a module value was asked for out of forward-pass order within one block."
 tags: [error, execution-order, interleaving]
-related: [docs/errors/value-was-not-provided.md, docs/errors/cannot-access-outside-interleaving.md, docs/concepts/threading-and-mediators.md, docs/usage/invoke-and-batching.md]
+related: [docs/errors/module-never-fired.md, docs/errors/cannot-access-outside-interleaving.md, docs/concepts/threading-and-mediators.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/intervention/interleaver.py]
 ---
 
@@ -22,17 +22,12 @@ from nnsight.intervention.interleaver import OutOfOrderError
 
 ## Cause
 
-Each block of intervention code runs in its own **greenlet worker** (a
-`Mediator`) that runs in lockstep with the model's forward pass. When the block
-reads `module.output`, the worker *parks* until the model reaches that module,
-then resumes with the value. A worker can only be served locations **in the order
-the model reaches them** — it holds one pending request at a time.
-
-If you ask for layer 1's output *after* layer 5's, layer 1 has already fired and
-its value is gone by the time your request arrives. The run finishes with the
-worker still parked on `model.transformer.h.1.output`, and
-`Interleaver.check_dangling_mediators` throws `OutOfOrderError` into the worker so
-the traceback points at the exact line that was waiting.
+Each invoke's intervention code runs in a worker that parks until the model reaches
+the location it asked for. It can only be served locations **in the order the model
+reaches them**. If you ask for layer 1's output *after* layer 5's, layer 1 already
+fired; the run ends with the worker still waiting, and the error is thrown at the
+line that was waiting. See
+[threading-and-mediators.md](../concepts/threading-and-mediators.md) for the model.
 
 `model.output` is the location that catches people first. It is the *root* envoy —
 the very end of the forward pass — so reading it before any layer strands that
@@ -42,16 +37,17 @@ layer's request:
 # wrong: model.output runs the whole model, so h[8] has already fired
 with model.trace(prompt):
     logits = model.output.logits.save()
-    hidden = model.model.layers[8].output.save()   # OutOfOrderError
+    hidden = model.transformer.h[8].output.save()   # OutOfOrderError
 
 # right: activations first, model.output last
 with model.trace(prompt):
-    hidden = model.model.layers[8].output.save()
+    hidden = model.transformer.h[8].output.save()
     logits = model.output.logits.save()
 ```
 
-That ordering is the natural way to *describe* the task ("give me the prediction and
-also layer 8"), which is why it is such a common first error.
+Reverse-order reads often come with a stray `[0]` on a GPT-2 block's output,
+which is a plain tensor, not a tuple — see
+[tuple outputs](../usage/access-and-modify.md#tuple-outputs).
 
 The `.i0` suffix on the location is the occurrence tag — which visit of that
 location the request targets. Without `tracer.iter`, it is always `.i0`; in a
@@ -60,8 +56,14 @@ generation loop it counts `.i0`, `.i1`, `.i2`, … per step.
 ## Common triggers
 
 - Reading modules in reverse order inside one block (`h[5].output` before `h[1].output`).
+- Reading a block before something inside it. Forward order is **depth-first**: a
+  module runs *inside* the one that contains it, so `h[0].output` then
+  `h[0].attn.output` is out of order — the whole block, attention included, already
+  ran. Read inward-out: `h[0].attn.c_proj.input`, then `h[0].attn.output`, then
+  `h[0].output`. The same holds on any architecture
+  (`layers[0].self_attn.o_proj` inside `layers[0].self_attn`).
 - Reading a `.grad` for an early layer before a later one inside `with tensor.backward():` — gradients flow in reverse, so access order reverses too (see [docs/usage/backward-and-grad.md](../usage/backward-and-grad.md)).
-- Calling a module yourself without `hook=True`, then reading one of its submodules — the call runs with the trace stood down, so nothing is served (see [docs/gotchas/integrations.md](../gotchas/integrations.md)).
+- Calling a module yourself without `hook=True`, then reading one of its submodules — the call runs with the trace stood down, so nothing is served (see [calling modules directly](../usage/access-and-modify.md#calling-modules-directly-inside-a-trace)).
 
 Reading the *same* location twice in one block is fine: the second read is
 answered from the same served value and hands back the identical object.
@@ -74,118 +76,24 @@ with model.trace(prompt):
 
 ## Fix
 
-```python
-# WRONG — layer 5 fires before layer 1, so the request for h[1] arrives too late
-with model.trace("The Eiffel Tower is in"):
-    out5 = model.transformer.h[5].output.save()
-    out1 = model.transformer.h[1].output.save()   # OutOfOrderError
-```
-
-```python
-# FIXED — access modules in forward-pass order
-with model.trace("The Eiffel Tower is in"):
-    out1 = model.transformer.h[1].output.save()
-    out5 = model.transformer.h[5].output.save()
-```
-
-To genuinely read modules out of forward order, run a second pass with an extra
-empty invoke — each invoke is its own worker, so their access orders are
+Read in forward order, as above. To read out of forward order, add an empty
+invoke — each invoke is its own worker, so their access orders are
 independent:
 
 ```python
 with model.trace() as tracer:
     with tracer.invoke("The Eiffel Tower is in"):
         out5 = model.transformer.h[5].output.save()
-    with tracer.invoke():           # empty invoke = another pass over the same batch
+    with tracer.invoke():           # empty invoke: a second worker on the same forward
         out1 = model.transformer.h[1].output.save()
 ```
 
-## Mitigation
-
-- Lay intervention code out top-to-bottom in the order modules run in `print(model)`.
-- For backward passes, mirror forward order in reverse inside `with tensor.backward():`.
-- Split interleaving access patterns across multiple invokes.
-
 ## Inside a `tracer.iter` loop
 
-The loop body is subject to the same rule, once per step — but the loop changes
-what happens when you break it, and one shape of the mistake is silent.
-
-An out-of-order body does not lose a value; it shifts every request one occurrence
-later. Reading `h[8]` before writing `h[2]` means the write for step *k* is asked
-for after step *k*'s `h[2]` has gone, so it binds to step *k+1* instead. Each pass
-pushes the next one along. Whether anything says so depends on one thing:
-**whether the last shifted request still has a step to land on.**
-
-```python
-# the write is meant for steps 1 and 2, but it is asked for after h[8] each time
-with model.generate("Hi there", max_new_tokens=4, min_new_tokens=4) as tracer:
-    for step in tracer.iter[1:3]:
-        late = model.transformer.h[8].output
-        model.transformer.h[2].output[:] = 0
-    tail = nnsight.save("this line runs")
-```
-
-That completes. No exception, no warning, and the statement after the loop runs.
-The writes land on steps 2 and 3. Measured per-step norms of `h[2].output` over
-the four generated steps:
-
-| variant | step 0 | 1 | 2 | 3 |
-|---|---|---|---|---|
-| no write | 2570.9 | 54.7 | 58.7 | 66.1 |
-| in-order write at `iter[1:3]` | 2570.9 | **0.0** | **0.0** | 55.9 |
-| late-read write at `iter[1:3]` | 2570.9 | 54.7 | **0.0** | **0.0** |
-
-Step 1 — the first step the loop selected — is untouched, and step 3, which the
-loop never selected, is zeroed. Nothing says so.
-
-When a shifted request runs off the end of the run, the loop is cut short with
-a warning naming the occurrence:
-
-```python
-# now the loop reaches the run's last step, so the shifted write asks for i4
-with model.generate("Hi there", max_new_tokens=4, min_new_tokens=4) as tracer:
-    for step in tracer.iter[1:4]:
-        late = model.transformer.h[8].output
-        model.transformer.h[2].output[:] = 0
-```
-
-```
-UserWarning: 'model.transformer.h.2.output.i4' was never reached: the loop asked
-for a step the run did not make, so it was cut short — values saved inside the
-loop are kept, and the statements after it did not run. …
-```
-
-A loop that includes step 0 does raise, with the plain out-of-order message,
-because the pin at iteration 0 is not treated as a loop at all.
-
-So, for an out-of-order loop body:
-
-| Loop | Result |
-|---|---|
-| includes step 0 (`iter[:N]`, `iter[0:N]`) | raises `'…i0' was requested but the model already ran past it` |
-| bounded, last selected step **is** the run's last (`iter[1:4]` over 4 steps) | warns, naming an occurrence past the loop's own selection; the statements after the loop do not run |
-| bounded, stops **short** of the run's last step (`iter[1:3]` over 4 steps) | **silent** — writes land one step late, trailing code runs |
-| open (`iter[1:]`, `tracer.all()`) | warns; writes land one step late and the last is dropped |
-
-One exception to the first row: a `.source` op whose module's `.source` is first
-touched inside the loop shifts even at step 0. `attn.output[0]` read before
-`attn.source.attention_interface_1.output` in `for step in tracer.iter[:4]` gives
-the op's steps 1–3, one entry short, and ends with the "never reached" warning.
-Touching `attn.source` before the trace restores the raise. See
-[../gotchas/iteration.md](../gotchas/iteration.md).
-
-The silent row — and the fact that a warning is easy to miss — is why an
-intervention inside a loop deserves a check rather than a clean exit. Read a
-location you edited back in a second invoke and compare it against a no-write
-baseline, per step. If the loop does warn, the tell is the occurrence number: an
-`.iN` past anything the loop selected means the body reads a later location
-before an earlier one. Reorder the body — read `h[2]` before `h[8]` — and every
-one of these shapes runs clean.
-
-A loop whose body is in order but whose *bound* exceeds the run is cut short
-with the same warning; that case is
-[value-was-not-provided.md](value-was-not-provided.md).
+The same rule applies per step, but past step 0 an out-of-order request binds to
+the *next* step instead of raising — silently, or with a "never reached" warning
+that blames the loop bound. See
+[Pitfalls in iteration.md](../usage/iteration.md#an-out-of-order-body-shifts-by-a-step).
 
 ## Another cause: something replaced the module's forward
 
@@ -218,6 +126,6 @@ for envoy in [model, *model.modules()]:
 
 ## Related
 
-- [value-was-not-provided.md](value-was-not-provided.md) — same class, the "module never fired / loop outran the run" flavor.
+- [module-never-fired.md](module-never-fired.md) — same class, the "module never fired / loop outran the run" flavor.
 - [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) — accessing a value with no trace running at all.
 - [docs/concepts/threading-and-mediators.md](../concepts/threading-and-mediators.md) — how greenlet workers park and resume.

@@ -23,28 +23,21 @@ from nnsight import TransformersModel
 model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
 ```
 
-The task string is `"text-generation"`, which covers causal LMs and the
-pipeline's chat templating. A masked model wants `task="fill-mask"`.
-
-Constructing one emits `nnsight.NNsightDeprecationWarning`, a `FutureWarning`, so
-it is shown wherever the construction happens rather than only in `__main__`:
+`task="text-generation"` covers causal LMs and chat templating; a masked model
+wants `task="fill-mask"`. Construction emits `nnsight.NNsightDeprecationWarning`
+(a `FutureWarning`, so it shows wherever the construction happens):
 
 ```
 LanguageModel is deprecated; use TransformersModel(repo_id, task='text-generation') instead.
 ```
 
-Everything the class offered is on `TransformersModel`: `trace`, `scan`,
-`generate` returning token ids, `pipe` running the whole pipeline, batching,
-`tracer.iter`, gradients, caching, sessions and renaming. The one convenience it
-adds is `tokenizer_kwargs=` at load, which becomes one line afterwards:
+The alias's `tokenizer_kwargs=` becomes one line on `TransformersModel`:
+`model.tokenizer.padding_side = "right"`.
 
-```python
-model = TransformersModel("openai-community/gpt2", task="text-generation")
-model.tokenizer.padding_side = "right"
-```
-
-Both classes share a remote model key, so a checkpoint deployed as a
-`TransformersModel` is reachable when wrapped as either.
+Remotely, the alias uses `TransformersModel`'s model key with the task pinned to
+`text-generation`. The task is part of the key, so it reaches a deployment only
+when that deployment's task is `text-generation` (see
+[transformers-model.md](transformers-model.md#remote)).
 
 ## Related
 

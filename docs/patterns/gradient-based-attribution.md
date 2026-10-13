@@ -15,18 +15,10 @@ internal activation would move the metric most?" The simplest form is the salien
 map, `d(metric)/d(activation)`. Structured versions (input × gradient, integrated
 gradients) reweight or accumulate gradients to satisfy specific axioms.
 
-In nnsight, gradients on intermediate activations are read via
-`with tensor.backward():`. This runs the real backward pass **interleaved** with the
-block, exposing `.grad` on any tensor you captured in the surrounding forward trace
-as the gradient reaches it. See `docs/usage/backward-and-grad.md`.
-
-## When to use
-
-- Saliency / sensitivity maps: which positions or features matter most.
-- Integrated gradients: axiomatic input attribution.
-- Layer importance scores from gradient norms.
-- The forward+gradient halves of attribution patching — see
-  [attribution-patching](attribution-patching.md).
+In nnsight, `with metric.backward():` runs the real backward pass interleaved with
+the block and exposes `.grad` on any tensor captured in the forward trace. Use it for
+saliency maps, integrated gradients, and gradient-norm layer importance; for
+clean-minus-corrupt × gradient maps see [attribution-patching](attribution-patching.md).
 
 ## Canonical pattern
 
@@ -62,21 +54,11 @@ layer 10: ||grad|| last pos = 2.8377
 layer 11: ||grad|| last pos = 0.6846
 ```
 
-**Two rules:**
-
-1. **Request `.grad` in reverse-forward order.** Backward visits later layers
-   first; asking for an earlier layer's gradient before a later one raises
-   `OutOfOrderError`.
-2. **Capture the activations you want gradients for *before* entering the backward
-   context**, and read their `.grad` *inside* it.
-
-> **No `requires_grad_(True)` needed for in-graph activations.** A layer output,
-> attention output, or embedding output is already a non-leaf tensor carrying a
-> `grad_fn`, so `with metric.backward():` reads its gradient directly (the examples
-> above have no `requires_grad_` and work). Calling `.requires_grad_(True)` on such
-> a tensor is harmless but redundant. You only need it for a leaf tensor you
-> construct yourself (e.g. a scaled embedding baseline in integrated gradients).
-> Run *without* `torch.no_grad()` — the metric must be able to build a graph.
+Request `.grad` in **reverse** forward order, capture the activations before
+entering the backward context, and run without `torch.no_grad()` — see
+[backward-and-grad](../usage/backward-and-grad.md). In-graph activations (layer,
+attention, embedding outputs) need no `requires_grad_(True)`; only a leaf tensor you
+construct yourself does.
 
 ## Variations
 
@@ -96,18 +78,7 @@ for tok, s in zip(tokens, saliency.tolist()):
     print(f"{tok!r:>12}  {s:.3f}")
 ```
 
-```
-       'The'  1.938
-        'ĠE'  1.789
-       'iff'  1.847
-        'el'  0.528
-    'ĠTower'  1.215
-       'Ġis'  5.466
-       'Ġin'  2.676
-      'Ġthe'  1.567
-     'Ġcity'  1.934
-       'Ġof'  9.503
-```
+The final `'Ġof'` (9.5) and `'Ġis'` (5.5) dominate; the subject tokens score 0.5–1.9.
 
 ### Integrated gradients (IG)
 
@@ -135,8 +106,7 @@ to get wrong:
     `(1 - alpha_start)`; without that factor completeness is off by exactly that
     much.
 
-Here the scaled activation *is* a leaf you construct, so it needs
-`requires_grad_(True)`:
+The scaled activation is a leaf you construct, so it needs `requires_grad_(True)`:
 
 ```python
 ALPHA_START = 0.05              # not 0 — see the warning above
@@ -160,14 +130,9 @@ ig = (1 - ALPHA_START) * ig_accum / N_STEPS   # path length x mean gradient
 saliency = ig.sum(dim=-1)                     # [B, S]
 ```
 
-`(1 - ALPHA_START)` is the length of the path being integrated. Drop it and every
-attribution is inflated by `1 / (1 - ALPHA_START)`, which the completeness check
-below will report as a constant relative error.
-
-**Always check completeness.** IG's defining axiom is that the attributions sum to
-the change in the metric across the path. If they don't, the result is an artifact —
-this is the only thing that distinguishes a converged run from the divergent one
-above, and it costs three lines:
+**Always check completeness.** The attributions must sum to the change in the
+metric across the path; this is the only thing that distinguishes a converged run
+from the divergent one above:
 
 ```python
 def F_at(alpha):                       # scale whatever the IG loop scaled
@@ -175,8 +140,7 @@ def F_at(alpha):                       # scale whatever the IG loop scaled
         embeds = model.transformer.wte.output
         model.transformer.wte.output = embeds * alpha
         value = model.lm_head.output[:, -1, target].save()
-    return value          # `return` *inside* the block is a SyntaxError -- the
-                          # body is recompiled at module level, not as a function
+    return value                       # return after the block, not inside it
 
 total = ig.sum().item()
 target_delta = F_at(1.0).item() - F_at(ALPHA_START).item()
@@ -186,28 +150,30 @@ print(f"completeness: {total:.4f} vs {target_delta:.4f}")   # want these to matc
 `F_at` has to scale the same activation the loop scaled, at the same module — a
 completeness check against a different module measures nothing.
 
-**Batch the steps.** The alpha steps don't interact, so put several in one batch and
-let `metric.sum().backward()` give you per-row gradients — 14x faster per step than
-one trace per alpha on GPT-2, for a few hundred MiB:
+**Batch the steps.** The alpha steps don't interact, so run 16 at a time as rows of
+one batch; `.sum().backward()` gives per-row gradients. This replaces the loop above,
+scales the same `wte.output`, and is an order of magnitude faster on GPT-2:
 
 ```python
 alphas = ALPHA_START + (1 - ALPHA_START) * (torch.arange(N_STEPS) + 0.5) / N_STEPS
-chunk = alphas[s : s + 16]                       # 16 is a reasonable knee
-with model.trace([prompt] * len(chunk)):
-    act = model.transformer.h[LAYER].output      # rows identical
-    scaled = (act * chunk.view(-1, 1, 1)).detach()
-    scaled.requires_grad_(True)
-    model.transformer.h[LAYER].output = scaled
-    with model.lm_head.output[:, -1, target].sum().backward():
-        g = scaled.grad.sum(0, keepdim=True).save()
+ig_accum = 0
+for start in range(0, N_STEPS, 16):
+    chunk = alphas[start : start + 16]
+    with model.trace([prompt] * len(chunk)):
+        embeds = model.transformer.wte.output          # rows identical
+        embeds_full = embeds[:1].save()
+        scaled = (embeds * chunk.view(-1, 1, 1).to(embeds.device)).detach()
+        scaled.requires_grad_(True)
+        model.transformer.wte.output = scaled
+        with model.lm_head.output[:, -1, target].sum().backward():
+            g = scaled.grad.sum(0, keepdim=True).save()
+    ig_accum = ig_accum + embeds_full * g
+
+ig = (1 - ALPHA_START) * ig_accum / N_STEPS
 ```
 
-Replacement with a detached leaf (above), replacement with a non-leaf
-(`scaled = act * alpha`, no `detach`), and in-place (`act[:] = act * alpha`, then
-read `act.grad`) all give the same gradient — pick whichever reads best.
-
-To run all `N_STEPS` as one (remote-friendly) request, wrap in
-`with model.session():` and accumulate inside — see `docs/usage/session.md`.
+To run all steps as one (remote-friendly) request, wrap the loop in
+`with model.session():` — see [session](../usage/session.md).
 
 ### Editing gradients mid-backward
 
@@ -225,28 +191,15 @@ with model.trace(prompt):
 # torch.equal(original * 2, doubled) -> True
 ```
 
-### Multiple backward passes
-
-Use `retain_graph=True` to backprop more than once from the same forward:
-
-```python
-with model.trace(prompt):
-    hs = model.transformer.h[5].output
-    logits = model.lm_head.output
-    with logits[:, -1, target].sum().backward(retain_graph=True):
-        g_target = hs.grad.norm().save()
-    with logits[:, -1, :].pow(2).sum().backward():
-        g_norm = hs.grad.norm().save()
-```
+To backprop more than once from the same forward, pass `retain_graph=True` — see
+[backward-and-grad](../usage/backward-and-grad.md).
 
 ## Interpretation tips
 
 - **`||grad||` vs `act * grad`** answer different questions: sensitivity vs current
   contribution.
-- **IG axioms** (completeness, sensitivity) make IG more reliable than raw
-  input × grad on saturated networks — at `N_STEPS`× the cost.
-- **Gradient saturation** is real: on a confident prediction the gradient at the
-  actual point is small; IG's path integral fixes this.
+- **Gradient saturation:** on a confident prediction the gradient at the actual
+  point is small; IG's path integral fixes this, at `N_STEPS`× the cost.
 - **Position matters.** Summing across positions ranks layers; per-position
   gradients tell you which token.
 - **Same metric across runs.** The logit `lm_head.output[..., target]` and the
@@ -254,12 +207,6 @@ with model.trace(prompt):
 
 ## Gotchas
 
-- **Reverse-forward order for `.grad`.** Requesting an earlier-forward tensor's
-  gradient before a later one raises `OutOfOrderError`.
-- **Only `.grad` inside `with metric.backward():`** — no `.input` / `.output`.
-  Capture activations in the forward body, read their gradients in the backward body.
-- **Run without `torch.no_grad()`.** The forward must build a graph for the backward
-  to traverse.
 - **Non-differentiable metrics** (`argmax`, top-k indices, integer ops) have no
   usable gradient — use logits / log-probs.
 - **Memory:** gradients on every layer's residual for a long sequence are heavy.
@@ -267,6 +214,6 @@ with model.trace(prompt):
 
 ## Related
 
-- `docs/usage/backward-and-grad.md` — the full backward-context reference.
+- [backward-and-grad](../usage/backward-and-grad.md) — the full backward-context reference.
 - [attribution-patching](attribution-patching.md) — clean activations × corrupt-run gradients.
 - [logit-lens](logit-lens.md) — which layer first cares (gradient) about which prediction (logit lens).

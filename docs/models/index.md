@@ -2,11 +2,13 @@
 title: Model Classes
 one_liner: Decision tree for picking the right nnsight model wrapper.
 tags: [models, index]
-related: [docs/models/transformers-model.md, docs/models/tensor-parallel.md, docs/models/quantization.md, docs/models/nnsight-base.md, docs/models/diffusion-model.md, docs/models/vllm.md, docs/models/language-model.md, docs/models/vision-language-model.md]
-sources: [src/nnsight/__init__.py:53, src/nnsight/modeling/base.py:6, src/nnsight/modeling/transformers.py:161, src/nnsight/modeling/diffusion.py:38, src/nnsight/modeling/vllm/vllm.py:36, src/nnsight/modeling/language.py:19, src/nnsight/modeling/vlm.py:29]
+related: [docs/index.md, docs/models/transformers-model.md, docs/models/tensor-parallel.md, docs/models/quantization.md, docs/models/nnsight-base.md, docs/models/diffusion-model.md, docs/models/vllm.md, docs/models/language-model.md, docs/models/vision-language-model.md]
+sources: [src/nnsight/__init__.py, src/nnsight/modeling/base.py, src/nnsight/modeling/transformers.py, src/nnsight/modeling/diffusion.py, src/nnsight/modeling/vllm/vllm.py, src/nnsight/modeling/language.py, src/nnsight/modeling/vlm.py]
 ---
 
 # Model Classes
+
+Up: [docs/index.md](../index.md) — all sections.
 
 ## What this is for
 
@@ -25,6 +27,9 @@ Pick the model wrapper that matches what you have. All wrappers expose the same 
 
 - You need **production throughput, continuous batching, or async streaming** with NNsight interventions.
   - See [docs/models/vllm.md](vllm.md). Class: `nnsight.modeling.vllm.VLLM`.
+  - An edit every request on the engine runs, including other clients': [vllm-editing.md](vllm-editing.md).
+  - Streaming with `mode="async"`, or one engine behind HTTP (`nnsight-serve`): [vllm-serving.md](vllm-serving.md).
+  - Tensor parallelism, MoE and hybrid models on vLLM, and version notes: [vllm-parallelism.md](vllm-parallelism.md).
 
 - Your model is **too big for one GPU** and you want to trace it split across several with `transformers` tensor parallelism (one process per GPU, launched with `torchrun`).
   - See [docs/models/tensor-parallel.md](tensor-parallel.md). Still `TransformersModel` — pass `distributed_config=DistributedConfig(tp_size=N)`; sharded activations are gathered for you.
@@ -37,23 +42,8 @@ Pick the model wrapper that matches what you have. All wrappers expose the same 
 - `nnsight.LanguageModel` — DEPRECATED thin alias for `TransformersModel(repo_id, task="text-generation")`. Warns on construction. See [docs/models/language-model.md](language-model.md).
 - `nnsight.VisionLanguageModel` — DEPRECATED thin alias for `TransformersModel(repo_id, task="image-text-to-text")`. Warns on construction. See [docs/models/vision-language-model.md](vision-language-model.md).
 
-## At a glance
-
-| Class | Import | Use it for | Loader backend |
-|-------|--------|------------|----------------|
-| `TransformersModel` | `nnsight` | **Any** HF transformers task | `transformers.pipeline` |
-| `NNsight` | `nnsight` | Any `torch.nn.Module` | None (you instantiate) |
-| `DiffusionModel` | `nnsight` | diffusers pipelines | `diffusers.DiffusionPipeline` |
-| `VLLM` | `nnsight.modeling.vllm` | High-throughput serving with interventions | `vllm.LLM` (sync) / `vllm.v1.engine.async_llm.AsyncLLM` (async) |
-| `TransformersModel` + `DistributedConfig` | `nnsight` + `transformers.distributed` | A model sharded across GPUs (tensor parallel) | `transformers.pipeline` |
-| `TransformersModel` + `dtype="nf4"` | `nnsight` | A model held in 4 or 8 bits | `transformers.pipeline` |
-| `LanguageModel` *(deprecated)* | `nnsight` | → `TransformersModel(task="text-generation")` | `transformers.pipeline` |
-| `VisionLanguageModel` *(deprecated)* | `nnsight` | → `TransformersModel(task="image-text-to-text")` | `transformers.pipeline` |
-
-All HF-backed wrappers support lazy loading: `dispatch=False` (default) downloads only configs and builds a meta-tensor architecture; `dispatch=True` loads real weights immediately. Real weights also load automatically on the first `.trace()` / `.generate()` / `.pipe()` call. `.scan()` never dispatches.
-
 ## Related
 
-- [docs/concepts/](../concepts/) — the underlying tracing / Envoy / interleaver model
-- [docs/remote/](../remote/) — running these on NDIF
-- [docs/gotchas/](../gotchas/) — cross-cutting pitfalls
+- [docs/concepts/](../concepts/index.md) — the underlying tracing / Envoy / interleaver model
+- [docs/remote/](../remote/index.md) — running these on NDIF
+- [docs/errors/symptom-index.md](../errors/symptom-index.md) — something broke

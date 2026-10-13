@@ -3,34 +3,23 @@ title: NDIF Status and Availability
 one_liner: Check the NDIF service state and whether a specific model is currently running before submitting.
 tags: [remote, ndif, status]
 related: [docs/remote/index.md, docs/remote/api-key-and-config.md]
-sources: [src/nnsight/ndif.py:210, src/nnsight/ndif.py:308, src/nnsight/ndif.py:134]
+sources: [src/nnsight/ndif.py]
 ---
 
 # NDIF Status and Availability
 
 ## What this is for
 
-Models on NDIF can be in different deployment states (running, deploying, unhealthy). Submitting a request to a non-running model still works — it queues — but may take a while to dispatch. These functions tell you what's live so you can fail fast or pick a different revision.
+Models on NDIF can be in different deployment states (running, deploying, unhealthy). Submitting to a model that isn't running still works — the request queues — but may take a while to dispatch. These functions tell you what's live so you can fail fast or pick a different revision.
 
 ## Canonical pattern
 
 ```python
 import nnsight
 
-print(nnsight.status())                                    # formatted table
+print(nnsight.status())                                    # deployment table
 nnsight.is_model_running("meta-llama/Llama-3.1-70B")       # -> True / False
 ```
-
-## status() — deployment table
-
-```python
-import nnsight
-
-s = nnsight.status()
-print(s)
-```
-
-Output:
 
 ```
 NDIF Service: Up 🟢
@@ -41,40 +30,34 @@ TransformersModel  meta-llama/Llama-3.1-70B  text-generation  main      HOT    R
 TransformersModel  openai-community/gpt2     text-generation  main      WARM   DEPLOYING
 ```
 
-Only **deployed** models appear — those at level `HOT` or `WARM` (`COLD`, i.e. downloaded but not up, is filtered out; `src/nnsight/ndif.py:246`).
+Only **deployed** models appear — level `HOT` or `WARM`; `COLD` (downloaded but not up) is filtered out. Per-model `state` is `RUNNING` (live), `DEPLOYING` (coming up; requests queue) or `UNHEALTHY` (deployment problem).
 
-`status()` returns an `NdifStatus` (`src/nnsight/ndif.py:134`). It's a dict-like view over `deployments`, so you can inspect it programmatically:
+## status() programmatically
+
+`status()` returns an `NdifStatus`, a dict-like view over the deployments (`status(raw=True)` returns the raw `/status` JSON instead):
 
 ```python
 s = nnsight.status()
 
 print(s.status)                      # NdifStatus.Status.UP
-for repo_id in s:                    # iterates deployment repo ids
+for repo_id in s:                    # iterates deployment keys
     info = s[repo_id]
     print(repo_id, info["model_class"], info["level"], info["state"])
 ```
 
-Each `info` dict has `model_class`, `repo_id`, `task`, `revision`, `level`, `state`. `NdifStatus` supports `s[key]`, `key in s`, `len(s)`, `s.keys()`, and iteration. Replicas of one deployment fold into a single entry (healthiest state wins). A checkpoint deployed under several pipeline tasks is several deployments; each appears as its own entry, keyed `"repo_id (task)"` — and when the tasks tie (several revisions under one task), the revision joins the key.
+Each `info` dict has `model_class`, `repo_id`, `task`, `revision`, `level`, `state`. `NdifStatus` supports `s[key]`, `key in s`, `len(s)`, `s.keys()` and iteration. Replicas of one deployment fold into a single entry (healthiest state wins). A checkpoint deployed under several pipeline tasks is several deployments, each keyed `"repo_id (task)"`; when the tasks tie (several revisions under one task), the revision joins the key.
 
-`status(raw=True)` returns the raw `/status` JSON instead of an `NdifStatus`.
-
-`nnsight.ndif_status()` is a deprecated alias that warns and forwards to `status()`.
-
-## Service status values
-
-`NdifStatus.status` is one of (`src/nnsight/ndif.py:146`):
+`NdifStatus.status` is one of:
 
 | Value | Meaning |
 |-------|---------|
-| `UP` | At least one model's state is `RUNNING`. |
+| `UP` | At least one model is `RUNNING`. |
 | `REDEPLOYING` | None running, but at least one is `DEPLOYING`. |
 | `DOWN` | Nothing running or deploying, or the service was unreachable. |
 
-Per-model `state` values seen in the table: `RUNNING` (live), `DEPLOYING` (coming up; requests queue), `UNHEALTHY` (deployment problem). `level` is `HOT` or `WARM`.
+`nnsight.ndif_status()` is a deprecated alias that warns and forwards to `status()`.
 
 ## is_model_running
-
-For a yes/no answer about a single model (`src/nnsight/ndif.py:308`):
 
 ```python
 if nnsight.is_model_running("meta-llama/Llama-3.1-70B"):
@@ -84,25 +67,14 @@ else:
     print("Model not currently running on NDIF — a request will queue and warm.")
 ```
 
-It canonicalizes the repo id via the Hub (`HfApi().model_info(repo_id).id`, handling aliases/redirects), matches on `repo_id` and `revision` (and `task`, when given), and returns `True` if any matching deployment has `application_state == "RUNNING"`.
-
-Custom revision, or a specific pipeline task when the checkpoint is up under several:
+The repo id is canonicalized via the Hugging Face Hub (aliases and redirects match), and `revision` (default `"main"`) and, when given, `task` must match. Custom revision, or one task when the checkpoint is up under several:
 
 ```python
 nnsight.is_model_running("meta-llama/Llama-3.1-70B", revision="my-finetune-branch")
 nnsight.is_model_running("openai-community/gpt2", task="text-generation")
 ```
 
-## Custom HOST
-
-If you've pointed `CONFIG.API.HOST` at a self-hosted or staging deployment, `status()` and `is_model_running()` query that host automatically (both go through `{CONFIG.API.HOST}/status`):
-
-```python
-from nnsight import CONFIG
-CONFIG.API.HOST = "https://staging.api.ndif.us"
-
-nnsight.status()    # queries staging
-```
+Both functions query `{CONFIG.API.HOST}/status`, so they follow a custom host — see [api-key-and-config.md](./api-key-and-config.md#pointing-at-a-different-host).
 
 ## Gotchas
 
@@ -113,5 +85,5 @@ nnsight.status()    # queries staging
 ## Related
 
 - [api-key-and-config.md](./api-key-and-config.md) — `CONFIG.API.HOST`.
-- [ndif-overview.md](./ndif-overview.md) — what happens when a job is submitted.
+- [ndif-overview.md](./ndif-overview.md) — job status values once a request is submitted.
 - https://discuss.ndif.us/ — outage reports.

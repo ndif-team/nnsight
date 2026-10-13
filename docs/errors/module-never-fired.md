@@ -1,0 +1,94 @@
+---
+title: A Module Never Fired
+one_liner: "At the end of a run a worker was still parked on a location the model never reached — the module didn't fire (OutOfOrderError), or a loop asked for more steps than the run made (a warning and a cut-short loop)."
+tags: [error, execution-order, dangling-worker]
+related: [docs/errors/out-of-order-error.md, docs/errors/cannot-access-outside-interleaving.md, docs/usage/iteration.md, docs/usage/scan.md, docs/concepts/threading-and-mediators.md]
+sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/iterator.py]
+---
+
+# A Module Never Fired
+
+The model ran to the end while a worker was still waiting for a location that never
+came. Same exception class as [out-of-order-error.md](out-of-order-error.md), raised
+once the forward pass finishes.
+
+## Symptom
+
+A worker parked outside any loop — the module simply never fired:
+
+```
+nnsight.intervention.interleaver.OutOfOrderError: 'model.transformer.h.5.output.i0' was requested but the model already ran past it
+```
+
+A worker parked inside a `tracer.iter` loop — bounded (`iter[:8]`, `iter[2]`,
+`iter[[0, 2, 7]]`) or open (`iter[:]`, `all()`) — on a step the run did not make.
+That is a warning, not an exception:
+
+```
+UserWarning: 'model.transformer.h.11.output.i3' was never reached: the loop asked for a step the run did not make, so it was cut short — values saved inside the loop are kept, and the statements after it did not run. An open `tracer.iter[:]` / `tracer.all()` loop ends this way by design. To hold a generation to a bounded loop's count, pass `min_new_tokens=` on transformers or `min_tokens=` / `ignore_eos=True` on vLLM; put what follows the loop in a separate `tracer.invoke()`.
+```
+
+The location reads `<envoy.path>.<output|input>.i<occurrence>` — e.g.
+`model.transformer.h.5.output.i0` is layer 5's output on the first (i0) visit.
+
+## Cause — two reasons a location is never reached
+
+### 1. The module never fired
+
+The module path exists in `print(model)`, but its `forward` was **not called** on
+this input, so nothing ever delivered its value. Common cases:
+
+- **Dropout / other eval-mode-disabled layers** — bypassed under `model.eval()`.
+- **Branch paths** — `if self.config.use_flash_attention: ... else: ...` runs only one side; a submodule on the path not taken never fires.
+- **Modules not reached by this input** — auxiliary heads, MoE experts not routed to, a vision encoder on a text-only query.
+- **Children of a skipped module** — after `module.skip(value)`, that module's submodules don't run.
+
+### 2. A loop asked for more steps than the run made
+
+A `tracer.iter` loop — bounded or open — that asks for a step the run does not make
+is cut short with the `UserWarning` above: saved values kept, statements after the
+loop dropped. An out-of-order loop body produces the same warning. Both are covered
+in [iteration.md](../usage/iteration.md#the-one-rule).
+
+## Fix
+
+### Confirm the module actually fires — `model.scan(...)`
+
+`scan` runs the forward with fake tensors (shapes only), hitting the same code
+paths the real forward will:
+
+```python
+with model.scan("Hello"):
+    print(model.transformer.h[5].output.shape)   # raises here too if it never fires
+```
+
+See [docs/usage/scan.md](../usage/scan.md).
+
+### Read the forward source
+
+`print(model.transformer.h[0].source)` (see [docs/usage/source.md](../usage/source.md))
+or `inspect.getsource(type(module).forward)` shows what actually runs — branches,
+eval-mode short-circuits, and dispatch hide behind the module tree.
+
+### Don't read children of a skipped module
+
+```python
+# WRONG — h[1] is skipped, so its mlp never fires
+with model.trace("Hi"):
+    model.transformer.h[1].skip(model.transformer.h[1].input)
+    inner = model.transformer.h[1].mlp.output.save()   # OutOfOrderError
+```
+
+```python
+# FIXED — read a submodule of a layer that actually runs
+with model.trace("Hi"):
+    model.transformer.h[1].skip(model.transformer.h[1].input)
+    inner = model.transformer.h[2].mlp.output.save()
+```
+
+## Related
+
+- [out-of-order-error.md](out-of-order-error.md) — the eager "asked in the wrong order" flavor of the same class.
+- [docs/usage/scan.md](../usage/scan.md) — verify a module fires.
+- [docs/usage/iteration.md](../usage/iteration.md) — loops that outrun the run, and how to hold a run to a count.
+- [docs/usage/source.md](../usage/source.md) — read inside-the-forward execution order.

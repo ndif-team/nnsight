@@ -15,27 +15,16 @@ mirrors every child module as an `Envoy`, so `.trace()`, `.edit()` and
 `.session()` work against a model nnsight never loaded. It is the simplest entry
 point, and the one with no opinions about input format.
 
-`NNsight` is a thin, named `Envoy` subclass (`base.py`): `Envoy` is the node type
-the tree is built from, `NNsight` is the conventional name for wrapping a whole
-model, and the higher-level wrappers (`TransformersModel`, `DiffusionModel`, ...)
-are specialized envoys that add loading and tokenization on top of the same
-behavior.
-
 ## When to use it
 
-Use `NNsight` for a custom architecture that is not on HuggingFace, for research
-code that builds its model in Python (`torch.nn.Sequential`, hand-built encoders,
-GANs, RL policy nets, autoencoders), or whenever you want the intervention
-machinery and nothing else.
+Use `NNsight` for a custom architecture that is not on HuggingFace or a model
+your code builds in Python, whenever you want the intervention machinery and
+nothing else.
 
-Reach for a subclass instead when you want HF-style loading from a repo id
+Reach for a subclass instead when you want loading from a repo id
 ([`TransformersModel`](transformers-model.md),
-[`DiffusionModel`](diffusion-model.md)), tokenization or `.generate()`
-([`TransformersModel`](transformers-model.md)), or batching across several
-non-empty `tracer.invoke(...)` calls — base `NNsight` implements neither
-`_batch_size()` nor `_batch()`, and a second non-empty invoke raises
-`NotImplementedError: NNsight does not support batching multiple invokes`. One
-input invoke plus any number of empty invokes does work.
+[`DiffusionModel`](diffusion-model.md)), tokenization, `.generate()`, or
+batching several inputs (see [Empty invokes](#empty-invokes-batching-workaround)).
 
 ## Loading
 
@@ -94,21 +83,14 @@ with model.trace(torch.randn(1, 8)):
 print(tuple(hidden.shape), tuple(final.shape))     # (1, 16) (1, 4)
 ```
 
-(Verified in `tests/test_modeling.py`.)
-
-### Modifying activations
-
-```python
-with model.trace(torch.rand(1, 8)):
-    model[0].output[:] = 0                          # in-place
-    model[1].output = model[1].output * 2           # replacement
-    out = model.output.save()
-```
+Editing, skipping, caching and gradients work as on any wrapper; see [access-and-modify.md](../usage/access-and-modify.md).
 
 ### Empty invokes (batching workaround)
 
-One input invoke plus empty invokes runs the same forward in its own worker,
-which covers most of what batching would have been used for:
+Base `NNsight` implements neither `_batch_size()` nor `_batch()`, so a second
+non-empty invoke raises `NotImplementedError: NNsight does not support batching
+multiple invokes`. One input invoke plus any number of empty invokes works, each
+empty invoke seeing the same forward:
 
 ```python
 with model.trace() as tracer:
@@ -140,11 +122,9 @@ or `config` — those are added by the HF-backed subclasses, as are `.generate()
 - **Re-wrapping the same module is safe.** Wrapping a module twice re-installs
   its controller rather than stacking (`tests/test_modeling.py` `TestUpdate`,
   `tests/test_multiple_wrappers.py`).
-- **Module access order matters.** Inside a single invoke, reading `.output` of a
-  later layer before an earlier one can deadlock — see [docs/gotchas/](../gotchas/).
-- **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` errors
-  when there is no active trace, and reading `model.output` outside one gives
-  `Cannot access 'model.output' outside of interleaving`.
+- Access order and `.save()` rules are the same as on every wrapper; see
+  [out-of-order-error.md](../errors/out-of-order-error.md) and
+  [save.md](../usage/save.md).
 
 ## Related
 

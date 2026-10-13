@@ -1,6 +1,6 @@
 ---
 title: Session
-one_liner: `model.session()` wraps several traces in one scope so values pass between them without `.save()`.
+one_liner: "`model.session()` wraps several traces in one scope so values pass between them without `.save()`."
 tags: [usage, session, multi-trace]
 related: [docs/usage/trace.md, docs/usage/save.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/tracer.py]
@@ -32,20 +32,10 @@ print(diff.item())     # 0.0  (same input -> identical activations)
 `h0` flows from the first trace into the second on its own; only `diff` is
 `.save()`d, so only `diff` comes back out.
 
-## Why a session
-
-Outside a session, each `with model.trace(...)` is its own boundary: values don't
-cross from one trace to the next, and everything you want to keep needs `.save()`.
-A session removes the per-trace boundary so you can:
-
-- reuse a value captured in one forward inside a later one,
-- run ordinary Python — loops, conditionals, building lists — around the traces,
-
-all in one block, and only pay the `.save()` filter once, at the session edge.
-
 ## Ordinary Python around the traces
 
-The session body is real Python; the nested traces run as they're reached.
+The session body is real Python — loops, conditionals, building lists — and the
+nested traces run as they're reached. This is the way to loop over prompts.
 
 ```python
 with model.session():
@@ -55,7 +45,6 @@ with model.session():
             norms.append(model.transformer.h[layer].output.norm())
     stacked = torch.stack(norms).save()
 
-print([round(x, 1) for x in stacked.tolist()])   # [213.6, 658.5, 2570.4]
 ```
 
 Each trace contributes one value to `norms`; only the final `stacked` tensor is
@@ -101,10 +90,5 @@ with model.session(remote=True):
 Use `remote="local"` to dry-run the serialize/deserialize path offline. See
 [../remote/remote-session.md](../remote/remote-session.md).
 
-## Notes
-
-- `model.session()` returns a plain tracer that captures the block, runs it as real
-  Python (nested traces execute as reached), and gates saves at its own outermost
-  boundary — there is no separate session state.
-- There is no top-level `nnsight.session(...)`; open one from a model:
-  `model.session()`.
+There is no top-level `nnsight.session(...)`; open one from a model with
+`model.session()`.

@@ -2,7 +2,7 @@
 title: Backends
 one_liner: A Backend decides what running a captured trace means — execute locally, ship to NDIF (blocking/non-blocking/async), or serialize-and-run for a local dry run.
 tags: [internals, dev]
-related: [docs/developing/tracing-pipeline.md, docs/developing/adding-a-new-backend.md, docs/developing/serialization.md]
+related: [docs/developing/tracing-pipeline.md, docs/developing/serialization.md]
 sources: [src/nnsight/tracing/backend.py, src/nnsight/intervention/backends/remote.py, src/nnsight/intervention/backends/local.py, src/nnsight/intervention/backends/display.py, src/nnsight/modeling/mixins/remotable.py]
 ---
 
@@ -10,11 +10,10 @@ sources: [src/nnsight/tracing/backend.py, src/nnsight/intervention/backends/remo
 
 ## What this covers
 
-A `Backend` is the bridge between the tracing system (which captures and compiles a
-`with` block) and what actually happens to it on `__exit__`. This doc walks the
-`Backend` base and the three concrete backends: `RemoteBackend`,
-`AsyncRemoteBackend`, and `LocalSimulationBackend`, plus how a model turns a
-`remote=` kwarg into one.
+A `Backend` decides what happens to a captured, compiled `with` block on
+`__exit__`. This page covers the `Backend` base, the three concrete backends
+(`RemoteBackend`, `AsyncRemoteBackend`, `LocalSimulationBackend`), how a model turns
+a `remote=` kwarg into one, and how to add your own.
 
 ## Architecture
 
@@ -31,13 +30,11 @@ class Backend:
 By the time a backend runs, the block is already captured and compiled (during
 `Tracer.capture`), so the backend's only job is to decide what "run it" means. The
 default just executes it locally — which, for `InterleavingTracer`, means
-`InterleavingTracer.execute` sets up the interleaver and runs the model. A tracer
-gets the default `Backend` unless one is passed to `trace(backend=...)`.
-
-There are only these three responsibilities, and they sit in three places: local
-execution *is* the default `Backend`; editing is `EditingTracer.execute` storing the
-block rather than running it; and exception cleanup is `Tracer.__exit__` calling
-`clean_traceback` (`tracing/util.py`).
+`InterleavingTracer.execute` sets up the interleaver and runs the model. It is step
+4 of the [trace lifecycle](./architecture-overview.md#lifecycle--sequence). A tracer
+gets the default `Backend` unless one is passed to `trace(backend=...)`. Editing is
+not a backend concern (`EditingTracer.execute` stores the block as a replayed
+`Mediator`), and traceback cleanup stays in `Tracer.__exit__`.
 
 ### How a backend is selected
 
@@ -72,10 +69,13 @@ A remote backend never serializes the model — it names it. `to_model_key()`
 (`remotable.py`) returns `"{import.path.ClassName}:{model_specific_key}"`. The
 import-path part comes from `_remoteable_class()` (`remotable.py`), which a
 deprecated alias overrides to return the canonical class, so a model wrapped as
-`LanguageModel` and one wrapped as `TransformersModel` produce the *same* key the
-server knows it by. For a `TransformersModel` the model-specific part carries the
-repo id, revision, *and* the resolved pipeline task, so each task of a checkpoint
-is its own key. The server reconstructs with `from_model_key`.
+`LanguageModel` and one wrapped as `TransformersModel` produce the *same* key. The
+suffix is JSON: `HuggingFaceModel` puts the canonical repo id and revision in it,
+and `TransformersModel` adds the resolved pipeline `task`, so two tasks over one
+checkpoint (which can load different architecture classes) are two deployments and
+the server rebuilds the pipeline from the key rather than re-inferring it. The
+server reconstructs with `from_model_key`; `TestModelKey` in
+`tests/test_serialization.py` asserts this.
 
 ### RemoteBackend — NDIF over one websocket
 
@@ -85,8 +85,9 @@ modes share one serialize+send step:
 
 - **Blocking** (`blocking=True`, default) — `request` (`remote.py`) opens a
   websocket to `/subscribe`, takes the session id, POSTs the payload to `/request`,
-  then loops on `connection.recv()` until a `COMPLETED` status arrives, downloading
-  the result blob from a presigned URL and `torch.load`ing it. The saved values are
+  then loops on `connection.recv()` until a `COMPLETED` status arrives. The result
+  blob arrives inline as a binary websocket frame or as a presigned URL to download,
+  depending on its size, and is `torch.load`ed. The saved values are
   marked (`save`) and pushed back into the caller's frame, just like a local trace
   (`_push`, `remote.py`).
 - **Non-blocking** (`blocking=False`) — `submit` (`remote.py`) POSTs without a
@@ -166,44 +167,72 @@ local function/class that wasn't shipped by value, the deserialize raises
 `ModuleNotFoundError` exactly as a real server would — so a passing `remote="local"`
 run is strong evidence a real remote run will work, without a live server. Results
 land back in the caller's frame like an ordinary local trace.
-
 `_SERVER_MODULES` is the source of truth for what NDIF supports without an
 `ndif.register(...)` call — edit it if the server environment changes.
 
-## Key files / classes
+## Adding a backend
 
-- `src/nnsight/tracing/backend.py` — `Backend`. `tracer.execute(tracer.info.code)`.
-- `src/nnsight/intervention/backends/remote.py` — `RemoteBackend` (`request` for the
-  blocking websocket loop, `submit`/`poll` for non-blocking) and
-  `AsyncRemoteBackend` (`resolve`, `stream`).
-- `src/nnsight/intervention/backends/local.py` — `LocalSimulationBackend`, `_SERVER_MODULES`.
-- `src/nnsight/intervention/backends/display.py` — `StatusDisplay`.
-- `src/nnsight/modeling/mixins/remotable.py` — `Remotable.trace` (backend
-  selection), `_remote_backend`, `to_model_key`.
+Subclass `Backend` when you want to change **what is done with the captured
+block** — log it, ship it, store it. A different inference engine is a new model
+class instead ([adding-a-new-runtime.md](./adding-a-new-runtime.md)).
 
-## Lifecycle (one trace, default backend)
+When your `__call__(tracer)` runs, the block is already compiled:
+`tracer.info.code` is the body (a `CodeType`), `tracer.info.frame` the caller's
+live frame, and `tracer.node` the block's AST node (`None` after deserialization).
 
-1. User exits `with model.trace(...)`. `Tracer.__exit__` calls `self.backend(self)`.
-2. Default `Backend.__call__` calls `tracer.execute(tracer.info.code)`.
-3. `InterleavingTracer.execute` builds the batcher, makes the workers, and calls
-   `Envoy.interleave`, which runs the model interleaved with the workers.
-4. `push_result` writes saved values back; `__exit__`'s outermost `dec()` filters to
-   `.save()`-ed values.
+**Run locally, but do something first:**
 
-For `remote=True`, step 2 is replaced by `RemoteBackend.__call__` serializing and
-sending the trace; the block never runs locally.
+```python
+from nnsight.tracing.backend import Backend
 
-## Extension points
+class LoggingBackend(Backend):
+    def __init__(self, log_path="trace.log"):
+        self.log_path = log_path
 
-- **A new transport.** Subclass `Backend` (or `RemoteBackend` to reuse serialize/
-  send/download). See `docs/developing/adding-a-new-backend.md`.
-- **A stricter local simulation.** Trim `_SERVER_MODULES` or the path filters in
-  `LocalSimulationBackend._hide_local_modules`.
-- **Persistent transforms.** Not a backend concern here — use `model.edit()`
-  (`EditingTracer`), which stores a block as a replayed `Mediator`.
+    def __call__(self, tracer):
+        code = tracer.info.code
+        with open(self.log_path, "a") as f:
+            f.write(f"{code.co_filename}:{code.co_firstlineno} {code.co_name}\n")
+        tracer.execute(code)                    # what the default backend does
+
+with model.trace("Hello", backend=LoggingBackend("nn.log")):
+    out = model.transformer.h[0].output.save()
+```
+
+The block's source text is in the cache the tracer already filled:
+`nnsight.tracing.globals.SOURCES[code.co_filename]`.
+
+**Skip local execution and ship it** (the shape of `RemoteBackend.request`):
+
+```python
+class MyRemoteBackend(Backend):
+    def __init__(self, model_key):
+        self.model_key = model_key
+
+    def __call__(self, tracer):
+        from nnsight.schema.request import RequestModel
+        from nnsight.ndif import pull_env
+        from nnsight.tracing.tracer import save
+        from nnsight.tracing.util import push
+
+        pull_env()                                         # register local modules by value
+        blob = RequestModel.serialize(tracer, compress=False)
+        result = my_transport.send(self.model_key, blob)   # your wire
+        for value in result.values():                      # push saves back like a local run
+            save(value)
+        push(tracer.info.frame, result)
+```
+
+Usually it is easier to subclass `RemoteBackend` and override only the transport
+(`send`/`request`/`poll`), keeping its serialize, status display and download
+helpers. An async backend follows the shape of
+[`AsyncRemoteBackend`](#asyncremotebackend--the-same-request-awaited). To model a different
+server environment for dry runs, subclass `LocalSimulationBackend` and adjust
+`_SERVER_MODULES` / `_hide_local_modules`.
+
+Wire it up with `model.trace(..., backend=MyBackend())`, or for a `remote=`-keyed
+backend, add a branch in your model's `Remotable._remote_backend`.
 
 ## Related
 
-- `docs/developing/tracing-pipeline.md` — what the backend receives (`tracer.info`).
-- `docs/developing/adding-a-new-backend.md` — recipe for writing your own.
-- `docs/developing/serialization.md` — how the payload is (de)serialized.
+- [serialization.md](./serialization.md) — how the payload is (de)serialized.

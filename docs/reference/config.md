@@ -33,15 +33,16 @@ Load order (`Config.load`), later wins:
 ```python
 from nnsight import CONFIG
 
-CONFIG.set_default_api_key("YOUR_NDIF_KEY")  # sets APIKEY + saves to user file
-CONFIG.save()                                 # explicit save
+CONFIG.APP.DEBUG = True                       # this process only
+CONFIG.save()                                 # persist current values to the user file
+CONFIG.set_default_api_key("YOUR_NDIF_KEY")   # set APIKEY and save in one call
 ```
 
 ## `CONFIG.API.*`
 
 | Name | Type | Default | What it does | When to change |
 |------|------|---------|--------------|----------------|
-| `API.HOST` | `str` | `"https://api.ndif.us"` | Base URL for NDIF requests (status, env, job submission, results). | Point at an internal NDIF deployment; or override per call with `remote="<host url>"`, or globally via `NDIF_HOST`. |
+| `API.HOST` | `str` | `"https://api.ndif.us"` | Base URL for NDIF requests (status, env, job submission, results); the websocket URL is derived from it (`https://…` → `wss://…`). | Point at an internal NDIF deployment; or override per call with `remote="<host url>"`, or globally via `NDIF_HOST`. |
 | `API.APIKEY` | `Optional[str]` | `None` | NDIF API key sent with every remote request. | Set via `CONFIG.set_default_api_key("...")`, the `NDIF_API_KEY` env var, or a Colab secret. |
 | `API.COMPRESS` | `bool` | `True` | zstandard-compress request payloads and result downloads for faster transfers. | Disable only when debugging the wire format / a compression issue. |
 
@@ -49,13 +50,13 @@ CONFIG.save()                                 # explicit save
 
 | Name | Type | Default | What it does | When to change |
 |------|------|---------|--------------|----------------|
-| `APP.DEBUG` | `bool` | `False` | When `True`, tracebacks keep nnsight's internal frames; when `False`, they are filtered to your own code. | Turn on to debug an exception you suspect is in nnsight internals. Also enabled by `NNSIGHT_DEBUG`. |
-| `APP.REMOTE_LOGGING` | `bool` | `True` | Whether `print(...)` from a remote run is streamed back as log events. | Disable to silence remote logs. |
+| `APP.DEBUG` | `bool` | `False` | When `True`, tracebacks keep nnsight's internal frames (when `False`, they are filtered to your own code), and remote runs are verbose: payload/result byte sizes, and each status on its own line instead of one in-place spinner. See [debug-mode.md](../errors/debug-mode.md). | Turn on to debug an exception you suspect is in nnsight internals. Also enabled by `NNSIGHT_DEBUG`. |
+| `APP.REMOTE_LOGGING` | `bool` | `True` | Show the remote status display (spinner + RECEIVED/QUEUED/RUNNING/LOG …) and the download progress bar; `print(...)` in a remote block arrives as `LOG` status here. | Disable for silent runs. |
 | `APP.PYMOUNT` | `bool` | `True` | Mount `.save()` onto every Python object (via the optional C extension) so `value.save()` works in a trace. When `False` (or the extension didn't build), use `nnsight.save(value)`. Mounting adds `.save` to all objects process-wide, so anything checking `hasattr(x, "save")` will see it. | Disable if you only use `nnsight.save()`, or a class's own `.save()` conflicts. |
 | `APP.DISABLE_CPP_BACKTRACE` | `bool` | `True` | At import, neutralize glibc `backtrace()` so a torch C++ error raised inside an interleaving greenlet surfaces as a normal Python exception instead of segfaulting the process. Empties torch's (rarely used) *C++* backtrace string process-wide; Python tracebacks and error messages are unaffected. Only glibc/x86-64 Linux is touched. | Turn off (via `NNSIGHT_DISABLE_CPP_BACKTRACE=0`) only if you need torch's C++ stack traces and accept the crash risk. |
 
 
-> **Why this exists.** nnsight runs each invoke's intervention code in a greenlet, which time-shares one OS stack by copying stack slices in and out. When a torch op raises a `c10` error while a worker greenlet is running, torch's error constructor captures a C++ backtrace with glibc `backtrace()`, which walks off the greenlet's stack slice into stale memory and crashes libgcc's unwinder — turning a plain shape error into a hard segfault. Emptying that one call removes the crash without changing any Python-visible behavior.
+> **Why `DISABLE_CPP_BACKTRACE` exists.** A torch C++ error raised inside a greenlet captures a glibc backtrace that walks off the greenlet's copied stack slice and segfaults. Emptying that one call removes the crash and changes nothing Python can see.
 
 ## Environment variables
 
@@ -66,25 +67,7 @@ CONFIG.save()                                 # explicit save
 | `NNSIGHT_DEBUG` | If set (any value), forces `CONFIG.APP.DEBUG = True`. |
 | `NNSIGHT_DISABLE_CPP_BACKTRACE` | Overrides `CONFIG.APP.DISABLE_CPP_BACKTRACE`. Falsy values (`0`, `false`, `no`, `off`) turn the guard **off**; anything else keeps it on (the default). |
 | `NNSIGHT_CONFIG` | Path to the user config file (overrides the `~/.config/nnsight/config.yaml` default). |
-| `NNSIGHT_VLLM_CLONE_READS` | vLLM only, and **not** a `CONFIG` field — it is read in the engine's worker process, so it has to be in the environment before `VLLM(...)`. If set to anything but a falsy value (`0`, `false`, `no`, `off`), a block is served private copies rather than views into the engine's memory: saved and cached values keep what was computed, and in-place edits stop reaching the model. See [vLLM: serving copies instead of views](../models/vllm.md#serving-copies-instead-of-views). |
+| `NNSIGHT_VLLM_CLONE_READS` | vLLM only; not a `CONFIG` field, so set it in the environment before `VLLM(...)`. Truthy serves blocks private copies instead of views into engine memory. Behavior and trade-offs: [vLLM: serving copies instead of views](../models/vllm.md#serving-copies-instead-of-views). |
 | `XDG_CONFIG_HOME` | Base dir for the default user config path. |
 
 Pass `-v` (or `--verbose`) on the command line — e.g. `python train.py -v` — to turn on debug mode for that run (equivalent to `NNSIGHT_DEBUG=1`). Note it's a plain `sys.argv` scan, so any launcher that also uses `-v` (e.g. `pytest -v`) will enable it too.
-
-## Programmatic usage
-
-```python
-from nnsight import CONFIG
-
-# Read
-print(CONFIG.APP.DEBUG, CONFIG.API.HOST)
-
-# Modify in-process (does NOT persist)
-CONFIG.APP.PYMOUNT = False
-
-# Persist to the user config file
-CONFIG.save()
-
-# Set + persist API key in one call
-CONFIG.set_default_api_key("YOUR_NDIF_KEY")
-```

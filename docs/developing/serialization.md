@@ -14,56 +14,26 @@ NDIF runs code submitted from any Python 3.10+ client regardless of the server's
 Python version. Standard `cloudpickle` serializes functions by their `__code__`
 bytecode, and bytecode is version-specific — a function pickled on 3.10 can fail
 to load on 3.11. NNsight instead serializes code by its **source text**, then
-recompiles it on the far side. This covers the source-based pickler, block
-reduction, the persistent-object reference protocol (model/tokenizer passed by
-ID), the `RequestModel` envelope, `SerializedFrame`, `Mediator.__getstate__` (how
-an edit rides to the server), and the `remote="local"` dry-run backend.
+recompiles it on the far side, so client and server Pythons need not match. This
+covers the source-based pickler, block reduction, the persistent-object reference
+protocol (model/tokenizer passed by ID), the `RequestModel` envelope,
+`SerializedFrame`, and `Mediator.__getstate__` (how an edit rides to the server).
 
-## Quick check (verified round-trips)
+## Example
 
-`dumps`/`loads` are the drop-in pickle-style API in
-`src/nnsight/intervention/serialization.py`:
+`dumps`/`loads` (`src/nnsight/intervention/serialization.py`) are the pickle-style
+API:
 
 ```python
 from nnsight.intervention.serialization import dumps, loads
 
-# a lambda closing over a local
 m = 3
 loads(dumps(lambda x: x * m))(5)          # -> 15
-
-# a recursive module-level function
-def fib(n): return n if n < 2 else fib(n-1) + fib(n-2)
-loads(dumps(fib))(10)                       # -> 55
 ```
 
-Persistent objects are referenced by ID instead of serialized. Any object with
-`_persistent_id` in its `__dict__` is written as that ID; the unpickler resolves
-it against a `persistent_objects` map:
-
-```python
-from nnsight.intervention.serialization import dumps, loads, UnknownPersistentIdError
-
-class Tok: pass
-t = Tok(); t._persistent_id = "Tokenizer"
-blob = dumps({"tok": t, "n": 5})
-
-loads(blob, persistent_objects={"Tokenizer": t})["tok"] is t   # -> True
-loads(blob)                                                    # -> UnknownPersistentIdError: Tokenizer
-```
-
-The full round-trip suite is `tests/test_serialization.py` (run it with
-`CUDA_VISIBLE_DEVICES="" python -m pytest tests/test_serialization.py`).
+The round-trip suite is `tests/test_serialization.py`.
 
 ## Architecture
-
-### Why source instead of bytecode
-
-Module docstring (`serialization.py`):
-
-> Standard cloudpickle serializes code as *bytecode*, which is tied to the exact
-> Python version — a payload pickled on 3.10 can fail to load on 3.11. This module
-> serializes code by its **source** instead, so it reconstructs on any Python that
-> can parse the syntax (client and server need not match).
 
 Two layered mechanisms: `code_reduce` (capture code as text plus only the names it
 references) and persistent ids (`_persistent_id`, reference heavy objects instead
@@ -93,7 +63,8 @@ of pickling them).
   via cloudpickle's `_get_cell_contents` and folded into the globals. It returns
   the 6-tuple reduce form `(_load_function, args, globals, None, None, _fill)`. On
   `(OSError, TypeError)` — C functions, dataclass methods, REPL functions with no
-  recoverable source — it falls back to cloudpickle's bytecode path.
+  recoverable source — it falls back to cloudpickle's bytecode path, which only
+  loads on a matching Python.
 - `persistent_id(obj)` (`serialization.py`) returns
   `obj.__dict__["_persistent_id"]` when present (else `None`).
 - `CustomCloudUnpickler(pickle.Unpickler)` (`serialization.py`) overrides
@@ -163,12 +134,8 @@ A real frame can't be pickled, so `tracer.info.frame` is a `SerializedFrame`
 source lookup. `f_locals`/`f_globals` are empty dicts — the real locals/globals
 travel in the `interventions` tuple and are written back onto the frame in
 `RequestModel.deserialize`. Build one from a live frame with `SerializedFrame.of(frame)`.
-
-Related helpers in the same module: `Scope(dict)`, the 3-tier namespace a
-captured block runs in (whose iteration yields only the block's own names — what
-the reducers rely on); `push(frame, variables)`, which writes results
-back into a live frame (`PyFrame_LocalsToFast` before 3.13, a plain `update` on
-3.13+); and `clean_traceback`, which strips internal nnsight frames.
+The reducers rely on `Scope` iteration yielding only the block's own names
+([tracing-pipeline.md](./tracing-pipeline.md#scope-how-a-captured-block-reaches-names)).
 
 ## Edits ride to the server — `Mediator.__getstate__`
 
@@ -199,72 +166,34 @@ server actor's live objects.
   self.interleaver}` plus `Module:<path>` for every envoy in `self.modules()`.
   `TransformersModel` extends it (`transformers.py`) with the tokenizer and
   friends. This map is passed to `loads(..., persistent_objects=...)`; a missing ID
-  raises `UnknownPersistentIdError`.
+  raises `UnknownPersistentIdError: <id>`.
 
 ### Model identity — `to_model_key`
 
-`Remotable.to_model_key()` (`remotable.py`) is
-`f"{to_import_path(self._remoteable_class())}:{self._remoteable_model_key()}"`.
-`_remoteable_class()` returns `type(self)` by default; deprecated aliases
-override it to the canonical class (`LanguageModel`/`VisionLanguageModel` return
-`TransformersModel`) so all three wrappings resolve to the one key the server
-knows. The model-specific suffix is JSON: `HuggingFaceModel` puts the canonical
-repo id and revision in it, and `TransformersModel` adds the resolved pipeline
-`task` — the server rebuilds the pipeline from the key instead of re-inferring
-one, and two tasks over one checkpoint (which can load different architecture
-classes) are two distinct keys, i.e. two deployments. `TestModelKey` in
-`tests/test_serialization.py` asserts all of this.
+The request names the model rather than serializing it; how that key is built is in
+[backends.md](./backends.md#model-identity-to_model_key).
 
 ## The response — `schema/response.py`
 
-`Status(str, Enum)` (`response.py`): `RECEIVED, QUEUED, PROVISIONING,
-DEPLOYING, DISPATCHED, RUNNING, COMPLETED, ERROR, LOG`. `ResponseModel(BaseModel)`
-carries `id`, `status`, `description`, and `data`. On `COMPLETED`, `data`
-holds a presigned URL; the saves blob is downloaded separately and
-`torch.load`-ed into a `RESULT = Dict[str, Any]`. `pickle`/`unpickle` use
+`ResponseModel` carries a job's `id`, `status` (the `Status` enum in `response.py`),
+`description`, and `data`. On `COMPLETED`, the saves blob arrives either inline (a
+binary websocket frame) or, depending on its size, as a presigned URL in `data` that
+the client downloads; either way it is `torch.load`-ed, since `pickle`/`unpickle` use
 `torch.save`/`torch.load` so tensors survive the wire.
 
-## The `remote="local"` dry run — `backends/local.py`
+## The `remote="local"` dry run
 
-`LocalSimulationBackend(Backend)` (`local.py`) exercises the entire remote path
-without a server. `model.trace(..., remote="local")` serializes the trace exactly
-as `RemoteBackend` would, then deserializes it **with the user's local
-(non-installed) modules hidden** — mimicking a server where the user's own source
-files don't exist — and runs the deserialized block against the real local model.
-If the block references a local function/class that wasn't shipped by value,
-deserialize raises `ModuleNotFoundError`, exactly as the server would.
+`LocalSimulationBackend` serializes and deserializes in-process with local modules
+hidden; see [backends.md](./backends.md#localsimulationbackend--a-serverless-dry-run).
+Both it and `RemoteBackend._serialize` call `pull_env()` first, which registers
+local, non-installed modules for by-value pickling so the user's own helpers ship.
 
-`_SERVER_MODULES` (`local.py`) is the allowlist of roots assumed present on
-NDIF and never hidden: `{"torch", "numpy", "transformers", "accelerate",
-"diffusers", "einops", "peft", "nnsight"}`. To simulate a stricter environment,
-edit this set. `TestLocalSimulation` / `TestServerExecution` in
-`tests/test_serialization.py` are the reference.
+## `save` and `mark`
 
-Note: `RemoteBackend._serialize` and `LocalSimulationBackend.__call__` both call
-`pull_env()` (from `nnsight.ndif`) first, which registers local, non-installed
-modules for by-value pickling so the server (or the simulated deserialize) doesn't
-hit `ModuleNotFoundError` on the user's own helpers.
-
-## `obj.save()` and the pymount C extension
-
-There are two ways to mark a value as saved inside a trace:
-
-- `nnsight.save(obj)` — a plain function.
-- `obj.save()` — a method mounted onto Python's base `object` type by the
-  `nnsight._c.py_mount` C extension (`src/nnsight/_c/py_mount.c`), which edits the
-  C-level method table because `object` rejects attribute assignment from Python.
-
-The extension is optional and built by `setup.py` (an `Extension` over
-`src/nnsight/_c/py_mount.c`). If no C compiler is available, setuptools silently
-skips it and `obj.save()` is unavailable — which is exactly why the Docker image
-installs `gcc`/`libc6-dev` so `.save()` works server-side. `nnsight.save(obj)`
-works either way. `tests/test_saving.py::TestSaveMethod` is skipped when the mount
-isn't built (`skipif(not save_mounted, ...)`).
-
-Both forms now **raise if called outside a running trace** — marking a value where
-no trace will read it is a mistake, not a silent no-op. The unguarded mechanism
-behind them is `mark()`, used internally by the remote and vLLM-serve backends to
-push a result home after a trace has already exited.
+`nnsight.save(obj)` and `obj.save()` (the optional C mount — see
+[testing.md](./testing.md#the-c-extension-save)) both raise outside a running trace.
+The unguarded mechanism behind them is `nnsight.tracing.tracer.mark()`, which the remote and vLLM-serve
+backends use to push a result home after a trace has already exited.
 
 ## Lifecycle (NDIF round-trip)
 
@@ -278,28 +207,15 @@ push a result home after a trace has already exited.
    persistent IDs resolve to the server's live model/tokenizer/module tree.
 4. **Execute.** The reconstructed tracer runs against the server-side model; saved
    values are collected.
-5. **Return.** Saves are `torch.save`-pickled, zstd-compressed, uploaded, and the
-   presigned URL is returned in a `COMPLETED` `ResponseModel`. The client downloads
-   and `torch.load`s them; `RemoteBackend._push` writes them into the caller's
+5. **Return.** Saves are `torch.save`-pickled, zstd-compressed, and returned with
+   `COMPLETED`: inline on the websocket or, depending on size, uploaded and sent as a
+   presigned URL the client downloads. The client `torch.load`s them; `RemoteBackend._push` writes them into the caller's
    `x = ...save()` variables.
 
 `LocalSimulationBackend` runs steps 1, 3, and 4 in-process.
 
-## Key files
-
-- `src/nnsight/intervention/serialization.py` — `code_reduce`,
-  `reduce_block`, `_lambda_source`, `_load_function`,
-  `_fill`, `CustomCloudPickler`, `CustomCloudUnpickler`,
-  `dumps`/`loads`
-- `src/nnsight/schema/request.py` — `RequestModel` (`serialize`/`deserialize`)
-- `src/nnsight/schema/response.py` — `Status`, `ResponseModel`
-- `src/nnsight/tracing/util.py` — `SerializedFrame`
-- `src/nnsight/intervention/interleaver.py` — `Mediator.__getstate__`
-- `src/nnsight/intervention/backends/local.py` — `LocalSimulationBackend`
-- `src/nnsight/_c/py_mount.c` + `setup.py` — the pymount extension
-
 ## Related
 
-- [backends.md](./backends.md) — how `RemoteBackend`/`AsyncRemoteBackend` use these payloads
-- [vllm-integration.md](./vllm-integration.md) — mediators serialized across process boundaries
-- `tests/test_serialization.py`, `tests/test_ndif.py`, `tests/test_editing.py::TestEditSerialization` — the reference suites
+- [vllm-integration.md](./vllm-integration.md) — mediators serialized across process boundaries.
+- Reference suites: `tests/test_serialization.py`, `tests/test_ndif.py`,
+  `tests/test_editing.py::TestEditSerialization`.

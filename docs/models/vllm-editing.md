@@ -96,23 +96,11 @@ installed under raises (`ValueError`) at the call on a local engine, and comes
 back as the request's error from a served one. `edits="probe"` (a string) is
 refused; write the list.
 
-That is the whole handle — the values are not read through it. They are taken as
-they are collected, so nothing accumulates on the worker for as long as somebody
-is reading the outputs, which on the synchronous engine is every request there
-is. An error raised inside an installed block is re-raised where its values would
-have arrived.
+An error raised inside an installed block is re-raised where its values would have arrived.
 
-Two different objects carry these, which matters when the names collide:
-
-- **`tracer.result`** is the copy the *worker* hands your block, and it carries the
-  edit's values only — `result.saves["hidden"]` is the edit's even if your trace
-  saved `hidden` too, and there is no `nnsight_saves` on it. Your trace's own value
-  is not missing; it comes back as your variable, the way every traced value does.
-- **An output from `model.generate(...)`** is the engine's copy, assembled after the
-  fact: `output.saves` holds both kinds with the trace's winning a collision, and
-  `output.nnsight_saves` holds the trace's own apart.
-
-Different names avoid the question entirely.
+**When an edit and a trace save the same name**, `tracer.result.saves` holds the edit's value (the
+trace's comes back as your variable), while a `model.generate(...)` output's `.saves` holds both
+with the trace's winning and `.nnsight_saves` holds the trace's alone. Different names avoid it.
 
 ## On an async engine
 
@@ -135,14 +123,10 @@ sync-looking call would leave every edit in place and say nothing.
 
 ## When to edit instead of trace
 
-- Sweeping many prompts — an edit pays the serialization once instead of per
-  request. Capturing one layer over 500 prompts on Qwen3-8B: **0.5 s edited**
-  (bare vLLM 0.45 s) against 0.8 s traced when the block reads only a layer
-  envoy bound outside the trace — and **5.2 s traced** the moment the block also
-  reads `model.logits`, `model.samples` or `tracer.result`, because a reference
-  to the model inside the block ships the model with every invoke (~9 ms each),
-  and those properties cannot be bound outside a trace. In a sweep, take the
-  text from the edit's outputs.
+- Sweeping many prompts — an edit pays the serialization once instead of per request, close to
+  bare-vLLM speed. A traced sweep is much slower when the block reads `model.logits`,
+  `model.samples` or `tracer.result`, since a reference to the model inside the block ships the
+  model with every invoke; in a sweep, take the text from the edit's outputs.
 - Instrumenting traffic you don't control (a served endpoint, another client).
 - Keep tracing for one-off experiments, and whenever you want the values pushed
   back into your own variables.
