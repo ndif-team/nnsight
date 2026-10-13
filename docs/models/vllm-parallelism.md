@@ -1,6 +1,6 @@
 ---
 title: vLLM parallelism and architectures
-one_liner: Tensor parallelism is transparent to a block; mixture-of-experts and hybrid trunks, and what changes across vLLM releases.
+one_liner: Tensor parallelism is transparent to a block; mixture-of-experts and hybrid trunks on vLLM.
 tags: [models, vllm, tensor-parallel, moe]
 related: [docs/models/vllm.md, docs/models/tensor-parallel.md, docs/models/index.md]
 sources: [src/nnsight/modeling/vllm/fragments.py, src/nnsight/modeling/vllm/batching.py, tests/vllm/test_tensor_parallel.py, tests/vllm/test_moe_batching.py]
@@ -40,9 +40,7 @@ MoE models (Qwen-MoE, DeepSeek, Mixtral, ...) work with the same transparency, i
 - **default** (`enable_expert_parallel=False`): every rank holds a slice of every expert's matrices (the dense-MLP TP sharding, fused across experts);
 - **expert parallel** (`enable_expert_parallel=True`): each rank holds `num_experts / world_size` whole experts.
 
-The router (`mlp.gate`, a `ReplicatedLinear`) is full and identical on every rank, so reading router logits or swapping them (expert steering / expert-masking ablation) needs no gathering at all. The fused-experts module (`mlp.experts`, a `FusedMoE`) is the one MoE-specific case the batcher handles. A layer that returns **per-rank partial sums**, leaving the all-reduce to the block around it, is all-reduced into the true value on access, and a write-back is divided by the group size so that block's own all-reduce reconstructs the swapped value exactly once. Verified in `tests/vllm/test_moe_batching.py` against an HF reference. On 0.27 the fused layer usually reduces inside itself and hands back the whole value already, so there is nothing to gather; measured on a two-rank Qwen1.5-MoE, both ranks return the identical tensor. Either way what your block reads is the whole thing.
-
-The case that still arrives partial is a layer built to defer its reduce (`skip_final_all_reduce`), which is gathered as above. A sequence-parallel MoE layer is split by rows rather than summed, which is a different correction and one nnsight does not make, so that value reads as one rank's rows.
+The router (`mlp.gate`, a `ReplicatedLinear`) is full and identical on every rank, so reading or swapping router logits needs no gathering. The fused-experts module (`mlp.experts`, a `FusedMoE`) reads whole too: a layer that returns per-rank partial sums is all-reduced on access, and a write-back is divided by the group size so the model's own all-reduce reconstructs it exactly once (`tests/vllm/test_moe_batching.py`). The exception: a sequence-parallel MoE layer is split by rows rather than summed, which nnsight does not correct, so it reads as one rank's rows.
 
 Individual experts are **not** addressable as submodules: vLLM stacks all local experts into fused weight tensors consumed by one grouped kernel, so there is no `experts[3]` at any parallelism level. The top-k selection and routing weights are computed inside that kernel too — recompute them from the logits. `mlp.gate.output` is `(logits, bias)`, `[tokens, num_experts]`; to ablate an expert, mask its router logit: `mlp.gate.output[0][:, e] = -inf`.
 
@@ -63,18 +61,4 @@ Qwen3-Next / Qwen3.5-style models interleave gated-delta-net layers with full-at
 
 ## vLLM versions
 
-Everything on this page was run on **0.27.1**. The `vllm` extra carries no upper
-bound, so `pip install "nnsight[vllm]"` takes whatever vLLM is current. Check the
-version you have rather than assuming a range. Two things about the engine you build are worth knowing, because
-nnsight arranges the first for you and the second is yours:
-
-- **The model runner.** vLLM 0.27 ships a second GPU model runner and defaults to
-  it for every non-MoE model. nnsight's interventions arrive by subclassing the
-  original one, so it asks vLLM for that one (`VLLM_USE_V2_MODEL_RUNNER=0`) when it
-  builds the engine. Setting that variable to `1` yourself is refused rather than
-  overridden: the engine would otherwise come up with no interventions installed and
-  fail at the first collect with a missing method. The V2 runner is not
-  instrumented.
-- **Workers are spawned, so a script needs an `if __name__ == "__main__":`
-  guard** — on one card and `mode="sync"` as much as under tensor parallelism. See
-  [the engine page](vllm.md).
+Tested versions and the model-runner pin: [vllm.md](vllm.md#vllm-versions). Scripts need an `if __name__ == "__main__":` guard on one card as much as under tensor parallelism; see [vllm.md](vllm.md#gotchas).

@@ -16,12 +16,10 @@ projection. This is different from `device_map="auto"`, which puts whole *layers
 on different GPUs and runs them one after another — tensor parallelism splits
 *within* each layer and runs the ranks together.
 
-The catch for interpretability is that a sharded module's activation, on any one
-rank, is only that rank's slice of the real tensor. nnsight gathers those slices
-before your intervention sees the value and re-splits whatever you leave behind,
-so **the trace you write is the trace you would write against one GPU**.
-
-There is nothing to install, import, or enable.
+On any one rank, a sharded module's activation is only that rank's slice. nnsight
+gathers the slices before your intervention sees the value and re-splits whatever
+you leave behind, so **the trace you write is the trace you would write against
+one GPU**. There is nothing to install, import, or enable.
 
 ## The canonical pattern
 
@@ -52,51 +50,32 @@ with model.trace("The Eiffel Tower is in the city of"):
 print(gate.shape)  # (1, 11, 8192) on every rank, not (1, 11, 2048)
 ```
 
-Edits work the same way: you write the whole tensor and nnsight puts each rank's
-piece back. The one thing to remember is the clone — a gathered value is the
-output of a collective, and torch refuses an in-place write into one (rule 3
-below):
+Edits work the same way — you write the whole tensor and nnsight puts each rank's
+piece back — but take a clone first (rule 3 below).
 
-```python
-with model.trace(prompt):
-    # Spans rank boundaries; you never think about that.
-    edited = model.model.layers[5].mlp.gate_proj.output.clone()
-    edited[..., :3000] = 0
-    model.model.layers[5].mlp.gate_proj.output = edited
-    logits = model.lm_head.output.save()
-```
-
-> **`tp_plan="auto"` is checked too.** A bare `tp_plan="auto"` names no degree
-> of its own — transformers shards over whatever ranks the launcher provided —
-> so nnsight reads the degree off the world size and runs the same check below.
-> gpt2 under `torchrun --nproc_per_node=2` is refused with
-> `UnshardableCheckpoint` rather than silently loading its full 0.5 GB on both
-> ranks. A *custom* plan (a dict of patterns) overrides the checkpoint's
-> published plan, so the published plan's limit says nothing about it and it
-> loads unchecked. Prefer `distributed_config=DistributedConfig(tp_size=N)`
-> anyway: it states the degree in the code, and it is the only form that can ask
-> for expert parallelism.
+> **`tp_plan="auto"`** shards over whatever ranks the launcher provided; nnsight
+> reads the degree off the world size and applies the same checks. Prefer
+> `distributed_config=DistributedConfig(tp_size=N)`: it states the degree in the
+> code and is the only form that can ask for expert parallelism. A *custom* plan
+> (a dict of patterns) loads unchecked.
 
 ### When the load fails
 
-All three of these arrive wrapped in a pipeline `ValueError: Could not load model
-...`, with the real message near the end of it:
+All three arrive wrapped in a pipeline `ValueError: Could not load model ...`,
+with the real message near the end:
 
 - `KeyError: 'RANK'` — the script was started with `python`, not `torchrun`.
-  Tensor parallelism needs the calling process to *be* a rank, which is also why
-  it cannot run in a notebook kernel.
+  The calling process has to *be* a rank, which is also why TP cannot run in a
+  notebook kernel.
 - `tp_size (2) * fsdp_size (1) is not equal to world_size (4)` —
   `--nproc_per_node` and `tp_size` have to be the same number.
-- `` `tp_plan` and `device_map` are mutually exclusive `` — pick one. They are
-  two different ways of spreading a model, and `device_map` is the reflex to
-  suppress here.
+- `` `tp_plan` and `device_map` are mutually exclusive `` — pick one.
 
 ## What is sharded and what is not
 
-Most of what people read is **already whole** and costs nothing: a row-parallel
-layer all-reduces its output, so a decoder layer, `self_attn`, `mlp`, and the
-final norm all arrive complete. What is really a slice, and what nnsight does
-about it:
+Most of what people read is **already whole**: a row-parallel layer all-reduces
+its output, so a decoder layer, `self_attn`, `mlp`, and the final norm all arrive
+complete.
 
 | | Sharded? | Example |
 |---|---|---|
@@ -107,121 +86,87 @@ about it:
 | The LM head | no — gathered by transformers | `lm_head.output` |
 | Embeddings | whole, unless the plan shards them — see below | `embed_tokens.output` |
 | **Parameters** | **yes — not gathered** | `q_proj.weight`, `down_proj.weight` |
-| `.source` inside a sharded module | yes — a `DTensor` whose `.shape` is the whole and whose data is this rank's, see rule 4 | `q_proj.source.F_linear_0` |
+| `.source` inside a sharded module | yes — a `DTensor`, see [below](#reading-a-value-between-two-sharded-modules) | `q_proj.source.F_linear_0` |
 | `.source` in a parent that calls one | no — gather it yourself | `mlp.source.self_gate_proj_0` |
 | Anything between two sharded modules | no — gather it yourself | `mlp.act_fn.output`, `query_states_0` |
 
-"No" in the table means the value *reads* whole; writing into it in place is a
-separate question, answered by rule 3 below — under TP these whole values are
-collectives' outputs, and in-place writes on them raise.
+"No" means the value *reads* whole; writing into it in place is rule 3.
 
 Calling a sharded module **ad hoc** — the logit lens, `model.lm_head(hidden)` —
-is corrected the same way its activations are, so it returns the full-width
-result it would on one GPU.
+returns the full-width result it would on one GPU. The gather only fires when an
+intervention is parked on that location, and `tracer.cache()` gathers only the
+modules it selects.
 
-The gather only fires when an intervention is actually parked on that location,
-so reading a handful of locations does not pay for the hundreds you ignored. A
-`tracer.cache()` gathers only the modules it selects.
-
-**A vocab-parallel embedding's own output cannot be read.** Only some plans shard
-the embedding — those that do name it `embedding_rowwise`, which in practice means
-the tied-embedding checkpoints (Llama-3.2-1B and -3B, and most small models).
-Where it is sharded, the value's layout is single-use: the buffer saying which
-vocabulary rows this rank owns is spent by the first reassembly, so parking on
-`embed_tokens.output` raises a bare `AssertionError` from torch's embedding op.
-The same takes out a `tracer.cache()` called with *no* arguments, which selects
-every module and so reaches the embedding.
-
-Which case you are in is in the config:
+**A vocab-parallel embedding's own output cannot be read.** Plans that shard the
+embedding (`embedding_rowwise`, in practice the tied-embedding checkpoints such as
+Llama-3.2-1B and -3B) make its layout single-use, so parking on
+`embed_tokens.output` raises a bare `AssertionError` from torch's embedding op —
+and so does `tracer.cache()` with *no* arguments, which selects every module.
+Check the config, and read `model.model.layers[0].input` instead, which is the
+same tensor and arrives whole on any plan:
 
 ```python
 "embed_tokens" in (model.config.base_model_tp_plan or {})
 # True  — Llama-3.2-1B, Llama-3.2-3B     embed_tokens.output raises
 # False — Llama-3.3-70B, Qwen3-8B        embed_tokens.output reads whole
-```
 
-`model.model.layers[0].input` works either way: it is the same tensor one module
-later, and it arrives whole at any degree.
-
-```python
 with model.trace(prompt) as tracer:
     embeddings = model.model.layers[0].input.save()   # whole, on any plan
     cache = tracer.cache(modules=[...]).save()        # name them, don't select all
 ```
 
-Parameters are the exception, and the one place a trace does not read as it would
-on one GPU. `layer.weight` is a `DTensor`: this rank holds `1/tp_size` of it, but
-**`.shape` reports the whole**, so the shape alone will not tell you it is split.
+### Parameters are DTensors
+
+`layer.weight` is a `DTensor`: this rank holds `1/tp_size` of it, but
+**`.shape` reports the whole**. nnsight does not reassemble weights, since that
+would allocate the whole tensor on every rank in exactly the situation where
+memory was tight.
 
 ```python
 w = model.model.layers[0].self_attn.q_proj.weight
 w.shape                 # (3072, 3072) — the global shape
 w.placements            # (Shard(dim=0),)
-w.to_local().shape      # (1536, 3072) — what this rank actually holds, at tp=2
-w.full_tensor()         # the real thing; every rank must call it, and it
-                        # allocates the whole tensor on each of them
+w.to_local().shape      # (1536, 3072) — what this rank holds, at tp=2
+w.full_tensor()         # the whole thing; every rank must call it
 ```
 
-Weights are what tensor parallelism exists to split, so nnsight does not quietly
-reassemble one — that would allocate the whole tensor on every rank, in the
-situation where memory was tight enough to reach for TP. Most torch operations
-handle a `DTensor` for you; `.to_local()` and `.full_tensor()` are there when you
-need to be explicit.
-
-**Reducing a sharded weight gives you this rank's answer, and no error says so.**
-`w.mean()`, `w.norm()`, `w.abs().max()` all return a `DTensor` with a `Partial`
-placement — the reduction over this rank's slice, still waiting to be combined.
-Read a scalar out of it with `float()` and you get that partial number, which
-differs between ranks and matches none of them. On Llama-3.2-3B at tp=2:
+**Reducing a sharded weight gives this rank's answer, silently.** `w.mean()`,
+`w.norm()`, `w.abs().max()` return a `DTensor` with a `Partial` placement;
+`float()` on it gives a per-rank partial that matches no real value. Call
+`.full_tensor()` on the *reduction* (one small collective, not a copy of the
+layer):
 
 ```python
-w = model.model.layers[0].self_attn.q_proj.weight
-float(w.mean())                  # rank 0:  2.256e-05   rank 1: -1.171e-05
-float(w.mean().full_tensor())    # 5.421e-06 on both — the real mean
-float(w.norm())                  # rank 0: 81.80        rank 1: 68.97
-float(w.norm().full_tensor())    # 106.996
+float(w.norm())                  # rank 0: 81.80   rank 1: 68.97   (wrong)
+float(w.norm().full_tensor())    # 106.996 on both
 ```
 
-Call `.full_tensor()` on the *reduction*, not on the weight: the result is a
-scalar, so it costs one small collective rather than a copy of the layer. Any
-weight-norm sweep or layer-magnitude plot needs this, or it silently plots
-per-rank noise.
-
-**A sharded weight cannot be edited in place through the `DTensor`.**
-`weight[:, :10] = 0` raises `NotImplementedError: Operator aten.fill_.Tensor does
-not have a sharding strategy registered`. Write through `.to_local()`, which is
-the right thing anyway — each rank edits the rows or columns it holds:
+**A sharded weight cannot be edited in place through the `DTensor`**
+(`NotImplementedError: Operator aten.fill_.Tensor does not have a sharding
+strategy registered`). Write through `.to_local()`, each rank editing the slice it
+holds; a rank-one update has to be expressed per rank the same way:
 
 ```python
 with torch.no_grad():
     model.model.layers[0].mlp.gate_proj.weight.to_local()[:, :10] = 0
 ```
 
-Out-of-place arithmetic on the whole (`weight.mul_(0.5)`) works unchanged. A
-rank-one update written against a whole weight matrix has to be expressed
-per-rank the same way.
-
 ## Rules for intervention code under TP
 
-**Every rank runs your block.** That is what keeps the collectives lined up, and
-it puts four obligations on the code:
+**Every rank runs your block.** That keeps the collectives lined up, and puts four
+obligations on the code:
 
-1. **No rank-dependent control flow.** Nothing may branch on rank, and nothing
-   may take a different path on different ranks — the ranks would stop agreeing
-   on when to gather, and the run deadlocks. It deadlocks quietly: no exception,
-   and no watchdog inside several minutes. A plain `kill` (SIGTERM) of
-   `torchrun` takes the rank processes down with it; `kill -9` does not — they
-   stay alive holding their share of every card, so after a SIGKILL find their
-   pids and kill those, or the next attempt meets a GPU that is busy with the
-   last one.
+1. **No rank-dependent control flow.** Nothing may branch on rank or take a
+   different path on different ranks, or the ranks stop agreeing on when to
+   gather and the run deadlocks — quietly, with no exception. `kill` (SIGTERM) of
+   `torchrun` takes the ranks down with it; after `kill -9`, find and kill the
+   rank processes too, or they keep holding their GPUs.
 
-2. **Seed before you sample.** This one is a correctness bug, not an
-   inconsistency. `torch.initial_seed()` differs per rank under `torchrun` — the
-   ranks are seeded randomly, not from the rank — so unseeded sampling diverges
-   immediately. If it does, the ranks generate *different tokens*,
-   and then the model's own all-reduces sum activations computed from different
-   sequences — the output is wrong on every rank, not merely different. Use
-   greedy decoding, or seed identically on every rank:
+2. **Seed before you sample.** `torch.initial_seed()` differs per rank under
+   `torchrun`, so unseeded sampling makes ranks generate *different tokens*, and
+   the model's all-reduces then sum activations from different sequences — the
+   output is wrong on every rank. Use greedy decoding or seed identically on every
+   rank:
 
    ```python
    torch.manual_seed(0)                      # same on every rank
@@ -230,62 +175,40 @@ it puts four obligations on the code:
    ```
 
    Many checkpoints ship `do_sample: true` in `generation_config.json`, so this
-   bites without you asking for sampling. And it can bite *quietly*: on a
-   vocab-parallel tied embedding (Llama-3.2-1B/-3B), a rank's divergent token
-   falls outside its own vocabulary shard, looks up zeros, and the all-reduce
-   keeps rank 0's path — so rank 0's run looks perfectly healthy while ranks
-   1..N return token sequences the model never actually ran on. Checking "does
-   seeding matter here?" by eyeballing rank 0 answers wrongly.
+   bites without you asking for sampling. On a vocab-parallel tied embedding it
+   can look healthy on rank 0 while ranks 1..N return sequences the model never
+   ran on, so eyeballing rank 0 does not answer whether seeding matters.
 
 3. **Editing takes a clone — on any value a sharded module produced.** Whether
-   nnsight gathered it or transformers reduced it, the whole value you see is
-   the output of a collective, and torch will not let you write into one in
-   place — a `value[...] = x` raises `Output 0 of ... is a view and is being
-   modified inplace`. This is broader than the gathered locations: it also hits
-   values the table above calls whole, because they are whole *by all-reduce* —
+   nnsight gathered it or transformers all-reduced it, the whole value is a
+   collective's output, and an in-place write raises `Output 0 of ... is a view
+   and is being modified inplace`. That includes values the table calls whole:
    `o_proj.output`, `down_proj.output`, `mlp.output`, the tensor inside
-   `self_attn.output`, an MoE's `experts.output`, `lm_head.output`. All of
-   them take in-place writes on one GPU and refuse them under TP. Clone, edit,
+   `self_attn.output`, an MoE's `experts.output`, `lm_head.output`. Clone, edit,
    assign back:
 
    ```python
    with model.trace(prompt):
-       edited = model.model.layers[0].mlp.gate_proj.output.clone()
-       edited[..., :64] = 0
-       model.model.layers[0].mlp.gate_proj.output = edited
+       edited = model.model.layers[5].mlp.gate_proj.output.clone()
+       edited[..., :3000] = 0           # spans rank boundaries; no matter
+       model.model.layers[5].mlp.gate_proj.output = edited
    ```
 
    Whole-value replacement (`... .output = torch.zeros_like(...)`) needs no
-   clone. nnsight does not clone for you: on a large model that is a copy the
-   size of the activation, on every gather, for the many traces that only read.
+   clone. nnsight does not clone for you, since that would copy every gathered
+   activation for the many traces that only read.
 
-4. **Nothing inside a module's forward is reassembled for you.** A module's own
-   `.input`/`.output` is; a `.source` operation is not, and neither is a plain
-   module sitting between a column-parallel output and the row-parallel input
-   that consumes it (`mlp.act_fn`). Nothing on those values records which axis
-   holds the shard once it has left the module that produced it, and the axis
-   moves — attention's `view`/`transpose` puts it on the head dimension. So the
-   trace names the axis and reassembles it, with `gather`/`shard`; see "Reading a
-   value between two sharded modules" below. Nothing warns when you reach for
-   `.source` on a sharded model — this page is the notice.
+4. **Values inside a module's forward are not reassembled** — `.source`
+   operations and modules between two sharded ones; see the next section.
 
-   A `.source` value taken from *inside* a sharded module is the subtle case: it
-   is a `DTensor`, so its `.shape` reports the whole even though its data is this
-   rank's slice, and reading a number out of it is wrong without a word of
-   warning. `gather` handles it — the value carries its own layout, so `gather`
-   uses that rather than the `dim` you name — as does `.full_tensor()`.
-
-**Every rank produces the same saved values**, since they are computed from
-gathered tensors. Print or write results from one rank, or you get N copies.
+**Every rank produces the same saved values.** Print or write results from one
+rank, or you get N copies.
 
 ## Reading a value between two sharded modules
 
 A module's `.input`/`.output` is gathered for you. A value *between* two sharded
-modules is not, and this is the one place a trace does not read as it would on
-one GPU.
-
-The shard is created by a column-parallel module and consumed by the
-row-parallel one after it, so everything in between is one rank's slice:
+modules is not: the shard is created by a column-parallel module and consumed by
+the row-parallel one after it, so everything in between is one rank's slice.
 
 ```
 gate_proj [colwise] ─▶  (1,11,64)  →  (1,11,32)   ┐
@@ -294,16 +217,12 @@ up_proj   [colwise]     (1,11,64)  →  (1,11,32)   │  is this rank's slice
 down_proj [rowwise] ─▶  (1,11,16)  →  (1,11,16)   ┘  ← whole again
 ```
 
-nnsight cannot gather these for you, because **nothing on the value says how it
-is split.** transformers tracks the layout only while a value is inside the
-module that made it; on the way out it unwraps to an ordinary tensor, and a
-32-wide slice of a 64-wide activation is then indistinguishable from a genuine
-32-wide one. Worse, the axis moves: attention's `view`/`transpose` puts the shard
-on the *head* dimension, so there is not even a fixed axis to assume.
-
-You know what the forward did, so you say which axis, with
-[`gather`][nnsight.modeling.tp.fragments.gather] and its inverse
-[`shard`][nnsight.modeling.tp.fragments.shard]:
+nnsight cannot gather these itself, because **nothing on the value says how it is
+split**: transformers unwraps it to a plain tensor on the way out of the module
+that made it, and the axis moves (attention's `view`/`transpose` puts it on the
+head dimension). Nothing warns when you reach for `.source` on a sharded model.
+You name the axis, with `gather` and its inverse `shard` (both in
+`src/nnsight/modeling/tp/fragments.py`):
 
 ```python
 from nnsight.modeling.tp import gather, shard
@@ -311,55 +230,32 @@ from nnsight.modeling.tp import gather, shard
 attn = model.model.layers[1].self_attn
 
 with model.trace(prompt):
-    q = attn.source.query_states_0.output   # (1, heads/tp_size, seq, head_dim)
-    heads = gather(model, q, dim=1).save()  # (1, heads, seq, head_dim) — every head
-```
-
-To edit one, put this rank's piece back before the forward carries on — and
-clone first, per rule 3:
-
-```python
-with model.trace(prompt):
-    q = attn.source.query_states_0.output
-    heads = gather(model, q, dim=1).clone()
-    heads[:, 3] = 0                                  # ablate head 3, whoever holds it
+    q = attn.source.query_states_0.output       # (1, heads/tp_size, seq, head_dim)
+    heads = gather(model, q, dim=1).clone()     # (1, heads, seq, head_dim); clone per rule 3
+    heads[:, 3] = 0                             # ablate head 3, whoever holds it
     attn.source.query_states_0.output = shard(model, heads, dim=1)
     logits = model.lm_head.output.save()
 ```
 
-Measured on Llama at tp=2 against the same block on one GPU: the gathered
-`query_states` is `(1,4,11,4)` either way with the same sum, and ablating head 3
-gives logits summing to `-19.721992` against `-19.722000`.
+A `.source` value from *inside* a sharded module is the subtle case: it is a
+`DTensor`, so its `.shape` reports the whole while its data is this rank's slice.
+`gather` reads the layout off such a value instead of the `dim` you name;
+`.full_tensor()` also works. Test for it with `isinstance(value, DTensor)` or
+`value.placements`.
 
-Both are **collectives**, so rule 1 applies with full force: every rank must
-reach them. Call them unconditionally, never inside a branch that could go
-differently on different ranks. They are no-ops on an unsharded model, so the
-same block runs at any degree — which is also how you keep one script working on
-one GPU and on eight.
-
-The no-op cuts the other way too: **a one-GPU run validates nothing about your
-gather.** At `tp_size=1` the value comes back untouched, so a wrong `dim` is
-accepted silently there and only raises (or garbles the tensor) on a sharded
-run — and skipping the clone works at `tp_size=1`, where you are editing the
-live tensor, while on a sharded run the gathered value is an assembled copy:
-editing it in place without `shard()`-and-assign raises under grad and, under
-`torch.no_grad()`, silently changes nothing. Smoke-test a gather/shard block at
-`tp_size=2` before trusting it.
-
-If you are not sure which axis holds the shard, print the shape at tp=1 and at
-tp=2 and compare: the axis that shrank by `tp_size` is the one. That comparison
-answers for a plain tensor, which is what a value between two modules is. It
-says nothing about a `.source` value inside a sharded module, whose `.shape` is
-the whole at every degree — for those, `isinstance(value, DTensor)` or
-`value.placements` is the test, and `gather` reads the layout off the value
-itself.
+Both are **collectives**, so rule 1 applies: call them unconditionally on every
+rank. They are no-ops on an unsharded model, so the same block runs at any
+degree — which also means **a one-GPU run validates nothing**: a wrong `dim`, or
+a missing clone, passes at `tp_size=1` and raises or silently changes nothing on
+a sharded run. Smoke-test a gather/shard block at `tp_size=2`. To find the shard
+axis of a plain tensor, print its shape at tp=1 and tp=2; the axis that shrank by
+`tp_size` is the one.
 
 ## A sharded model wrapped with `NNsight` directly
 
-`TransformersModel` attaches the tensor-parallel rules for you. A tree built with
-plain `NNsight` over an already-sharded module does not get them by default — it
-has no way to know the module came from `transformers` — so every sharded value
-would be handed over as this device's piece. Opt in:
+`TransformersModel` attaches the tensor-parallel rules for you. Plain `NNsight`
+over an already-sharded module does not, and would hand over each device's piece.
+Opt in:
 
 ```python
 from nnsight import NNsight
@@ -370,42 +266,28 @@ from nnsight.modeling.tp.envoys import tp_envoys
 model = NNsight(
     sharded_hf_model,
     interleaver=Interleaver(fragments=TPFragments()),
-    envoys=tp_envoys(),          # ad-hoc calls on sharded modules
+    envoys=tp_envoys(),          # ad-hoc calls like model.lm_head(hidden) return whole tensors
 )
 ```
 
-`TPFragments` works the rules out for itself as the tree is built, and stays
-inert on a model that is not sharded — so this is safe to pass unconditionally.
-`tp_envoys()` is what makes `model.lm_head(hidden)` return a whole tensor rather
-than this rank's slice.
+`TPFragments` stays inert on a model that is not sharded, so this is safe to pass
+unconditionally.
 
 ## Requires transformers >= 5.19
 
-nnsight reads the exact shapes of 5.19's distributed backend — the named
-`(pp, fsdp, tp)` device mesh, the expert plan on its own `model.ep_plan`, the
-`ep_dispatch_experts` style — and earlier releases differ in each of them, so
-sharding on one is refused with `UnsupportedTransformersVersion` the moment a
-sharded model is seen, rather than half-supported. The refusal exists because
-the failure it prevents is silent: a backend whose layout nnsight cannot read
-does not error, it hands intervention code one rank's slice as though it were
-the whole tensor. On a transformers old enough to predate the DTensor backend
-entirely (≤ 5.15) the load stops earlier, at `ModuleNotFoundError: No module
-named 'transformers.distributed.tensor_parallel'` — check
-`transformers.__version__` before reading further into that one.
+Sharding on an earlier release is refused with `UnsupportedTransformersVersion`
+the moment a sharded model is seen, because a backend layout nnsight cannot read
+would otherwise hand intervention code one rank's slice as though it were whole.
+A transformers old enough to lack the DTensor backend stops earlier, at
+`ModuleNotFoundError: No module named 'transformers.distributed.tensor_parallel'`.
 
 ## A checkpoint that cannot be split at all
 
-Not every model publishes a sharding plan. gpt2 is the obvious one: its config
-has no `base_model_tp_plan`, so there is nothing telling transformers which
-weights to cut or along which dimension.
-
-**transformers does not refuse this, and does not warn.** Given a plan of `None`
-it shards *nothing* — `verify_tp_plan` returns early and no forward is wrapped —
-so every rank loads a complete copy of the weights. The model then answers
-correctly off one rank while the other cards hold redundant copies. Nothing
-fails; you simply paid `tp_size` GPUs for one GPU's worth of work.
-
-nnsight raises `UnshardableCheckpoint` instead, before the weights are fetched:
+Not every model publishes a sharding plan (`base_model_tp_plan`): gpt2 does not,
+and neither do several recent Qwen releases. **transformers does not refuse or
+warn** — it shards nothing, so every rank loads a full copy. nnsight raises
+`UnshardableCheckpoint` instead, before the weights are fetched (at `.dispatch()`
+under the default `dispatch=False`):
 
 ```python
 TransformersModel(
@@ -417,21 +299,11 @@ TransformersModel(
 # tp_size=2 would load a whole copy of it onto every rank rather than a shard.
 ```
 
-The check sits on the loading path, so with the default `dispatch=False` the
-constructor returns and the refusal arrives at `.dispatch()`, which is the first
-point at which there is anything to refuse.
-
-The same error covers a degree that does not divide evenly — `tp_size=3` on a
-model that splits 8 ways — because the all-gather assumes every rank holds an
-equal piece, so an uneven degree returns the wrong shape rather than running
-slower. The message lists the degrees that would work.
-
-To find out in advance, ask
-[`max_tp_size`][nnsight.modeling.tp.plan.max_tp_size] for the largest degree a
-config supports; every workable degree is one of its divisors, and `None` means
-the model has to be spread some other way (one GPU, or `device_map` over
-several). It reads the config alone — no weights, no GPUs, no `torchrun` — so it
-is the cheapest thing to run before you allocate anything:
+The same error covers a degree that does not divide evenly (`tp_size=3` on a
+model that splits 8 ways), since the gather assumes equal pieces; the message
+lists the degrees that would work. To check in advance — config only, no weights,
+GPUs or `torchrun` — ask `max_tp_size` (`src/nnsight/modeling/tp/plan.py`) for the
+largest degree; every workable degree divides it, and `None` means TP is out:
 
 ```python
 from transformers import AutoConfig
@@ -442,14 +314,10 @@ max_tp_size(AutoConfig.from_pretrained("Qwen/Qwen2.5-0.5B"))         # 2  (2 kv 
 max_tp_size(AutoConfig.from_pretrained("openai-community/gpt2"))     # None
 ```
 
-A missing plan is not only an old-model problem — several recent Qwen releases
-publish no `base_model_tp_plan` either, and `None` is `None` whatever the reason.
-
 ## Expert parallelism
 
 A mixture-of-experts checkpoint can be split by *expert* instead of along the
-feature dimension. Ask for it the way transformers does — it applies the model's
-`base_model_ep_plan` in place of its tensor-parallel one:
+feature dimension; transformers then applies the model's `base_model_ep_plan`:
 
 ```python
 model = TransformersModel(
@@ -460,87 +328,48 @@ model = TransformersModel(
 )
 ```
 
-Traces read the same as any other. The expert plan is one style,
-`ep_dispatch_experts`: its wrapper sends each token to the rank that owns its
-expert and combines the answers before returning, so at the trace's vantage
-point everything is already whole — the router's output is replicated and never
-masked, and `experts.output` is the full combined tensor on every rank,
-readable and editable like anything else. (Printing `experts.source` shows that
-dispatch wrapper's own steps; most of them hold per-rank token batches of
-different shapes, and only the final output transform is whole.)
+Traces read the same as any other. The expert plan's wrapper
+(`ep_dispatch_experts`) sends each token to the rank owning its expert and
+combines the answers before returning, so the router's output is replicated and
+`experts.output` is the full combined tensor on every rank. (Inside
+`experts.source`, most steps hold per-rank token batches; only the final output
+is whole.) The degree has to divide the **expert count**, checked before the
+weights are fetched.
 
-Two side effects of the EP load are normal: transformers wraps the model
-with FSDP2 even at `fsdp_size=1`, and the pipeline then prints a long "The
-model 'FSDP...ForCausalLM' is not supported for text-generation" warning on
-every rank — it is cosmetic, the load and the traces are unaffected.
+An EP load also wraps the model with FSDP2 even at `fsdp_size=1`, and the
+pipeline prints a "The model 'FSDP...ForCausalLM' is not supported for
+text-generation" warning on every rank. It is cosmetic.
 
-The degree has to divide the **expert count** rather than the head counts, and
-nnsight checks that before the weights are fetched — `tp_size=3` on a 4-expert
-model raises `UnshardableCheckpoint` rather than loading and failing.
-
-**Plain tensor parallelism on an MoE checkpoint is also fine.** Without an EP
-request, the experts shard along their feature dimensions like any MLP
-(`moe_tp_experts`, which Mixtral, DeepSeek-V3, Qwen3-MoE and around twenty-five
-other shipped configs carry, all-reduces inside its own forward), and every
-read and edit behaves as above.
-
-One caveat on the non-default path: overriding the plan by hand to the legacy
-masked trio (`ep_router` + `moe_tp_experts`) gives correct outputs, but
-`experts.inputs` then holds each rank's *masked, local* routing — per-rank
-values with no warning. The default plans on every version do not do this.
+**Plain tensor parallelism on an MoE is also fine.** Without an EP request the
+experts shard along their feature dimensions like any MLP (`moe_tp_experts`), and
+every read and edit behaves as above. Overriding the plan by hand to the legacy
+`ep_router` + `moe_tp_experts` pair gives correct outputs but leaves
+`experts.inputs` holding each rank's masked, local routing, with no warning.
 
 ## What is not supported
 
-Four styles are still refused: `megamoe_router`, `megamoe_experts`,
+Four styles are refused: `megamoe_router`, `megamoe_experts`,
 `moe_identity_expert`, and MLA's split kv projection (`mla_kv_a_proj`). A plan
-containing one supports no degree at all, so a load asking for tensor parallelism
-is turned away by the same `UnshardableCheckpoint` as a checkpoint with no plan —
-deliberately, rather than handing you a fragment of a tensor and letting you draw
-conclusions from it. (DeepSeek-V2-Lite is the one to know: `mla_kv_a_proj` puts
-tensor parallelism out of reach, while expert parallelism is still open to it.)
-`UnsupportedParallelStyle`, which names the module and the style, is what a style
-added to a plan *after* the load produces.
-
+containing one supports no degree, so the load is refused with
+`UnshardableCheckpoint` (DeepSeek-V2-Lite: `mla_kv_a_proj` rules out tensor
+parallelism, but expert parallelism is still open). A style added to a plan
+*after* the load raises `UnsupportedParallelStyle`, naming the module and style.
 They are refused because no model in the test set exercises them, not because
-they are known to be ungatherable. `ep_router` and `grouped_gemm` sat in this
-list until a model using them was actually run end to end, at which point both
-turned out to need no gather at all. Reading a style's transforms is not the same
-as having run one, which is the mistake the table exists to prevent.
+they are known to be ungatherable.
 
-Results differ slightly from a single-GPU run, because an all-reduce sums in a
-different order than one big matmul — and how much depends entirely on the dtype.
-Measured on Llama-3.2-3B at tp=4 against one GPU, as the largest elementwise
-difference over the tensor's own scale:
-
-| | layer 0 `gate_proj` | layer 13 | layer 27 | logits |
-|---|---|---|---|---|
-| `bfloat16` | 3.4e-3 | 9.0e-3 | 7.5e-3 | 8.2e-3 |
-| `float32` | 2.5e-7 | 7.3e-7 | 9.7e-7 | 9.1e-7 |
-
-So bfloat16 drifts around 1e-3 and grows with depth, while float32 stays near the
-floor of the dtype. Greedy token choices are identical in both, and the test
-suite asserts that. If you are using agreement with a single-GPU run as a sanity
-check, expect the bfloat16 numbers — a float32 mismatch above 1e-6 is a real
-difference, not arithmetic order.
+**Results differ slightly from one GPU**, because an all-reduce sums in a
+different order than one matmul. In `bfloat16` expect relative differences
+around 1e-3, growing with depth; in `float32`, around 1e-6. Greedy tokens match
+in both, so a float32 mismatch well above 1e-6 is a real difference.
 
 ## Under the hood
 
-`TPFragments` ([`nnsight.modeling.tp`][nnsight.modeling.tp]) says which locations
-hold one rank's slice and how to reassemble them; the
-[`Interleaver`][nnsight.intervention.interleaver.Interleaver] does the bracketing —
-gather the value, serve the parked workers the whole tensor, re-split what they
-leave — once per visit, and only when something is actually waiting to read it.
-
-Every `HuggingFaceModel` is built with an ordinary interleaver carrying one of
-these. It stays inert (`enabled = False`, one attribute check per location) until
-it instruments a module the model's own `tp_plan` names — with `_device_mesh`
-set, which is what says the model was really split — and that is where it records
-the rules. That covers eager loading and the
-meta-then-`dispatch()` path without either needing to know about it.
-
-The same seam serves vLLM's tensor parallelism, which shards differently and
-gathers with different collectives — see
-[`nnsight.intervention.fragments`][nnsight.intervention.fragments].
+Every `HuggingFaceModel` is built with a `TPFragments` that stays inert until it
+instruments a module the model's own `tp_plan` names with `_device_mesh` set, so
+eager loading and the meta-then-`dispatch()` path both pick it up. The
+gather-serve-reshard bracketing is the interleaver's generic `Fragments` seam,
+shared with vLLM; see [interleaver-internals.md](../developing/interleaver-internals.md#handle-one-visit)
+and `src/nnsight/intervention/fragments.py`.
 
 ## Related
 

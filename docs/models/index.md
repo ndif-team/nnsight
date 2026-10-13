@@ -42,21 +42,6 @@ Pick the model wrapper that matches what you have. All wrappers expose the same 
 - `nnsight.LanguageModel` — DEPRECATED thin alias for `TransformersModel(repo_id, task="text-generation")`. Warns on construction. See [docs/models/language-model.md](language-model.md).
 - `nnsight.VisionLanguageModel` — DEPRECATED thin alias for `TransformersModel(repo_id, task="image-text-to-text")`. Warns on construction. See [docs/models/vision-language-model.md](vision-language-model.md).
 
-## At a glance
-
-| Class | Import | Use it for | Loader backend |
-|-------|--------|------------|----------------|
-| `TransformersModel` | `nnsight` | **Any** HF transformers task | `transformers.pipeline` |
-| `NNsight` | `nnsight` | Any `torch.nn.Module` | None (you instantiate) |
-| `DiffusionModel` | `nnsight` | diffusers pipelines | `diffusers.DiffusionPipeline` |
-| `VLLM` | `nnsight.modeling.vllm` | High-throughput serving with interventions | `vllm.LLM` (sync) / `vllm.v1.engine.async_llm.AsyncLLM` (async) |
-| `TransformersModel` + `DistributedConfig` | `nnsight` + `transformers.distributed` | A model sharded across GPUs (tensor parallel) | `transformers.pipeline` |
-| `TransformersModel` + `dtype="nf4"` | `nnsight` | A model held in 4 or 8 bits | `transformers.pipeline` |
-| `LanguageModel` *(deprecated)* | `nnsight` | → `TransformersModel(task="text-generation")` | `transformers.pipeline` |
-| `VisionLanguageModel` *(deprecated)* | `nnsight` | → `TransformersModel(task="image-text-to-text")` | `transformers.pipeline` |
-
-Lazy loading (`dispatch=`) is described in [transformers-model.md](transformers-model.md).
-
 ## Related
 
 - [docs/concepts/](../concepts/) — the underlying tracing / Envoy / interleaver model

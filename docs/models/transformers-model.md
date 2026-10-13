@@ -10,9 +10,9 @@ sources: [src/nnsight/modeling/transformers.py, src/nnsight/modeling/processing.
 
 ## What this is for
 
-`nnsight.TransformersModel` is the **primary** wrapper for any HuggingFace `transformers` model. It is backed by a `transformers.pipeline`, so it works for any task the pipeline factory knows — text generation, fill-mask, text/image classification, token classification, ASR, image-text-to-text (VLM) — and leans on the pipeline to tokenize, featurize, template chat, and pad batches. You pick the task (or let it be inferred from the checkpoint) and get the full NNsight tracing API. Two tasks are the exceptions under `trace`: `mask-generation`, whose preprocessing runs the model itself, and `keypoint-matching`, whose unit input is a pair of images that the list convention would split. Each is refused with a message naming its escape hatches — `model.pipe(...)` for the whole task, or a forward on an encoding you build with the model's own processor; see [Chunked tasks](#chunked-tasks).
+`nnsight.TransformersModel` is the **primary** wrapper for any HuggingFace `transformers` model. It is backed by a `transformers.pipeline`, so it works for any task the pipeline factory knows — text generation, fill-mask, text/image classification, token classification, ASR, image-text-to-text (VLM) — and leans on the pipeline to tokenize, featurize, template chat, and pad batches. You pick the task (or let it be inferred from the checkpoint) and get the full NNsight tracing API. Two tasks cannot be traced; see [Chunked tasks](#chunked-tasks).
 
-Use it for anything you'd load from the HuggingFace Hub with an `AutoModel*` / `pipeline`. `LanguageModel` and `VisionLanguageModel` are now thin deprecated aliases over this class (see [language-model.md](language-model.md) / [vision-language-model.md](vision-language-model.md)).
+`LanguageModel` and `VisionLanguageModel` are deprecated aliases over this class (see [language-model.md](language-model.md) / [vision-language-model.md](vision-language-model.md)).
 
 ## Loading
 
@@ -31,16 +31,7 @@ model = TransformersModel("openai-community/gpt2", device="cpu", dispatch=True)
 
 ### Choosing a device
 
-To put the whole model on one device pass `device=` (`"cpu"`, `"cuda"`, `"cuda:1"`, `0`).
-`device_map=` is for spreading a model across several devices (`"auto"` on a
-multi-GPU machine, or a dict that places modules on different devices).
-
-The model loads through `transformers.pipeline(...)`, and the pipeline moves a model
-that `from_pretrained` placed on a single device to its own `device`, which defaults to
-the first accelerator. So `device_map="cpu"`, `device_map={"": "cpu"}`, and leaving the
-device out all give a model on `cuda:0` when a GPU is present, with no warning. This
-holds for `dispatch=True` and for a lazy model dispatched on first use. Check with
-`next(model.parameters()).device`.
+Pass `device=` (`"cpu"`, `"cuda:1"`, `0`) to put the whole model on one device; `device_map=` is for spreading it across several. The model loads through `transformers.pipeline(...)`, which moves a single-device model to its own `device` (the first accelerator by default), silently overriding a single-device `device_map`. This holds for `dispatch=True` and lazy dispatch alike; check with `next(model.parameters()).device`.
 
 | Argument (one GPU present) | Model ends up on |
 |---|---|
@@ -59,12 +50,7 @@ checkpoint does not change that. Under `HF_HUB_OFFLINE=1` the first form raises
 offline mode`, so pass `task=` on an air-gapped machine or a cluster node with no
 outbound network.
 
-transformers 5 has no `summarization`, `translation`, `text2text-generation`,
-`question-answering` or `image-to-text` pipeline, so a seq2seq checkpoint (T5, BART)
-has no task of its own left: `text-generation` is the only route, and from a repo id
-that route resolves through `AutoModelForCausalLM` and builds the decoder-only class
-(`BartForCausalLM` — no encoder) without saying so. Load the model yourself and hand
-nnsight the module:
+**Seq2seq checkpoints (T5, BART).** transformers 5 has no seq2seq pipeline task, and `text-generation` from a repo id silently builds the decoder-only class (`BartForCausalLM`, no encoder). Load the model yourself and pass the module:
 
 ```python
 from transformers import AutoTokenizer, BartForConditionalGeneration
@@ -76,10 +62,7 @@ model = TransformersModel(
 )
 ```
 
-A seq2seq run through `text-generation` also has `pipe` echo the prompt back rather
-than return the completion (transformers' behaviour), so an intervention measured
-through those records reads as a no-op — measure through `generate` /
-`tracer.result` instead.
+`pipe` on such a model echoes the prompt rather than the completion, so measure interventions through `generate` / `tracer.result`.
 
 ### Constructor
 
@@ -112,7 +95,7 @@ TransformersModel(
 | `device` | The single device to load onto (`"cpu"`, `"cuda:1"`, `0`). Defaults to the first accelerator. See [Choosing a device](#choosing-a-device). |
 | `device_map`, `trust_remote_code`, `attn_implementation`, ... | Forwarded to the pipeline / `from_pretrained`. `device_map` spreads a model across devices; a single-device map such as `"cpu"` is overridden by the pipeline's `device`. |
 | `config` | A config object the model is built from in place of the checkpoint's own, on the meta build and the real load alike. Keyword overrides are not merged into it, as with `from_pretrained`. |
-| `rename` | Module-path aliases (see [Module renaming](#module-renaming)). |
+| `rename` | Module-path aliases (see [rename-modules.md](../usage/rename-modules.md)). |
 
 `kwargs` are split between the `pipeline(...)` factory's own parameters and `model_kwargs` automatically (`transformers.py`, `_split_pipeline_kwargs`), so anything HF accepts works.
 
@@ -201,7 +184,7 @@ assert model.dispatched is False                        # scan never loads weigh
 
 `scan` runs the forward under a fake-tensor mode: only shapes/dtypes propagate, no real weights are loaded, and the model is never dispatched. Read `.shape` / `.dtype` inside the block rather than saving tensors out (the values are fakes valid only there).
 
-## Input forms `trace` / `generate` accept
+## Input forms
 
 Every invoke is normalized to per-row model inputs and padded into one forward, so mixed formats and unequal lengths combine freely (`processing.py`, `preprocess_invoke`; verified in `tests/test_language.py`):
 
@@ -248,10 +231,13 @@ other invokes pass:
   and any other row is left as the model counts it. Positions you pass are kept,
   and a mask wider than the input (a key-value cache continuation) gets none.
 
-Other keywords are forward arguments, passed on as they are. A *tensor* outside
-the table (`pixel_values`, `cache_position`, ...) is not known to be per-row, so
-an input carrying one is handed to the model whole and does not batch with
-other invokes.
+Other keywords are forward arguments, passed on as they are.
+
+**Opaque inputs don't batch.** A *tensor* outside the table (`pixel_values`,
+`input_features`, `cache_position`, ...) or a raw float feature tensor is not
+known to be per-row, so the input is handed to the model whole and must be a
+lone invoke; a second invoke raises `NotImplementedError: Can't batch these
+inputs; pass text or token ids.` (`processing.py`, `preprocess_invoke`).
 
 Chat messages are detected and templated automatically (as `Pipeline.__call__` would):
 
@@ -260,8 +246,6 @@ messages = [{"role": "user", "content": "Who wrote 'Beloved'?"}]
 with model.trace(messages):
     ...
 ```
-
-A raw float feature tensor or a multimodal encoding (one carrying `pixel_values`, `input_features`, ...) is **opaque** — it passes straight to the model untouched and cannot be batched with others (`processing.py`, `preprocess_invoke`).
 
 ### Batching across invokes
 
@@ -293,25 +277,14 @@ assert logits.shape[0] == 7                        # seven windows, seven rows
 
 An edit inside the block reaches every row, because the rows are the forward's rather than something the trace assembled afterwards.
 
-Two consequences:
+**A chunked invoke is the whole batch.** The row count belongs to the task and is only known after preprocessing, while the batcher counts one row per invoke before that — so a second invoke would name rows belonging to the first. It is refused with `NotImplementedError: task='zero-shot-classification' splits this invoke into 3 forward rows, and a batched trace gives an invoke the rows its input has ...`.
 
-- **A chunked invoke is the whole batch.** The row count belongs to the task and is only known after preprocessing, while the batcher counts one row per invoke before that — so a second invoke would name rows belonging to the first. It is refused with `NotImplementedError: task='zero-shot-classification' splits this invoke into 3 forward rows, and a batched trace gives an invoke the rows its input has ...`.
-- **`mask-generation` has no forward to trace.** Its preprocessing runs the model to embed the image and then yields one input per batch of candidate points, so the encoder would run outside the trace. It is refused with a message pointing at `model.pipe(image)` for the whole task, or at a forward on an encoding you build with `model.image_processor`.
+**Two tasks are refused under `trace`**, each with a message naming the escape hatches — `model.pipe(...)` for the whole task, or a forward on an encoding you build with `model.image_processor`:
 
-`keypoint-matching` is the other refused task, for a different reason: its unit input is a *pair* of images, which a trace's list convention (one prompt per element) would split. Run the whole task with `model.pipe([image_a, image_b])`, or trace one forward on an encoding you build yourself: `model.image_processor(images=[image_a, image_b], return_tensors='pt')`.
+- `mask-generation` — its preprocessing runs the model itself (to embed the image), so the encoder would run outside the trace.
+- `keypoint-matching` — its unit input is a *pair* of images, which the list convention (one prompt per element) would split. Use `model.pipe([image_a, image_b])` or `model.image_processor(images=[image_a, image_b], return_tensors='pt')`.
 
 A task whose input is a dict — `{"image": ..., "question": ..., "word_boxes": [...]}` for `document-question-answering`, `{"image": ..., "candidate_labels": [...]}` for `zero-shot-object-detection`, `{"table": ..., "query": ...}` for `table-question-answering` — goes through the task's own preprocessing, including the `_args_parser` step `Pipeline.__call__` would run (which is where `table-question-answering` builds its `pd.DataFrame`). A mapping carrying tensors is still read as a model encoding (`processing.py`, `is_task_input`). A dual-encoder zero-shot task (`zero-shot-image-classification`, `zero-shot-audio-classification`) nests the candidate labels' text encoding inside its preprocess row; the trace merges those tensors into its one forward, so `logits_per_image` / `logits_per_audio` reads `(1, n_labels)` — one text row per candidate label against the single image/audio row.
-
-Row counts across the five, measured on the checkpoints `tests/test_chunked_tasks.py` uses plus `openai/whisper-tiny`:
-
-| Task | Input | Read inside the block |
-|---|---|---|
-| `token-classification` | `"John lives in Paris"` | `logits` `(1, 18, 2)` |
-| `token-classification` | the same 200x, `stride=16` | `logits` `(7, 512, 2)` |
-| `zero-shot-classification` | one sequence, 3 `candidate_labels=` | `logits` `(3, 2)` |
-| `zero-shot-object-detection` | `{"image", "candidate_labels"}`, 2 labels | `logits` `(2, 256, 1)` |
-| `document-question-answering` | `{"image", "question", "word_boxes"}` | `start_logits` `(1, 25)` |
-| `automatic-speech-recognition` | 70 s of audio, `chunk_length_s=30` | `encoder.layers[0].output` `(3, 1500, 384)` |
 
 **An encoder-decoder ASR trace needs `decoder_input_ids=`.** `trace` runs one forward, and a seq2seq model with no decoder ids builds decoder embeddings for itself, then rejects the pair it just made: `ValueError: You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time`, which names nothing the caller wrote. Pass one row of `decoder_start_token_id` per chunk:
 
@@ -323,28 +296,22 @@ with asr.trace(audio, chunk_length_s=30, decoder_input_ids=ids):
 
 `generate` and `pipe` run the decode loop themselves and need none of this.
 
-## Finding the image span in a VLM
+## Vision-language models
 
-An `image-text-to-text` model's prompt is mostly image: the processor expands the
-template's single `<image>` placeholder into one token per image patch, and those
-positions are where an intervention on the image goes. Find them by matching the
-config's image token id:
+An `image-text-to-text` model takes a prompt plus `images=` (or `text=` and `images=`), or chat messages with the image inline (`{"type": "image", "image": img}`); the processor runs for you in `trace`, `scan` and `generate`, and `generate` returns token ids. Generation arguments (`max_new_tokens`, `do_sample`, `temperature`, ...) reach the model's `generate` as plain keywords; the pipeline's spelling, `generate_kwargs={...}`, is unpacked into them. `max_length` is the exception: the pipeline sends it to the processor as a truncation length, so bound generation with `max_new_tokens`.
+
+### Finding the image span
+
+The processor expands the template's single `<image>` placeholder into one token per image patch, and those positions are where an intervention on the image goes. Build the encoding yourself and match the config's image token id:
 
 ```python
 enc = model.processor(images=image, text=prompt, return_tensors="pt")
 span = (enc["input_ids"] == model.config.image_token_id).nonzero()
+with model.trace(enc):
+    logits = model.output.logits.save()
 ```
 
-**Only processor-built ids carry that span.** On `llava-hf/llava-interleave-qwen-0.5b-hf`
-the processor returns 742 ids of which **729** are the image token; the same text
-through `model.tokenizer` alone returns 14 ids with the placeholder still a single
-token. Building ids one way and `pixel_values` the other gives
-`ValueError: Image features and image tokens do not match, tokens: 1, features: 746496`,
-which reports the mismatch in features rather than in what you passed.
-
-Build the encoding with `model.processor` and pass it whole, and the count lines
-up. The same encoding is what `trace` gives the model: a multimodal encoding is
-opaque, so it goes straight through and cannot share a batch with another invoke.
+**Only processor-built ids carry that span.** The same text through `model.tokenizer` alone leaves the placeholder as a single token, and pairing those ids with processor-built `pixel_values` raises `ValueError: Image features and image tokens do not match, tokens: 1, features: ...`. Passing the processor's encoding whole is equivalent to passing the prompt and `images=`. Either way the input is opaque and must be a lone invoke (see [Input forms](#input-forms)).
 
 ## Generation internals: `generator` / streamer
 
@@ -361,86 +328,22 @@ with model.generate(PROMPT, max_new_tokens=3) as tracer:
         step = model.generator.streamer.output.save()   # prompt, then 1 token/step
 ```
 
-## Iterating over generation steps
+Per-step reads and edits during generation use `tracer.iter`; see [iteration.md](../usage/iteration.md).
 
-```python
-import nnsight
+## Interventions, renaming, caching
 
-with model.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
-    per_step = nnsight.save([])
-    for step in tracer.iter[:3]:
-        per_step.append(model.transformer.h[0].output)
-# per_step[0] is the full prompt; per_step[1:] are one cached token each
-```
-
-Within a step, read locations in forward order. A wrong-order read in the loop can bind to the next step instead of raising; see [iteration.md](../usage/iteration.md#pitfalls).
-
-## Interventions
-
-```python
-# in-place zeroing
-with model.trace(PROMPT):
-    model.transformer.h[-1].output[:] = 0
-    logits = model.output.logits.save()
-
-# replacement / logit lens (ad-hoc module call, out of order)
-with model.trace("The Eiffel Tower is in the city of"):
-    hidden = model.transformer.h[-1].output
-    logits = model.lm_head(model.transformer.ln_f(hidden))
-    tokens = logits.argmax(dim=-1).save()
-
-# gradients
-with model.trace(PROMPT):
-    a = model.transformer.h[0].output
-    loss = model.output.logits.sum()
-    with loss.backward():
-        grad = a.grad.save()
-
-# skip a module
-with model.trace(PROMPT):
-    model.transformer.h[0].mlp.skip(torch.zeros_like(mlp_out))
-
-# cache activations
-with model.trace(PROMPT) as tracer:
-    cache = tracer.cache(include_inputs=True)
-# cache["model.transformer.h.0"].output
-```
-
-## Module renaming
-
-```python
-model = TransformersModel(
-    "openai-community/gpt2", task="text-generation", dispatch=True,
-    rename={"transformer.h": "layers", "mlp": "my_mlp"},
-)
-assert model.layers[0] is model.transformer.h[0]
-with model.trace(PROMPT):
-    out = model.layers[0].my_mlp.output.save()      # alias
-    ref = model.transformer.h[0].mlp.output.save()  # original still works
-```
-
-Aliases are honored in `tracer.cache()` keys too (`tests/test_language.py`).
+Reading, editing, gradients, `skip`, `tracer.cache` and `rename=` work as on any wrapper; see [access-and-modify.md](../usage/access-and-modify.md), [backward-and-grad.md](../usage/backward-and-grad.md), [skip.md](../usage/skip.md), [cache.md](../usage/cache.md) and [rename-modules.md](../usage/rename-modules.md).
 
 ## Dispatch behavior
 
-- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device. The Envoy tree is fully usable for writing intervention code. The config it is built from takes the same load kwargs the real load's config does — `attn_implementation`, `experts_implementation`, `dtype`, overrides of config attributes — so `model.config` says before dispatch what it will say after; placement kwargs (`device_map`, `max_memory`, ...) wait for dispatch.
+- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device and the Envoy tree is fully usable for writing intervention code. The meta config takes the same load kwargs as the real load (`attn_implementation`, `experts_implementation`, `dtype`, config overrides), so `model.config` is the same before and after dispatch; placement kwargs (`device_map`, `max_memory`, ...) wait for dispatch.
 - `dispatch=True`: real weights load during `__init__`.
 - First `trace`/`generate`/`pipe` auto-dispatches if needed (`mixins/meta.py`, `Meta.interleave`). `scan` does **not** dispatch.
 - Call `model.dispatch()` to force loading.
 
 ## Remote
 
-`TransformersModel` is remoteable. `model.to_model_key()` identifies the checkpoint (repo id + revision, canonicalized via the Hub, plus the resolved pipeline task — so each task of a checkpoint is its own remote model, and the server rebuilds the exact pipeline you traced), and `trace(..., remote=True)` runs on NDIF. The deprecated `LanguageModel` / `VisionLanguageModel` aliases share this class's remote key (`language.py`, `LanguageModel._remoteable_class`) — but each pins a task (`text-generation` / `image-text-to-text`), and the task is part of the key, so they reach a `TransformersModel` deployment only when its task matches the one they pin. See [docs/remote/](../remote/).
-
-## Gotchas
-
-- **`device_map="cpu"` loads on the GPU.** Pass `device="cpu"` for one device; `device_map=` is for spreading a model across devices. See [Choosing a device](#choosing-a-device).
-- **`generate` vs `pipe`.** `generate` returns token ids and decodes with the checkpoint's `generation_config`, which may sample — pass `do_sample=False` for a deterministic run; `pipe` returns decoded records and folds in the checkpoint's sampling `task_specific_params`.
-- **`save()` outside a trace raises.** `.save()` / `nnsight.save(...)` raises if there's no active trace.
-- **`scan` needs `dispatch=False` to be cheap** but works either way; it never loads weights.
-- **Opaque inputs can't be batched.** A multimodal encoding (with `pixel_values`) or a raw float tensor must be a lone invoke — batching several raises `NotImplementedError`.
-- **Chunked inputs can't be batched either.** A task that splits one input into several forward rows takes the whole batch; see [Chunked tasks](#chunked-tasks).
-- **`tracer.result` is preferred over `model.generator.output`** for finished ids; reading or writing the latter warns with `nnsight.NNsightDeprecationWarning`.
+`TransformersModel` is remoteable (`trace(..., remote=True)`; see [docs/remote/](../remote/)). `model.to_model_key()` is the repo id + revision, canonicalized via the Hub, plus the resolved pipeline task, so each task of a checkpoint is its own remote model and the server rebuilds the exact pipeline you traced. The deprecated aliases use this class's key with their pinned task, so they reach a deployment only when its task is `text-generation` / `image-text-to-text` respectively.
 
 ## Related
 
