@@ -42,6 +42,11 @@ def bind(envoy: Envoy) -> None:
     ``envoy`` has one, so the key need not spell the backbone's name
     (``transformer`` here, ``model`` there).
 
+    A dotted alias binds on the envoy its prefix names, which the key's path
+    must start with: ``{"attn.c_proj": "attn.o_proj", "mlp.c_proj":
+    "mlp.down_proj"}`` binds ``o_proj`` on the attention and ``down_proj`` on
+    the MLP, where GPT-2 spells both ``c_proj``.
+
     An alias names one module, so a class or ``*`` key that matches two
     from one envoy is an error, not a guess (see `named`).
 
@@ -79,26 +84,37 @@ def bind(envoy: Envoy) -> None:
             continue
         path, target = matches[0]
         for alias in [aliases] if isinstance(aliases, str) else aliases:
+            host, relative = envoy, path
+            if "." in alias:
+                prefix, _, alias = alias.rpartition(".")
+                if not path.startswith(f"{prefix}."):
+                    raise ValueError(
+                        f"`rename` alias {prefix + '.' + alias!r} for {path!r} names no "
+                        f"ancestor of it on `{envoy.path}`: a dotted alias binds on the "
+                        f"envoy its prefix names, so the prefix spells the start of the "
+                        f"key's path, without `*`."
+                    )
+                host, relative = envoy.get(prefix), path[len(prefix) + 1:]
             # Already pointing at this very envoy: nothing is displaced.
             # Covers a key aliased to its own name (``{"attn": "attn"}``,
             # which a cross-architecture dict pairs with
             # ``{"self_attn": "attn"}``) and two keys reaching one module
             # through tied weights.
-            if envoy.__dict__.get(alias) is target:
+            if host.__dict__.get(alias) is target:
                 continue
 
             # What the name would displace, in the order lookup would find
             # it. `hasattr` is right for the module and wrong for the envoy:
             # an eproperty's `__get__` raises outside interleaving, so the
             # envoy's own classes are scanned by namespace instead.
-            bound = envoy._aliases.get(alias)
+            bound = host._aliases.get(alias)
             if bound is not None:
                 displaced = f"the alias already bound here from {bound!r}"
-            elif alias in envoy.__dict__:
+            elif alias in host.__dict__:
                 displaced = "a child module or attribute of that name"
-            elif any(alias in vars(klass) for klass in type(envoy).__mro__):
-                displaced = f"the `{type(envoy).__name__}.{alias}` attribute"
-            elif hasattr(envoy._module, alias):
+            elif any(alias in vars(klass) for klass in type(host).__mro__):
+                displaced = f"the `{type(host).__name__}.{alias}` attribute"
+            elif hasattr(host._module, alias):
                 # The same test `__getattr__` gates its fallthrough on, so
                 # this is the shadowing surface exactly: every name it finds
                 # is one `envoy.<name>` answers to today.
@@ -108,15 +124,15 @@ def bind(envoy: Envoy) -> None:
 
             if displaced is not None:
                 raise ValueError(
-                    f"`rename` alias {alias!r} for {path!r} would shadow "
-                    f"{displaced} on `{envoy.path}`. Aliases are bound as plain "
+                    f"`rename` alias {alias!r} for {relative!r} would shadow "
+                    f"{displaced} on `{host.path}`. Aliases are bound as plain "
                     f"attributes, so this would make the original unreachable "
                     f"by name while leaving it in the tree. Pick a different "
                     f"alias."
                 )
 
-            object.__setattr__(envoy, alias, target)
-            envoy._aliases[alias] = path
+            object.__setattr__(host, alias, target)
+            host._aliases[alias] = relative
 
 
 def named(envoy: Envoy, key: str | type) -> list[tuple[str, Envoy]]:
@@ -162,7 +178,8 @@ def spellings(
     A spelling of a path is a spelling of its parent's path plus the last
     component, or, where a ``rename`` key names the path from an ancestor, a
     spelling of that ancestor's path plus the alias (the rule `bind`
-    binds by, so it is known before the aliases bind). Spellings so compose
+    binds by, so it is known before the aliases bind; a dotted alias adds its
+    last component to the envoy its prefix names). Spellings so compose
     through ancestors: under ``{"transformer.h": "layers", "attn": "self_attn"}``,
     ``model.transformer.h.0.attn`` is also ``model.layers.0.self_attn``. A
     class key names ``module`` by type, so it stands for the last component
@@ -177,16 +194,19 @@ def spellings(
         if isinstance(key, type):
             if not isinstance(module, key):
                 continue
-            ancestor = parent
+            size = 1
         else:
             # The key is relative to an ancestor, so it is shorter than the path.
             size = key.lstrip(".").count(".") + 1
             if size >= len(parts) or not path_ends_with(path, key):
                 continue
-            ancestor = ".".join(parts[:-size])
-        heads = spellings(rename, ancestor)
         for alias in [aliases] if isinstance(aliases, str) else aliases:
-            found += [f"{prefix}.{alias}" for prefix in heads]
+            # A dotted alias binds on the envoy its prefix names, that many
+            # components further down.
+            down = alias.count(".")
+            if down < size:
+                host = ".".join(parts[: len(parts) - size + down])
+                found += [f"{prefix}.{alias.split('.')[-1]}" for prefix in spellings(rename, host)]
     return found
 
 

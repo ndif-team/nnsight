@@ -63,6 +63,7 @@ shape:
 |------------|----------|
 | **String** (`"layers"`) | One alias. |
 | **List** (`["mdl", "backbone"]`) | Multiple aliases for the same path. |
+| **Dotted** (`"attn.o_proj"`) | Binds on the envoy the prefix names, which the key's path must start with: `{"attn.c_proj": "attn.o_proj"}` binds `o_proj` on each block's `attn`. |
 
 Verified behaviors:
 
@@ -91,7 +92,20 @@ g.layers[0] is g.transformer.h[0]                          # True
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
 g = TransformersModel("openai-community/gpt2", dispatch=True, rename={GPT2Attention: "self_attn"})
 g.transformer.h[0].self_attn is g.transformer.h[0].attn    # True
+
+# a dotted alias: binds on the attention and on the MLP, not on the block
+g = TransformersModel("openai-community/gpt2", dispatch=True,
+                      rename={"attn.c_proj": "attn.o_proj", "mlp.c_proj": "mlp.down_proj"})
+g.transformer.h[0].attn.o_proj is g.transformer.h[0].attn.c_proj    # True
+g.transformer.h[0].mlp.down_proj is g.transformer.h[0].mlp.c_proj   # True
 ```
+
+A dotted alias is for a name that means different modules under different parents.
+GPT-2 spells both the attention's output projection and the MLP's down projection
+`c_proj`, so `{"c_proj": "o_proj"}` gives the MLP an `o_proj` too, and
+`{"attn.c_proj": "o_proj"}` binds `o_proj` on the block. Keying from the block and
+spelling the parent in the alias puts each name on its own module. A prefix that is
+not the start of the key's path, or that has a `*`, raises.
 
 A class key is for a tree that keeps different modules under one native name: a
 hybrid whose every block has a `mixer` that is a state-space mixer on one block
@@ -159,8 +173,9 @@ You can also index a renamed `ModuleList` entry by its alias string:
   rather than picking one; `*` is for a component whose name varies
   (`"*.h"`), not for naming every entry. To give every entry's child a name,
   key the child (`{"attn": "self_attn"}`).
-- **A dotted key mounts on the root; a leading-dot key mounts where it resolves.**
-  Pick the form that matches where you want to reach the alias.
+- **A dotted key mounts on the root; a leading-dot key mounts where it resolves;
+  a dotted alias mounts on the envoy its prefix names.** Pick the form that
+  matches where you want to reach the alias.
 
 ## Related
 

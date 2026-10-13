@@ -753,6 +753,42 @@ class TestRename:
             via_name = gpt2.transformer.h[0].mlp.input.save()
         assert torch.equal(via_alias, via_name)
 
+    @torch.no_grad()
+    def test_dotted_alias_binds_on_its_prefix(self):
+        # GPT-2 spells the attention's output projection and the MLP's down
+        # projection both `c_proj`; a dotted alias tells them apart.
+        from nnsight.intervention.aliasing import spellings
+
+        rename = {"attn": "self_attn", "attn.c_proj": "attn.o_proj", "mlp.c_proj": "mlp.down_proj"}
+        gpt2 = TransformersModel("gpt2", task="text-generation", dispatch=True, rename=rename)
+        block = gpt2.transformer.h[0]
+        assert block.attn.o_proj is block.attn.c_proj
+        assert block.mlp.down_proj is block.mlp.c_proj
+        assert block._aliases == {"self_attn": "attn"}
+        assert block.attn._aliases == {"o_proj": "c_proj"}
+        assert block.mlp._aliases == {"down_proj": "c_proj"}
+        assert "model.transformer.h.0.self_attn.o_proj" in spellings(
+            rename, "model.transformer.h.0.attn.c_proj"
+        )
+
+        with gpt2.trace(PROMPT):
+            via_alias = block.self_attn.o_proj.output.save()
+            via_name = block.attn.c_proj.output.save()
+            clean = gpt2.output.logits.save()
+        assert torch.equal(via_alias, via_name)
+        with gpt2.trace(PROMPT):
+            block.mlp.down_proj.input[:] = 0
+            edited = gpt2.output.logits.save()
+        with gpt2.trace(PROMPT):
+            block.mlp.c_proj.input[:] = 0
+            expected = gpt2.output.logits.save()
+        assert torch.equal(edited, expected) and not torch.equal(edited, clean)
+
+    @pytest.mark.parametrize("rename", [{"*.h": "*.layers"}, {"attn.c_proj": "mlp.o_proj"}])
+    def test_dotted_alias_prefix_must_name_an_ancestor(self, rename):
+        with pytest.raises(ValueError, match="names no ancestor"):
+            TransformersModel("gpt2", task="text-generation", rename=rename)
+
 
 @pytest.fixture(scope="module")
 def gpt2_meta():
