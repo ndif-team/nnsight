@@ -2,7 +2,7 @@
 title: Symptom Index
 one_liner: Start from what you observed — including the failures that raise nothing at all — and get to the page that explains it.
 tags: [error, index, silent-failure]
-related: [docs/errors/index.md, docs/gotchas/index.md, docs/usage/save.md, docs/usage/iter-all-next.md]
+related: [docs/errors/index.md, docs/gotchas/index.md, docs/usage/save.md, docs/usage/iteration.md]
 sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py]
 ---
 
@@ -19,7 +19,7 @@ worth reading: those failures raise nothing, so nothing routes you to a page.
 | The intervention changed nothing | The write rebound a local instead of going through the property | [Writing to a name instead of the model](#writing-to-a-name-instead-of-the-model) |
 | The whole block did nothing, no output at all | `model.trace(x)` / `model.scan(x)` called without `with` | [A run method called without `with`](#a-run-method-called-without-with) |
 | Only one forward ran when you asked for several | A generation kwarg passed to `trace()` | [Generation kwargs on trace()](#generation-kwargs-on-trace) |
-| A name after the block is undefined (`UnboundLocalError`, `NameError`) | Not saved, or the block unwound before reaching it | [docs/usage/save.md](../usage/save.md), [value-was-not-provided.md](value-was-not-provided.md) |
+| A name after the block is undefined (`UnboundLocalError`, `NameError`) | Not saved, or the block unwound before reaching it | [docs/usage/save.md](../usage/save.md), [module-never-fired.md](module-never-fired.md) |
 | A saved list is empty, but only when running remotely | The elements were saved, not the container | [docs/usage/save.md](../usage/save.md) |
 | `.grad` is `None` | Read outside a `with metric.backward():` block | [.grad outside a backward block](#grad-outside-a-backward-block) |
 | Per-step writes in a loop land one step late | A `tracer.iter` body that reads a later location before an earlier one — silent unless a shifted request runs off the end of the run | [out-of-order-error.md](out-of-order-error.md) |
@@ -32,7 +32,7 @@ worth reading: those failures raise nothing, so nothing routes you to a page.
 | What you saw | Where |
 |---|---|
 | `OutOfOrderError: '<location>.i0' was requested but the model already ran past it` | [out-of-order-error.md](out-of-order-error.md) |
-| `UserWarning: '<location>.iN' was never reached: the loop asked for a step the run did not make …` | [value-was-not-provided.md](value-was-not-provided.md) |
+| `UserWarning: '<location>.iN' was never reached: the loop asked for a step the run did not make …` | [module-never-fired.md](module-never-fired.md) |
 | `ValueError: Cannot access '<location>' outside of interleaving` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
 | `ValueError: trace() needs an input, or at least one 'with tracer.invoke(...)' block` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
 | `ValueError: save() was called outside a trace. …` | [save-outside-trace.md](save-outside-trace.md) |
@@ -43,8 +43,8 @@ worth reading: those failures raise nothing, so nothing routes you to a page.
 | ``WithBlockNotFoundError: nnsight found no `with` statement at …`` / ``no source for …`` | [with-block-not-found.md](with-block-not-found.md) |
 | `SyntaxError: 'return' outside function` | [return inside a trace body](#return-inside-a-trace-body) |
 | `NotImplementedError: <Class> does not support batching multiple invokes` | [batching-not-implemented.md](batching-not-implemented.md) |
-| `AttributeError: module 'nnsight' has no attribute 'list' / 'apply' / 'session' / …` | [docs/reference/version-history.md](../reference/version-history.md) |
-| `AttributeError: 'Tensor' object has no attribute 'value'` | [docs/reference/version-history.md](../reference/version-history.md) |
+| `AttributeError: module 'nnsight' has no attribute 'list' / 'apply' / 'session' / …` | [docs/reference/migrating-to-0.8.md](../reference/migrating-to-0.8.md) |
+| `AttributeError: 'Tensor' object has no attribute 'value'` | [docs/reference/migrating-to-0.8.md](../reference/migrating-to-0.8.md) |
 
 ---
 

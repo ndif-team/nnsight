@@ -2,7 +2,7 @@
 title: Generate
 one_liner: Multi-token generation through the model; returns token ids (`tracer.result`). Decoding follows the checkpoint's `generation_config`.
 tags: [usage, tracing, generation]
-related: [docs/usage/trace.md, docs/usage/pipe.md, docs/usage/iter-all-next.md, docs/gotchas/iteration.md, docs/usage/invoke-and-batching.md]
+related: [docs/usage/trace.md, docs/usage/pipe.md, docs/usage/iteration.md, docs/gotchas/iteration.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/modeling/transformers.py, src/nnsight/intervention/tracer.py]
 ---
 
@@ -101,7 +101,7 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
         per_step.append(model.output.logits[0, -1].argmax(dim=-1))
 ```
 
-A loop must not ask for a step the run does not make: `iter[:5]` is right here because `max_new_tokens=5` and nothing ends the generation sooner. See `docs/usage/iter-all-next.md` for the forms and `docs/gotchas/iteration.md` for what happens when a loop outruns the run.
+A loop must not ask for a step the run does not make: `iter[:5]` is right here because `max_new_tokens=5` and nothing ends the generation sooner. See `docs/usage/iteration.md` for the forms and `docs/gotchas/iteration.md` for what happens when a loop outruns the run.
 
 ## Per-step tokens (streamer)
 
@@ -202,7 +202,7 @@ generation to N steps by suppressing EOS until then.
 
 - `docs/usage/trace.md`
 - `docs/usage/pipe.md`
-- `docs/usage/iter-all-next.md`
+- `docs/usage/iteration.md`
 - `docs/gotchas/iteration.md`
 - `docs/usage/invoke-and-batching.md`
 - `docs/usage/save.md`

@@ -2,7 +2,7 @@
 title: SAEs and Auxiliary Modules
 one_liner: Wire a sparse autoencoder (or any auxiliary `nn.Module`) into a model and trace through it as a first-class submodule.
 tags: [pattern, interpretability, sae, dictionaries, extending]
-related: [docs/usage/edit.md, docs/usage/access-and-modify.md, docs/usage/skip.md, docs/usage/invoke-and-batching.md, docs/concepts/envoy.md, docs/usage/extending.md]
+related: [docs/usage/edit.md, docs/usage/access-and-modify.md, docs/usage/skip.md, docs/usage/invoke-and-batching.md, docs/concepts/envoy.md, docs/developing/extending.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, tests/test_editing.py, tests/test_language.py]
 ---
 
@@ -240,7 +240,7 @@ The canonical, tested `eproperty` derived-view example is the per-head attention
 accessor in `tests/test_language.py` (`Heads` / `TestCustomEnvoys`) and
 `docs/patterns/per-head-attention.md`, where the reshape round-trips so its
 `.transform` cleanly writes head edits back. See `docs/concepts/envoy.md` and
-`docs/usage/extending.md` for the full `eproperty` surface (`preprocess` /
+`docs/developing/extending.md` for the full `eproperty` surface (`preprocess` /
 `postprocess` / `transform` / `provide`) and the `envoys=` wiring.
 
 ## Interpretation tips
@@ -381,7 +381,7 @@ an adapter. If you want to read it, route it through a module.
 - `docs/usage/access-and-modify.md` — `hook=True` and the `__call__` vs `forward` dispatch.
 - `docs/usage/skip.md` — replacing a module's output.
 - `docs/concepts/envoy.md` — the extension surface (`eproperty`, subclassing, attaching modules).
-- `docs/usage/extending.md` — custom served values and the `envoys=` wiring.
+- `docs/developing/extending.md` — custom served values and the `envoys=` wiring.
 - `docs/patterns/per-head-attention.md` — the tested `eproperty` derived-view example.
 - `tests/test_editing.py` — `TestEditingWithAttachment` worked adapter/SAE examples.
 - `tests/test_language.py` — `Heads` / `TestCustomEnvoys`, the `envoys=` + `eproperty` matrix.

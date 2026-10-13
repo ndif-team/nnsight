@@ -2,7 +2,7 @@
 title: Pipe
 one_liner: Run the whole task pipeline under a trace; returns its records (decoded text, labels, ...).
 tags: [usage, tracing, pipeline]
-related: [docs/usage/generate.md, docs/usage/trace.md, docs/usage/iter-all-next.md]
+related: [docs/usage/generate.md, docs/usage/trace.md, docs/usage/iteration.md]
 sources: [src/nnsight/modeling/transformers.py]
 ---
 
@@ -79,7 +79,7 @@ with model.pipe("The Eiffel Tower is in the city of", max_new_tokens=5, do_sampl
 ```
 
 The same rule applies: the loop must not ask for a step the pipeline does not
-run — see [iter-all-next.md](iter-all-next.md).
+run — see [iteration.md](iteration.md).
 
 ```python
 with model.pipe("The Eiffel Tower is in the city of", max_new_tokens=5, do_sample=False) as tracer:
@@ -139,5 +139,5 @@ records = model.pipe("Hello", max_new_tokens=3, do_sample=False)
 
 - `docs/usage/generate.md`
 - `docs/usage/trace.md`
-- `docs/usage/iter-all-next.md`
+- `docs/usage/iteration.md`
 - `docs/usage/save.md`

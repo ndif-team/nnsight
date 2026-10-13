@@ -2,7 +2,7 @@
 title: Steering with Added Vectors
 one_liner: Add a precomputed direction to the residual stream at a specific layer to push the model's behavior in a target direction.
 tags: [pattern, interpretability, steering, residual-stream]
-related: [docs/usage/access-and-modify.md, docs/usage/generate.md, docs/usage/iter-all-next.md, docs/patterns/ablation.md]
+related: [docs/usage/access-and-modify.md, docs/usage/generate.md, docs/usage/iteration.md, docs/patterns/ablation.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/tracer.py]
 ---
 
@@ -177,7 +177,7 @@ print(model.tokenizer.decode(ids[0]))
 
 Bounded, not `tracer.all()`: an open-ended loop unwinds every line after it, so
 `tracer.result.save()` would never run (see
-[iter-all-next.md](../usage/iter-all-next.md)).
+[iteration.md](../usage/iteration.md)).
 
 `min_new_tokens` matches the bound to what the run will actually do. Steering
 changes when the model emits an end-of-text token, and a bounded loop the run
@@ -221,7 +221,7 @@ steering a fixed prompt position rather than the running token, apply it outside
 the loop — or index from the end.
 
 For step-conditional steering (e.g. only the first 5 tokens), slice the range:
-`tracer.iter[:5]`. See [iter-all-next.md](../usage/iter-all-next.md).
+`tracer.iter[:5]`. See [iteration.md](../usage/iteration.md).
 
 ### Refusal direction
 
@@ -263,7 +263,7 @@ it out) to suppress refusal. Same pattern with `coef < 0` or projection
 - [ablation](ablation.md)
 - [multi-prompt-comparison](multi-prompt-comparison.md)
 - `docs/usage/generate.md` — generate returns token ids via `tracer.result`.
-- `docs/usage/iter-all-next.md` — step-conditional steering during generation.
+- `docs/usage/iteration.md` — step-conditional steering during generation.
 - Turner et al. (2023), "Activation Addition".
 - Arditi et al. (2024), "Refusal in Language Models Is Mediated by a Single
   Direction".

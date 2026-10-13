@@ -44,7 +44,7 @@ model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 ## Generation control
 
-- [iter-all-next](iter-all-next.md) — `tracer.iter[slice|int|list]`, `tracer.all()`: per-step targeting and blanket recursion over a repeated run.
+- [iteration](iteration.md) — `tracer.iter[slice|int|list]`, `tracer.all()`: per-step targeting and blanket recursion over a repeated run.
 - [stop-and-early-exit](stop-and-early-exit.md) — `tracer.stop()` to abort the forward pass early.
 - [skip](skip.md) — `module.skip(replacement)`: bypass a module's compute entirely.
 
@@ -58,4 +58,4 @@ model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 ## Extending nnsight
 
-- [extending](extending.md) — Custom `Envoy` subclasses, attaching modules to the tree, and integration patterns for new runtimes.
+- [extending](../developing/extending.md) — Custom `Envoy` subclasses, attaching modules to the tree, and integration patterns for new runtimes.

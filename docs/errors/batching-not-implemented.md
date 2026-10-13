@@ -2,7 +2,7 @@
 title: Model Does Not Support Batching Multiple Invokes
 one_liner: "NotImplementedError: <ModelClass> does not support batching multiple invokes — two or more input invokes on a model whose _batch() isn't implemented."
 tags: [error, batching, setup]
-related: [docs/usage/invoke-and-batching.md, docs/concepts/batching-and-invokers.md, docs/usage/extending.md]
+related: [docs/usage/invoke-and-batching.md, docs/concepts/batching-and-invokers.md, docs/developing/extending.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/batching.py, src/nnsight/modeling/transformers.py, src/nnsight/modeling/processing.py]
 ---
 
@@ -73,11 +73,11 @@ with model.trace() as tracer:
 `TransformersModel` overrides `_batch_size` (counts rows) and `_batch` (pads and
 concatenates), so HuggingFace models batch out of the box — reach for it rather
 than `NNsight(hf_model)`. For a non-HF model, implement the same two methods on
-your subclass: see [docs/usage/extending.md](../usage/extending.md), which carries
+your subclass: see [docs/developing/extending.md](../developing/extending.md), which carries
 the recipe and a worked example.
 
 ## Related
 
 - [docs/usage/invoke-and-batching.md](../usage/invoke-and-batching.md)
 - [docs/concepts/batching-and-invokers.md](../concepts/batching-and-invokers.md)
-- [docs/usage/extending.md](../usage/extending.md)
+- [docs/developing/extending.md](../developing/extending.md)

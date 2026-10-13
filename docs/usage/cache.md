@@ -2,7 +2,7 @@
 title: Activation Cache
 one_liner: tracer.cache() records module outputs (and optionally inputs) into a path- and attribute-addressable view.
 tags: [usage, cache, intervention]
-related: [docs/usage/access-and-modify.md, docs/usage/iter-all-next.md, docs/usage/save.md, docs/usage/invoke-and-batching.md]
+related: [docs/usage/access-and-modify.md, docs/usage/iteration.md, docs/usage/save.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/intervention/cache.py, src/nnsight/intervention/tracer.py]
 ---
 
@@ -336,7 +336,7 @@ Returns a `CacheView` (already saved, so it survives past the trace).
 ## Related
 
 - [access-and-modify.md](access-and-modify.md) — one-off `.output` / `.input`.
-- [iter-all-next.md](iter-all-next.md) — generation-step iteration.
+- [iteration.md](iteration.md) — generation-step iteration.
 - [rename-modules.md](rename-modules.md) — alias-aware cache keys.
 - [invoke-and-batching.md](invoke-and-batching.md) — rows, padding, and what an
   invoke's slice of the batch contains.

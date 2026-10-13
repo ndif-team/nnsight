@@ -2,7 +2,7 @@
 title: A Module Value Was Never Provided
 one_liner: "At the end of a run a worker was still parked on a location the model never reached — the module didn't fire (OutOfOrderError), or a loop asked for more steps than the run made (a warning and a cut-short loop)."
 tags: [error, execution-order, dangling-worker]
-related: [docs/errors/out-of-order-error.md, docs/errors/cannot-access-outside-interleaving.md, docs/usage/iter-all-next.md, docs/usage/scan.md, docs/concepts/threading-and-mediators.md]
+related: [docs/errors/out-of-order-error.md, docs/errors/cannot-access-outside-interleaving.md, docs/usage/iteration.md, docs/usage/scan.md, docs/concepts/threading-and-mediators.md]
 sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/iterator.py]
 ---
 
@@ -161,5 +161,5 @@ with model.trace("Hi"):
 
 - [out-of-order-error.md](out-of-order-error.md) — the eager "asked in the wrong order" flavor of the same class.
 - [docs/usage/scan.md](../usage/scan.md) — verify a module fires.
-- [docs/usage/iter-all-next.md](../usage/iter-all-next.md) — bounded vs open iteration.
+- [docs/usage/iteration.md](../usage/iteration.md) — bounded vs open iteration.
 - [docs/usage/source.md](../usage/source.md) — read inside-the-forward execution order.

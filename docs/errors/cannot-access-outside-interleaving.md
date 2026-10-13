@@ -2,7 +2,7 @@
 title: Cannot Access Outside of Interleaving
 one_liner: "ValueError: Cannot access `<location>` outside of interleaving — an Envoy value was read or set with no trace running; plus: trace() needs an input or an invoke."
 tags: [error, setup, interleaving]
-related: [docs/errors/save-outside-trace.md, docs/errors/value-was-not-provided.md, docs/usage/trace.md, docs/usage/save.md, docs/concepts/envoy.md]
+related: [docs/errors/save-outside-trace.md, docs/errors/module-never-fired.md, docs/usage/trace.md, docs/usage/save.md, docs/concepts/envoy.md]
 sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/envoy.py]
 ---
 
@@ -103,6 +103,6 @@ with model.trace() as tracer:
 ## Related
 
 - [save-outside-trace.md](save-outside-trace.md) — `save()` has its own outside-a-trace guard.
-- [value-was-not-provided.md](value-was-not-provided.md) — the model *did* run but the requested module wasn't reached.
+- [module-never-fired.md](module-never-fired.md) — the model *did* run but the requested module wasn't reached.
 - [docs/usage/save.md](../usage/save.md), [docs/usage/trace.md](../usage/trace.md).
 - [docs/concepts/envoy.md](../concepts/envoy.md) — how `.output` / `.input` resolve.

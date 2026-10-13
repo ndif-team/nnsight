@@ -2,7 +2,7 @@
 title: Iteration Pitfalls (iter, all)
 one_liner: Multi-step generation footguns — a loop that outruns the run, an open loop that never returns, and writes that land one step late.
 tags: [gotcha, generate, iter, all]
-related: [docs/usage/iter-all-next.md, docs/usage/generate.md]
+related: [docs/usage/iteration.md, docs/usage/generate.md]
 sources: [src/nnsight/intervention/iterator.py, src/nnsight/intervention/interleaver.py]
 ---
 
@@ -442,6 +442,6 @@ with model.generate("Hello", max_new_tokens=2) as tracer:
 ---
 
 ## Related
-- [docs/usage/iter-all-next.md](../usage/iter-all-next.md) — full `tracer.iter[...]` / `.all()` reference.
+- [docs/usage/iteration.md](../usage/iteration.md) — full `tracer.iter[...]` / `.all()` reference.
 - [docs/usage/generate.md](../usage/generate.md) — multi-token generation.
 - [docs/gotchas/order-and-deadlocks.md](order-and-deadlocks.md) — module access order rules within a step.

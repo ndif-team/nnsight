@@ -93,7 +93,7 @@ with model.trace() as tracer:
 
 Row scoping (narrow/widen) is handled by the `Batcher` — you only say how many rows
 each input is and how to concatenate them. See
-[invoke-and-batching.md](invoke-and-batching.md).
+[invoke-and-batching.md](../usage/invoke-and-batching.md).
 
 ## 2. Adding methods and attributes
 
@@ -352,7 +352,7 @@ with model.trace(prompt):
 
 ## Related
 
-- [access-and-modify.md](access-and-modify.md) — the built-in `.output` / `.input`.
-- [invoke-and-batching.md](invoke-and-batching.md) — how `_batch_size` / `_batch`
+- [access-and-modify.md](../usage/access-and-modify.md) — the built-in `.output` / `.input`.
+- [invoke-and-batching.md](../usage/invoke-and-batching.md) — how `_batch_size` / `_batch`
   feed batching.
-- [rename-modules.md](rename-modules.md) — aliasing module paths.
+- [rename-modules.md](../usage/rename-modules.md) — aliasing module paths.

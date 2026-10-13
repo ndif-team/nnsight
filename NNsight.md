@@ -21,7 +21,7 @@ it says so.
 
 This is 0.8 — the pipeline rewrite. If you knew an older nnsight, see
 [What changed in 0.8](#what-changed-in-08) and
-[docs/reference/version-history.md](docs/reference/version-history.md).
+[docs/reference/migrating-to-0.8.md](docs/reference/migrating-to-0.8.md).
 
 ---
 
@@ -122,7 +122,7 @@ Everything downstream follows from a few commitments:
 
 0.8 is a ground-up rewrite around a compile-and-interleave pipeline. The
 old→new delta, for readers of an earlier nnsight, is
-[docs/reference/version-history.md](docs/reference/version-history.md); the rest of
+[docs/reference/migrating-to-0.8.md](docs/reference/migrating-to-0.8.md); the rest of
 this document describes 0.8 as it is.
 
 ---
@@ -1190,7 +1190,7 @@ with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
     ids = tracer.result.save()                       # runs, because the loop was bounded
 ```
 
-`max_new_tokens` is a cap, not a guarantee — if the model stops early (EOS), the steps that didn't happen warn but the reached steps' saved values are kept. Negative indices raise `ValueError` (there is no "last step" shorthand), and there is **no `tracer.next()`** — the old manual-stepping API is gone. The `with tracer.iter[...]:` block form still works but is deprecated in favor of the `for` loop. (`docs/usage/iter-all-next.md`.)
+`max_new_tokens` is a cap, not a guarantee — if the model stops early (EOS), the steps that didn't happen warn but the reached steps' saved values are kept. Negative indices raise `ValueError` (there is no "last step" shorthand), and there is **no `tracer.next()`** — the old manual-stepping API is gone. The `with tracer.iter[...]:` block form still works but is deprecated in favor of the `for` loop. (`docs/usage/iteration.md`.)
 
 ### 6.4 Editing a model
 
@@ -1573,7 +1573,7 @@ The `.i<n>` suffix on the location is the occurrence tag — which visit of that
 location the request targets; `.i0` outside iteration, counting up per step
 inside a generation loop. Import it from `nnsight.intervention.interleaver` to
 catch it. (`docs/errors/out-of-order-error.md`,
-`docs/errors/value-was-not-provided.md`.)
+`docs/errors/module-never-fired.md`.)
 
 **`Cannot access '<location>' outside of interleaving`** (a `ValueError`).
 Reading or writing an Envoy value — `.output`, `.input`, `.inputs`, `.source` —
@@ -1910,7 +1910,7 @@ stacked on top (see [The mixin architecture](#71-the-mixin-architecture)), and
 every value you can read or write is an `eproperty` over one location string
 (see [eproperties: how values are hooked](#52-eproperties-how-values-are-hooked)).
 Extending nnsight means adding to one of those three layers. The recipe-style
-reference for all of this is `docs/usage/extending.md`; the developer deep-dives
+reference for all of this is `docs/developing/extending.md`; the developer deep-dives
 are `docs/developing/extending-envoy.md`, `docs/developing/adding-a-new-runtime.md`,
 and `docs/developing/adding-a-new-backend.md`.
 

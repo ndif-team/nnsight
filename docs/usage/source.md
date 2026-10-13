@@ -379,4 +379,4 @@ version of a model exposes, and whether a wrapper dispatches elsewhere.
 
 - [access-and-modify.md](access-and-modify.md) — module-level `.output` / `.input`.
 - [skip.md](skip.md) — `.skip()` at the module and operation level.
-- [iter-all-next.md](iter-all-next.md) — iteration semantics.
+- [iteration.md](iteration.md) — iteration semantics.

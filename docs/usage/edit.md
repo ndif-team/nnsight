@@ -193,4 +193,4 @@ with edited.trace("The Eiffel Tower is in", remote="local"):
 - `docs/usage/access-and-modify.md`
 - `docs/usage/skip.md`
 - `docs/usage/save.md`
-- `docs/usage/iter-all-next.md` — re-applying an edit at every generation step
+- `docs/usage/iteration.md` — re-applying an edit at every generation step

@@ -32,7 +32,7 @@ The worker/model event protocol is `VALUE` / `SWAP` / `SKIP` / `BARRIER` (the `E
 
 ### `eproperty` reintroduced
 
-The `eproperty` descriptor is back, with a new API. Decorate a stub with `@eproperty` (or `@eproperty(key=..., description=...)`) to define a hookable value; the stub is the *preprocess* mapping the served value to what the user reads, refined by `.postprocess` (a written value before the swap), `.transform` (write an edited preprocess view back to the model's layout), and `.provide` (serve the value from the model side via `interleaver.handle`). A `description=` surfaces the value in the Envoy repr tree. `Envoy.input` / `.inputs` / `.output`, `tracer.result`, and `VLLM.logits` / `.samples` are all built on it; add your own on a model subclass. See [extending.md](../usage/extending.md).
+The `eproperty` descriptor is back, with a new API. Decorate a stub with `@eproperty` (or `@eproperty(key=..., description=...)`) to define a hookable value; the stub is the *preprocess* mapping the served value to what the user reads, refined by `.postprocess` (a written value before the swap), `.transform` (write an edited preprocess view back to the model's layout), and `.provide` (serve the value from the model side via `interleaver.handle`). A `description=` surfaces the value in the Envoy repr tree. `Envoy.input` / `.inputs` / `.output`, `tracer.result`, and `VLLM.logits` / `.samples` are all built on it; add your own on a model subclass. See [extending.md](../developing/extending.md).
 
 ### `save` is guarded
 

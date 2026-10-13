@@ -141,7 +141,7 @@ with model.trace("The Eiffel Tower is in"):
 By default every child envoy is the base `Envoy`, but a model can pass `envoys=` —
 a map from a module type or dotted path suffix to a custom `Envoy` subclass — so a
 chosen module gets a subclass that exposes a custom `eproperty` (e.g. a per-head
-`.heads` view; see [extending.md](../usage/extending.md) and
+`.heads` view; see [extending.md](../developing/extending.md) and
 [per-head-attention.md](../patterns/per-head-attention.md)). A path suffix matches
 the native path or any spelling of it under the `rename=` aliases, composed through
 ancestors (`"layers.0.self_attn"` under `rename={"transformer.h": "layers", "attn":

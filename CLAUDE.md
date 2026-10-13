@@ -25,7 +25,7 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 ### "I want multi-token / autoregressive generation"
 - [docs/usage/generate.md](docs/usage/generate.md) — `model.generate(input, max_new_tokens=N)` → **token ids** on `tracer.result`
 - [docs/usage/pipe.md](docs/usage/pipe.md) — `model.pipe(input)` → the task pipeline's **records** (decoded text, labels)
-- [docs/usage/iter-all-next.md](docs/usage/iter-all-next.md) — `for _ in tracer.iter[...]:`, `tracer.all()`
+- [docs/usage/iteration.md](docs/usage/iteration.md) — `for _ in tracer.iter[...]:`, `tracer.all()`
 
 ### "I want to run multiple prompts at once"
 - [docs/usage/invoke-and-batching.md](docs/usage/invoke-and-batching.md) — `tracer.invoke(...)`, batched lists, empty invokes
@@ -77,7 +77,7 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 - Most-asked-for: [logit-lens](docs/patterns/logit-lens.md), [activation-patching](docs/patterns/activation-patching.md), [ablation](docs/patterns/ablation.md), [steering](docs/patterns/steering.md), [attention-patterns](docs/patterns/attention-patterns.md), [probing](docs/patterns/probing.md), [sae-and-auxiliary-modules](docs/patterns/sae-and-auxiliary-modules.md), [per-head-attention](docs/patterns/per-head-attention.md)
 
 ### "I'm extending nnsight (custom model / runtime / value)"
-- [docs/usage/extending.md](docs/usage/extending.md) — subclass `NNsight`/`Envoy`, `_batch_size`/`_batch`, attach modules
+- [docs/developing/extending.md](docs/developing/extending.md) — subclass `NNsight`/`Envoy`, `_batch_size`/`_batch`, attach modules
 - [docs/concepts/envoy.md](docs/concepts/envoy.md) — mental model; `eproperty` is the descriptor behind served values (`.output`/`.input`/custom)
 - [docs/developing/extending-envoy.md](docs/developing/extending-envoy.md) — custom served values via `interleaver.handle` + a property
 
@@ -123,7 +123,7 @@ Read at least the first two if the user is asking "why is my code blocking / out
 - [docs/reference/config.md](docs/reference/config.md) — every `CONFIG.*` setting
 - [docs/reference/glossary.md](docs/reference/glossary.md) — Mediator, Invoker, Tracer, Envoy, Interleaver, Batcher, greenlet, source, ...
 - [docs/reference/external-resources.md](docs/reference/external-resources.md) — nnsight.net, NDIF, Discord, paper
-- [docs/reference/version-history.md](docs/reference/version-history.md) — the pipeline rewrite, old→new deltas
+- [docs/reference/migrating-to-0.8.md](docs/reference/migrating-to-0.8.md) — the pipeline rewrite, old→new deltas
 
 ---
 

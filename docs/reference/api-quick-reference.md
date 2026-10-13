@@ -92,7 +92,7 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `envoy.source.<op>_<n>` | e.g. `.source.relu_0` | A `SourceEnvoy` for the n-th call of `<op>` in the forward; same `.input`/`.output`/`.skip`/`.source` interface. `print(envoy.source)` lists them. |
 | `envoy.source.<name>_<n>` | e.g. `.source.h_0` | A `SourceEnvoy` for the n-th assignment to `<name>` in the forward; `.output` is the assigned value (read or replace it). One counter per name, shared with calls: `f = pick(); f(x)` is `f_0` then `f_1`. Fires once per loop iteration for an assignment inside a loop. |
 
-Deprecated aliases (warn under `NNsightDeprecationWarning`; use the `tracer.*` forms): `model.iter`, `model.all()`. The full inventory of deprecated names is in [version-history.md](./version-history.md).
+Deprecated aliases (warn under `NNsightDeprecationWarning`; use the `tracer.*` forms): `model.iter`, `model.all()`. The full inventory of deprecated names is in [migrating-to-0.8.md](./migrating-to-0.8.md).
 
 ## Model-specific handles
 

@@ -2,7 +2,7 @@
 title: OutOfOrderError
 one_liner: "OutOfOrderError: '<location>' was requested but the model already ran past it — a module value was asked for out of forward-pass order within one block."
 tags: [error, execution-order, interleaving]
-related: [docs/errors/value-was-not-provided.md, docs/errors/cannot-access-outside-interleaving.md, docs/concepts/threading-and-mediators.md, docs/usage/invoke-and-batching.md]
+related: [docs/errors/module-never-fired.md, docs/errors/cannot-access-outside-interleaving.md, docs/concepts/threading-and-mediators.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/intervention/interleaver.py]
 ---
 
@@ -185,7 +185,7 @@ one of these shapes runs clean.
 
 A loop whose body is in order but whose *bound* exceeds the run is cut short
 with the same warning; that case is
-[value-was-not-provided.md](value-was-not-provided.md).
+[module-never-fired.md](module-never-fired.md).
 
 ## Another cause: something replaced the module's forward
 
@@ -218,6 +218,6 @@ for envoy in [model, *model.modules()]:
 
 ## Related
 
-- [value-was-not-provided.md](value-was-not-provided.md) — same class, the "module never fired / loop outran the run" flavor.
+- [module-never-fired.md](module-never-fired.md) — same class, the "module never fired / loop outran the run" flavor.
 - [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) — accessing a value with no trace running at all.
 - [docs/concepts/threading-and-mediators.md](../concepts/threading-and-mediators.md) — how greenlet workers park and resume.

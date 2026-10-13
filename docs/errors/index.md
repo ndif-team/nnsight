@@ -26,8 +26,8 @@ the wrong order. There is one class for both: `OutOfOrderError`
 | Exception | Message | Doc |
 |---|---|---|
 | `OutOfOrderError` | ``'<location>.i0' was requested but the model already ran past it`` | [out-of-order-error.md](out-of-order-error.md) |
-| `OutOfOrderError` (dangling worker) | ``'<location>.i0' was requested but the model already ran past it`` — raised at the end of the run for a worker still waiting on a location that never fired | [value-was-not-provided.md](value-was-not-provided.md) |
-| `UserWarning` (not an exception) | ``'<location>' was never reached: the loop asked for a step the run did not make, so it was cut short — values saved inside the loop are kept, and the statements after it did not run. …`` — an `iter` loop, bounded or open, that outran the model | [value-was-not-provided.md](value-was-not-provided.md) |
+| `OutOfOrderError` (dangling worker) | ``'<location>.i0' was requested but the model already ran past it`` — raised at the end of the run for a worker still waiting on a location that never fired | [module-never-fired.md](module-never-fired.md) |
+| `UserWarning` (not an exception) | ``'<location>' was never reached: the loop asked for a step the run did not make, so it was cut short — values saved inside the loop are kept, and the statements after it did not run. …`` — an `iter` loop, bounded or open, that outran the model | [module-never-fired.md](module-never-fired.md) |
 
 
 ## Setup / context errors

@@ -24,7 +24,7 @@ real tensor.
 
 - Use `if`/`for` freely on activation values.
 - Don't use `for` to loop over generation steps — use `tracer.iter[...]`
-  ([iter-all-next.md](iter-all-next.md)).
+  ([iteration.md](iteration.md)).
 - Don't use `for` to access modules out of order within one invoke — modules must be
   accessed in forward-pass order. Use multiple invokes
   ([invoke-and-batching.md](invoke-and-batching.md)).
@@ -144,7 +144,7 @@ several traces share one scope. For remote workloads use
 - **`if`/`for` are real Python** — they decide over current activation values; they
   do not create per-step branches in the model's forward.
 - **`for step in tracer.iter[:]:` is different** — that loops over generation steps,
-  not Python iterations ([iter-all-next.md](iter-all-next.md)).
+  not Python iterations ([iteration.md](iteration.md)).
 - **Python loops cannot reorder module access** — iteration order must match the
   forward pass, or `OutOfOrderError`.
 - **Inside a `model.session()` body but outside an inner trace you're in plain
@@ -160,4 +160,4 @@ several traces share one scope. For remote workloads use
 - [trace.md](trace.md)
 - [session.md](session.md)
 - [access-and-modify.md](access-and-modify.md)
-- [iter-all-next.md](iter-all-next.md)
+- [iteration.md](iteration.md)

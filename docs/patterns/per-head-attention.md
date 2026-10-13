@@ -2,7 +2,7 @@
 title: Per-Head Attention
 one_liner: Read and modify individual attention heads by reshaping the attention output, by reading the already-per-head tensor from `.source`, or by exposing a first-class `.heads` accessor with an `eproperty`.
 tags: [pattern, interpretability, attention, heads]
-related: [docs/patterns/attention-patterns.md, docs/usage/source.md, docs/patterns/ablation.md, docs/concepts/envoy.md, docs/usage/extending.md]
+related: [docs/patterns/attention-patterns.md, docs/usage/source.md, docs/patterns/ablation.md, docs/concepts/envoy.md, docs/developing/extending.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, src/nnsight/intervention/source.py, tests/test_source.py, tests/test_language.py]
 ---
 
@@ -268,7 +268,7 @@ class Heads(Envoy):
         return value.transpose(1, 2).reshape(b, s, nh * hd)
 ```
 
-See `docs/concepts/envoy.md` and `docs/usage/extending.md` for the full `eproperty`
+See `docs/concepts/envoy.md` and `docs/developing/extending.md` for the full `eproperty`
 surface (`preprocess` / `postprocess` / `transform` / `provide`) and the `envoys=`
 wiring. `tests/test_language.py` (`TestCustomEnvoys`) is the worked, tested example.
 
@@ -337,4 +337,4 @@ gradient and sum over `head_dim` for a `[layer, head]` map. See
 - [attribution-patching](attribution-patching.md) — per-head attribution maps.
 - `docs/usage/source.md` — how `.source` exposes intermediate ops.
 - `docs/concepts/envoy.md` — the extension surface (`eproperty`, subclassing `Envoy`).
-- `docs/usage/extending.md` — custom served values and the `envoys=` wiring.
+- `docs/developing/extending.md` — custom served values and the `envoys=` wiring.

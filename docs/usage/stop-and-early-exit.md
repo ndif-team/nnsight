@@ -2,7 +2,7 @@
 title: Stop and Early Exit
 one_liner: Cut a forward pass short with `tracer.stop()`; raises EarlyStopException, swallowed by the interleaver.
 tags: [usage, control-flow, early-stop]
-related: [docs/usage/trace.md, docs/usage/iter-all-next.md, docs/usage/skip.md]
+related: [docs/usage/trace.md, docs/usage/iteration.md, docs/usage/skip.md]
 sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py]
 ---
 
@@ -103,7 +103,7 @@ with model.generate(max_new_tokens=8, do_sample=False) as tracer:
 
 The second invoke's loop was cut short by the first invoke's stop rather than by
 a bound of its own, so it warns that it asked for a step the run did not make,
-like any loop the run outruns ([iter-all-next.md](iter-all-next.md)). If the
+like any loop the run outruns ([iteration.md](iteration.md)). If the
 invokes need to stop independently, run them as separate traces.
 
 ## The run's result is gone after a stop
@@ -176,6 +176,6 @@ with model.trace("Hello world") as tracer:
 ## Related
 
 - [trace.md](trace.md)
-- [iter-all-next.md](iter-all-next.md)
+- [iteration.md](iteration.md)
 - [skip.md](skip.md)
 - [save.md](save.md)
