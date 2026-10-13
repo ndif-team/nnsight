@@ -475,14 +475,18 @@ def gather(model: Any, value: Any, dim: int = -1) -> Any:
     forward did, so you say:
 
     ```python
+    from nnsight.modeling.tp import gather
+
     with model.trace(prompt):
         q = layer.self_attn.source.query_states_0.output   # (1, heads/N, seq, dim)
-        whole = tp.gather(model, q, dim=1)                 # (1, heads, seq, dim)
+        whole = gather(model, q, dim=1)                    # (1, heads, seq, dim)
     ```
 
     A collective, so **every rank must reach it**: call it unconditionally, never
     inside a branch that could go differently on different ranks. Returns the
-    value unchanged on an unsharded model, so the same block runs either way.
+    value unchanged on an unsharded model, so the same block runs either way —
+    which also means a one-GPU run never checks ``dim``: a wrong axis only
+    shows itself at ``tp_size > 1``.
     """
     from torch.distributed.tensor import Shard
 
@@ -504,11 +508,15 @@ def shard(model: Any, value: Any, dim: int = -1) -> Any:
     left there is as wrong as a piece read out.
 
     ```python
+    from nnsight.modeling.tp import gather, shard
+
     with model.trace(prompt):
         q = layer.self_attn.source.query_states_0.output
-        whole = tp.gather(model, q, dim=1)
-        whole[:, 3] = 0                                    # ablate head 3
-        layer.self_attn.source.query_states_0.output = tp.shard(model, whole, dim=1)
+        whole = gather(model, q, dim=1).clone()            # clone before editing:
+        whole[:, 3] = 0                                    # a gathered value is a
+        layer.self_attn.source.query_states_0.output = (   # collective's output,
+            shard(model, whole, dim=1)                     # in-place writes raise
+        )
     ```
 
     Same rule: a collective, so every rank must reach it.

@@ -5,10 +5,11 @@ Not a test module (no ``test_`` prefix, so pytest does not collect it):
 reference and once across N ranks, then compares.
 
 Expert parallelism is a different axis from tensor parallelism. It is asked for
-with ``enable_expert_parallel=True``, and transformers answers by applying the
-model's *expert* plan — ``base_model_ep_plan``, which distributes whole experts
-across ranks — instead of its tensor-parallel one. ``model.tp_plan`` resolves to
-whichever is in force, which is the only thing nnsight has to read.
+with ``ep_size=N`` (``enable_expert_parallel=True`` before 5.19), and
+transformers answers by applying the model's *expert* plan —
+``base_model_ep_plan``, which distributes whole experts across ranks — instead
+of its tensor-parallel one. ``model.tp_plan`` resolves to whichever is in
+force, which is the only thing nnsight has to read.
 
 Every rank runs the identical block, so nothing here may branch on rank.
 """
@@ -39,11 +40,20 @@ def build(world: int, repo: str, mode: str):
 
     kwargs = {}
     if world > 1:
+        import dataclasses
+
         from transformers.distributed import DistributedConfig
 
-        kwargs["distributed_config"] = DistributedConfig(
-            tp_size=world, enable_expert_parallel=(mode == "ep")
-        )
+        ep_kwargs = {}
+        if mode == "ep":
+            # 5.19 asks for expert parallelism with ep_size and deprecates
+            # enable_expert_parallel (removal slated for 5.20); 5.16-5.18 have
+            # only the flag.
+            has_ep_size = any(
+                field.name == "ep_size" for field in dataclasses.fields(DistributedConfig)
+            )
+            ep_kwargs = {"ep_size": world} if has_ep_size else {"enable_expert_parallel": True}
+        kwargs["distributed_config"] = DistributedConfig(tp_size=world, **ep_kwargs)
     else:
         kwargs["device_map"] = {"": "cpu"}
 

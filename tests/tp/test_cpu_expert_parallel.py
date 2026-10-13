@@ -3,7 +3,7 @@
 `test_cpu_gloo.py` covers tensor parallelism, where a module's activation is one
 rank's slice along a tensor axis. Expert parallelism splits a different thing —
 whole experts across ranks — and transformers expresses it with a separate plan
-(``base_model_ep_plan``) applied when ``enable_expert_parallel=True``. The styles
+(``base_model_ep_plan``) applied when expert parallelism is requested. The styles
 in it are not variations on colwise/rowwise:
 
 * ``ep_router`` leaves the router replicated and masks non-local experts in its
