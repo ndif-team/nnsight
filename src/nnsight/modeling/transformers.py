@@ -48,6 +48,7 @@ invoke is refused rather than served the wrong rows.
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -442,12 +443,15 @@ class TransformersModel(HuggingFaceModel):
         # dropped. `quantization_config` is held back: from_pretrained takes it
         # before the config does and merges it with a pre-quantized checkpoint's
         # own, so letting the config claim it would overwrite that on meta.
-        config, _ = AutoConfig.from_pretrained(
-            repo_id,
-            revision=self.revision,
-            return_unused_kwargs=True,
-            **{k: v for k, v in kwargs.items() if k != "quantization_config"},
-        )
+        # A user `config=` replaces the checkpoint's; copied, since from_config writes to it.
+        config = copy.deepcopy(kwargs.pop("config", None))
+        if config is None:
+            config, _ = AutoConfig.from_pretrained(
+                repo_id,
+                revision=self.revision,
+                return_unused_kwargs=True,
+                **{k: v for k, v in kwargs.items() if k != "quantization_config"},
+            )
 
         error = None
         for auto in targeted["pt"]:
@@ -497,6 +501,18 @@ class TransformersModel(HuggingFaceModel):
         kwargs = resolve_load_kwargs(kwargs)
 
         top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
+        if "config" in top_level:
+            # pipeline() reads `config` only to pick the class, never passing it
+            # to from_pretrained, so load the model with it here and wrap it.
+            from transformers.pipelines import check_task, get_task
+
+            self.task = self.task or get_task(repo_id)
+            for name in ("config", "dtype", "torch_dtype", "device_map", "trust_remote_code", "token"):
+                if name in top_level:
+                    model_kwargs[name] = top_level[name]
+            auto = check_task(self.task)[1]["pt"][0]
+            module = auto.from_pretrained(repo_id, revision=self.revision, **model_kwargs)
+            return self._wrap(module, **top_level)
         # The pipeline loads the model and infers every preprocessor; only
         # forward the ones the user explicitly supplied.
         provided = {
