@@ -1,6 +1,6 @@
 ---
 title: Contributing
-one_liner: House style, branch/commit conventions, and the pre-PR routine for this repo.
+one_liner: House style, branch/commit conventions, the pre-PR test routine, and the docs standard for this repo.
 tags: [internals, dev]
 related: [docs/developing/testing.md, docs/developing/architecture-overview.md]
 sources: [STYLE.md, pyproject.toml, tests/]
@@ -11,7 +11,7 @@ sources: [STYLE.md, pyproject.toml, tests/]
 ## What this covers
 
 How work lands in this repo: the canonical style guide, branch and commit
-conventions, and what to run before opening a PR. The authoritative style document
+conventions, what to run before opening a PR, and how to update docs. The authoritative style document
 is [`STYLE.md`](../../STYLE.md) at the repository root — read it first; the notes
 here don't restate it.
 
@@ -44,49 +44,12 @@ philosophy tells you what to do. The load-bearing points:
   messages are terse, quote values with `{x!r}`, and name the user-facing API
   rather than internals.
 
-## Deprecations
-
-Every deprecation warns under `nnsight.NNsightDeprecationWarning`, with
-`stacklevel=2` so the warning points at the caller's line:
-
-```python
-warnings.warn(
-    "model.generator.output is deprecated; use tracer.result instead.",
-    NNsightDeprecationWarning,
-    stacklevel=2,
-)
-```
-
-Three rules make a deprecation warning that people actually see:
-
-- **The category is `NNsightDeprecationWarning`, a `FutureWarning` subclass.**
-  Not `DeprecationWarning`. Python's default filters are
-  `default::DeprecationWarning:__main__` followed by `ignore::DeprecationWarning`,
-  so a `DeprecationWarning` raised from inside a package — which is where every
-  nnsight deprecation is raised — warns to nobody. `FutureWarning` is the category
-  the language reserves for deprecations addressed to a library's *users*, and no
-  default filter hides it.
-- **The message names the replacement**, in one shape:
-  `"<what is deprecated> is deprecated; use <what to write instead> instead."`
-  Nothing else. A user who reads only the message knows what to type next.
-- **nnsight registers no warning filters.** A library that calls
-  `warnings.simplefilter`/`filterwarnings` at import overrides the `-W` flags and
-  `PYTHONWARNINGS` its user chose. The dedicated category is what lets a caller
-  silence nnsight's deprecations and nothing else:
-  `warnings.filterwarnings("ignore", category=nnsight.NNsightDeprecationWarning)`.
-
-For a whole callable, `@nnsight.deprecated("<old> is deprecated; use <new> instead.")`
-wraps it and does all three. `tests/test_deprecations.py` asserts every deprecation
-warns under the category, from an imported module as well as from `__main__`.
-
 ## Branches
 
-Base PRs on the active release branch — `0.8` — not `main`. Development happens on
-the release branch, and `.github/workflows/python-app.yml` tests pushes to `main`
-and `0.8` only, so a branch cut from anywhere else is untested. `main` is
-release-stable. Interactive git flags (`git rebase -i`, `git add -i`)
-aren't used here — prefer new commits over force-pushes during review; the
-reviewer squashes on merge.
+Base PRs on `dev`; `main` is the release branch. CI
+(`.github/workflows/python-app.yml`) runs on every pull request and on pushes to
+`main` and `dev`. Prefer new commits over force-pushes during review; the reviewer
+squashes on merge.
 
 ## Commits
 
@@ -110,12 +73,11 @@ Co-Authored-By: <agent name> <noreply@anthropic.com>
 
 ## Before you open a PR
 
-There is no separate `CONTRIBUTING.md`; the routine is the test suite.
-
-Run the offline suite on CPU (see [testing.md](./testing.md) for the details):
+Setup, prerequisites and bug reports are in the root
+[CONTRIBUTING.md](../../CONTRIBUTING.md). Run the offline suite on CPU (see
+[testing.md](./testing.md) for the details):
 
 ```bash
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm --ignore=tests/tp
 ```
 
@@ -145,6 +107,24 @@ laid out one file per concept:
 
 A PR merges fastest when it fixes or adds one thing, ships a test that fails before
 and passes after, explains the why in a paragraph, and passes the suite locally.
+
+## Updating docs
+
+Docs change in the same PR as the code that invalidates them. They are written for
+a reader — often a coding agent — who finds one page and applies it, so:
+
+- **One topic, one home.** Put new material on the page that owns the topic and link
+  to it from elsewhere; never copy a section. The layout is in
+  [docs/index.md](../index.md): `usage/` per feature, `patterns/` per technique,
+  `errors/` keyed by what the user saw, `developing/` for internals.
+- **Compact.** State the rule, show one example, stop. No restating, no history
+  ("used to", "now raises") — the page describes the code as it is.
+- **Nothing environment-specific**: no machine or host names, personal paths,
+  tunnels, or one deployment's details. Generalize the requirement or leave it out.
+- **A new page gets an index line** in its section's `index.md`.
+
+The full standard is the Documentation section of the root
+[CONTRIBUTING.md](../../CONTRIBUTING.md#documentation).
 
 ## Where the team is
 

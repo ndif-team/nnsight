@@ -420,7 +420,9 @@ message names the replacement and nothing else: `"<old> is deprecated; use <new>
 instead."` For a whole callable, `@deprecated("...")` does both. **The library
 registers no warning filters** — mutating the global filter list overrides the
 `-W` flags and `PYTHONWARNINGS` the user chose; the dedicated category is what
-lets them silence ours alone.
+lets them silence ours alone. `tests/test_deprecations.py` asserts every
+deprecation warns under the category, from an imported module as well as from
+`__main__` — add yours to it.
 
 **Error messages are terse and state the observed condition.** Quote values with
 `{x!r}` rather than hand-rolled quotes. Continue with `;` and a lowercase clause
