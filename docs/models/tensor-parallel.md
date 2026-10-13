@@ -111,6 +111,10 @@ about it:
 | `.source` in a parent that calls one | no — gather it yourself | `mlp.source.self_gate_proj_0` |
 | Anything between two sharded modules | no — gather it yourself | `mlp.act_fn.output`, `query_states_0` |
 
+"No" in the table means the value *reads* whole; writing into it in place is a
+separate question, answered by rule 3 below — under TP these whole values are
+collectives' outputs, and in-place writes on them raise.
+
 Calling a sharded module **ad hoc** — the logit lens, `model.lm_head(hidden)` —
 is corrected the same way its activations are, so it returns the full-width
 result it would on one GPU.
@@ -205,10 +209,11 @@ it puts four obligations on the code:
 1. **No rank-dependent control flow.** Nothing may branch on rank, and nothing
    may take a different path on different ranks — the ranks would stop agreeing
    on when to gather, and the run deadlocks. It deadlocks quietly: no exception,
-   and no watchdog inside several minutes. Killing `torchrun` does not take the
-   rank processes with it either — they stay alive holding their share of every
-   card, so find their pids and kill those, or the next attempt meets a GPU that
-   is busy with the last one.
+   and no watchdog inside several minutes. A plain `kill` (SIGTERM) of
+   `torchrun` takes the rank processes down with it; `kill -9` does not — they
+   stay alive holding their share of every card, so after a SIGKILL find their
+   pids and kill those, or the next attempt meets a GPU that is busy with the
+   last one.
 
 2. **Seed before you sample.** This one is a correctness bug, not an
    inconsistency. `torch.initial_seed()` differs per rank under `torchrun` — the
@@ -225,12 +230,23 @@ it puts four obligations on the code:
    ```
 
    Many checkpoints ship `do_sample: true` in `generation_config.json`, so this
-   bites without you asking for sampling.
+   bites without you asking for sampling. And it can bite *quietly*: on a
+   vocab-parallel tied embedding (Llama-3.2-1B/-3B), a rank's divergent token
+   falls outside its own vocabulary shard, looks up zeros, and the all-reduce
+   keeps rank 0's path — so rank 0's run looks perfectly healthy while ranks
+   1..N return token sequences the model never actually ran on. Checking "does
+   seeding matter here?" by eyeballing rank 0 answers wrongly.
 
-3. **Editing a gathered value takes a clone.** A sharded value is made whole by
-   a collective, and torch will not let you write into the output of one in
+3. **Editing takes a clone — on any value a sharded module produced.** Whether
+   nnsight gathered it or transformers reduced it, the whole value you see is
+   the output of a collective, and torch will not let you write into one in
    place — a `value[...] = x` raises `Output 0 of ... is a view and is being
-   modified inplace`. Clone, edit, assign back:
+   modified inplace`. This is broader than the gathered locations: it also hits
+   values the table above calls whole, because they are whole *by all-reduce* —
+   `o_proj.output`, `down_proj.output`, `mlp.output`, the tensor inside
+   `self_attn.output`, an MoE's `experts.output`, `lm_head.output`. All of
+   them take in-place writes on one GPU and refuse them under TP. Clone, edit,
+   assign back:
 
    ```python
    with model.trace(prompt):
@@ -321,6 +337,15 @@ differently on different ranks. They are no-ops on an unsharded model, so the
 same block runs at any degree — which is also how you keep one script working on
 one GPU and on eight.
 
+The no-op cuts the other way too: **a one-GPU run validates nothing about your
+gather.** At `tp_size=1` the value comes back untouched, so a wrong `dim` is
+accepted silently there and only raises (or garbles the tensor) on a sharded
+run — and skipping the clone works at `tp_size=1`, where you are editing the
+live tensor, while on a sharded run the gathered value is an assembled copy:
+editing it in place without `shard()`-and-assign raises under grad and, under
+`torch.no_grad()`, silently changes nothing. Smoke-test a gather/shard block at
+`tp_size=2` before trusting it.
+
 If you are not sure which axis holds the shard, print the shape at tp=1 and at
 tp=2 and compare: the axis that shrank by `tp_size` is the one. That comparison
 answers for a plain tensor, which is what a value between two modules is. It
@@ -354,19 +379,19 @@ inert on a model that is not sharded — so this is safe to pass unconditionally
 `tp_envoys()` is what makes `model.lm_head(hidden)` return a whole tensor rather
 than this rank's slice.
 
-## Requires transformers >= 5.16
+## Requires transformers >= 5.19
 
-5.16 rebuilt tensor parallelism on DTensor. The sharding plan moved from a stamp
-on each sharded module to a single `_tp_plan` on the model, and the style's
-collectives moved from forward hooks into a wrapper around `module.forward`.
-nnsight reads the layout the way that backend describes it, so on an older
-transformers it would find nothing sharded — and that does not fail, it hands
-intervention code one rank's slice as though it were the whole tensor. nnsight
-refuses to load rather than let that through. The refusal is not always worded
-as a version: on transformers 5.15 the load stops at
-`ModuleNotFoundError: No module named 'transformers.distributed.tensor_parallel'`,
-which is the 5.16 backend not being there. Check `transformers.__version__`
-before reading further into it.
+nnsight reads the exact shapes of 5.19's distributed backend — the named
+`(pp, fsdp, tp)` device mesh, the expert plan on its own `model.ep_plan`, the
+`ep_dispatch_experts` style — and earlier releases differ in each of them, so
+sharding on one is refused with `UnsupportedTransformersVersion` the moment a
+sharded model is seen, rather than half-supported. The refusal exists because
+the failure it prevents is silent: a backend whose layout nnsight cannot read
+does not error, it hands intervention code one rank's slice as though it were
+the whole tensor. On a transformers old enough to predate the DTensor backend
+entirely (≤ 5.15) the load stops earlier, at `ModuleNotFoundError: No module
+named 'transformers.distributed.tensor_parallel'` — check
+`transformers.__version__` before reading further into that one.
 
 ## A checkpoint that cannot be split at all
 
@@ -430,24 +455,39 @@ feature dimension. Ask for it the way transformers does — it applies the model
 model = TransformersModel(
     "openai/gpt-oss-20b",
     task="text-generation",
-    distributed_config=DistributedConfig(tp_size=4, enable_expert_parallel=True),
+    distributed_config=DistributedConfig(tp_size=4, ep_size=4),
     dispatch=True,
 )
 ```
 
-Traces read the same as any other. The three styles an expert plan uses need
-less gathering than the name suggests: `ep_router` leaves the router replicated
-and masks non-local experts *after* the handoff, `grouped_gemm` shards expert
-parameters and installs no transform at all, and `moe_tp_experts` produces this
-rank's term of a sum, which is reduced for you like any row-parallel output.
+Traces read the same as any other. The expert plan is one style,
+`ep_dispatch_experts`: its wrapper sends each token to the rank that owns its
+expert and combines the answers before returning, so at the trace's vantage
+point everything is already whole — the router's output is replicated and never
+masked, and `experts.output` is the full combined tensor on every rank,
+readable and editable like anything else. (Printing `experts.source` shows that
+dispatch wrapper's own steps; most of them hold per-rank token batches of
+different shapes, and only the final output transform is whole.)
+
+Two side effects of the EP load are normal: transformers wraps the model
+with FSDP2 even at `fsdp_size=1`, and the pipeline then prints a long "The
+model 'FSDP...ForCausalLM' is not supported for text-generation" warning on
+every rank — it is cosmetic, the load and the traces are unaffected.
 
 The degree has to divide the **expert count** rather than the head counts, and
 nnsight checks that before the weights are fetched — `tp_size=3` on a 4-expert
 model raises `UnshardableCheckpoint` rather than loading and failing.
 
-**Plain tensor parallelism on an MoE checkpoint is also fine.** `moe_tp_experts`,
-which Mixtral, DeepSeek-V3, Qwen3-MoE and around twenty-five other shipped
-configs use, all-reduces inside its own forward.
+**Plain tensor parallelism on an MoE checkpoint is also fine.** Without an EP
+request, the experts shard along their feature dimensions like any MLP
+(`moe_tp_experts`, which Mixtral, DeepSeek-V3, Qwen3-MoE and around twenty-five
+other shipped configs carry, all-reduces inside its own forward), and every
+read and edit behaves as above.
+
+One caveat on the non-default path: overriding the plan by hand to the legacy
+masked trio (`ep_router` + `moe_tp_experts`) gives correct outputs, but
+`experts.inputs` then holds each rank's *masked, local* routing — per-rank
+values with no warning. The default plans on every version do not do this.
 
 ## What is not supported
 

@@ -88,6 +88,10 @@ def bind(value: Any) -> Any:
 #: Attribute holding a module's `State` once it has been sourced/skipped.
 STATE = "__nnsight__"
 
+#: Flag on a module whose instance ``forward`` is a wrapper to run as the
+#: controller's body, not one to put back around it (`_framework_forward`).
+BODY_FORWARD = "__nnsight_body_forward__"
+
 #: Sentinel returned by the skip gate when no skip is pending for a location.
 NO_SKIP = object()
 
@@ -646,6 +650,12 @@ def _framework_forward(module: Any) -> bool:
     """
     if "_hf_hook" in module.__dict__:
         return True
+    if module.__dict__.get(BODY_FORWARD):
+        # Whoever owns a module's wrapper can declare it the controller's body
+        # (the handoffs then sit outside it) by setting this flag before the
+        # controller installs. The one current user, and why, is the note under
+        # SIDES in nnsight.modeling.tp.fragments.
+        return False
     forward = module.__dict__.get("forward")
     return ".install_forward.<locals>." in getattr(forward, "__qualname__", "")
 

@@ -29,8 +29,9 @@ from nnsight.modeling.tp import (
 
 def _upstream_styles() -> set:
     # The module `TPFragments._style_of` imports, so the table is checked against
-    # the registry the supported backend actually reads. On transformers below the
-    # 5.16 floor this import is what fails, which is the point.
+    # the registry the supported backend actually reads. On a transformers too
+    # old to have the DTensor backend this import is what fails, which is the
+    # point.
     from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
     return set(ALL_PARALLEL_STYLES._global_mapping)
@@ -117,8 +118,19 @@ class TestStyleCoverage:
             f"carry a shard) or to UNSUPPORTED."
         )
 
+    # Styles the tables carry ahead of the floor: CI installs the latest
+    # transformers while the floor trails it, so an entry for a style a newer
+    # release added is not stale on an install that predates it. Each names
+    # the release that introduced it; drop an entry here once the floor
+    # passes that release. Empty while the floor (5.19) is current.
+    FORWARD_STYLES: set = set()
+
     def test_no_rule_names_a_style_that_no_longer_exists(self):
-        stale = (set(SIDES) | set(UNSUPPORTED)) - _upstream_styles()
+        stale = (
+            (set(SIDES) | set(UNSUPPORTED))
+            - _upstream_styles()
+            - self.FORWARD_STYLES
+        )
         assert not stale, (
             f"rules name parallel styles transformers no longer has: "
             f"{sorted(stale)} — probably renamed upstream."
@@ -289,18 +301,19 @@ class TestTransformersVersionFloor:
         monkeypatch.setattr(tp_fragments, "_version_checked", False)
         tp_fragments._check_transformers_version()
 
-    def test_an_older_transformers_is_refused(self, monkeypatch):
+    @pytest.mark.parametrize("version", ["5.15.1", "5.16.1", "5.18.0"])
+    def test_an_older_transformers_is_refused(self, monkeypatch, version):
         from nnsight.modeling.tp import UnsupportedTransformersVersion
 
-        with pytest.raises(UnsupportedTransformersVersion, match="5.16"):
-            self._check(monkeypatch, "5.15.1")
+        with pytest.raises(UnsupportedTransformersVersion, match="5.19"):
+            self._check(monkeypatch, version)
 
     @pytest.mark.parametrize(
-        "version", ["5.16.0", "5.16.1", "6.0.0", "5.16.0.dev0", "5.17.0rc1"]
+        "version", ["5.19.0", "5.19.1", "6.0.0", "5.19.0.dev0", "5.20.0rc1"]
     )
     def test_the_floor_and_above_are_allowed(self, monkeypatch, version):
         # Including pre-releases of the fixed series: an editable transformers
-        # checkout reports 5.16.0.dev0, which a plain >= would reject.
+        # checkout reports 5.19.0.dev0, which a plain >= would reject.
         self._check(monkeypatch, version)
 
     def test_it_only_runs_once(self, monkeypatch):
@@ -310,7 +323,7 @@ class TestTransformersVersionFloor:
 
         from nnsight.modeling.tp import fragments as tp_fragments
 
-        monkeypatch.setattr(transformers, "__version__", "5.16.0")
+        monkeypatch.setattr(transformers, "__version__", "5.19.0")
         monkeypatch.setattr(tp_fragments, "_version_checked", False)
         tp_fragments._check_transformers_version()
         monkeypatch.setattr(transformers, "__version__", "0.1.0")
