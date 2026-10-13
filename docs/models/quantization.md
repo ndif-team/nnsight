@@ -249,7 +249,7 @@ ndif deploy meta-llama/Llama-3.3-70B --dtype nf4
 ```
 
 A **client cannot ask for a quantization**, though — a remote model key is the
-repo id and revision, and says nothing about how the weights are held. The
+repo id, revision and task, and says nothing about how the weights are held. The
 deployment decides; a client-side `dtype=` only shapes its own meta build.
 
 Placement uses the nominal bytes/weight from the names table, which undercounts

@@ -683,6 +683,46 @@ class TestServerExecution:
         assert frame.f_locals == {"a": 1}
 
 
+class TestParentLinks:
+    """The weak parent link is not pickled; it is rebuilt on the receiving side."""
+
+    @staticmethod
+    def _assert_parents(root):
+        for node in root.modules():
+            for child in node._children:
+                assert child.parent is node, child.path
+
+    def test_a_shipped_tree_relinks_itself(self, gpt2):
+        copy = loads(dumps(gpt2), gpt2._remoteable_persistent_objects())
+        assert copy is not gpt2 and copy.parent is None
+        self._assert_parents(copy)
+        assert copy.transformer.h[2].mlp.root is copy
+
+    def test_a_shipped_subtree_is_its_own_root(self, gpt2):
+        # Shipped without its parent, the top envoy has none; below it, the copies link to each other.
+        block = loads(dumps(gpt2.transformer.h[2]), gpt2._remoteable_persistent_objects())
+        assert block is not gpt2.transformer.h[2]
+        assert block.parent is None and block.root is block
+        assert block.mlp.parent is block
+
+    @torch.no_grad()
+    def test_a_deserialized_trace_reads_through_parent(self, gpt2):
+        # The server runs the block against the envoys rebuilt from the payload.
+        backend = _ServerRoundTrip(gpt2)
+        with gpt2.trace("The Eiffel Tower is in", backend=backend):
+            gpt2.transformer.h[0].attn.parent.mlp.output.save()
+        assert backend.ran
+
+    @torch.no_grad()
+    def test_remote_local_trace_reads_through_parent(self, gpt2):
+        with gpt2.trace("The Eiffel Tower is in", remote="local"):
+            block = gpt2.transformer.h[0].attn.parent
+            hidden = block.mlp.output.save()
+        with gpt2.trace("The Eiffel Tower is in"):
+            expected = gpt2.transformer.h[0].mlp.output.save()
+        assert torch.equal(hidden, expected)
+
+
 def _seed_id_cache():
     # to_model_key canonicalizes the repo id via the Hub; pre-seed the cache so the
     # key builds without a network round-trip.
@@ -726,3 +766,46 @@ class TestModelKey:
 
         import_path = "nnsight.modeling.transformers.TransformersModel"
         assert from_import_path(import_path) is TransformersModel
+
+    def test_key_carries_the_resolved_task(self, gpt2):
+        # The task is part of the remote identity: the server rebuilds the
+        # pipeline from the key rather than re-inferring one from the Hub, and
+        # two tasks over one checkpoint are two deployments. Always resolved —
+        # gpt2 was built without a task, and the key still names one.
+        import json
+
+        _seed_id_cache()
+        suffix = json.loads(gpt2.to_model_key().split(":", 1)[1])
+        assert suffix["task"] == "text-generation"
+
+    def test_a_different_task_mints_a_different_key(self, gpt2):
+        _seed_id_cache()
+        from nnsight.modeling.transformers import TransformersModel
+
+        other = TransformersModel("openai-community/gpt2", task="feature-extraction")
+        assert other.to_model_key() != gpt2.to_model_key()
+
+    def test_key_is_stable_across_rebuild(self, gpt2):
+        # mint -> from_model_key -> re-mint must be a fixed point: the server
+        # rebuilds from the key and anything it re-mints (status, logs) must
+        # name the same deployment.
+        _seed_id_cache()
+        from nnsight.modeling.huggingface import HuggingFaceModel
+
+        key = gpt2.to_model_key()
+        assert HuggingFaceModel.from_model_key(key).to_model_key() == key
+
+    def test_alias_task_mints_the_canonical_key(self):
+        # "sentiment-analysis" IS "text-classification" (transformers'
+        # TASK_ALIASES); two spellings of one pipeline must not become two
+        # deployments.
+        _seed_id_cache()
+        import json
+
+        from nnsight.modeling.transformers import TransformersModel
+
+        aliased = TransformersModel(
+            "openai-community/gpt2", task="sentiment-analysis"
+        )
+        suffix = json.loads(aliased.to_model_key().split(":", 1)[1])
+        assert suffix["task"] == "text-classification"

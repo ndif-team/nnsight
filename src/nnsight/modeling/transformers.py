@@ -18,7 +18,7 @@ this module leans on the pipeline rather than re-deriving any of it:
   per-invoke encodings are padded together by `processing.collate`.
 * **Padding**: which side to pad is the model's business, not the task's, so it
   follows `TransformersModel._is_causal` — decoders left-pad and get
-  mask-derived ``position_ids``; encoders keep right padding.
+  mask-derived ``position_ids``; encoders and encoder-decoders pad right.
 
 Three ways in, and the difference matters:
 
@@ -48,6 +48,7 @@ invoke is refused rather than served the wrong rows.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, Optional
 
 import copy
@@ -338,7 +339,10 @@ class TransformersModel(HuggingFaceModel):
         # `_update` (dispatch) and `_remoteable_set_env` (PEFT rebind) both preserve
         # standalone children like this one.
         self.generator = GeneratorEnvoy(
-            Generator(), path=f"{self.path}.generator", interleaver=self.interleaver
+            Generator(),
+            path=f"{self.path}.generator",
+            interleaver=self.interleaver,
+            parent=self,
         )
         self._children.append(self.generator)
 
@@ -402,25 +406,32 @@ class TransformersModel(HuggingFaceModel):
         # Pad with EOS when there's no pad token. Left-pad only for causal decoders,
         # so a batched trace/generation aligns the last real token at the right edge
         # (``output[:, -1]`` is every row's real last token); encoder tasks keep
-        # their default (right) padding.
+        # their default (right) padding. An encoder-decoder is set to the right
+        # explicitly: the text-generation pipeline it loads under left-pads every
+        # model it wraps, which shifts the absolute positions of BART's encoder.
         if self.tokenizer is None:
             return
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         if self._is_causal():
             self.tokenizer.padding_side = "left"
+        elif self._is_encoder_decoder():
+            self.tokenizer.padding_side = "right"
 
     def _is_causal(self) -> bool:
         # A decoder-only generative model (GPT-2, Llava, ...) — as opposed to an
         # encoder (BERT) or encoder-decoder (T5). Decides left-padding and the
         # left-pad position_ids correction.
         model = getattr(self.pipeline, "model", None)
-        config = getattr(model, "config", None)
         return (
             model is not None
             and model.can_generate()
-            and not getattr(config, "is_encoder_decoder", False)
+            and not self._is_encoder_decoder()
         )
+
+    def _is_encoder_decoder(self) -> bool:
+        model = getattr(self.pipeline, "model", None)
+        return bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False))
 
     def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import AutoConfig, pipeline
@@ -575,7 +586,11 @@ class TransformersModel(HuggingFaceModel):
         # The pipeline factory can't infer the task or the preprocessors from a
         # module instance, so infer the task and source the preprocessors from
         # what was passed in or the model's name_or_path (captured as
-        # self.repo_id).
+        # self.repo_id). The class-name guess can differ from the Hub's
+        # pipeline_tag — which is what a repo-id construction infers into the
+        # remote model key — but a pre-loaded module is a *local* model: its
+        # weights are already in hand, so its key never has to match a
+        # deployment. Local inference keeps this path offline.
         if self.task is None:
             self.task = _infer_task(module)
         self.pipeline = pipeline(
@@ -681,6 +696,24 @@ class TransformersModel(HuggingFaceModel):
         return self.pipeline(*inputs, **kwargs)
 
     # -- remote --------------------------------------------------------------
+
+    def _remoteable_model_key(self) -> str:
+        # The task is part of the model's remote identity: two tasks over one
+        # checkpoint can load different architecture classes (ForCausalLM vs
+        # ForSequenceClassification), so they are different deployments, and the
+        # server must rebuild the pipeline the client traced rather than
+        # re-infer one from the Hub. Always the resolved task, never null — an
+        # unset task is inferred by the meta build before any key is minted.
+        # The alias table, not check_task's full normalization: an alias names
+        # the identical pipeline ("sentiment-analysis" is "text-classification"),
+        # so two spellings must not become two deployments — but check_task
+        # would also collapse "translation_en_to_fr" to bare "translation",
+        # which names a *different* pipeline configuration.
+        from transformers.pipelines import TASK_ALIASES
+
+        data = json.loads(super()._remoteable_model_key())
+        data["task"] = TASK_ALIASES.get(self.task, self.task)
+        return json.dumps(data)
 
     def _remoteable_persistent_objects(self) -> dict:
         objects = super()._remoteable_persistent_objects()

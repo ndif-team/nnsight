@@ -129,6 +129,94 @@ class TestGenerate:
         assert base[0]["generated_text"] != zeroed[0]["generated_text"]
 
 
+def _chat():
+    """Chat messages with the image inline, as the pipeline takes them."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": _image()},
+                {"type": "text", "text": QUESTION},
+            ],
+        }
+    ]
+
+
+class TestModelGenerate:
+    """``generate`` on the model (not ``pipe``) for inputs the task's pipeline
+    preprocesses: chat messages, plain text, a task-input dict. The
+    ``image-text-to-text`` pipeline nests generate arguments as
+    ``generate_kwargs`` and takes any other keyword for the processor; both
+    have to reach the model's ``generate`` flat."""
+
+    @torch.no_grad()
+    @pytest.mark.parametrize(
+        "make_input",
+        [
+            _chat,
+            lambda: "Hello there",
+            lambda: {"images": _image(), "text": "<image>Describe"},
+        ],
+        ids=["chat-with-image", "text-only", "task-dict"],
+    )
+    def test_max_new_tokens_reaches_generate(self, llava, make_input):
+        with llava.generate(make_input(), max_new_tokens=3) as tracer:
+            prompt = llava.model.language_model.layers[0].output.shape[1].save()
+            ids = tracer.result.save()
+        assert ids.shape == (1, prompt + 3)
+
+    @torch.no_grad()
+    def test_matches_processor_keyword_input(self, llava):
+        with llava.generate(_chat(), max_new_tokens=3, do_sample=False) as tracer:
+            from_chat = tracer.result.save()
+        with llava.generate(
+            _prompt(llava), images=_image(), max_new_tokens=3, do_sample=False
+        ) as tracer:
+            from_keywords = tracer.result.save()
+        assert torch.equal(from_chat, from_keywords)
+
+    @torch.no_grad()
+    def test_sampling_arguments_reach_generate(self, llava):
+        # The pipeline would hand do_sample/temperature to the processor, which
+        # ignores them, and every run would come out greedy and identical.
+        kwargs = dict(max_new_tokens=8, do_sample=True, temperature=50.0, top_k=0)
+        runs = set()
+        for _ in range(4):
+            with llava.generate("Hello there", **kwargs) as tracer:
+                ids = tracer.result.save()
+            runs.add(tuple(ids[0].tolist()))
+        assert len(runs) > 1
+
+    @torch.no_grad()
+    def test_generate_kwargs_dict_is_unpacked(self, llava):
+        # The pipeline's own spelling of generate arguments is accepted too.
+        with llava.generate("Hello there", generate_kwargs={"max_new_tokens": 4}) as tracer:
+            prompt = llava.model.language_model.layers[0].output.shape[1].save()
+            ids = tracer.result.save()
+        assert ids.shape == (1, prompt + 4)
+
+    @torch.no_grad()
+    def test_iter_visits_every_step(self, llava):
+        with llava.generate(_chat(), max_new_tokens=3) as tracer:
+            lengths = list().save()
+            for step in tracer.iter[:3]:
+                lengths.append(llava.model.language_model.layers[0].output.shape[1])
+        # The prefill sees the whole prompt, each decode step one new token.
+        assert len(lengths) == 3
+        assert lengths[0] > 1 and lengths[1:] == [1, 1]
+
+    @torch.no_grad()
+    def test_intervention_on_a_step_changes_generation(self, llava):
+        with llava.generate(_chat(), max_new_tokens=3, do_sample=False) as tracer:
+            clean = tracer.result.save()
+        with llava.generate(_chat(), max_new_tokens=3, do_sample=False) as tracer:
+            for step in tracer.iter[1]:
+                llava.model.language_model.layers[0].output[:] = 0
+            edited = tracer.result.save()
+        assert torch.equal(clean[:, :-2], edited[:, :-2])
+        assert not torch.equal(clean, edited)
+
+
 class TestScan:
     @torch.no_grad()
     def test_scan_reads_shapes_without_dispatch(self, llava_meta):

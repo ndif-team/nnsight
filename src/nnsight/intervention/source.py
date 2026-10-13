@@ -811,10 +811,12 @@ class SourceEnvoy:
             raise SourceNotAvailable(
                 "recursive `.source` is only available inside a trace"
             )
-        if self.path not in interleaver.sourced:
+        if interleaver.sourced.get(self.path) is None:
             # Mark requested (None placeholder), then park until the operation fires
             # and the model side hands back the live callable (see run_op). Build
             # and cache its instrumented copy so later fires this run reuse it.
+            # A second worker drilling the same call parks too; both are served
+            # at the same fire and whichever runs first builds the copy.
             interleaver.sourced[self.path] = None
             fn = Mediator.value(f"{self.path}.fn")
             if isinstance(fn, torch.nn.Module):
@@ -827,9 +829,10 @@ class SourceEnvoy:
                     f"{self.name!r} is an assignment, not a call; there is no "
                     f"function to drill into"
                 )
-            interleaver.sourced[self.path] = instrument(  # raises SourceNotAvailable if it can't
-                fn, make_op(lambda: (interleaver, self.path) if interleaver.interleaving else (None, None))
-            )
+            if interleaver.sourced[self.path] is None:
+                interleaver.sourced[self.path] = instrument(  # raises SourceNotAvailable if it can't
+                    fn, make_op(lambda: (interleaver, self.path) if interleaver.interleaving else (None, None))
+                )
         return Source(self.envoy, prefix=self.path, compiled=interleaver.sourced[self.path][1])
 
     @eproperty

@@ -926,6 +926,19 @@ class TestRecursive:
         assert torch.allclose(first, torch.relu(model.fc(x)))
         assert torch.allclose(both, first)
 
+    def test_two_invokes_drill_same_call(self, x):
+        # Both invokes ask for the same drill before the call fires; the second
+        # must wait for it too rather than read the first one's placeholder.
+        model = Calls()
+        envoy = Envoy(model)
+        with envoy.trace() as tracer:
+            with tracer.invoke(x):
+                relu = nnsight.save(envoy.source.relu_double_0.source.torch_relu_0.output)
+            with tracer.invoke():
+                add = nnsight.save(envoy.source.relu_double_0.source.torch_add_0.output)
+        assert torch.allclose(relu, torch.relu(model.fc(x)))
+        assert torch.allclose(add, relu + relu)
+
     def test_bound_method_recursion(self, x):
         model = Methoded()
         envoy = Envoy(model)

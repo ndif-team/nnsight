@@ -223,6 +223,10 @@ brought in, and including a container rebuilt from blocks the tree already wraps
 (`model.transformer.h = nn.ModuleList(list(model.transformer._module.h)[:4])`).
 Each such entry names the one envoy at the module's first path.
 
+## Parent links
+
+Each envoy holds a weak reference to the envoy whose `_children` holds it (`_parent`), read through `envoy.parent` (`None` on the root); `envoy.root` follows it up to the model envoy. A shared module's envoy has the parent at its first path, and an alias is not a child, so it changes no parent. The link is weak, so a held envoy keeps none of its ancestors alive and `del model` frees the tree by refcounting. It is set as the child is built (`parent=` on `Envoy.__init__`), kept through a dispatch re-point (`_update` keeps the envoys), and left out of the pickled state: on unpickling a parent re-links its children, and an envoy shipped without its parent has none.
+
 ## Module renaming (aliases)
 
 `rename={...}` on `NNsight`/`Envoy` binds aliases pointing at the same child envoy (`bind`, `aliasing.py`). A single-component path (`{"transformer": "gpt"}`) binds wherever it resolves; a multi-component path (`{"transformer.h": "layers"}`) binds on the envoy it resolves from. Aliases are ordinary attributes referencing the same object, so they survive a dispatch re-point with no rebuild.

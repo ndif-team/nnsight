@@ -208,7 +208,12 @@ server actor's live objects.
 `_remoteable_class()` returns `type(self)` by default; deprecated aliases
 override it to the canonical class (`LanguageModel`/`VisionLanguageModel` return
 `TransformersModel`) so all three wrappings resolve to the one key the server
-knows. `TestModelKey` in `tests/test_serialization.py` asserts this.
+knows. The model-specific suffix is JSON: `HuggingFaceModel` puts the canonical
+repo id and revision in it, and `TransformersModel` adds the resolved pipeline
+`task` — the server rebuilds the pipeline from the key instead of re-inferring
+one, and two tasks over one checkpoint (which can load different architecture
+classes) are two distinct keys, i.e. two deployments. `TestModelKey` in
+`tests/test_serialization.py` asserts all of this.
 
 ## The response — `schema/response.py`
 

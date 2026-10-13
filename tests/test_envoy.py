@@ -1,4 +1,6 @@
 
+import weakref
+
 import pytest
 import torch
 import nnsight
@@ -555,6 +557,60 @@ class TestLookup:
         named = dict(envoy.named_modules())
         assert set(named) == module_paths(module)
         assert named["model.head"].path == "model.head"
+
+
+def assert_parents(root):
+    """Every envoy's `parent` is the envoy whose `_children` holds it."""
+    assert root.parent is None
+    for node in root.modules():
+        for child in node._children:
+            assert child.parent is node, (child.path, node.path)
+
+
+class TestParent:
+    def test_each_child_points_at_its_parent(self, envoy):
+        assert_parents(envoy)
+        assert envoy.layers[1].mlp.parent is envoy.layers[1]
+        assert envoy.layers.parent is envoy
+
+    def test_root_walks_up_to_the_model(self, envoy):
+        assert envoy.layers[2].mlp.fc.root is envoy
+        assert envoy.root is envoy
+
+    def test_the_link_is_weak(self, envoy):
+        assert isinstance(envoy.layers[0].__dict__["_parent"], weakref.ref)
+
+    def test_an_alias_does_not_change_the_parent(self, module):
+        # `first_mlp` binds on the root, but the envoy it names is still layer 0's.
+        model = Envoy(module, rename={"mlp": "block_mlp", "layers.0.mlp": "first_mlp"})
+        assert_parents(model)
+        assert model.layers[0].block_mlp.parent is model.layers[0]
+        assert model.first_mlp is model.layers[0].mlp
+        assert model.first_mlp.parent is model.layers[0]
+
+    def test_a_shared_module_keeps_its_first_parent(self):
+        shared = Envoy(SharedStack())
+        assert_parents(shared)
+        # `shared` comes first in the module, so the root is its parent; the
+        # container's two entries naming it are aliases of that one envoy.
+        assert shared.layers[0] is shared.shared
+        assert shared.shared.parent is shared
+        assert shared.layers[1].parent is shared.layers
+
+    def test_a_replaced_child_takes_its_new_parent(self, envoy):
+        envoy.layers[0].mlp = nn.Linear(8, 8)
+        assert envoy.layers[0].mlp.parent is envoy.layers[0]
+        assert_parents(envoy)
+
+    def test_links_survive_update(self, envoy):
+        kept = envoy.layers[1].mlp
+        module = Model(n_layers=4)
+        envoy._update(module)
+        assert_parents(envoy)
+        assert envoy.layers[1].mlp is kept and kept.parent is envoy.layers[1]
+        # An entry the new module gained is built under its own parent.
+        assert envoy.layers[3].parent is envoy.layers
+        assert envoy.layers[3].attn.root is envoy
 
 
 class TestRename:

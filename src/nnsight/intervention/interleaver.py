@@ -912,5 +912,8 @@ class Interleaver:
                     )
             mediator.worker = None
         self.mediators = []
+        # The cache routes hold each worker, whose scope holds the model: left in
+        # place they would tie the model to its own interleaver in a cycle.
+        self.observers = {}
         self.batcher = None
 

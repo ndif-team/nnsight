@@ -41,7 +41,7 @@ with model.generate(text=prompt, images=[img], max_new_tokens=3, do_sample=False
 print(model.tokenizer.batch_decode(ids))
 ```
 
-On `TransformersModel(task="image-text-to-text")`, `trace` / `scan` / `generate` take the same prompt and `images=` and the processor still runs for you, so the call above needs no change beyond the constructor. Running the processor yourself and passing the encoding is equivalent, and gives you the `input_ids` to compute image-token positions from:
+On `TransformersModel(task="image-text-to-text")`, `trace` / `scan` / `generate` take the same prompt and `images=` and the processor still runs for you, so the call above needs no change beyond the constructor. They also take chat messages with the image inline (`{"type": "image", "image": img}`), which the pipeline templates and preprocesses. Either way, generation arguments (`max_new_tokens`, `do_sample`, `temperature`, ...) reach the model's `generate` as plain keywords, as on `text-generation`; the pipeline's own spelling, `generate_kwargs={...}`, is unpacked into them. `max_length` is the exception: the pipeline sends it to the processor as a truncation length, so bound the generation with `max_new_tokens`. Running the processor yourself and passing the encoding is equivalent, and gives you the `input_ids` to compute image-token positions from:
 
 ```python
 encoding = model.processor(images=img, text=prompt, return_tensors="pt")
