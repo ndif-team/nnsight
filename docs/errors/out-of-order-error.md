@@ -22,17 +22,12 @@ from nnsight.intervention.interleaver import OutOfOrderError
 
 ## Cause
 
-Each block of intervention code runs in its own **greenlet worker** (a
-`Mediator`) that runs in lockstep with the model's forward pass. When the block
-reads `module.output`, the worker *parks* until the model reaches that module,
-then resumes with the value. A worker can only be served locations **in the order
-the model reaches them** — it holds one pending request at a time.
-
-If you ask for layer 1's output *after* layer 5's, layer 1 has already fired and
-its value is gone by the time your request arrives. The run finishes with the
-worker still parked on `model.transformer.h.1.output`, and
-`Interleaver.check_dangling_mediators` throws `OutOfOrderError` into the worker so
-the traceback points at the exact line that was waiting.
+Each invoke's intervention code runs in a worker that parks until the model reaches
+the location it asked for. It can only be served locations **in the order the model
+reaches them**. If you ask for layer 1's output *after* layer 5's, layer 1 already
+fired; the run ends with the worker still waiting, and the error is thrown at the
+line that was waiting. See
+[threading-and-mediators.md](../concepts/threading-and-mediators.md) for the model.
 
 `model.output` is the location that catches people first. It is the *root* envoy —
 the very end of the forward pass — so reading it before any layer strands that
@@ -49,9 +44,6 @@ with model.trace(prompt):
     hidden = model.model.layers[8].output.save()
     logits = model.output.logits.save()
 ```
-
-That ordering is the natural way to *describe* the task ("give me the prediction and
-also layer 8"), which is why it is such a common first error.
 
 The `.i0` suffix on the location is the occurrence tag — which visit of that
 location the request targets. Without `tracer.iter`, it is always `.i0`; in a
@@ -80,37 +72,17 @@ with model.trace(prompt):
 
 ## Fix
 
-```python
-# WRONG — layer 5 fires before layer 1, so the request for h[1] arrives too late
-with model.trace("The Eiffel Tower is in"):
-    out5 = model.transformer.h[5].output.save()
-    out1 = model.transformer.h[1].output.save()   # OutOfOrderError
-```
-
-```python
-# FIXED — access modules in forward-pass order
-with model.trace("The Eiffel Tower is in"):
-    out1 = model.transformer.h[1].output.save()
-    out5 = model.transformer.h[5].output.save()
-```
-
-To genuinely read modules out of forward order, run a second pass with an extra
-empty invoke — each invoke is its own worker, so their access orders are
+Read in forward order, as above. To read out of forward order, add an empty
+invoke — each invoke is its own worker, so their access orders are
 independent:
 
 ```python
 with model.trace() as tracer:
     with tracer.invoke("The Eiffel Tower is in"):
         out5 = model.transformer.h[5].output.save()
-    with tracer.invoke():           # empty invoke = another pass over the same batch
+    with tracer.invoke():           # empty invoke: a second worker on the same forward
         out1 = model.transformer.h[1].output.save()
 ```
-
-## Mitigation
-
-- Lay intervention code out top-to-bottom in the order modules run in `print(model)`.
-- For backward passes, mirror forward order in reverse inside `with tensor.backward():`.
-- Split interleaving access patterns across multiple invokes.
 
 ## Inside a `tracer.iter` loop
 

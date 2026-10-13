@@ -1,6 +1,6 @@
 ---
 title: Cannot Invoke While the Model Is Already Running
-one_liner: "ValueError: Cannot invoke while the model is already running. — a tracer.invoke(...) was opened after the model started executing."
+one_liner: "ValueError: Cannot invoke while the model is already running. — a tracer.invoke(...) was opened inside another invoke's body (or a tracer.iter loop), after the model started executing."
 tags: [error, setup, invoke]
 related: [docs/errors/cannot-access-outside-interleaving.md, docs/usage/invoke-and-batching.md, docs/usage/trace.md]
 sources: [src/nnsight/intervention/tracer.py]
@@ -16,74 +16,46 @@ ValueError: Cannot invoke while the model is already running.
 
 ## Cause
 
-`Invoker.__init__` (`src/nnsight/intervention/tracer.py`) rejects construction
-when the tracer's interleaver is already interleaving:
+Invokes register their inputs and intervention code **before** the forward pass
+starts. Invoke bodies themselves run while the model is executing, so opening a
+`tracer.invoke(...)` from inside one has nothing to plug into. Triggers:
 
-```python
-if tracer.envoy.interleaver.interleaving:
-    raise ValueError("Cannot invoke while the model is already running.")
-```
+- a `tracer.invoke(...)` nested inside another invoke's body;
+- a `tracer.invoke(...)` inside a `for step in tracer.iter[...]:` loop.
 
-`interleaver.interleaving` is true from when the interleaver context is entered
-until it exits — i.e. while the greenlet workers and the model's forward pass are
-running. Invokes are how the tracer collects batched inputs and registers workers
-**before** the forward pass starts; opening a new one after the model is already
-running has nothing to plug into.
-
-## Common triggers
-
-- Nesting `tracer.invoke(...)` inside another `tracer.invoke(...)` body.
-- Calling `model.trace(...)` from code that is itself running inside a live trace.
-- Opening a new invoke from inside a `for step in tracer.iter[...]:` loop (the loop body runs during interleaving).
+A `model.trace(...)` opened inside a running trace (directly, or from a helper the
+block calls) does not reach this check; it fails with
+`AttributeError: 'NoneType' object has no attribute 'event'`. Same fix: don't nest.
 
 ## Fix
 
 ```python
-# WRONG — second invoke opened inside the first invoke's body
+# WRONG
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
-        with tracer.invoke("World"):        # ValueError
+        with tracer.invoke("World"):           # ValueError
             out = model.lm_head.output.save()
 ```
 
 ```python
-# FIXED — sibling invokes under the same trace
+# FIXED — sibling invokes under one trace; or sibling traces under a session
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
         a = model.lm_head.output.save()
     with tracer.invoke("World"):
         b = model.lm_head.output.save()
-```
 
-A trace nested inside another trace is a different shape and does not reach this
-check — the inner `trace` builds a tracer against an interleaver that is already
-running, and fails while wiring it up:
-
-```python
-# WRONG — nested traces
-with model.trace("Hello"):
-    with model.trace("World"):              # AttributeError: 'NoneType' object has no attribute 'event'
-        out = model.lm_head.output.save()
-```
-
-The fix is the same one.
-
-```python
-# FIXED — use a session to run multiple traces
-with model.session() as session:
+with model.session():
     with model.trace("Hello"):
         a = model.lm_head.output.save()
     with model.trace("World"):
         b = model.lm_head.output.save()
 ```
 
-## Mitigation
-
-- Treat invokes as **siblings** under one trace, never children of each other.
-- For multiple distinct traces, use `model.session()`.
-- To intervene on every generation step, use `tracer.iter[...]` / `tracer.all()`, not nested invokes.
+To intervene on every generation step, use `tracer.iter[...]` / `tracer.all()`
+inside one invoke, not nested invokes.
 
 ## Related
 
 - [docs/usage/invoke-and-batching.md](../usage/invoke-and-batching.md)
-- [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md)
+- [docs/usage/session.md](../usage/session.md)

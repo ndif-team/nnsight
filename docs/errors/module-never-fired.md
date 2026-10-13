@@ -8,10 +8,9 @@ sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/iter
 
 # A Module Never Fired
 
-This is the **late** flavor of `OutOfOrderError`: the model ran to the end while a
-worker was still parked, waiting for a location that never came. Same exception
-class as [out-of-order-error.md](out-of-order-error.md);
-`Interleaver.check_dangling_mediators` surfaces it once the forward pass finishes.
+The model ran to the end while a worker was still waiting for a location that never
+came. Same exception class as [out-of-order-error.md](out-of-order-error.md), raised
+once the forward pass finishes.
 
 ## Symptom
 
@@ -37,17 +36,12 @@ The location reads `<envoy.path>.<output|input>.i<occurrence>` — e.g.
 ### 1. The module never fired
 
 The module path exists in `print(model)`, but its `forward` was **not called** on
-this input, so nothing ever delivered its value. The worker parks forever and
-`check_dangling_mediators` throws `OutOfOrderError` at the end of the run. Common
-cases:
+this input, so nothing ever delivered its value. Common cases:
 
 - **Dropout / other eval-mode-disabled layers** — bypassed under `model.eval()`.
 - **Branch paths** — `if self.config.use_flash_attention: ... else: ...` runs only one side; a submodule on the path not taken never fires.
 - **Modules not reached by this input** — auxiliary heads, MoE experts not routed to, a vision encoder on a text-only query.
 - **Children of a skipped module** — after `module.skip(value)`, that module's submodules don't run.
-
-nnsight can't know in advance whether a module fires. Verify it yourself (see the
-fixes below).
 
 ### 2. A loop asked for more steps than the run made
 

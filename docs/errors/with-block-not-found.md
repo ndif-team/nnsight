@@ -14,79 +14,39 @@ Each error here is one of those steps refusing, before anything runs.
 
 ## `WithBlockNotFoundError`
 
-### Symptom
-
-One of three messages, depending on what nnsight could recover at the call site:
-
 ```
 WithBlockNotFoundError: nnsight has no source for <stdin>, so it cannot read the
 body of the `with` block at line 3. …
-```
-
-```
 WithBlockNotFoundError: nnsight found no `with` statement at run.py:12, the line
-the trace was entered from, which reads `t.__enter__()`. Either the tracer wasn't
-used as a `with` block … or the source nnsight read for this file is stale …
-```
-
-```
+the trace was entered from, which reads `t.__enter__()`. …
 WithBlockNotFoundError: nnsight found no `with` statement at <ipython-input-3>:4,
-the line the trace was entered from. nnsight compiles the block's own body to run
-it …
+the line the trace was entered from. …
 ```
 
-The first means there was no source to read at all; the second that the file is on
-disk but has no `with` at that line; the third that source was recovered but its
-line numbers don't line up with the code being run.
+nnsight reads the source of the frame that entered the tracer and looks for a
+`with` at that line. Each message is one way that fails:
 
-### Cause
-
-`Tracer.capture()` (`src/nnsight/tracing/tracer.py`) reads the source of the frame
-that entered the tracer, parses it, and looks for a `with` / `async with` node at
-the exact line the tracer was created on. If there is no such node there, it
-raises `WithBlockNotFoundError`.
-
-The block's *body* is what nnsight actually runs (interleaved with the model), and
-it can only get that body by finding the `with` statement in the source. No `with`
-at that line means there is nothing to capture. The verdict (found / not found) is
-memoized per call site, so a non-`with` site fails the same way every time without
-re-parsing.
-
-### Common triggers
-
-- **Not used as a `with` block.** Calling `model.trace(x).__enter__()`, or storing
-  the tracer and entering it by hand, so the entering line isn't a `with`.
-- **Dynamically-built source.** Code `exec`/`compile`-d from a string that isn't
-  registered in `linecache`, so the recovered source doesn't match the line
-  numbers — the line nnsight looks at isn't the `with` it expected.
-- **A script fed to the interpreter on stdin** — `python < script.py` or
-  `cat script.py | python`. The frame's filename is `<stdin>`, which no source
-  can be read back from. Run the file by name instead; `python -c "..."` is fine,
-  because its source is recoverable.
-- **Edited-file / stale-source edge cases.** nnsight reads each file's source once
-  and never re-validates it (`Tracer.source`), so if the recovered source is out of
-  sync with the running code object, the expected line may not be a `with`.
-
-### Fix
+- **No source at all** — a script fed on stdin (`python < script.py`,
+  `cat script.py | python`). Run the file by name; `python -c "..."` is fine.
+- **No `with` at that line** — the tracer was entered by hand
+  (`model.trace(x).__enter__()`, or stored and entered later).
+- **Source doesn't line up with the running code** — code `exec`/`compile`-d from a
+  string not registered in `linecache`, or a file edited after nnsight first read
+  it (each file's source is read once).
 
 ```python
-# WRONG — tracer entered by hand, not as a `with`
+# WRONG
 t = model.trace("Hello")
 t.__enter__()                       # WithBlockNotFoundError
-```
 
-```python
-# FIXED — use it as a context manager
+# FIXED
 with model.trace("Hello"):
     out = model.lm_head.output.save()
 ```
 
-- **Run from a real `.py` file** (or a notebook cell) instead of `exec()`-ing a
-  string that contains `with model.trace(...)`.
-- **For programmatic intervention**, build the trace body as a real function in a
-  real file and call it, rather than generating source at runtime.
-- If the error reproduces from a clean state with an ordinary `with` block, it is
-  likely a bug — open an issue with a minimal reproducer.
+For programmatic interventions, put the trace in a real function in a real file and
+call it rather than generating source at runtime. If an ordinary `with` block in a
+saved file reproduces this from a clean state, it is a bug — open an issue.
 
 ## A trace body that starts with `try:`
 
@@ -97,10 +57,8 @@ way back out of. Put any statement above the `try`, or move the `try` outside th
 block.
 ```
 
-nnsight runs the block's body itself, so it has to stop the interpreter from
-running it inline first. It does that by raising at the body's first line
-(`skip_context`, `src/nnsight/tracing/tracer.py`) and catching that raise in the
-`with`. CPython puts the `try` keyword's line on an instruction that no
+nnsight stops the interpreter from running the body inline by raising at the body's
+first line and catching that raise in the `with`. CPython puts the `try` keyword's line on an instruction that no
 exception-table entry covers, so a raise delivered there unwinds the frame
 outright instead of reaching the `with`. The shape is refused rather than
 silently losing the whole block.

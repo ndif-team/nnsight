@@ -33,8 +33,9 @@ Load order (`Config.load`), later wins:
 ```python
 from nnsight import CONFIG
 
-CONFIG.set_default_api_key("YOUR_NDIF_KEY")  # sets APIKEY + saves to user file
-CONFIG.save()                                 # explicit save
+CONFIG.APP.DEBUG = True                       # this process only
+CONFIG.save()                                 # persist current values to the user file
+CONFIG.set_default_api_key("YOUR_NDIF_KEY")   # set APIKEY and save in one call
 ```
 
 ## `CONFIG.API.*`
@@ -55,7 +56,7 @@ CONFIG.save()                                 # explicit save
 | `APP.DISABLE_CPP_BACKTRACE` | `bool` | `True` | At import, neutralize glibc `backtrace()` so a torch C++ error raised inside an interleaving greenlet surfaces as a normal Python exception instead of segfaulting the process. Empties torch's (rarely used) *C++* backtrace string process-wide; Python tracebacks and error messages are unaffected. Only glibc/x86-64 Linux is touched. | Turn off (via `NNSIGHT_DISABLE_CPP_BACKTRACE=0`) only if you need torch's C++ stack traces and accept the crash risk. |
 
 
-> **Why this exists.** nnsight runs each invoke's intervention code in a greenlet, which time-shares one OS stack by copying stack slices in and out. When a torch op raises a `c10` error while a worker greenlet is running, torch's error constructor captures a C++ backtrace with glibc `backtrace()`, which walks off the greenlet's stack slice into stale memory and crashes libgcc's unwinder — turning a plain shape error into a hard segfault. Emptying that one call removes the crash without changing any Python-visible behavior.
+> **Why `DISABLE_CPP_BACKTRACE` exists.** A torch C++ error raised inside a greenlet captures a glibc backtrace that walks off the greenlet's copied stack slice and segfaults. Emptying that one call removes the crash and changes nothing Python can see.
 
 ## Environment variables
 
@@ -70,21 +71,3 @@ CONFIG.save()                                 # explicit save
 | `XDG_CONFIG_HOME` | Base dir for the default user config path. |
 
 Pass `-v` (or `--verbose`) on the command line — e.g. `python train.py -v` — to turn on debug mode for that run (equivalent to `NNSIGHT_DEBUG=1`). Note it's a plain `sys.argv` scan, so any launcher that also uses `-v` (e.g. `pytest -v`) will enable it too.
-
-## Programmatic usage
-
-```python
-from nnsight import CONFIG
-
-# Read
-print(CONFIG.APP.DEBUG, CONFIG.API.HOST)
-
-# Modify in-process (does NOT persist)
-CONFIG.APP.PYMOUNT = False
-
-# Persist to the user config file
-CONFIG.save()
-
-# Set + persist API key in one call
-CONFIG.set_default_api_key("YOUR_NDIF_KEY")
-```
