@@ -37,11 +37,11 @@ worth reading: those failures raise nothing, so nothing routes you to a page.
 | `ValueError: trace() needs an input, or at least one 'with tracer.invoke(...)' block` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
 | `ValueError: save() was called outside a trace. …` | [save-outside-trace.md](save-outside-trace.md) |
 | `ValueError: Cannot invoke while the model is already running.` | [invoke-during-execution.md](invoke-during-execution.md) |
-| ``ValueError: A traced `with` block cannot start with `try:` …`` | [A trace body that starts with try:](#a-trace-body-that-starts-with-try) |
-| ``ValueError: The body of a traced `with` must start on its own line …`` | [A body on the with line](#a-body-on-the-with-line) |
+| ``ValueError: A traced `with` block cannot start with `try:` …`` | [with-block-not-found.md](with-block-not-found.md#a-trace-body-that-starts-with-try) |
+| ``ValueError: The body of a traced `with` must start on its own line …`` | [with-block-not-found.md](with-block-not-found.md#a-body-on-the-with-line) |
 | `ValueError: A barrier was never reached by every block it waits for …` | [docs/usage/barrier.md](../usage/barrier.md) |
 | ``WithBlockNotFoundError: nnsight found no `with` statement at …`` / ``no source for …`` | [with-block-not-found.md](with-block-not-found.md) |
-| `SyntaxError: 'return' outside function` | [return inside a trace body](#return-inside-a-trace-body) |
+| `SyntaxError: 'return' outside function` | [with-block-not-found.md](with-block-not-found.md#return-inside-a-trace-body) |
 | `NotImplementedError: <Class> does not support batching multiple invokes` | [batching-not-implemented.md](batching-not-implemented.md) |
 | `AttributeError: module 'nnsight' has no attribute 'list' / 'apply' / 'session' / …` | [docs/reference/migrating-to-0.8.md](../reference/migrating-to-0.8.md) |
 | `AttributeError: 'Tensor' object has no attribute 'value'` | [docs/reference/migrating-to-0.8.md](../reference/migrating-to-0.8.md) |
@@ -130,80 +130,6 @@ with model.trace(prompt):
 ```
 
 See [docs/usage/backward-and-grad.md](../usage/backward-and-grad.md).
-
-## A trace body that starts with `try:`
-
-```
-ValueError: A traced `with` block cannot start with `try:`; nnsight intercepts the
-body at its first line, and a `try` there is the one statement Python gives it no
-way back out of. Put any statement above the `try`, or move the `try` outside the
-block.
-```
-
-nnsight runs the block's body itself, so it has to stop the interpreter from
-running it inline first. It does that by raising at the body's first line
-(`skip_context`, `src/nnsight/tracing/tracer.py`) and catching that raise in the
-`with`. CPython puts the `try` keyword's line on an instruction that no
-exception-table entry covers, so a raise delivered there unwinds the frame
-outright instead of reaching the `with`. The shape is refused rather than
-silently losing the whole block.
-
-Either statement below fixes it:
-
-```python
-with model.trace(prompt):
-    hidden = model.transformer.h[0].output      # any statement above the try
-    try:
-        head = hidden[0, -1]
-    except IndexError:
-        head = None
-    kept = nnsight.save(head)
-```
-
-```python
-try:                                            # or wrap the whole with
-    with model.trace(prompt):
-        hidden = model.transformer.h[0].output.save()
-except Exception as error:
-    print(error)
-```
-
-Only the *first* statement is the cue — a `try` anywhere else in the body is
-ordinary Python and catches what it is written to catch.
-
-## A body on the `with` line
-
-```
-ValueError: The body of a traced `with` must start on its own line; nnsight runs
-the body itself, and can only intercept it at the start of a line.
-```
-
-Same mechanism, same fix: give the body its own indented line.
-
-```python
-with model.trace(prompt): out = model.output.logits.save()      # refused
-
-with model.trace(prompt):
-    out = model.output.logits.save()                            # fine
-```
-
-## `return` inside a trace body
-
-The body is compiled on its own, outside any function, so a `return` in it is a
-syntax error at capture time:
-
-```
-SyntaxError: 'return' outside function
-```
-
-Return the saved value *after* the block:
-
-```python
-def hidden_state(prompt):
-    with model.trace(prompt):
-        hidden = model.transformer.h[0].output.save()
-    return hidden
-```
 
 ## Related
 

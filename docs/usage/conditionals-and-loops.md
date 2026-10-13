@@ -79,37 +79,10 @@ All entries are real, fully-resolved torch tensors. The comprehension reads laye
 
 ## `try` needs a statement above it
 
-A trace body cannot begin with `try:` — nnsight intercepts the body at its first
-line, and a `try` there is the one statement Python gives it no way back out of:
-
-```python
-with model.trace("Hello world"):
-    try:                                  # ValueError at `with` entry
-        h = model.transformer.h[0].output.save()
-    except RuntimeError:
-        h = None
-```
-
-```
-ValueError: A traced `with` block cannot start with `try:`; nnsight intercepts
-the body at its first line, and a `try` there is the one statement Python gives
-it no way back out of. Put any statement above the `try`, or move the `try`
-outside the block.
-```
-
-Anywhere else in the body it is ordinary Python:
-
-```python
-with model.trace("Hello world"):
-    layers = model.transformer.h            # any statement will do
-    try:
-        h = layers[0].output.save()
-    except RuntimeError:
-        h = None
-```
-
-Wrapping the whole `with` in a `try` — to log failures around the trace — is
-unaffected; the restriction is only on the block's own first statement.
+A trace body cannot *begin* with `try:` (it raises `ValueError` at `with` entry); put
+any statement above it, or the `try` outside the `with`. Anywhere else in the body
+`try` is ordinary Python. See
+[with-block-not-found.md](../errors/with-block-not-found.md#a-trace-body-that-starts-with-try).
 
 ## Loops inside an invoke
 
@@ -152,8 +125,6 @@ several traces share one scope. For remote workloads use
   first.
 - **`if some_tensor:` on a multi-element tensor raises `RuntimeError`** — exactly as
   in vanilla PyTorch. Reduce to a scalar (`.all()`, `.item()`, ...) first.
-- **A trace body cannot start with `try:`** — put any statement above it, or the
-  `try` outside the `with`.
 
 ## Related
 
