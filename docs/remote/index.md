@@ -10,29 +10,24 @@ sources: [src/nnsight/modeling/mixins/remotable.py:19, src/nnsight/intervention/
 
 Up: [docs/index.md](../index.md) — all sections.
 
-## What this is for
-
-These docs cover running nnsight interventions on NDIF (National Deep Inference Fabric) — shared GPU infrastructure that hosts large models (Llama-3.1-70B/405B and similar). You write the same `with model.trace(...)` blocks, add `remote=True`, and the traced block is serialized, queued, executed on a remote pod, and streamed back.
-
-NDIF service docs live at https://nnsight.net and https://login.ndif.us. These docs cover the client-side surface only.
-
-## Decision tree
+Running nnsight interventions on NDIF (National Deep Inference Fabric), the shared service that hosts large models: the same `with model.trace(...)` blocks with `remote=True`, executed on NDIF. These pages cover the client side; service docs are at https://nnsight.net and https://login.ndif.us.
 
 | Goal | Doc |
 |------|-----|
-| What is NDIF and what happens when I set `remote=True`? | [ndif-overview.md](./ndif-overview.md) |
-| Get an API key, set HOST/key, configure logging | [api-key-and-config.md](./api-key-and-config.md) |
-| Run a single trace remotely (most common starting point) | [remote-trace.md](./remote-trace.md) |
+| Run a single trace remotely (start here); what happens on `remote=True` | [remote-trace.md](./remote-trace.md) |
+| What NDIF is, job status values, what a job cost | [ndif-overview.md](./ndif-overview.md) |
+| Test the remote path offline, without a server (`remote="local"`) | [ndif-overview.md](./ndif-overview.md#dry-run-the-remote-path-with-remotelocal) |
+| Get an API key, set the host, configure logging | [api-key-and-config.md](./api-key-and-config.md) |
 | Bundle several traces into one request to skip multiple queue waits | [remote-session.md](./remote-session.md) |
 | Submit a job and poll for it later instead of blocking | [non-blocking-jobs.md](./non-blocking-jobs.md) |
 | Await a remote job (or async-iterate its status) from an event loop | [remote-async.md](./remote-async.md) |
 | Use local helper modules in remote intervention code | [register-local-modules.md](./register-local-modules.md) |
 | Check if a model is up before submitting | [status-and-availability.md](./status-and-availability.md) |
-| Test the remote path offline, without a server (`remote="local"`) | [remote-trace.md](./remote-trace.md#try-it-offline-first-with-remotelocal) |
 | Debug a "works locally, fails remotely" mismatch | [env-comparison.md](./env-comparison.md) |
-| Sweep a dataset, or train an adapter/probe, server-side | [remote-dataset-sweep.md](../patterns/remote-dataset-sweep.md), [remote-training.md](../patterns/remote-training.md) |
+| Sweep a dataset server-side | [patterns/remote-dataset-sweep.md](../patterns/remote-dataset-sweep.md) |
+| Train an adapter or probe server-side | [patterns/remote-training.md](../patterns/remote-training.md) |
 
 ## Related
 
-- [docs/usage/trace.md](../usage/trace.md) — local tracing patterns; the same code runs remotely with `remote=True`.
-- [docs/usage/generate.md](../usage/generate.md) — multi-token generation; combine with `remote=True` for hosted models.
+- [docs/usage/trace.md](../usage/trace.md) — local tracing; the same code runs remotely with `remote=True`.
+- [docs/usage/generate.md](../usage/generate.md) — multi-token generation.
