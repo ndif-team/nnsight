@@ -10,29 +10,13 @@ sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/tracer.py]
 
 ## What this is for
 
-Ablation removes (or replaces with a baseline) the output of a component and
-measures how the prediction degrades. It is the "lesion study" of mechanistic
-interpretability: if zeroing a component destroys a behavior, that component is
-doing something the task needs.
+Remove a component's output, or replace it with a baseline, and measure how the
+prediction degrades. If removing it breaks a behavior, the behavior needs it — use
+this to test a circuit hypothesis or to check that a probed feature is actually used.
 
-Common variants:
-
-- **Zero ablation**: replace the output with zeros. Simple, but pushes the residual
-  off-distribution.
-- **Mean ablation**: replace with the average activation over a reference set. Stays
-  closer to typical model state.
-- **Noise / resampling ablation**: replace with a sample from another input.
-
-In nnsight, ablation is an in-place write inside a trace. Pair an ablated invoke
-with a baseline invoke to compare.
-
-## When to use
-
-- Identifying which components a behavior depends on.
-- Validating a circuit hypothesis.
-- Measuring component importance for layer / head pruning.
-- Sanity-checking probes: if you can read X off layer L but ablating L doesn't
-  change the output, X may be epiphenomenal.
+- **Zero**: replace with zeros. Simple, but pushes the residual off-distribution.
+- **Mean**: replace with the average activation over a reference set.
+- **Resample**: replace with the activation from another input.
 
 ## Canonical pattern
 
@@ -63,53 +47,42 @@ baseline P(Paris) = 0.070
 ablated  P(Paris) = 0.053
 ```
 
-`mlp.output` is a plain tensor, so `[:] = 0` writes in place. The two invokes write
-to disjoint variables and never read a shared module across invokes, so **no barrier
-is needed**.
+`mlp.output` is a plain tensor, so `[:] = 0` writes in place. Neither invoke reads a
+value from the other, so no barrier is needed.
 
 ## Variations
 
-### Zero a specific position only
+### Zero one position or one neuron
+
+Index the write. `mlp.output` is `[B, S, hidden]`; individual MLP neurons live on
+`mlp.act.output` (`[B, S, 4*hidden]` on GPT-2). Either line works alone; together
+they must stay in forward order (`act` runs inside the MLP, before its output):
 
 ```python
 with model.trace(prompt):
-    model.transformer.h[LAYER].mlp.output[:, -1, :] = 0
-    logits = model.lm_head.output[:, -1, :].save()
-```
-
-### Zero a single hidden dimension / feature
-
-```python
-with model.trace(prompt):
-    feature_idx = 1234
-    model.transformer.h[LAYER].mlp.output[:, :, feature_idx] = 0
+    model.transformer.h[LAYER].mlp.act.output[:, -1, 1234] = 0   # one neuron
+    model.transformer.h[LAYER].mlp.output[:, -1, :] = 0          # last position only
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
 ### Zero one attention head
 
-`.attn.output` is a tuple `(attn_out, weights)`. Index `[0]` for the value-weighted
-output `[batch, seq, hidden]`, reshape to heads, zero one, and assign the whole tuple
-back:
+Zero the head's slice of the output projection's *input*, where the hidden dimension
+still decomposes per head. Do not reshape `attn.output[0]`: that is post-projection,
+and its column slices are not heads (see
+[per-head-attention](per-head-attention.md)).
 
 ```python
-n_heads = model.config.n_head
-head_dim = model.config.n_embd // n_heads
+HEAD = 4
+head_dim = model.transformer.h[0].attn._module.head_dim   # not n_embd // n_head
 
 with model.trace(prompt):
-    out = model.transformer.h[LAYER].attn.output
-    attn_out = out[0]                               # [B, S, hidden]
-    B, S, _ = attn_out.shape
-    reshaped = attn_out.view(B, S, n_heads, head_dim).clone()
-    reshaped[:, :, 4, :] = 0                         # zero head 4
-    new_attn = reshaped.view(B, S, n_heads * head_dim)
-    model.transformer.h[LAYER].attn.output = (new_attn,) + tuple(out[1:])
+    lo, hi = HEAD * head_dim, (HEAD + 1) * head_dim
+    model.transformer.h[LAYER].attn.c_proj.input[:, :, lo:hi] = 0
     logits = model.lm_head.output[:, -1, :].save()
 
-# P(Paris) = 0.066  (down slightly from 0.070 baseline)
+# P(Paris) = 0.065  (baseline 0.070)
 ```
-
-For ergonomic per-head access, see `docs/patterns/per-head-attention.md`.
 
 ### Mean ablation
 
@@ -128,7 +101,7 @@ with model.trace() as tracer:
         with tracer.invoke(p):
             acts.append(model.transformer.h[LAYER].mlp.output[:, -1, :])
 
-mean_act = torch.stack([a for a in acts], dim=0).mean(dim=0)   # [1, hidden]
+mean_act = torch.stack(list(acts), dim=0).mean(dim=0)   # [1, hidden]
 
 # Pass 2: ablate with the mean.
 with model.trace(prompt):
@@ -138,14 +111,11 @@ with model.trace(prompt):
 # mean-ablated P(Paris) = 0.078
 ```
 
-Create the accumulator inside the trace with `nnsight.save([])` and append raw
-values so the collected activations survive the trace.
-
 ### Noise / resampling ablation
 
 Replace with the activation from an unrelated prompt. Both invokes touch the same
 module and one passes a value to the other, so a `tracer.barrier(n)` is required —
-see `docs/usage/barrier.md`.
+see [barrier](../usage/barrier.md).
 
 ```python
 clean     = "The Eiffel Tower is in the city of"
@@ -158,31 +128,11 @@ with model.trace() as tracer:
         barrier()
     with tracer.invoke(clean):
         barrier()
-        mlp = model.transformer.h[LAYER].mlp.output
-        mlp[:, -1, :] = noise
-        model.transformer.h[LAYER].mlp.output = mlp
+        model.transformer.h[LAYER].mlp.output[:, -1, :] = noise
         logits = model.lm_head.output[:, -1, :].save()
 
 # resample-ablated P(Paris) = 0.037
 ```
-
-### Empty invoke for batch-wide ablation
-
-To ablate uniformly across a multi-invoke batch, add an empty `tracer.invoke()` — it
-covers the full batch:
-
-```python
-with model.trace() as tracer:
-    with tracer.invoke("The Eiffel Tower is in the city of"):
-        pass
-    with tracer.invoke("The Colosseum is in the city of"):
-        pass
-    with tracer.invoke():                       # empty: full batch
-        model.transformer.h[LAYER].mlp.output[:] = 0
-        logits = model.lm_head.output[:, -1, :].save()   # shape [2, 50257]
-```
-
-See `docs/usage/invoke-and-batching.md`.
 
 ### Ablating an MoE expert
 
@@ -203,30 +153,16 @@ quietly include the pad rows.
 
 ## Interpretation tips
 
-- **Compare logits, log-probs, or task accuracy** — not raw activation norms. The
-  point is functional effect.
-- **Zero ablation pushes out of distribution.** A large drop might just mean
-  "anything missing here breaks the model". Mean / resample ablation is more
-  conservative.
+- **Compare logits, log-probs, or task accuracy**, not activation norms.
+- **A large zero-ablation drop may only mean "anything missing here breaks the
+  model".** Mean ablation asks whether the *deviation from average* matters;
+  resample asks whether the *task-specific* content does.
 - **One-component ablation underestimates redundancy.** If two heads back each
   other up, zeroing either alone barely moves the answer. Ablate sets jointly.
-- **Different ablations answer different questions.** Zero = "is there *any* signal
-  here?" Mean = "is the *deviation from average* important?" Resample = "is the
-  *task-specific* content important?"
 
 ## Gotchas
 
-- `[:] = 0` is in-place. `.clone().save()` first if you need the pre-ablation value.
-- Submodule output shapes vary: `.mlp.output` is a tensor; `.attn.output` is a
-  tuple `(attn_out, weights)` — index `[0]` and rebuild `(new,) + tuple(out[1:])`
-  when replacing. GPT-2 **block** outputs are plain tensors in current
-  `transformers`. Check with `isinstance(module.output, tuple)`. See
-  `docs/usage/access-and-modify.md`.
-- Accumulating activations into a list across invokes: create the list inside the
-  trace as `xs = nnsight.save([])` and append raw values.
 - Module names differ across architectures — `print(model)` to inspect.
-- If two invokes read *and* write the same module's output, use `tracer.barrier(n)`.
-  See `docs/usage/barrier.md`.
 
 ## Related
 

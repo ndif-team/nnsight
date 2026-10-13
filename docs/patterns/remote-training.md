@@ -16,11 +16,6 @@ nnsight's interleaved backward exactly as they do locally
 ([backward-and-grad](../usage/backward-and-grad.md)) — what changes is that the
 loop, the optimizer and the parameters all have to live on the server.
 
-## When to use
-
-- The model is remote and the thing you're fitting is far smaller than the model.
-- You'd otherwise be submitting one job per training step.
-
 ## The shape
 
 Everything goes inside one `session(remote=True)`. The optimizer never crosses the
@@ -87,7 +82,7 @@ with model.session(remote=True) as session:
 
         optimizer.step()
         optimizer.zero_grad()
-        print(loss.item(), adapter.WA.norm().item())
+        print(f"loss {loss.item():.4f}  |WB| {adapter.WB.norm().item():.4f}")
 
     # Plain tensors, not the adapter: it holds an Envoy pointing at a module that
     # only exists on the server.
@@ -95,8 +90,11 @@ with model.session(remote=True) as session:
     trained_WB = adapter.WB.detach().save()
 ```
 
-`print` streams back as `LOG` lines, so the loss curve arrives while the job runs
-rather than after it.
+`print` streams back as `LOG` lines, so the loss curve arrives while the job runs.
+Printing a parameter norm next to the loss is the check that it is really training:
+a client-side optimizer and a client-built adapter both run to completion with a
+plausible loss and no error. If `|WB|` never moves off zero, or the loss repeats to
+the last decimal on consecutive steps, the optimizer is a no-op.
 
 To use the result, rebuild the adapter from the weights that came home:
 
@@ -121,20 +119,6 @@ with model.generate("I'm upset", remote=True):
 | Save the weights, not the adapter | The adapter holds an `Envoy`; the object cannot be reconstructed client-side |
 | Replacement assignment, not `output[:] =` | `one of the variables needed for gradient computation has been modified by an inplace operation` |
 
-## Check that it is really training
-
-Two of the ways this goes wrong produce no error at all — a client-side optimizer
-and a client-built adapter both run to completion and report a plausible loss. Print
-a parameter norm next to the loss:
-
-```python
-print(f"step {step}  loss {loss.item():.4f}  |WB| {adapter.WB.norm().item():.4f}")
-```
-
-If `|W|` does not move off its initial value, your parameters are not on the server
-(or are on `meta`) and the optimizer is a no-op. A loss that is identical to the last
-decimal on consecutive steps means the same thing.
-
 ## Gotchas
 
 - **The optimizer's `.grad` reads happen between traces, not inside them.** Step
@@ -142,13 +126,6 @@ decimal on consecutive steps means the same thing.
 - **`nnsight.save` marks by identity.** `adapter.WA` is an attribute, not a name in
   the block's scope, so `.save()` on it inside `__init__` returns nothing. Bind the
   value to a local — `trained_WA = adapter.WA.detach().save()` — as above.
-- **Server version matters.** NDIF used to wrap a whole request in one
-  `torch.autocast` region with its weight cache enabled, which froze the
-  half-precision copy of every parameter at the value it had before the first
-  `optimizer.step()`. Gradients looked healthy and the weights moved, but the model
-  never saw the updates and the loss sat flat. Fixed server-side; if you are
-  training against an older deployment, call `torch.clear_autocast_cache()` after
-  each step.
 
 ## Related
 

@@ -1,6 +1,6 @@
 ---
 title: Per-Head Attention
-one_liner: Read and modify individual attention heads by reshaping the attention output, by reading the already-per-head tensor from `.source`, or by exposing a first-class `.heads` accessor with an `eproperty`.
+one_liner: Read, ablate, or patch individual attention heads by slicing the output projection's input, by reading the already-per-head tensor from `.source`, or by exposing a `.heads` accessor with an `eproperty`.
 tags: [pattern, interpretability, attention, heads]
 related: [docs/patterns/attention-patterns.md, docs/usage/source.md, docs/patterns/ablation.md, docs/developing/extending-envoy.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.py, src/nnsight/intervention/source.py, tests/test_source.py, tests/test_language.py]
@@ -10,34 +10,18 @@ sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/eproperty.
 
 ## What this is for
 
-The value-weighted attention output (after `c_proj` / `o_proj`) is laid out as
-`[batch, seq, n_heads * head_dim]`. To operate on individual heads — read one
-head's output, ablate a head, replace one head with another's — view that flat
-dimension as `[batch, seq, n_heads, head_dim]`.
+Reading one head's output, ablating a head, or patching one head from another run.
+Heads exist only **before** the attention output projection (`c_proj` on GPT-2,
+`o_proj` on Llama-style models): its input is `[batch, seq, n_heads * head_dim]` with
+head-major columns. After the projection, the hidden dimension no longer decomposes
+per head.
 
-Three ways:
+## Pattern A: slice the output projection's input
 
-1. **Inline reshape** of `attn.output[0]` inside a trace. Works on the
-   post-projection output.
-2. **Read `.source.attention_interface_1.output[0]`**, which is *already* shaped
-   `[batch, seq, n_heads, head_dim]` (before the reshape + `c_proj`). No manual
-   reshape needed.
-3. **Expose a first-class `.heads` accessor** with a custom `eproperty` on an
-   `Envoy` subclass, wired to the output projection via `envoys=`. Then
-   `attn.c_proj.heads` is a per-head view you read and write like any other
-   activation — no reshape at the call site.
-
-## When to use
-
-- Per-head attention-output reads.
-- Per-head ablation studies.
-- Per-head patching (with `tracer.barrier(n)` to bring values across invokes).
-- Building a per-head metric pipeline.
-
-## Pattern A: inline reshape of the attention output
+The simplest correct route. Columns `[h*head_dim : (h+1)*head_dim]` of
+`c_proj.input` are head `h`:
 
 ```python
-import torch
 from nnsight.modeling.transformers import TransformersModel
 
 model = TransformersModel("openai-community/gpt2", dispatch=True)
@@ -46,95 +30,36 @@ n_heads  = model.config.n_head
 head_dim = model.transformer.h[0].attn._module.head_dim   # not n_embd // n_heads
 LAYER, HEAD = 5, 4
 prompt = "The cat sat on the"
+lo, hi = HEAD * head_dim, (HEAD + 1) * head_dim
 
-# Read one head's output.
+# Read every head's output.
 with model.trace(prompt):
-    attn_out = model.transformer.h[LAYER].attn.output[0]   # [B, S, hidden]
-    B, S, H = attn_out.shape
-    per_head = attn_out.view(B, S, n_heads, head_dim).save()
-
-print(per_head.shape)              # torch.Size([1, 5, 12, 64])
-print(per_head[:, :, HEAD].shape)  # torch.Size([1, 5, 64])  -- head 4's output
+    x = model.transformer.h[LAYER].attn.c_proj.input       # [B, S, hidden]
+    per_head = x.view(*x.shape[:2], n_heads, head_dim).save()
 
 assert per_head.shape == (1, 5, n_heads, head_dim)
-```
 
-`.attn.output` is a tuple `(attn_out, weights)`, so index `[0]` for the tensor.
-
-### Reshaping the output tuple
-
-Clone, zero one head's *slice of the projected output*, reshape back to flat, and
-assign the whole tuple:
-
-!!! warning "This is not head ablation"
-
-    `attn.output[0]` is the output of `c_proj`. After that projection the hidden
-    dimension no longer decomposes per head, so columns
-    `[h*head_dim : (h+1)*head_dim]` are **not** head `h` — zeroing them removes
-    something, but not that head's contribution. Measure it: take the prompt
-    above, and score each run by how much the final-position logit of the
-    baseline's top token moves —
-
-    ```python
-    with model.trace(prompt):
-        base = model.lm_head.output[0, -1, :].save()
-    tok = base.argmax().item()          # ' floor' for "The cat sat on the"
-    delta = float(logits[0, tok] - base[tok])   # logits: the edited run's save
-    ```
-
-    — running the column-zeroing edit below and the real ablation of
-    [Pattern B](#pattern-b-per-head-straight-from-source) for the same head.
-    On GPT-2 layer 5 head 8, zeroing the columns moves the logit by `+0.016` —
-    a rounding error — while really ablating the head moves it by `-1.47`: a
-    ~90x understatement with the sign flipped. Layer 11 head 7 fails the other
-    way: `+8.25` for the columns, `-0.06` for the head. Across all 144 heads
-    the two deltas disagree in sign for 71 — no error, and a plausible-looking
-    number unrelated to the head.
-
-    To actually ablate a head, cut it *before* the projection — see
-    [Pattern B](#pattern-b-per-head-straight-from-source) below, or slice
-    `attn.c_proj.input`, which is equivalent. Use the pattern here only when you
-    genuinely want to edit the projected output.
-
-```python
+# Ablate one head.
 with model.trace(prompt):
-    out = model.transformer.h[LAYER].attn.output
-    attn = out[0]
-    B, S, _ = attn.shape
-    edited = attn.view(B, S, n_heads, head_dim).clone()
-    edited[:, :, HEAD, :] = 0
-    new_attn = edited.view(B, S, n_heads * head_dim)
-    model.transformer.h[LAYER].attn.output = (new_attn,) + tuple(out[1:])
+    model.transformer.h[LAYER].attn.c_proj.input[:, :, lo:hi] = 0
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
-Here the whole tuple is rebuilt because `.view()` produces a *different* tensor
-that has to take the element's place, and a tuple's elements cannot be
-reassigned (`attn.output[0] = new_attn` raises). An in-place write needs no
-rebuild, but it has to index the layout that is actually there:
-`attn.output[0]` is `[B, S, hidden]`, so `attn.output[0][:, :, HEAD, :] = 0`
-raises `IndexError: too many indices for tensor of dimension 3`. Slice the flat
-columns instead — and see the warning above for what that does and does not
-mean.
+On this prompt, ablating layer 5 head 4 moves the baseline's top-token (`' floor'`)
+logit by `+0.307`.
+
+!!! warning "Do not reshape `attn.output[0]`"
+
+    `attn.output[0]` is the output *of* `c_proj`. `view(B, S, n_heads, head_dim)`
+    succeeds on it but the slices are not heads: zeroing "head 4" there moves the
+    same logit by `-0.178` — the wrong sign. Across all 144 GPT-2 heads the two
+    deltas disagree in sign for about half (71). No error, just a plausible number
+    unrelated to the head.
 
 ## Pattern B: per-head straight from `.source`
 
-Inside GPT-2's attention forward, the attention output is per-head *before* it gets
-flattened and projected. Read it directly from the source op — no reshape:
-
-```python
-with model.trace(prompt):
-    ph = (
-        model.transformer.h[LAYER].attn
-        .source.attention_interface_1.output[0]     # already [B, S, n_heads, head_dim]
-        .save()
-    )
-print(ph.shape)   # torch.Size([1, 5, 12, 64])
-
-assert ph.shape == (1, 5, n_heads, head_dim)
-```
-
-Ablate a head at this stage (before `c_proj`) by rebuilding the op's output tuple:
+Inside GPT-2's attention forward, the attention-interface call returns a tensor that
+is already `[B, S, n_heads, head_dim]`, before it is flattened and projected:
 
 ```python
 with model.trace(prompt):
@@ -145,41 +70,20 @@ with model.trace(prompt):
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
-The op name (`attention_interface_1`; `_0` is the assignment choosing the
-implementation) is GPT-2-specific — discover yours with
-`print(model.transformer.h[0].attn.source)`. See `docs/usage/source.md` and
-`docs/patterns/attention-patterns.md`.
-
-Equivalently, zero the head's slice of the projection's *input*, which needs no
-tuple rebuild and no source-op name:
-
-```python
-with model.trace(prompt):
-    lo, hi = HEAD * head_dim, (HEAD + 1) * head_dim
-    model.transformer.h[LAYER].attn.c_proj.input[:, :, lo:hi] = 0
-    logits = model.lm_head.output[:, -1, :].save()
-```
-
-Both routes agree exactly — the saved logits are bitwise equal. With the metric
-from Pattern A's warning (GPT-2, layer 5 head 4, "The cat sat on the"), the
-`' floor'` logit moves `-80.654` → `-80.347`, a delta of `+0.307`; the Pattern A
-reshape gives `-0.178` for the same head — a different magnitude and the wrong
-sign, because it is not a head ablation. Prefer this
-one when you just want the ablation; prefer the source-op form when you also want to
-read or edit the per-head tensor.
+The saved logits are bitwise equal to Pattern A's. The op name
+(`attention_interface_1`; `_0` is the assignment choosing the implementation) is
+GPT-2-specific — discover yours with `print(model.transformer.h[0].attn.source)`. See
+[source](../usage/source.md). Prefer Pattern A for plain ablation; use this form when
+you also want the per-head tensor without a reshape.
 
 ## Pattern C: a first-class `.heads` accessor via `eproperty`
 
-For repeated use, expose the per-head view as its own served value: an `eproperty`
-on an `Envoy` subclass, wired to the output projection with `envoys=`. Serve the
-**projection's input**, for the reason Pattern A's warning gives: that is the last
-point at which the hidden dimension still decomposes per head.
+For repeated use, serve the per-head view of the projection's input as its own value:
+an `eproperty` on an `Envoy` subclass, wired to `attn.c_proj` with `envoys=`.
 
 ```python
-import torch
 from nnsight import Envoy
 from nnsight.intervention.eproperty import eproperty
-from nnsight.modeling.transformers import TransformersModel
 
 class ProjHeads(Envoy):
     n_heads = 12                                   # model.config.n_head
@@ -201,79 +105,40 @@ model = TransformersModel(
 )
 
 with model.trace(prompt):
-    per_head = model.transformer.h[LAYER].attn.c_proj.heads.save()
-
-assert per_head.shape == (1, 5, 12, 64)            # [B, S, n_heads, head_dim]
-
-with model.trace(prompt):
     model.transformer.h[LAYER].attn.c_proj.heads[:, :, HEAD, :] = 0
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
-On the layer 5 head 4 setup above this reproduces the true ablation exactly —
-the saved logits equal the source-op route's and the `c_proj.input` slice's
-bitwise: the same `+0.307` move of the `' floor'` logit, against `-0.178` for
-the post-projection reshape.
+This reproduces Pattern A's logits bitwise. Key on the path suffix `"attn.c_proj"`,
+not the `Conv1D` type — GPT-2's MLP has a `c_proj` too. Authoring details are in
+[extending-envoy](../developing/extending-envoy.md); `tests/test_language.py`
+(`TestCustomEnvoys`) is the tested example.
 
-The key is the path suffix `"attn.c_proj"`, not the `Conv1D` type: GPT-2's MLP
-has a `c_proj` too, and a type key would wrap it as well. `key="input"` serves the
-raw `(args, kwargs)` pair, which is why the preprocess destructures it and the
-transform repacks it. Authoring details — `.transform`, `envoys=` matching rules,
-the `[B, S, H]` output variant — are in
-[extending-envoy.md](../developing/extending-envoy.md);
-`tests/test_language.py` (`TestCustomEnvoys`) is the tested example.
+## Patching and attribution per head
 
-## Variations
-
-### A reusable helper
-
-```python
-def heads(attn_output_tensor, n_heads):
-    B, S, H = attn_output_tensor.shape
-    return attn_output_tensor.view(B, S, n_heads, H // n_heads)
-
-with model.trace(prompt):
-    per_head = heads(model.transformer.h[LAYER].attn.output[0], n_heads).save()
-```
-
-### Per-head patching across invokes
-
-Combine Pattern A or B with `tracer.barrier(n)` to move one head's activation from a
-clean run into a corrupt run. See `docs/patterns/activation-patching.md`.
-
-### Per-head attribution
-
-Multiply a per-head reshape of `(act_clean - act_corrupt)` against the corresponding
-gradient and sum over `head_dim` for a `[layer, head]` map. See
-`docs/patterns/attribution-patching.md`.
+To patch one head across invokes, combine Pattern A with `tracer.barrier(n)` — see
+[activation-patching](activation-patching.md). For a `[layer, head]` attribution
+map, see [attribution-patching](attribution-patching.md#sub-block-and-per-head-attribution).
 
 ## Interpretation tips
 
 - **`head_dim` is not `hidden_size // n_heads`.** Read it off the attention
-  module: `attn._module.head_dim` is there on GPT-2, Qwen and Llama alike
-  (`transformers` 5.15). The config is less reliable — `Gemma2Config` carries
-  `head_dim`, `Qwen2Config` raises `AttributeError` for it. On `gemma-2-2b`,
-  `hidden_size` is 2304 and `num_attention_heads` is 8, but `head_dim` is 256 and
-  `o_proj.in_features` is 2048, so `attn.output[0].view(B, S, 8, 288)` succeeds
-  and is not heads.
+  module: `attn._module.head_dim` is there on GPT-2, Qwen and Llama alike. The config
+  is less reliable — `Gemma2Config` carries `head_dim`, `Qwen2Config` raises
+  `AttributeError` for it. On `gemma-2-2b`, `hidden_size` is 2304 and
+  `num_attention_heads` is 8, but `head_dim` is 256 and `o_proj.in_features` is 2048,
+  so `attn.output[0].view(B, S, 8, 288)` succeeds and is not heads.
 - **Under grouped-query attention the head convention still holds.** The pattern
   and the projection's input are indexed by *query* head:
   `o_proj.input.view(B, S, num_attention_heads, head_dim)` is `torch.equal` to
   `.source.attention_interface_1.output[0]` on Qwen2.5-0.5B (14 query / 2 KV
   heads) and gemma-2-2b (8 / 4). Only the K and V projections are sliced by
   `num_key_value_heads`.
-- **`attn.output[0]` is post-projection**; `.source.attention_interface_1.output[0]`
-  is pre-projection and already per-head.
 - **Aliasing matters.** `.view()` shares storage; `.reshape()` / `.contiguous()` may
   copy. If edits don't show up downstream, you mutated a copy — rebuild and assign.
-- **Position dimension.** `[B, S, n_heads, head_dim]` slices both head and position:
-  `per_head[:, -1, HEAD, :]` is "head HEAD at the last position".
 
 ## Gotchas
 
-- `.attn.output` is a tuple — index `[0]` for the value-weighted output.
-- When replacing, rebuild the whole tuple `(new,) + tuple(out[1:])` and assign;
-  don't `__setitem__` a tuple (`attn.output[0] = x` fails).
 - Request source ops before the module's own `.output` in a forward, or hit
   `OutOfOrderError`.
 - A wrong `head_dim` does not always raise. When `n_heads * head_dim` still equals
@@ -284,7 +149,7 @@ gradient and sum over `head_dim` for a `[layer, head]` map. See
 ## Related
 
 - [attention-patterns](attention-patterns.md) — reading attention probabilities.
-- [activation-patching](activation-patching.md), [ablation](ablation.md).
-- [attribution-patching](attribution-patching.md) — per-head attribution maps.
-- `docs/usage/source.md` — how `.source` exposes intermediate ops.
-- `docs/developing/extending-envoy.md` — custom served values and the `envoys=` wiring.
+- [activation-patching](activation-patching.md), [ablation](ablation.md),
+  [attribution-patching](attribution-patching.md).
+- [source](../usage/source.md) — how `.source` exposes intermediate ops.
+- [extending-envoy](../developing/extending-envoy.md) — custom served values and the `envoys=` wiring.

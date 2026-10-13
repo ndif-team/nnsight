@@ -10,32 +10,19 @@ sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/tracer.py]
 
 ## What this is for
 
-Activation steering (a.k.a. "activation addition", ActAdd) changes behavior by
-adding a fixed vector to a layer's residual stream during the forward pass. The
-vector is usually a "concept direction" — the difference of mean activations
-between contrasting prompt sets — or a learned probe direction. Adding it pushes
-the residual toward that concept; subtracting suppresses it.
-
-The same machinery drives refusal-direction work, sentiment / topic steering, and
-"control vectors". The interpretability claim: if a single low-rank addition to one
-layer reliably changes behavior, that behavior has a linearly-decodable
-representation at that layer.
-
-In nnsight this is an in-place `+=` to `block.output` inside a trace, plus a
-separate computation of the direction.
-
-## When to use
-
-- Testing whether a behavior is linearly steerable from a given layer.
-- Comparing steering effectiveness across layers / coefficients.
-- Building refusal-direction / sycophancy / persona interventions.
-- Re-injecting a probe's learned direction to measure it.
+Activation steering (activation addition, ActAdd) changes behavior by adding a fixed
+vector to a layer's residual stream during the forward pass — usually the difference
+of mean activations between contrasting prompt sets, or a probe direction. Adding it
+pushes toward the concept; subtracting suppresses it. Use it to test whether a
+behavior is linearly steerable from a layer, or to check that a probe direction is
+causal. Refusal-direction work (Arditi et al., 2024) is the same pattern with
+`mean(harmful) - mean(harmless)` subtracted or projected out. In nnsight it is an
+in-place `+=` to `block.output` inside a trace.
 
 ## Computing the steering direction
 
-Take the difference of mean residuals between a positive and negative prompt set at
-the chosen layer. Bundle both passes in one `session()` (one engine call if remote;
-cross-trace values flow without a per-element `.save()`):
+Take the difference of mean residuals between a positive and a negative prompt set
+at the chosen layer:
 
 ```python
 import torch
@@ -48,20 +35,17 @@ positive = ["I love this so much", "This is wonderful", "I am very happy"]
 negative = ["I hate this so much", "This is terrible", "I am very sad"]
 LAYER = 6
 
-with model.session():
-    with model.trace() as tracer:
-        pos_acts = nnsight.save([])
-        neg_acts = nnsight.save([])
-        for p in positive:
-            with tracer.invoke(p):
-                pos_acts.append(model.transformer.h[LAYER].output[:, -1, :])
-        for p in negative:
-            with tracer.invoke(p):
-                neg_acts.append(model.transformer.h[LAYER].output[:, -1, :])
+with model.trace() as tracer:
+    pos_acts = nnsight.save([])
+    neg_acts = nnsight.save([])
+    for p in positive:
+        with tracer.invoke(p):
+            pos_acts.append(model.transformer.h[LAYER].output[:, -1, :])
+    for p in negative:
+        with tracer.invoke(p):
+            neg_acts.append(model.transformer.h[LAYER].output[:, -1, :])
 
-pos = torch.cat([a for a in pos_acts], dim=0).mean(0)   # [hidden]
-neg = torch.cat([a for a in neg_acts], dim=0).mean(0)
-direction = (pos - neg)
+direction = torch.cat(list(pos_acts)).mean(0) - torch.cat(list(neg_acts)).mean(0)
 direction = direction / direction.norm()                # [768]
 ```
 
@@ -89,9 +73,8 @@ baseline argmax: ' bought'
 steered  argmax: ' I'
 ```
 
-`block.output` is a plain tensor, so `+=` writes the residual in place. Two invokes
-write disjoint variables and only the second modifies the steered module, so **no
-barrier is needed**.
+`block.output` is a plain tensor, so `+=` writes the residual in place. Neither invoke
+reads a value from the other, so no barrier is needed.
 
 ## Choosing the coefficient
 
@@ -127,44 +110,12 @@ Fluency holds to 93 and breaks at 186 — a little past one times the residual n
 At block 10, where the norm is 244, the same fraction is `coef = 122`. Sweep the
 layer alongside the fraction; the two interact.
 
-## Variations
+## Steering during generation
 
-### Steer all positions vs only the last
-
-```python
-# All positions: nudges every token's residual.
-model.transformer.h[LAYER].output[:] += direction * coef
-
-# Only the last position: cleaner targeting on next-token prediction.
-model.transformer.h[LAYER].output[:, -1, :] += direction * coef
-
-# A specific span (positions 5-10): targeted intervention.
-model.transformer.h[LAYER].output[:, 5:10, :] += direction * coef
-```
-
-### Multi-layer steering
-
-Adding the same direction at several consecutive layers often produces stronger,
-cleaner effects than a single big push:
-
-```python
-with model.trace(prompt):
-    for L in [4, 5, 6, 7]:
-        model.transformer.h[L].output[:, -1, :] += direction * (coef / 4)
-    out = model.lm_head.output.save()
-
-# out[:, -1, :].argmax -> ' I'
-```
-
-### Steering during generation
-
-`model.generate(...)` returns generated **token ids** (read `tracer.result`).
-
-A bare edit in the trace body fires **once, on the prefill** — the forward that
-encodes the prompt — and not on the decode steps that follow. That still changes
-the output, because it changes how the prompt was read, so it is easy to mistake
-for working. To keep the steering on while the model writes, put the edit in a
-**bounded** `tracer.iter[:N]`:
+A bare edit in a `generate` body fires **once, on the prefill** — the forward that
+encodes the prompt — and not on the decode steps. That still changes the output, so
+it is easy to mistake for working. To keep the steering on while the model writes,
+put the edit in a **bounded** `tracer.iter[:N]`:
 
 ```python
 with model.generate(prompt, max_new_tokens=20, min_new_tokens=20, do_sample=False) as tracer:
@@ -176,19 +127,13 @@ print(model.tokenizer.decode(ids[0]))
 ```
 
 Bounded, not `tracer.all()`: an open-ended loop unwinds every line after it, so
-`tracer.result.save()` would never run (see
-[iteration.md](../usage/iteration.md)).
+`tracer.result.save()` would never run. `min_new_tokens` pins the run to the bound —
+steering changes when the model emits end-of-text, and a loop the run stops short
+of is cut short with a warning and `ids` is never bound. See
+[iteration](../usage/iteration.md).
 
-`min_new_tokens` matches the bound to what the run will actually do. Steering
-changes when the model emits an end-of-text token, and a bounded loop the run
-stops short of is cut short with a warning — the steering simply stops early and
-`ids` is never bound, with nothing raised in your code. Pinning the step count
-also keeps the rows of a sweep the same length.
-
-The two are easy to tell apart once you look. They agree while the prefill's
-effect is still carrying, then diverge once only one of them is still adding
-anything: here on the third generated token, `' told'` against `' like'`. With the
-direction and `coef = 8.0` above, continuing `"I went to the bakery and"`:
+With the direction and `coef = 8.0` above, the two diverge on the third generated
+token:
 
 ```
 baseline     :  bought a bag of cookies. I was so excited. I
@@ -196,57 +141,27 @@ prefill only :  I was like, 'Oh my God, I'm so
 every step   :  I was told that the bread was good. I was told
 ```
 
-Note that the prefill-only run *does* differ from the baseline — the prompt was
-encoded differently — which is why a missing per-step application reads as "the
-steering is working, the effect is just modest" rather than as a bug.
+The prefill-only run *does* differ from the baseline, which is why a missing
+per-step application reads as "the effect is just modest" rather than as a bug.
 
-#### On `VLLM`
+With the KV cache, each decode step's activation covers only the token just
+produced, so `[:, -1, :]` is the last prompt token on step 0 and the new token after;
+an absolute index like `[:, 5, :]` is out of range from step 1 on.
 
-Indexing, the `(hidden, residual)` layer output and how to scale the vector differ;
-see [What your block sees on vLLM](../models/vllm.md#what-your-block-sees-on-vllm).
-
-#### `[:, -1, :]` means something different after the prefill
-
-With `use_cache=True` (the default), the prefill's activation covers the whole
-prompt, but each decode step's covers **only the token just produced** — sequence
-length 1. So `[:, -1, :]` is the last prompt token on step 0 and the new token on
-every step after, which is what you want here.
-
-An **absolute** index is not portable that way: `[:, 5, :]` addresses prompt
-position 5 during the prefill and is out of range from step 1 on. If you are
-steering a fixed prompt position rather than the running token, apply it outside
-the loop — or index from the end.
-
-For step-conditional steering (e.g. only the first 5 tokens), slice the range:
-`tracer.iter[:5]`. See [iteration.md](../usage/iteration.md).
-
-### Refusal direction
-
-The "refusal direction" line of work computes
-`mean(harmful) - mean(harmless)` at a middle layer and *subtracts* it (or projects
-it out) to suppress refusal. Same pattern with `coef < 0` or projection
-(`hs - (hs @ direction) * direction`).
+On `VLLM`, indexing, the `(hidden, residual)` layer output and how to scale the vector
+differ; see [What your block sees on vLLM](../models/vllm.md#what-your-block-sees-on-vllm).
 
 ## Interpretation tips
 
-- **Sweep coefficient and layer.** A working direction has a band of `(layer, coef)`
-  where behavior shifts and fluency holds; the band moves with the layer's
-  residual norm, so recompute it per layer (see
-  [Choosing the coefficient](#choosing-the-coefficient)).
-- **Look at fluency, not just argmax.** A direction can flip the top token but
+- **Look at fluency, not just argmax.** A direction can flip the top token and
   produce gibberish downstream — always inspect a generation.
-- **Last position vs all positions.** Last-position is more surgical; all-position
-  is stronger but more disruptive.
-- **Norm-normalize the direction** so coefficients are comparable across directions.
-- **Compare to a random direction** at the same norm — a real concept direction
+- **Compare to a random direction** of the same norm — a real concept direction
   should beat it.
-- **Layer position matters.** Early-layer steering "prepends a concept"; mid/late
-  steering shapes the text; late-late steering tends to corrupt grammar.
+- **Last position vs all positions** (`output[:] += ...`): last-position is more
+  surgical; all-position is stronger but more disruptive.
 
 ## Gotchas
 
-- `+= direction * coef` mutates the residual in place. `.clone()` before if you need
-  the pre-steer state.
 - Device placement: `direction.to(model.device)` if computed elsewhere.
 - For Llama-family, the residual is at `model.model.layers[L].output`, not
   `model.transformer.h[L].output`. Use `print(model)`.
@@ -259,8 +174,8 @@ it out) to suppress refusal. Same pattern with `coef < 0` or projection
 - [activation-patching](activation-patching.md)
 - [ablation](ablation.md)
 - [invoke-and-batching](../usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces)
-- `docs/usage/generate.md` — generate returns token ids via `tracer.result`.
-- `docs/usage/iteration.md` — step-conditional steering during generation.
+- [generate](../usage/generate.md) — generate returns token ids via `tracer.result`.
+- [iteration](../usage/iteration.md) — step-conditional steering during generation.
 - Turner et al. (2023), "Activation Addition".
 - Arditi et al. (2024), "Refusal in Language Models Is Mediated by a Single
   Direction".
