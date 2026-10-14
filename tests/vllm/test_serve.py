@@ -58,7 +58,7 @@ def serve_url():
             sys.executable,
             "-m",
             "nnsight.modeling.vllm.serve.cli",
-            "gpt2",
+            "Qwen/Qwen2.5-0.5B",
             "--port",
             str(port),
             "--gpu-memory-utilization",
@@ -93,7 +93,7 @@ def serve_client():
     """A meta client — no weights; the server holds the engine."""
     from nnsight.modeling.vllm import VLLM
 
-    return VLLM("gpt2")
+    return VLLM("Qwen/Qwen2.5-0.5B")
 
 
 class TestGpulessClient:
@@ -112,10 +112,10 @@ class TestGpulessClient:
         with mock.patch("torch.cuda.is_available", return_value=False), mock.patch(
             "torch.cuda.device_count", return_value=0
         ), mock.patch("torch.cuda.max_memory_allocated", return_value=0):
-            model = VLLM("gpt2")
+            model = VLLM("Qwen/Qwen2.5-0.5B")
 
         assert model.tokenizer is not None
-        assert hasattr(model, "transformer")
+        assert hasattr(model.model, "layers")
 
 
 class TestServe:
@@ -129,8 +129,8 @@ class TestServe:
     @torch.no_grad()
     def test_intervention(self, serve_client, serve_url, ET_prompt):
         with serve_client.trace(ET_prompt, temperature=0.0, top_p=1, serve=serve_url):
-            serve_client.transformer.h[-2].mlp.output = torch.zeros_like(
-                serve_client.transformer.h[-2].mlp.output
+            serve_client.model.layers[-2].mlp.output = torch.zeros_like(
+                serve_client.model.layers[-2].mlp.output
             )
             logits = serve_client.logits.save()
 
@@ -197,7 +197,7 @@ class TestServeEdit:
     @torch.no_grad()
     def test_edit_runs_for_a_served_trace(self, serve_client, serve_url, ET_prompt):
         with serve_client.edit(serve=serve_url) as (tracer, edit):
-            hidden = serve_client.transformer.h[5].output.save()
+            hidden = serve_client.model.layers[5].output.save()
         try:
             with serve_client.trace(
                 ET_prompt, temperature=0.0, top_p=1, max_tokens=1, serve=serve_url
@@ -212,7 +212,7 @@ class TestServeEdit:
     @torch.no_grad()
     def test_clear_stops_it(self, serve_client, serve_url, ET_prompt):
         with serve_client.edit(serve=serve_url) as (tracer, edit):
-            hidden = serve_client.transformer.h[5].output.save()
+            hidden = serve_client.model.layers[5].output.save()
         edit.clear()
 
         with serve_client.trace(
@@ -226,7 +226,7 @@ class TestServeEdit:
     def test_the_client_stays_gpuless(self, serve_client, serve_url):
         # Installing must not dispatch an engine on the client — it has no weights.
         with serve_client.edit(serve=serve_url) as (tracer, edit):
-            hidden = serve_client.transformer.h[5].output.save()
+            hidden = serve_client.model.layers[5].output.save()
         try:
             assert not serve_client.dispatched
         finally:
@@ -237,9 +237,9 @@ class TestNamedEditsOverServe:
     def test_named_edit_selected_by_a_served_trace(self, serve_client, serve_url, ET_prompt):
         model = serve_client
         with model.edit(serve=serve_url, name="a") as (tracer, a):
-            value_a = model.transformer.h[3].output[-1].norm().save()
+            value_a = model.model.layers[3].output[0][-1].norm().save()
         with model.edit(serve=serve_url, name="b") as (tracer, b):
-            value_b = model.transformer.h[4].output[-1].norm().save()
+            value_b = model.model.layers[4].output[0][-1].norm().save()
         try:
             with model.trace(ET_prompt, serve=serve_url, max_tokens=1, edits=["a"]) as tracer:
                 result = tracer.result.save()

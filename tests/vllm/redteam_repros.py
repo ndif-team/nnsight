@@ -16,7 +16,7 @@ def sync_save_collision() -> None:
     """Does a trace save overwrite a same-named registered save on result?"""
     from nnsight.modeling.vllm import VLLM
 
-    model = VLLM("gpt2", dispatch=True, gpu_memory_utilization=0.1,
+    model = VLLM("Qwen/Qwen2.5-0.5B", dispatch=True, gpu_memory_utilization=0.1,
                  enable_prefix_caching=False)
     with model.edit() as (_, registration):
         same = nnsight.save("registered")
@@ -37,7 +37,7 @@ def sync_registration_matrix() -> None:
     """Probe registration scope, output-name collisions, and cache ordering."""
     from nnsight.modeling.vllm import VLLM
 
-    model = VLLM("gpt2", dispatch=True, gpu_memory_utilization=0.1,
+    model = VLLM("Qwen/Qwen2.5-0.5B", dispatch=True, gpu_memory_utilization=0.1,
                  enable_prefix_caching=False)
     try:
         events = []
@@ -97,7 +97,7 @@ async def async_registration_and_foreign_leak() -> None:
     from nnsight.modeling.vllm.engines.engine import merge_collected
     from vllm import SamplingParams
 
-    model = VLLM("gpt2", mode="async", dispatch=True,
+    model = VLLM("Qwen/Qwen2.5-0.5B", mode="async", dispatch=True,
                  gpu_memory_utilization=0.1, enable_prefix_caching=False)
     engine = model.vllm_entrypoint
     registration = None

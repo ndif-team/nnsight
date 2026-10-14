@@ -20,14 +20,19 @@ def sampling(max_tokens: int = 3):
     return SamplingParams(temperature=0.0, max_tokens=max_tokens, ignore_eos=True)
 
 
+def _vocab_size(model):
+    """The width of the logits: the model's vocabulary, which pads the tokenizer's."""
+    return model.vllm_entrypoint.llm_engine.vllm_config.model_config.get_vocab_size()
+
+
 class TestRegistration:
     @torch.no_grad()
-    def test_untraced_requests_carry_their_own_values(self, vllm_gpt2_uncached):
-        model = vllm_gpt2_uncached
+    def test_untraced_requests_carry_their_own_values(self, vllm_qwen_uncached):
+        model = vllm_qwen_uncached
         prompts = ["The Eiffel Tower is in", "Hello world", "A"]
 
         with model.edit() as (tracer, registration):
-            hidden = model.transformer.h[5].output.save()
+            hidden = model.model.layers[5].output[0].save()
         try:
             outputs = model.generate(prompts, max_tokens=3, temperature=0.0,
                                      ignore_eos=True)
@@ -45,11 +50,11 @@ class TestRegistration:
             registration.clear()
 
     @torch.no_grad()
-    def test_clear_stops_it(self, vllm_gpt2_uncached, ET_prompt):
-        model = vllm_gpt2_uncached
+    def test_clear_stops_it(self, vllm_qwen_uncached, ET_prompt):
+        model = vllm_qwen_uncached
 
         with model.edit() as (tracer, registration):
-            hidden = model.transformer.h[5].output.save()
+            hidden = model.model.layers[5].output[0].save()
         registration.clear()
 
         outputs = model.generate([ET_prompt], max_tokens=2, temperature=0.0,
@@ -57,14 +62,14 @@ class TestRegistration:
         assert "hidden" not in getattr(outputs[0], "saves", {})
 
     @torch.no_grad()
-    def test_several_registrations_keep_their_own_names(self, vllm_gpt2_uncached,
+    def test_several_registrations_keep_their_own_names(self, vllm_qwen_uncached,
                                                         ET_prompt):
-        model = vllm_gpt2_uncached
+        model = vllm_qwen_uncached
 
         with model.edit() as (tracer, deep_reg):
-            deep = model.transformer.h[8].output.save()
+            deep = model.model.layers[8].output[0].save()
         with model.edit() as (tracer, shallow_reg):
-            shallow = model.transformer.h[2].output.save()
+            shallow = model.model.layers[2].output[0].save()
         try:
             saves = model.generate([ET_prompt], max_tokens=2, temperature=0.0,
                                    ignore_eos=True)[0].saves
@@ -76,17 +81,17 @@ class TestRegistration:
             shallow_reg.clear()
 
     @torch.no_grad()
-    def test_iteration_follows_the_generated_tokens(self, vllm_gpt2_uncached,
+    def test_iteration_follows_the_generated_tokens(self, vllm_qwen_uncached,
                                                     ET_prompt):
         # Without the tracer's iter/all a registered block finishes inside the
         # prefill and never sees a generated token.
-        model = vllm_gpt2_uncached
+        model = vllm_qwen_uncached
         steps = 4
 
         with model.edit() as (tracer, registration):
             readout = nnsight.save([])
             for step in tracer.iter[:steps]:
-                readout.append(model.transformer.h[5].output[-1])
+                readout.append(model.model.layers[5].output[0][-1])
         try:
             outputs = model.generate([ET_prompt], max_tokens=steps,
                                      temperature=0.0, ignore_eos=True)
@@ -95,13 +100,15 @@ class TestRegistration:
             registration.clear()
 
     @torch.no_grad()
-    def test_edits_every_request(self, vllm_gpt2_uncached, ET_prompt):
-        model = vllm_gpt2_uncached
+    def test_edits_every_request(self, vllm_qwen_uncached, ET_prompt):
+        model = vllm_qwen_uncached
         before = model.generate([ET_prompt], max_tokens=3, temperature=0.0,
                                 ignore_eos=True)[0].outputs[0].text
 
         with model.edit() as (tracer, registration):
-            model.transformer.h[5].output[:] = 0
+            # A Qwen layer returns (hidden, residual); zero both, so the stream is gone.
+            model.model.layers[5].output[0][:] = 0
+            model.model.layers[5].output[1][:] = 0
         try:
             during = model.generate([ET_prompt], max_tokens=3, temperature=0.0,
                                     ignore_eos=True)[0].outputs[0].text
@@ -115,16 +122,16 @@ class TestRegistration:
 
     @torch.no_grad()
     def test_a_trace_reaches_its_registered_value_through_result(
-        self, vllm_gpt2_uncached, ET_prompt
+        self, vllm_qwen_uncached, ET_prompt
     ):
-        model = vllm_gpt2_uncached
+        model = vllm_qwen_uncached
 
         with model.edit() as (tracer, registration):
-            hidden = model.transformer.h[5].output.save()
+            hidden = model.model.layers[5].output[0].save()
         try:
             with model.trace(ET_prompt, temperature=0.0, max_tokens=2,
                              ignore_eos=True) as tracer:
-                own = model.transformer.h[2].output.save()
+                own = model.model.layers[2].output[0].save()
                 result = tracer.result.save()
 
             # The trace's own value arrives as a variable; the registration's
@@ -150,12 +157,12 @@ class TestAnEditThatRaises:
     """
 
     @torch.no_grad()
-    def test_the_engine_survives_and_keeps_answering(self, vllm_gpt2_uncached,
+    def test_the_engine_survives_and_keeps_answering(self, vllm_qwen_uncached,
                                                      ET_prompt):
-        model = vllm_gpt2_uncached
+        model = vllm_qwen_uncached
 
         with model.edit() as (tracer, edit):
-            hidden = model.transformer.h[5].output.save()
+            hidden = model.model.layers[5].output[0].save()
             raise ValueError("boom, every request")
         try:
             # Long enough to run the forwards that used to trip it.
@@ -174,13 +181,13 @@ class TestAnEditThatRaises:
 
 class TestEditHandles:
     @torch.no_grad()
-    def test_clear_edits_clears_every_one(self, vllm_gpt2_uncached, ET_prompt):
-        model = vllm_gpt2_uncached
+    def test_clear_edits_clears_every_one(self, vllm_qwen_uncached, ET_prompt):
+        model = vllm_qwen_uncached
 
         with model.edit() as (tracer, deep):
-            deep_hidden = model.transformer.h[8].output.save()
+            deep_hidden = model.model.layers[8].output[0].save()
         with model.edit() as (tracer, shallow):
-            shallow_hidden = model.transformer.h[2].output.save()
+            shallow_hidden = model.model.layers[2].output[0].save()
 
         model.clear_edits()
 
@@ -195,11 +202,11 @@ class TestEditHandles:
         assert "deep_hidden" not in saves and "shallow_hidden" not in saves
 
     @torch.no_grad()
-    def test_a_cleared_edit_drops_out_of_the_list(self, vllm_gpt2_uncached):
-        model = vllm_gpt2_uncached
+    def test_a_cleared_edit_drops_out_of_the_list(self, vllm_qwen_uncached):
+        model = vllm_qwen_uncached
 
         with model.edit() as (tracer, edit):
-            hidden = model.transformer.h[5].output.save()
+            hidden = model.model.layers[5].output[0].save()
         assert model._installed_edits == [edit]
 
         edit.clear()
@@ -207,32 +214,32 @@ class TestEditHandles:
         # Clearing twice is a no-op, not an error.
         edit.clear()
 
-    def test_inplace_false_is_refused(self, vllm_gpt2_uncached):
+    def test_inplace_false_is_refused(self, vllm_qwen_uncached):
         # There is no copy to edit instead — the engine is what every caller shares.
         with pytest.raises(ValueError, match="inplace"):
-            vllm_gpt2_uncached.edit(inplace=False)
+            vllm_qwen_uncached.edit(inplace=False)
 
 
 class TestBarrierIsRefused:
     """Each invoke is its own request, so the blocks never meet — say so."""
 
-    def test_in_a_trace(self, vllm_gpt2):
+    def test_in_a_trace(self, vllm_qwen):
         with pytest.raises(NotImplementedError, match="barrier"):
-            with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+            with vllm_qwen.trace(temperature=0.0, max_tokens=1) as tracer:
                 barrier = tracer.barrier(2)
 
-    def test_in_an_edit(self, vllm_gpt2_uncached):
+    def test_in_an_edit(self, vllm_qwen_uncached):
         # Not entered: an edit's body runs per request on the worker, so calling
         # it there would only surface as that request's deferred error.
-        tracer = vllm_gpt2_uncached.edit()
+        tracer = vllm_qwen_uncached.edit()
         with pytest.raises(NotImplementedError, match="barrier"):
             tracer.barrier(2)
 
 
 class TestGenerateWithoutABlock:
     @torch.no_grad()
-    def test_returns_request_outputs(self, vllm_gpt2, ET_prompt):
-        outputs = vllm_gpt2.generate([ET_prompt], max_tokens=3, temperature=0.0,
+    def test_returns_request_outputs(self, vllm_qwen, ET_prompt):
+        outputs = vllm_qwen.generate([ET_prompt], max_tokens=3, temperature=0.0,
                                      ignore_eos=True)
 
         assert isinstance(outputs, list) and len(outputs) == 1
@@ -240,23 +247,23 @@ class TestGenerateWithoutABlock:
         assert len(outputs[0].outputs[0].token_ids) == 3
 
     @torch.no_grad()
-    def test_still_traces_inside_a_with_block(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.generate(ET_prompt, temperature=0.0, max_tokens=1) as tracer:
-            logits = vllm_gpt2.logits.save()
+    def test_still_traces_inside_a_with_block(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.generate(ET_prompt, temperature=0.0, max_tokens=1) as tracer:
+            logits = vllm_qwen.logits.save()
 
-        assert logits.shape[-1] == vllm_gpt2.tokenizer.vocab_size
+        assert logits.shape[-1] == _vocab_size(vllm_qwen)
 
     @torch.no_grad()
-    def test_max_new_tokens_is_accepted(self, vllm_gpt2, ET_prompt):
-        outputs = vllm_gpt2.generate([ET_prompt], max_new_tokens=2,
+    def test_max_new_tokens_is_accepted(self, vllm_qwen, ET_prompt):
+        outputs = vllm_qwen.generate([ET_prompt], max_new_tokens=2,
                                      temperature=0.0, ignore_eos=True)
         assert len(outputs[0].outputs[0].token_ids) == 2
 
 
 class TestResult:
     @torch.no_grad()
-    def test_result_is_the_finished_request_output(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=3,
+    def test_result_is_the_finished_request_output(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, max_tokens=3,
                              ignore_eos=True) as tracer:
             result = tracer.result.save()
 
@@ -264,8 +271,8 @@ class TestResult:
         assert len(result.outputs[0].token_ids) == 3
 
     @torch.no_grad()
-    def test_each_invoke_gets_its_own(self, vllm_gpt2, ET_prompt, MSG_prompt):
-        with vllm_gpt2.trace(temperature=0.0, max_tokens=2,
+    def test_each_invoke_gets_its_own(self, vllm_qwen, ET_prompt, MSG_prompt):
+        with vllm_qwen.trace(temperature=0.0, max_tokens=2,
                              ignore_eos=True) as tracer:
             with tracer.invoke(ET_prompt):
                 first = tracer.result.save()
@@ -285,16 +292,16 @@ class TestNamedEdits:
 
     def _install(self, model):
         with model.edit() as (tracer, unnamed):
-            plain = model.transformer.h[2].output[-1].norm().save()
+            plain = model.model.layers[2].output[0][-1].norm().save()
         with model.edit(name="a") as (tracer, a):
-            value_a = model.transformer.h[3].output[-1].norm().save()
+            value_a = model.model.layers[3].output[0][-1].norm().save()
         with model.edit(name="b") as (tracer, b):
-            value_b = model.transformer.h[4].output[-1].norm().save()
+            value_b = model.model.layers[4].output[0][-1].norm().save()
         return unnamed, a, b
 
     @torch.no_grad()
-    def test_generate_selects_named_edits(self, vllm_gpt2_uncached, ET_prompt):
-        model = vllm_gpt2_uncached
+    def test_generate_selects_named_edits(self, vllm_qwen_uncached, ET_prompt):
+        model = vllm_qwen_uncached
         unnamed, a, b = self._install(model)
         try:
             assert a.name == "a" and unnamed.name is None
@@ -312,8 +319,8 @@ class TestNamedEdits:
             model.clear_edits()
 
     @torch.no_grad()
-    def test_trace_and_invoke_select(self, vllm_gpt2_uncached, ET_prompt, MSG_prompt):
-        model = vllm_gpt2_uncached
+    def test_trace_and_invoke_select(self, vllm_qwen_uncached, ET_prompt, MSG_prompt):
+        model = vllm_qwen_uncached
         self._install(model)
         try:
             with model.trace(max_tokens=1, temperature=0.0, edits=["a"]) as tracer:
@@ -328,8 +335,8 @@ class TestNamedEdits:
             model.clear_edits()
 
     @torch.no_grad()
-    def test_unknown_name_is_refused(self, vllm_gpt2_uncached, ET_prompt):
-        model = vllm_gpt2_uncached
+    def test_unknown_name_is_refused(self, vllm_qwen_uncached, ET_prompt):
+        model = vllm_qwen_uncached
         self._install(model)
         try:
             with pytest.raises(ValueError, match="no edit is installed under that name"):
@@ -341,19 +348,19 @@ class TestNamedEdits:
             model.clear_edits()
 
     @torch.no_grad()
-    def test_a_string_is_not_a_list(self, vllm_gpt2_uncached, ET_prompt):
-        model = vllm_gpt2_uncached
+    def test_a_string_is_not_a_list(self, vllm_qwen_uncached, ET_prompt):
+        model = vllm_qwen_uncached
         with pytest.raises(TypeError, match="list of edit names"):
             model.generate([ET_prompt], max_tokens=1, edits="a")
 
     @torch.no_grad()
-    def test_names_are_tags(self, vllm_gpt2_uncached, ET_prompt):
+    def test_names_are_tags(self, vllm_qwen_uncached, ET_prompt):
         """Two edits under one name both run when it is asked for."""
-        model = vllm_gpt2_uncached
+        model = vllm_qwen_uncached
         with model.edit(name="pair") as (tracer, one):
-            first_norm = model.transformer.h[1].output[-1].norm().save()
+            first_norm = model.model.layers[1].output[0][-1].norm().save()
         with model.edit(name="pair") as (tracer, two):
-            second_norm = model.transformer.h[2].output[-1].norm().save()
+            second_norm = model.model.layers[2].output[0][-1].norm().save()
         try:
             output = model.generate([ET_prompt], max_tokens=1, edits=["pair"])[0]
             assert "first_norm" in output.saves and "second_norm" in output.saves

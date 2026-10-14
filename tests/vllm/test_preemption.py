@@ -23,7 +23,7 @@ NEW = 48
 
 
 @pytest.fixture(scope="module")
-def starved_gpt2():
+def starved_qwen():
     from nnsight.modeling.vllm import VLLM
 
     if GPU_COUNT < 1:
@@ -31,7 +31,7 @@ def starved_gpt2():
     # 40 blocks of 16 tokens: room for roughly one 400-token request at a time,
     # so four of them in flight guarantees preemption.
     return VLLM(
-        "gpt2",
+        "Qwen/Qwen2.5-0.5B",
         gpu_memory_utilization=0.1,
         num_gpu_blocks_override=40,
         max_num_seqs=4,
@@ -50,8 +50,8 @@ def _preemptions(model) -> int:
 
 
 @torch.no_grad()
-def test_preempted_requests_finish_with_every_step(starved_gpt2):
-    model = starved_gpt2
+def test_preempted_requests_finish_with_every_step(starved_qwen):
+    model = starved_qwen
     before = _preemptions(model)
     prompt = "The history of the city, told at length, begins with " + "and then more " * 60
     with model.trace(temperature=0.0, top_p=1.0, max_tokens=NEW, ignore_eos=True) as tracer:

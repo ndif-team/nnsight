@@ -35,220 +35,229 @@ def _request_state(model):
     return model.vllm_entrypoint.llm_engine.collective_rpc(_worker_request_state)[0]
 
 
+def _vocab_size(model):
+    """The width of the logits: the model's vocabulary, which pads the tokenizer's."""
+    return model.vllm_entrypoint.llm_engine.vllm_config.model_config.get_vocab_size()
+
+
 class TestClientCleanup:
     @torch.no_grad()
-    def test_mediators_cleared_after_trace(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            vllm_gpt2.logits.save()
+    def test_mediators_cleared_after_trace(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            vllm_qwen.logits.save()
 
         # The interleaver's per-trace workers are dropped when the trace ends.
-        assert vllm_gpt2.interleaver.mediators == []
+        assert vllm_qwen.interleaver.mediators == []
 
     @torch.no_grad()
-    def test_repeated_traces_stay_correct(self, vllm_gpt2, ET_prompt):
+    def test_repeated_traces_stay_correct(self, vllm_qwen, ET_prompt):
         for _ in range(5):
-            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-                logits = vllm_gpt2.logits.save()
-            assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
-            assert vllm_gpt2.interleaver.mediators == []
+            with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+                logits = vllm_qwen.logits.save()
+            assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+            assert vllm_qwen.interleaver.mediators == []
 
 
 class TestWorkerCleanup:
     @torch.no_grad()
-    def test_finished_request_is_forgotten(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            vllm_gpt2.logits.save()
+    def test_finished_request_is_forgotten(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            vllm_qwen.logits.save()
 
         # collect_nnsight pops each finished request, so nothing is left behind.
-        assert _request_state(vllm_gpt2)["mediators"] == 0
+        assert _request_state(vllm_qwen)["mediators"] == 0
 
     @torch.no_grad()
-    def test_generation_leaves_no_residue(self, vllm_gpt2, MSG_prompt):
-        with vllm_gpt2.trace(
+    def test_generation_leaves_no_residue(self, vllm_qwen, MSG_prompt):
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=5
         ) as tracer:
             logits = list().save()
             for _ in tracer.all():
-                logits.append(vllm_gpt2.logits)
+                logits.append(vllm_qwen.logits)
 
         assert len(logits) == 5
-        state = _request_state(vllm_gpt2)
+        state = _request_state(vllm_qwen)
         assert state["mediators"] == 0
         assert state["started"] == 0
 
 
 class TestBatchIsolation:
     @torch.no_grad()
-    def test_clean_and_corrupted_are_independent(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+    def test_clean_and_corrupted_are_independent(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(temperature=0.0, top_p=1) as tracer:
+            # Copies, since the next layer's fused norm writes into the MLP's
+            # output in place after it is read.
             with tracer.invoke(ET_prompt):
-                clean_hs = vllm_gpt2.transformer.h[-2].mlp.output.save()
-                clean_logits = vllm_gpt2.logits.save()
+                clean_hs = vllm_qwen.model.layers[-2].mlp.output.clone().save()
+                clean_logits = vllm_qwen.logits.save()
 
             with tracer.invoke(ET_prompt):
-                out = vllm_gpt2.transformer.h[-2].mlp.output.clone()
+                out = vllm_qwen.model.layers[-2].mlp.output.clone()
                 out[:] = 0
-                vllm_gpt2.transformer.h[-2].mlp.output = out
-                corrupted_hs = vllm_gpt2.transformer.h[-2].mlp.output.save()
-                corrupted_logits = vllm_gpt2.logits.save()
+                vllm_qwen.model.layers[-2].mlp.output = out
+                corrupted_hs = vllm_qwen.model.layers[-2].mlp.output.clone().save()
+                corrupted_logits = vllm_qwen.logits.save()
 
         assert not torch.all(clean_hs == 0)
         assert torch.all(corrupted_hs == 0)
-        assert vllm_gpt2.tokenizer.decode(clean_logits.argmax(dim=-1)) == " Paris"
-        assert vllm_gpt2.tokenizer.decode(corrupted_logits.argmax(dim=-1)) != " Paris"
+        assert vllm_qwen.tokenizer.decode(clean_logits.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(corrupted_logits.argmax(dim=-1)) != " Paris"
 
     @torch.no_grad()
     def test_different_length_prompts_get_their_own_spans(
-        self, vllm_gpt2, ET_prompt, MSG_prompt
+        self, vllm_qwen, ET_prompt, MSG_prompt
     ):
-        et_tokens = len(vllm_gpt2.tokenizer.encode(ET_prompt))
-        msg_tokens = len(vllm_gpt2.tokenizer.encode(MSG_prompt))
+        et_tokens = len(vllm_qwen.tokenizer.encode(ET_prompt))
+        msg_tokens = len(vllm_qwen.tokenizer.encode(MSG_prompt))
 
-        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+        with vllm_qwen.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(ET_prompt):
-                et_hs = vllm_gpt2.transformer.h[0].output.save()
-                et_logits = vllm_gpt2.logits.save()
+                et_hs = vllm_qwen.model.layers[0].output[0].save()
+                et_logits = vllm_qwen.logits.save()
 
             with tracer.invoke(MSG_prompt):
-                msg_hs = vllm_gpt2.transformer.h[0].output.save()
-                msg_logits = vllm_gpt2.logits.save()
+                msg_hs = vllm_qwen.model.layers[0].output[0].save()
+                msg_logits = vllm_qwen.logits.save()
 
         # Each invoke is narrowed to exactly its own tokens within the shared slab,
         # not the whole batch.
         assert et_hs.shape[0] == et_tokens
         assert msg_hs.shape[0] == msg_tokens
-        assert vllm_gpt2.tokenizer.decode(et_logits.argmax(dim=-1)) == " Paris"
-        assert vllm_gpt2.tokenizer.decode(msg_logits.argmax(dim=-1)) == " New"
+        assert vllm_qwen.tokenizer.decode(et_logits.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(msg_logits.argmax(dim=-1)) == " New"
 
     @torch.no_grad()
-    def test_identical_prompts_do_not_collide(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+    def test_identical_prompts_do_not_collide(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(ET_prompt):
-                first = vllm_gpt2.logits.save()
+                first = vllm_qwen.logits.save()
             with tracer.invoke(ET_prompt):
-                second = vllm_gpt2.logits.save()
+                second = vllm_qwen.logits.save()
 
         # vLLM tags same-content requests with the same hash; the two saves must
         # still come home to their own invoke rather than overwriting each other.
         assert first is not second
-        assert vllm_gpt2.tokenizer.decode(first.argmax(dim=-1)) == " Paris"
-        assert vllm_gpt2.tokenizer.decode(second.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(first.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(second.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_three_invokes_stay_distinct(self, vllm_gpt2, ET_prompt, MSG_prompt):
+    def test_three_invokes_stay_distinct(self, vllm_qwen, ET_prompt, MSG_prompt):
         JP_prompt = "The capital of Japan is the city of"
 
-        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+        with vllm_qwen.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(ET_prompt):
-                a = vllm_gpt2.logits.save()
+                a = vllm_qwen.logits.save()
             with tracer.invoke(MSG_prompt):
-                b = vllm_gpt2.logits.save()
+                b = vllm_qwen.logits.save()
             with tracer.invoke(JP_prompt):
-                c = vllm_gpt2.logits.save()
+                c = vllm_qwen.logits.save()
 
         # Three requests in one batch, each collected under its own invoke.
         assert a is not b and b is not c and a is not c
-        assert a.shape[-1] == vllm_gpt2.tokenizer.vocab_size
-        assert vllm_gpt2.tokenizer.decode(a.argmax(dim=-1)) == " Paris"
-        assert vllm_gpt2.tokenizer.decode(b.argmax(dim=-1)) == " New"
+        assert a.shape[-1] == _vocab_size(vllm_qwen)
+        assert vllm_qwen.tokenizer.decode(a.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(b.argmax(dim=-1)) == " New"
 
     @torch.no_grad()
-    def test_invoke_body_may_reference_module_globals(self, vllm_gpt2, ET_prompt):
+    def test_invoke_body_may_reference_module_globals(self, vllm_qwen, ET_prompt):
         # An invoke body is serialized into its request; a module global it uses
         # (here `torch`) must travel with it, not be dropped by the reducer.
-        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+        with vllm_qwen.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(ET_prompt):
-                vllm_gpt2.transformer.h[-2].mlp.output = torch.zeros_like(
-                    vllm_gpt2.transformer.h[-2].mlp.output
+                vllm_qwen.model.layers[-2].mlp.output = torch.zeros_like(
+                    vllm_qwen.model.layers[-2].mlp.output
                 )
-                logits = vllm_gpt2.logits.save()
+                logits = vllm_qwen.logits.save()
 
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) != " Paris"
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) != " Paris"
 
     @torch.no_grad()
-    def test_empty_invoke_contributes_no_request(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+    def test_empty_invoke_contributes_no_request(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke():
                 pass
             with tracer.invoke(ET_prompt):
-                logits = vllm_gpt2.logits.save()
+                logits = vllm_qwen.logits.save()
 
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
 
 class TestConcurrentGeneration:
     @torch.no_grad()
     def test_invokes_finish_at_their_own_step_counts(
-        self, vllm_gpt2, ET_prompt, MSG_prompt
+        self, vllm_qwen, ET_prompt, MSG_prompt
     ):
-        with vllm_gpt2.trace(temperature=0.0, top_p=1.0) as tracer:
+        with vllm_qwen.trace(temperature=0.0, top_p=1.0) as tracer:
             with tracer.invoke(ET_prompt, max_tokens=6):
                 et_logits = list().save()
                 for _ in tracer.iter[:6]:
-                    et_logits.append(vllm_gpt2.logits)
+                    et_logits.append(vllm_qwen.logits)
 
             with tracer.invoke(MSG_prompt, max_tokens=3):
                 msg_logits = list().save()
                 for _ in tracer.iter[:3]:
-                    msg_logits.append(vllm_gpt2.logits)
+                    msg_logits.append(vllm_qwen.logits)
 
         # The shorter request finishes at step 3 while the longer runs to 6; the
         # batch is repacked each decode step and each invoke collects its own count.
         assert len(et_logits) == 6
         assert len(msg_logits) == 3
-        assert _request_state(vllm_gpt2)["mediators"] == 0
+        assert _request_state(vllm_qwen)["mediators"] == 0
 
     @torch.no_grad()
-    def test_intervention_on_one_of_several_invokes(self, vllm_gpt2, MSG_prompt):
+    def test_intervention_on_one_of_several_invokes(self, vllm_qwen, MSG_prompt):
         # The same prompt runs twice side by side; only the second is intervened
         # on, and only its prediction moves — the corruption stays in its own request.
-        with vllm_gpt2.trace(temperature=0.0, top_p=1.0, max_tokens=3) as tracer:
+        with vllm_qwen.trace(temperature=0.0, top_p=1.0, max_tokens=3) as tracer:
             with tracer.invoke(MSG_prompt):
                 clean = list().save()
                 for _ in tracer.iter[:3]:
-                    clean.append(vllm_gpt2.logits.argmax(dim=-1))
+                    clean.append(vllm_qwen.logits.argmax(dim=-1))
 
             with tracer.invoke(MSG_prompt):
                 corrupted = list().save()
                 for _ in tracer.iter[:3]:
-                    out = vllm_gpt2.transformer.h[-2].output.clone()
-                    out[:] = 0
-                    vllm_gpt2.transformer.h[-2].output = out
-                    corrupted.append(vllm_gpt2.logits.argmax(dim=-1))
+                    # A Qwen layer returns (hidden, residual): zero both.
+                    hidden, residual = vllm_qwen.model.layers[-2].output
+                    vllm_qwen.model.layers[-2].output = (
+                        torch.zeros_like(hidden), torch.zeros_like(residual)
+                    )
+                    corrupted.append(vllm_qwen.logits.argmax(dim=-1))
 
-        assert vllm_gpt2.tokenizer.batch_decode(clean) == [" New", " York", " City"]
-        assert vllm_gpt2.tokenizer.batch_decode(corrupted) != [" New", " York", " City"]
+        assert vllm_qwen.tokenizer.batch_decode(clean) == [" New", " York", ","]
+        assert vllm_qwen.tokenizer.batch_decode(corrupted) != [" New", " York", ","]
 
     @torch.no_grad()
-    def test_many_traces_leave_worker_empty(self, vllm_gpt2, ET_prompt, MSG_prompt):
+    def test_many_traces_leave_worker_empty(self, vllm_qwen, ET_prompt, MSG_prompt):
         for prompt in (ET_prompt, MSG_prompt) * 3:
-            with vllm_gpt2.trace(prompt, temperature=0.0, top_p=1, max_tokens=2):
-                vllm_gpt2.logits.save()
+            with vllm_qwen.trace(prompt, temperature=0.0, top_p=1, max_tokens=2):
+                vllm_qwen.logits.save()
         # No request bookkeeping accumulates across many traces.
-        state = _request_state(vllm_gpt2)
+        state = _request_state(vllm_qwen)
         assert state["mediators"] == 0
         assert state["started"] == 0
 
     @torch.no_grad()
     def test_each_invoke_collects_its_own_generation(
-        self, vllm_gpt2, ET_prompt, MSG_prompt
+        self, vllm_qwen, ET_prompt, MSG_prompt
     ):
         # Each invoke keeps its own saved list, filled across its own generation
         # steps, and both come home from the one trace.
-        with vllm_gpt2.trace(temperature=0.0, top_p=1.0, max_tokens=3) as tracer:
+        with vllm_qwen.trace(temperature=0.0, top_p=1.0, max_tokens=3) as tracer:
             with tracer.invoke(ET_prompt):
                 et = list().save()
                 for _ in tracer.all():
-                    et.append(vllm_gpt2.logits.argmax(dim=-1))
+                    et.append(vllm_qwen.logits.argmax(dim=-1))
 
             with tracer.invoke(MSG_prompt):
                 msg = list().save()
                 for _ in tracer.all():
-                    msg.append(vllm_gpt2.logits.argmax(dim=-1))
+                    msg.append(vllm_qwen.logits.argmax(dim=-1))
 
         assert len(et) == 3
         assert len(msg) == 3
-        assert vllm_gpt2.tokenizer.batch_decode(msg) == [" New", " York", " City"]
+        assert vllm_qwen.tokenizer.batch_decode(msg) == [" New", " York", ","]
 
 
 class TestSeveralSequences:
@@ -260,30 +269,30 @@ class TestSeveralSequences:
     """
 
     @torch.no_grad()
-    def test_saves_come_back_one_per_sequence(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, max_tokens=3, temperature=1.0, seed=0, n=2):
-            hidden = vllm_gpt2.transformer.h[5].output.save()
+    def test_saves_come_back_one_per_sequence(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, max_tokens=3, temperature=1.0, seed=0, n=2):
+            hidden = vllm_qwen.model.layers[5].output[0].save()
 
         assert isinstance(hidden, list) and len(hidden) == 2
-        prompt_rows = len(vllm_gpt2.tokenizer.encode(ET_prompt))
+        prompt_rows = len(vllm_qwen.tokenizer.encode(ET_prompt))
         for value in hidden:
             assert value.shape[0] == prompt_rows
 
     @torch.no_grad()
-    def test_one_sequence_is_still_one_value(self, vllm_gpt2, ET_prompt):
+    def test_one_sequence_is_still_one_value(self, vllm_qwen, ET_prompt):
         # The list is what "more than one" looks like; n=1 is unchanged.
-        with vllm_gpt2.trace(ET_prompt, max_tokens=3, temperature=0.0):
-            hidden = vllm_gpt2.transformer.h[5].output.save()
+        with vllm_qwen.trace(ET_prompt, max_tokens=3, temperature=0.0):
+            hidden = vllm_qwen.model.layers[5].output[0].save()
 
         assert isinstance(hidden, torch.Tensor)
 
     @torch.no_grad()
     def test_the_result_is_one_object_not_one_per_sequence(
-        self, vllm_gpt2, ET_prompt
+        self, vllm_qwen, ET_prompt
     ):
         # A request has one output carrying n completions, and every sequence's
         # block is served that same object — so it is not n values of anything.
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             ET_prompt, max_tokens=3, temperature=1.0, seed=0, n=2
         ) as tracer:
             result = tracer.result.save()
@@ -292,15 +301,15 @@ class TestSeveralSequences:
         assert len(result.outputs) == 2
 
     @torch.no_grad()
-    def test_each_completion_carries_its_own(self, vllm_gpt2_uncached, ET_prompt):
+    def test_each_completion_carries_its_own(self, vllm_qwen_uncached, ET_prompt):
         # An installed block runs once per sequence too, and its values ride the
         # completion they belong to — next to that sequence's text and token ids.
         # This is the shape an async or serve caller reads, where there is no
         # variable to push a list into.
-        model = vllm_gpt2_uncached
+        model = vllm_qwen_uncached
 
         with model.edit() as (tracer, edit):
-            hidden = model.transformer.h[5].output.save()
+            hidden = model.model.layers[5].output[0].save()
         try:
             output = model.generate([ET_prompt], max_tokens=3, temperature=1.0,
                                     seed=0, n=2)[0]
@@ -318,15 +327,15 @@ class TestSeveralSequences:
             edit.clear()
 
     @torch.no_grad()
-    def test_the_sequences_diverge_where_they_should(self, vllm_gpt2, ET_prompt):
+    def test_the_sequences_diverge_where_they_should(self, vllm_qwen, ET_prompt):
         # Same prompt, so the prefill matches; the sampled steps are each
         # sequence's own.
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             ET_prompt, max_tokens=4, temperature=1.0, seed=0, n=2
         ) as tracer:
             steps = nnsight.save([])
             for _ in tracer.iter[:4]:
-                steps.append(vllm_gpt2.samples)
+                steps.append(vllm_qwen.samples)
             result = tracer.result.save()
 
         assert isinstance(steps, list) and len(steps) == 2
@@ -337,15 +346,15 @@ class TestSeveralSequences:
         assert second == list(result.outputs[1].token_ids)
 
     @torch.no_grad()
-    def test_no_worker_is_left_behind(self, vllm_gpt2, ET_prompt):
+    def test_no_worker_is_left_behind(self, vllm_qwen, ET_prompt):
         # The child requests are named "{index}_{parent}"; when that went
         # unmatched nothing was collected and nothing was ever freed.
-        engine = vllm_gpt2.vllm_entrypoint.llm_engine
+        engine = vllm_qwen.vllm_entrypoint.llm_engine
 
         for _ in range(3):
-            with vllm_gpt2.trace(ET_prompt, max_tokens=2, temperature=1.0,
+            with vllm_qwen.trace(ET_prompt, max_tokens=2, temperature=1.0,
                                  seed=0, n=2):
-                hidden = vllm_gpt2.transformer.h[5].output.save()
+                hidden = vllm_qwen.model.layers[5].output[0].save()
 
         assert engine.collective_rpc("nnsight_request_count") == [0]
 
@@ -354,48 +363,48 @@ class TestSameNameAcrossInvokes:
     """Several invokes saving one name: separate values, not copies of one."""
 
     @torch.no_grad()
-    def test_each_invoke_keeps_its_own(self, vllm_gpt2, ET_prompt, MSG_prompt):
+    def test_each_invoke_keeps_its_own(self, vllm_qwen, ET_prompt, MSG_prompt):
         # This is the shape every steering/patching recipe has. Merging them kept
         # only the last, so three prompts came back holding one prompt's value.
-        with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+        with vllm_qwen.trace(temperature=0.0, max_tokens=1) as tracer:
             with tracer.invoke(ET_prompt):
-                hidden = vllm_gpt2.transformer.h[5].output.save()
+                hidden = vllm_qwen.model.layers[5].output[0].save()
             with tracer.invoke(MSG_prompt):
-                hidden = vllm_gpt2.transformer.h[5].output.save()
+                hidden = vllm_qwen.model.layers[5].output[0].save()
 
         assert isinstance(hidden, list) and len(hidden) == 2
         # In invoke order, each sized to its own prompt.
-        assert hidden[0].shape[0] == len(vllm_gpt2.tokenizer.encode(ET_prompt))
-        assert hidden[1].shape[0] == len(vllm_gpt2.tokenizer.encode(MSG_prompt))
+        assert hidden[0].shape[0] == len(vllm_qwen.tokenizer.encode(ET_prompt))
+        assert hidden[1].shape[0] == len(vllm_qwen.tokenizer.encode(MSG_prompt))
 
     @torch.no_grad()
-    def test_distinct_names_are_untouched(self, vllm_gpt2, ET_prompt, MSG_prompt):
-        with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+    def test_distinct_names_are_untouched(self, vllm_qwen, ET_prompt, MSG_prompt):
+        with vllm_qwen.trace(temperature=0.0, max_tokens=1) as tracer:
             with tracer.invoke(ET_prompt):
-                et = vllm_gpt2.transformer.h[5].output.save()
+                et = vllm_qwen.model.layers[5].output[0].save()
             with tracer.invoke(MSG_prompt):
-                msg = vllm_gpt2.transformer.h[5].output.save()
+                msg = vllm_qwen.model.layers[5].output[0].save()
 
         assert isinstance(et, torch.Tensor) and isinstance(msg, torch.Tensor)
         assert et.shape[0] != msg.shape[0]
 
     @torch.no_grad()
     def test_a_container_saved_above_the_invokes_still_merges(
-        self, vllm_gpt2, ET_prompt, MSG_prompt
+        self, vllm_qwen, ET_prompt, MSG_prompt
     ):
         # One object locally, so its per-request copies merge slot-wise rather
         # than coming back as a list of copies.
-        with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+        with vllm_qwen.trace(temperature=0.0, max_tokens=1) as tracer:
             rows = nnsight.save([None, None])
             with tracer.invoke(ET_prompt):
-                rows[0] = vllm_gpt2.transformer.h[5].output
+                rows[0] = vllm_qwen.model.layers[5].output[0]
             with tracer.invoke(MSG_prompt):
-                rows[1] = vllm_gpt2.transformer.h[5].output
+                rows[1] = vllm_qwen.model.layers[5].output[0]
 
         assert len(rows) == 2
         assert rows[0] is not None and rows[1] is not None
-        assert rows[0].shape[0] == len(vllm_gpt2.tokenizer.encode(ET_prompt))
-        assert rows[1].shape[0] == len(vllm_gpt2.tokenizer.encode(MSG_prompt))
+        assert rows[0].shape[0] == len(vllm_qwen.tokenizer.encode(ET_prompt))
+        assert rows[1].shape[0] == len(vllm_qwen.tokenizer.encode(MSG_prompt))
 
 
 class TestPerInvokeSampling:
@@ -409,11 +418,11 @@ class TestPerInvokeSampling:
     """
 
     @torch.no_grad()
-    def test_a_default_valued_setting_is_still_the_invokes(self, vllm_gpt2,
+    def test_a_default_valued_setting_is_still_the_invokes(self, vllm_qwen,
                                                            ET_prompt, MSG_prompt):
         # 16 is vLLM's own default max_tokens, and 3 is not; both are this
         # invoke's business, and the trace-level 4 applies to neither.
-        with vllm_gpt2.trace(temperature=0.0, max_tokens=4) as tracer:
+        with vllm_qwen.trace(temperature=0.0, max_tokens=4) as tracer:
             with tracer.invoke(ET_prompt, max_tokens=16, ignore_eos=True):
                 long = tracer.result.save()
             with tracer.invoke(MSG_prompt, max_tokens=3, ignore_eos=True):
@@ -423,9 +432,9 @@ class TestPerInvokeSampling:
         assert len(short.outputs[0].token_ids) == 3
 
     @torch.no_grad()
-    def test_the_trace_level_setting_still_fills_in(self, vllm_gpt2, ET_prompt,
+    def test_the_trace_level_setting_still_fills_in(self, vllm_qwen, ET_prompt,
                                                     MSG_prompt):
-        with vllm_gpt2.trace(temperature=0.0, max_tokens=4, ignore_eos=True) as tracer:
+        with vllm_qwen.trace(temperature=0.0, max_tokens=4, ignore_eos=True) as tracer:
             with tracer.invoke(ET_prompt):
                 first = tracer.result.save()
             with tracer.invoke(MSG_prompt, max_tokens=2):
@@ -435,13 +444,13 @@ class TestPerInvokeSampling:
         assert len(second.outputs[0].token_ids) == 2
 
     @torch.no_grad()
-    def test_a_default_valued_temperature_is_kept(self, vllm_gpt2, ET_prompt):
+    def test_a_default_valued_temperature_is_kept(self, vllm_qwen, ET_prompt):
         # temperature=1.0 is the default, and asking for it against a greedy
         # trace has to mean sampling. Two draws at temperature 1 diverge; two
         # greedy ones cannot.
         texts = set()
         for seed in (0, 1, 2, 3):
-            with vllm_gpt2.trace(temperature=0.0, max_tokens=6) as tracer:
+            with vllm_qwen.trace(temperature=0.0, max_tokens=6) as tracer:
                 with tracer.invoke(ET_prompt, temperature=1.0, seed=seed,
                                    ignore_eos=True):
                     result = tracer.result.save()
@@ -496,11 +505,11 @@ def test_a_trace_needs_no_insecure_serialization():
         import os
         assert "VLLM_ALLOW_INSECURE_SERIALIZATION" not in os.environ
         from nnsight.modeling.vllm import VLLM
-        model = VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True)
+        model = VLLM("Qwen/Qwen2.5-0.5B", gpu_memory_utilization=0.1, dispatch=True)
         with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1.0, max_tokens=2) as tracer:
-            h = model.transformer.h[3].output.clone().save()
+            h = model.model.layers[3].output[0].clone().save()
             out = tracer.result.save()
-        assert h.shape[-1] == 768, h.shape
+        assert h.shape[-1] == 896, h.shape
         assert len(out.outputs[0].token_ids) == 2, out
         print("TRACE_OK")
         """

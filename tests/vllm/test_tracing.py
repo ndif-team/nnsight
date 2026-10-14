@@ -15,139 +15,140 @@ pytest.importorskip("vllm")
 
 class TestLogits:
     @torch.no_grad()
-    def test_single_logit(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
+    def test_single_logit(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
 
-        assert logits.shape[-1] == vllm_gpt2.tokenizer.vocab_size
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        # The head's width is the config's vocabulary, which pads past the tokenizer's.
+        assert logits.shape[-1] == vllm_qwen.config.vocab_size
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_logits_edit_changes_prediction(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            vllm_gpt2.logits = torch.zeros_like(vllm_gpt2.logits)
-            logits = vllm_gpt2.logits.save()
+    def test_logits_edit_changes_prediction(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            vllm_qwen.logits = torch.zeros_like(vllm_qwen.logits)
+            logits = vllm_qwen.logits.save()
 
         assert torch.all(logits == 0)
 
 
 class TestGeneration:
     @torch.no_grad()
-    def test_multi_token_generation(self, vllm_gpt2, MSG_prompt):
-        with vllm_gpt2.trace(
+    def test_multi_token_generation(self, vllm_qwen, MSG_prompt):
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=3
         ) as tracer:
             logits = list().save()
             for _ in tracer.iter[0:3]:
-                logits.append(vllm_gpt2.logits)
+                logits.append(vllm_qwen.logits)
 
-        assert vllm_gpt2.tokenizer.batch_decode(
+        assert vllm_qwen.tokenizer.batch_decode(
             [logit.argmax(dim=-1) for logit in logits]
-        ) == [" New", " York", " City"]
+        ) == [" New", " York", ","]
 
     @torch.no_grad()
-    def test_max_token_count(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, max_tokens=10) as tracer:
+    def test_max_token_count(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, max_tokens=10) as tracer:
             logits = list().save()
             for _ in tracer.all():
-                logits.append(vllm_gpt2.logits)
+                logits.append(vllm_qwen.logits)
 
         assert len(logits) == 10
 
     @torch.no_grad()
-    def test_generate_alias(self, vllm_gpt2, MSG_prompt):
-        with vllm_gpt2.generate(
+    def test_generate_alias(self, vllm_qwen, MSG_prompt):
+        with vllm_qwen.generate(
             MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=3
         ) as tracer:
             logits = list().save()
             for _ in tracer.iter[0:3]:
-                logits.append(vllm_gpt2.logits)
+                logits.append(vllm_qwen.logits)
 
-        assert vllm_gpt2.tokenizer.batch_decode(
+        assert vllm_qwen.tokenizer.batch_decode(
             [logit.argmax(dim=-1) for logit in logits]
-        ) == [" New", " York", " City"]
+        ) == [" New", " York", ","]
 
     @torch.no_grad()
-    def test_max_new_tokens_is_rewritten(self, vllm_gpt2, MSG_prompt):
+    def test_max_new_tokens_is_rewritten(self, vllm_qwen, MSG_prompt):
         # max_new_tokens must become max_tokens: the request stops at 3, so a cache
         # watching every step sees exactly 3. (Asserting only iter[:3]==3 would pass
         # even if the rewrite were dropped and the default max_tokens ran.)
-        with vllm_gpt2.generate(
+        with vllm_qwen.generate(
             MSG_prompt, temperature=0.0, top_p=1.0, max_new_tokens=3
         ) as tracer:
-            cache = tracer.cache(modules=[vllm_gpt2.transformer.h[0]])
+            cache = tracer.cache(modules=[vllm_qwen.model.layers[0]])
             for _ in tracer.all():
-                vllm_gpt2.logits
+                vllm_qwen.logits
 
-        assert len(cache["model.transformer.h.0"]) == 3
+        assert len(cache["model.model.layers.0"]) == 3
 
     @torch.no_grad()
-    def test_max_new_tokens_on_trace_too(self, vllm_gpt2, MSG_prompt):
+    def test_max_new_tokens_on_trace_too(self, vllm_qwen, MSG_prompt):
         # trace() rewrites it as well, not just generate().
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1.0, max_new_tokens=3
         ) as tracer:
-            cache = tracer.cache(modules=[vllm_gpt2.transformer.h[0]])
+            cache = tracer.cache(modules=[vllm_qwen.model.layers[0]])
             for _ in tracer.all():
-                vllm_gpt2.logits
+                vllm_qwen.logits
 
-        assert len(cache["model.transformer.h.0"]) == 3
+        assert len(cache["model.model.layers.0"]) == 3
 
 
 class TestSampling:
     @torch.no_grad()
-    def test_samples_are_the_drawn_ids(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-            samples = vllm_gpt2.samples.save()
+    def test_samples_are_the_drawn_ids(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+            samples = vllm_qwen.samples.save()
 
         # Greedy: the sampled id is the argmax of the logits it was drawn from.
         assert samples.item() == logits.argmax(dim=-1).item()
 
     @torch.no_grad()
-    def test_samples_edit_replaces_the_drawn_id(self, vllm_gpt2, ET_prompt):
+    def test_samples_edit_replaces_the_drawn_id(self, vllm_qwen, ET_prompt):
         # Overwriting `samples` swaps the token the engine continues from; reading it
         # back in the same step returns the forced id, not the greedy draw.
-        forced = vllm_gpt2.tokenizer.encode(" Chicago")[0]
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=1):
-            greedy = vllm_gpt2.logits.argmax(dim=-1).save()
-            vllm_gpt2.samples = torch.full_like(vllm_gpt2.samples, forced)
-            after = vllm_gpt2.samples.save()
+        forced = vllm_qwen.tokenizer.encode(" Chicago")[0]
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=1):
+            greedy = vllm_qwen.logits.argmax(dim=-1).save()
+            vllm_qwen.samples = torch.full_like(vllm_qwen.samples, forced)
+            after = vllm_qwen.samples.save()
 
         assert greedy.item() != forced          # the model would not have drawn it
         assert after.item() == forced            # but the swap took
 
     @torch.no_grad()
-    def test_temperature_changes_samples(self, vllm_gpt2, MSG_prompt):
-        with vllm_gpt2.trace(max_tokens=3) as tracer:
+    def test_temperature_changes_samples(self, vllm_qwen, MSG_prompt):
+        with vllm_qwen.trace(max_tokens=3) as tracer:
             with tracer.invoke(MSG_prompt, temperature=0.8, top_p=0.95, seed=1):
                 sampled = list().save()
                 for _ in tracer.iter[0:3]:
-                    sampled.append(vllm_gpt2.samples.item())
+                    sampled.append(vllm_qwen.samples.item())
 
             with tracer.invoke(MSG_prompt, temperature=0.0, top_p=1.0):
                 greedy = list().save()
                 for _ in tracer.iter[0:3]:
-                    greedy.append(vllm_gpt2.samples.item())
+                    greedy.append(vllm_qwen.samples.item())
 
         # One id at a time: these are plain ints, and `batch_decode` reads a flat
         # list of them as a sequence each in transformers 4 but as one sequence in
         # transformers 5, so it cannot state this across both. (The other decodes
         # in this suite pass tensors, which are unambiguous.)
         assert [
-            vllm_gpt2.tokenizer.decode([token]) for token in greedy
-        ] == [" New", " York", " City"]
+            vllm_qwen.tokenizer.decode([token]) for token in greedy
+        ] == [" New", " York", ","]
         assert sampled != greedy
 
     @torch.no_grad()
-    def test_seed_is_reproducible(self, vllm_gpt2, MSG_prompt):
+    def test_seed_is_reproducible(self, vllm_qwen, MSG_prompt):
         def run():
-            with vllm_gpt2.trace(
+            with vllm_qwen.trace(
                 MSG_prompt, temperature=0.8, top_p=0.95, seed=123, max_tokens=3
             ) as tracer:
                 drawn = list().save()
                 for _ in tracer.iter[0:3]:
-                    drawn.append(vllm_gpt2.samples.item())
+                    drawn.append(vllm_qwen.samples.item())
             return drawn
 
         assert run() == run()
@@ -155,82 +156,88 @@ class TestSampling:
 
 class TestInterventions:
     @torch.no_grad()
-    def test_read_activation_spans_the_prompt(self, vllm_gpt2, ET_prompt):
-        n_tokens = len(vllm_gpt2.tokenizer.encode(ET_prompt))
+    def test_read_activation_spans_the_prompt(self, vllm_qwen, ET_prompt):
+        n_tokens = len(vllm_qwen.tokenizer.encode(ET_prompt))
 
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            hs = vllm_gpt2.transformer.h[-2].mlp.output.save()
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            hs = vllm_qwen.model.layers[-2].mlp.output.save()
 
         assert hs.shape[0] == n_tokens
 
     @torch.no_grad()
-    def test_zero_activation_swap(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            vllm_gpt2.transformer.h[-2].mlp.output = torch.zeros_like(
-                vllm_gpt2.transformer.h[-2].mlp.output
+    def test_zero_activation_swap(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            vllm_qwen.model.layers[-2].mlp.output = torch.zeros_like(
+                vllm_qwen.model.layers[-2].mlp.output
             )
-            hs = vllm_gpt2.transformer.h[-2].mlp.output.save()
-            logits = vllm_gpt2.logits.save()
+            # Cloned: the next layer's fused add+norm rewrites the served buffer.
+            hs = vllm_qwen.model.layers[-2].mlp.output.clone().save()
+            logits = vllm_qwen.logits.save()
 
         assert torch.all(hs == 0)
         # Zeroing a late MLP moves the prediction off the clean answer.
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) != " Paris"
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) != " Paris"
 
     @torch.no_grad()
-    def test_in_place_edit(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            out = vllm_gpt2.transformer.h[-2].mlp.output.clone()
+    def test_in_place_edit(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            out = vllm_qwen.model.layers[-2].mlp.output.clone()
             out[:] = 0
-            vllm_gpt2.transformer.h[-2].mlp.output = out
-            hs = vllm_gpt2.transformer.h[-2].mlp.output.save()
+            vllm_qwen.model.layers[-2].mlp.output = out
+            hs = vllm_qwen.model.layers[-2].mlp.output.clone().save()
 
         assert torch.all(hs == 0)
 
     @torch.no_grad()
-    def test_read_module_input(self, vllm_gpt2, ET_prompt):
-        n_tokens = len(vllm_gpt2.tokenizer.encode(ET_prompt))
+    def test_read_module_input(self, vllm_qwen, ET_prompt):
+        n_tokens = len(vllm_qwen.tokenizer.encode(ET_prompt))
 
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            hs = vllm_gpt2.transformer.h[5].input.save()
+        # A Qwen decoder layer's first input is its positions; its MLP's is the
+        # hidden state.
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            hs = vllm_qwen.model.layers[5].mlp.input.save()
 
         assert hs.shape[0] == n_tokens
 
     @torch.no_grad()
-    def test_edit_module_input(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            vllm_gpt2.transformer.h[5].input = torch.zeros_like(
-                vllm_gpt2.transformer.h[5].input
+    def test_edit_module_input(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            vllm_qwen.model.layers[20].mlp.input = torch.zeros_like(
+                vllm_qwen.model.layers[20].mlp.input
             )
-            logits = vllm_gpt2.logits.save()
+            logits = vllm_qwen.logits.save()
 
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) != " Paris"
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) != " Paris"
 
     @torch.no_grad()
-    def test_multi_layer_intervention(self, vllm_gpt2, ET_prompt):
+    def test_multi_layer_intervention(self, vllm_qwen, ET_prompt):
         # Editing an early layer and reading a later one in the same trace: the
         # later read is downstream of the edit, and the prediction reflects it.
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            vllm_gpt2.transformer.h[3].output = torch.zeros_like(
-                vllm_gpt2.transformer.h[3].output
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            # A layer returns (hidden, residual); zero both, so nothing of the
+            # stream before layer 3 reaches the rest.
+            hidden, residual = vllm_qwen.model.layers[3].output
+            vllm_qwen.model.layers[3].output = (
+                torch.zeros_like(hidden),
+                torch.zeros_like(residual),
             )
-            later = vllm_gpt2.transformer.h[8].output.save()
-            logits = vllm_gpt2.logits.save()
+            later = vllm_qwen.model.layers[8].output[0].save()
+            logits = vllm_qwen.logits.save()
 
         assert (later != 0).any()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) != " Paris"
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) != " Paris"
 
     @torch.no_grad()
-    def test_edit_at_one_generation_step(self, vllm_gpt2, MSG_prompt):
-        with vllm_gpt2.trace(
+    def test_edit_at_one_generation_step(self, vllm_qwen, MSG_prompt):
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=5
         ) as tracer:
             zeroed = list().save()
             for it in tracer.iter[:]:
                 if it == 2:
-                    out = vllm_gpt2.transformer.h[-2].output.clone()
-                    out[0][:] = 0
-                    vllm_gpt2.transformer.h[-2].output = out
-                zeroed.append(torch.all(vllm_gpt2.transformer.h[-2].output[0] == 0))
+                    hidden, residual = vllm_qwen.model.layers[-2].output
+                    vllm_qwen.model.layers[-2].output = (torch.zeros_like(hidden), residual)
+                zeroed.append(torch.all(vllm_qwen.model.layers[-2].output[0] == 0))
 
         # Only the third step sees the zeroed activation.
         assert [bool(z) for z in zeroed] == [False, False, True, False, False]
@@ -238,181 +245,181 @@ class TestInterventions:
 
 class TestInputForms:
     @torch.no_grad()
-    def test_token_id_list(self, vllm_gpt2, ET_prompt):
-        token_ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+    def test_token_id_list(self, vllm_qwen, ET_prompt):
+        token_ids = vllm_qwen.tokenizer.encode(ET_prompt)
 
-        with vllm_gpt2.trace(token_ids, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
+        with vllm_qwen.trace(token_ids, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
 
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
-
-    @torch.no_grad()
-    def test_tokenizer_output_dict(self, vllm_gpt2, ET_prompt):
-        hf_output = vllm_gpt2.tokenizer(ET_prompt, return_tensors="pt")
-
-        with vllm_gpt2.trace(dict(hf_output), temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_dict_without_attention_mask(self, vllm_gpt2, ET_prompt):
-        token_ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+    def test_tokenizer_output_dict(self, vllm_qwen, ET_prompt):
+        hf_output = vllm_qwen.tokenizer(ET_prompt, return_tensors="pt")
 
-        with vllm_gpt2.trace({"input_ids": token_ids}, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
+        with vllm_qwen.trace(dict(hf_output), temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
 
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_attention_mask_selects_tokens(self, vllm_gpt2, ET_prompt):
-        token_ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+    def test_dict_without_attention_mask(self, vllm_qwen, ET_prompt):
+        token_ids = vllm_qwen.tokenizer.encode(ET_prompt)
+
+        with vllm_qwen.trace({"input_ids": token_ids}, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_attention_mask_selects_tokens(self, vllm_qwen, ET_prompt):
+        token_ids = vllm_qwen.tokenizer.encode(ET_prompt)
         # A leading zero in the mask drops the first token from the prompt.
         mask = [0] + [1] * (len(token_ids) - 1)
 
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             {"input_ids": token_ids, "attention_mask": mask}, temperature=0.0, top_p=1
         ):
-            hs = vllm_gpt2.transformer.h[0].output.save()
+            hs = vllm_qwen.model.layers[0].output[0].save()
 
         assert hs.shape[0] == len(token_ids) - 1
 
     @torch.no_grad()
-    def test_dict_with_tensor_input_ids(self, vllm_gpt2, ET_prompt):
+    def test_dict_with_tensor_input_ids(self, vllm_qwen, ET_prompt):
         # input_ids as a tensor rather than a list, no attention mask (issue #622).
-        hf_output = vllm_gpt2.tokenizer(ET_prompt, return_tensors="pt")
+        hf_output = vllm_qwen.tokenizer(ET_prompt, return_tensors="pt")
 
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             {"input_ids": hf_output["input_ids"]}, temperature=0.0, top_p=1
         ):
-            logits = vllm_gpt2.logits.save()
+            logits = vllm_qwen.logits.save()
 
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_mixed_string_and_token_invokes(self, vllm_gpt2, ET_prompt, MSG_prompt):
+    def test_mixed_string_and_token_invokes(self, vllm_qwen, ET_prompt, MSG_prompt):
         # One invoke takes token ids, the other a string; each resolves to its own
         # request and prediction.
-        et_tokens = vllm_gpt2.tokenizer.encode(ET_prompt)
+        et_tokens = vllm_qwen.tokenizer.encode(ET_prompt)
 
-        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+        with vllm_qwen.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(et_tokens):
-                et_logits = vllm_gpt2.logits.save()
+                et_logits = vllm_qwen.logits.save()
             with tracer.invoke(MSG_prompt):
-                msg_logits = vllm_gpt2.logits.save()
+                msg_logits = vllm_qwen.logits.save()
 
-        assert vllm_gpt2.tokenizer.decode(et_logits.argmax(dim=-1)) == " Paris"
-        assert vllm_gpt2.tokenizer.decode(msg_logits.argmax(dim=-1)) == " New"
+        assert vllm_qwen.tokenizer.decode(et_logits.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(msg_logits.argmax(dim=-1)) == " New"
 
     @torch.no_grad()
-    def test_rejects_multiple_prompts_per_invoke(self, vllm_gpt2, ET_prompt, MSG_prompt):
+    def test_rejects_multiple_prompts_per_invoke(self, vllm_qwen, ET_prompt, MSG_prompt):
         with pytest.raises(ValueError):
-            with vllm_gpt2.trace([ET_prompt, MSG_prompt], temperature=0.0):
-                vllm_gpt2.logits.save()
+            with vllm_qwen.trace([ET_prompt, MSG_prompt], temperature=0.0):
+                vllm_qwen.logits.save()
 
     @torch.no_grad()
-    def test_empty_invoke_with_interventions_raises(self, vllm_gpt2, ET_prompt):
+    def test_empty_invoke_with_interventions_raises(self, vllm_qwen, ET_prompt):
         # An empty invoke has no vLLM request; interventions in its body would be
         # silently dropped, so it is refused.
         with pytest.raises(ValueError, match="no prompt"):
-            with vllm_gpt2.trace(temperature=0.0) as tracer:
+            with vllm_qwen.trace(temperature=0.0) as tracer:
                 with tracer.invoke():
-                    vllm_gpt2.transformer.h[0].output = torch.zeros_like(
-                        vllm_gpt2.transformer.h[0].output
+                    vllm_qwen.model.layers[0].mlp.output = torch.zeros_like(
+                        vllm_qwen.model.layers[0].mlp.output
                     )
                 with tracer.invoke(ET_prompt):
-                    vllm_gpt2.logits.save()
+                    vllm_qwen.logits.save()
 
     @torch.no_grad()
-    def test_unknown_trace_sampling_kwarg_raises(self, vllm_gpt2, ET_prompt):
+    def test_unknown_trace_sampling_kwarg_raises(self, vllm_qwen, ET_prompt):
         # A typo'd trace-level sampling setting is refused, not silently ignored.
         with pytest.raises(TypeError, match="temperatur"):
-            with vllm_gpt2.trace(temperatur=0.0) as tracer:
+            with vllm_qwen.trace(temperatur=0.0) as tracer:
                 with tracer.invoke(ET_prompt):
-                    vllm_gpt2.logits.save()
+                    vllm_qwen.logits.save()
 
 
 class TestEarlyStop:
     @torch.no_grad()
-    def test_stop_halts_capture(self, vllm_gpt2, MSG_prompt):
-        with vllm_gpt2.trace(
+    def test_stop_halts_capture(self, vllm_qwen, MSG_prompt):
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=5
         ) as tracer:
             steps = list().save()
             for it in tracer.iter[:5]:
-                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+                steps.append(vllm_qwen.logits.argmax(dim=-1))
                 if it == 1:
                     tracer.stop()
 
         # Capture halts at the stop; the two steps up to it are kept.
         assert len(steps) == 2
-        assert vllm_gpt2.tokenizer.batch_decode(steps) == [" New", " York"]
+        assert vllm_qwen.tokenizer.batch_decode(steps) == [" New", " York"]
 
     @torch.no_grad()
-    def test_stop_finishes_the_request(self, vllm_gpt2, MSG_prompt):
+    def test_stop_finishes_the_request(self, vllm_qwen, MSG_prompt):
         # The engine stops scheduling the request, so far fewer than max_tokens
         # steps run — counted by a cache that watches every step until it ends.
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=20
         ) as tracer:
-            cache = tracer.cache(modules=[vllm_gpt2.transformer.h[0]])
+            cache = tracer.cache(modules=[vllm_qwen.model.layers[0]])
             for it in tracer.iter[:20]:
-                vllm_gpt2.logits
+                vllm_qwen.logits
                 if it == 1:
                     tracer.stop()
 
-        assert len(cache["model.transformer.h.0"]) < 20
+        assert len(cache["model.model.layers.0"]) < 20
 
     @torch.no_grad()
-    def test_stop_finishes_the_request_under_min_tokens(self, vllm_gpt2, MSG_prompt):
+    def test_stop_finishes_the_request_under_min_tokens(self, vllm_qwen, MSG_prompt):
         # min_tokens defers the scheduler's stop check, so a single forced
         # end-of-sequence would not retire the request. Re-forcing it every step ends
         # the request once min_tokens is met — still well short of max_tokens.
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=40, min_tokens=4
         ) as tracer:
-            cache = tracer.cache(modules=[vllm_gpt2.transformer.h[0]])
+            cache = tracer.cache(modules=[vllm_qwen.model.layers[0]])
             for it in tracer.iter[:40]:
-                vllm_gpt2.logits
+                vllm_qwen.logits
                 if it == 0:
                     tracer.stop()
 
-        steps = len(cache["model.transformer.h.0"])
+        steps = len(cache["model.model.layers.0"])
         assert 4 <= steps < 40
 
     @torch.no_grad()
-    def test_stop_under_ignore_eos_runs_to_max_tokens(self, vllm_gpt2, MSG_prompt):
+    def test_stop_under_ignore_eos_runs_to_max_tokens(self, vllm_qwen, MSG_prompt):
         # ignore_eos is the residual: forcing EOS can't retire the request, so it runs
         # the full max_tokens. The stop is control flow, so no error surfaces and the
         # engine stays healthy.
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=6, ignore_eos=True
         ) as tracer:
-            cache = tracer.cache(modules=[vllm_gpt2.transformer.h[0]])
+            cache = tracer.cache(modules=[vllm_qwen.model.layers[0]])
             for it in tracer.iter[:6]:
-                vllm_gpt2.logits
+                vllm_qwen.logits
                 if it == 1:
                     tracer.stop()
 
-        assert len(cache["model.transformer.h.0"]) == 6
-        with vllm_gpt2.trace(MSG_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " New"
+        assert len(cache["model.model.layers.0"]) == 6
+        with vllm_qwen.trace(MSG_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " New"
 
     @torch.no_grad()
-    def test_engine_healthy_after_stop(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(
+    def test_engine_healthy_after_stop(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(
             ET_prompt, temperature=0.0, top_p=1, max_tokens=5
         ) as tracer:
             for it in tracer.iter[:5]:
-                vllm_gpt2.logits
+                vllm_qwen.logits
                 if it == 0:
                     tracer.stop()
 
         # A later trace still runs on the same engine.
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
 
 class TestIterationBounds:
@@ -426,16 +433,16 @@ class TestIterationBounds:
     """
 
     @torch.no_grad()
-    def test_iter_past_the_end_is_cut_short(self, vllm_gpt2, MSG_prompt):
+    def test_iter_past_the_end_is_cut_short(self, vllm_qwen, MSG_prompt):
         # Eight steps asked of a three-step request: the loop is cut short at the
         # fourth ask, the three reached steps come home, and the append after the
         # loop never runs.
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
         ) as tracer:
             steps = list().save()
             for _ in tracer.iter[:8]:
-                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+                steps.append(vllm_qwen.logits.argmax(dim=-1))
             steps.append("after the loop")
 
         assert len(steps) == 3
@@ -443,22 +450,22 @@ class TestIterationBounds:
 
     @torch.no_grad()
     def test_bounded_iter_matching_the_request_keeps_its_tail(
-        self, vllm_gpt2, MSG_prompt
+        self, vllm_qwen, MSG_prompt
     ):
         # The other side of the same rule: a count the request does reach leaves the
         # loop to end on its own, so what follows it runs.
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
         ) as tracer:
             steps = list().save()
             for _ in tracer.iter[:3]:
-                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+                steps.append(vllm_qwen.logits.argmax(dim=-1))
             steps.append("after the loop")
 
         assert len(steps) == 4 and steps[-1] == "after the loop"
 
     @torch.no_grad()
-    def test_a_generation_cut_short_is_not_an_error(self, vllm_gpt2, MSG_prompt):
+    def test_a_generation_cut_short_is_not_an_error(self, vllm_qwen, MSG_prompt):
         # The count need not be absurd to go unmet: this request stops on its
         # second token — what an EOS does to a generation — while the loop is
         # still bound to six. The trace completes with what the run made. The
@@ -466,8 +473,8 @@ class TestIterationBounds:
         # stop_token_ids in the client and aborts the request, so the engine can
         # run a step past the stop token); what this asserts is that the loop
         # was cut short of its bound and nothing raised.
-        york = vllm_gpt2.tokenizer.encode(" York")
-        with vllm_gpt2.trace(
+        york = vllm_qwen.tokenizer.encode(" York")
+        with vllm_qwen.trace(
             MSG_prompt,
             temperature=0.0,
             top_p=1,
@@ -476,79 +483,79 @@ class TestIterationBounds:
         ) as tracer:
             steps = list().save()
             for _ in tracer.iter[:6]:
-                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+                steps.append(vllm_qwen.logits.argmax(dim=-1))
 
         assert 2 <= len(steps) < 6
 
     @torch.no_grad()
-    def test_open_iter_past_the_end_is_not_an_error(self, vllm_gpt2, MSG_prompt):
+    def test_open_iter_past_the_end_is_not_an_error(self, vllm_qwen, MSG_prompt):
         # `tracer.all()` has no end of its own, so asking for the step after the
         # last is how it finishes: warned about on the engine, never raised, and
         # every step it did reach comes home.
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
         ) as tracer:
             steps = list().save()
             for _ in tracer.all():
-                steps.append(vllm_gpt2.logits.argmax(dim=-1))
+                steps.append(vllm_qwen.logits.argmax(dim=-1))
 
-        assert vllm_gpt2.tokenizer.batch_decode(steps) == [" New", " York", " City"]
+        assert vllm_qwen.tokenizer.batch_decode(steps) == [" New", " York", ","]
 
     @torch.no_grad()
-    def test_engine_survives_an_over_run(self, vllm_gpt2, ET_prompt):
+    def test_engine_survives_an_over_run(self, vllm_qwen, ET_prompt):
         # The unwind ends one request's loop; every later trace is untouched.
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             ET_prompt, temperature=0.0, top_p=1, max_tokens=2
         ) as tracer:
             for _ in tracer.iter[:9]:
-                vllm_gpt2.logits
+                vllm_qwen.logits
 
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
 
 class TestDeferredErrors:
     @torch.no_grad()
-    def test_error_surfaces_to_client(self, vllm_gpt2, ET_prompt):
+    def test_error_surfaces_to_client(self, vllm_qwen, ET_prompt):
         # An error in intervention code comes back to the trace that wrote it,
         # naming the original exception.
         with pytest.raises(RuntimeError, match="ZeroDivisionError"):
-            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
                 _ = 1 / 0
-                vllm_gpt2.logits.save()
+                vllm_qwen.logits.save()
 
     @torch.no_grad()
-    def test_barrier_across_invokes_surfaces(self, vllm_gpt2, ET_prompt, MSG_prompt):
+    def test_barrier_across_invokes_surfaces(self, vllm_qwen, ET_prompt, MSG_prompt):
         # A barrier coordinates blocks within one process; across independent vLLM
         # requests each gets its own copy, so the count is never reached and it
         # surfaces as an error when the run ends rather than hanging forever.
         with pytest.raises(RuntimeError, match="barrier"):
-            with vllm_gpt2.trace(temperature=0.0, top_p=1, max_tokens=1) as tracer:
+            with vllm_qwen.trace(temperature=0.0, top_p=1, max_tokens=1) as tracer:
                 barrier = tracer.barrier(2)
                 with tracer.invoke(ET_prompt):
                     barrier()
-                    vllm_gpt2.logits.save()
+                    vllm_qwen.logits.save()
                 with tracer.invoke(MSG_prompt):
                     barrier()
-                    vllm_gpt2.logits.save()
+                    vllm_qwen.logits.save()
 
     @torch.no_grad()
-    def test_engine_survives_error(self, vllm_gpt2, ET_prompt):
+    def test_engine_survives_error(self, vllm_qwen, ET_prompt):
         try:
-            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
                 _ = 1 / 0
-                vllm_gpt2.logits.save()
+                vllm_qwen.logits.save()
         except RuntimeError:
             pass
 
         # The error ended only its own request; a later trace runs normally.
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_a_raise_after_the_first_read_spares_the_engine(self, vllm_gpt2,
+    def test_a_raise_after_the_first_read_spares_the_engine(self, vllm_qwen,
                                                             ET_prompt):
         # Both halves matter, and the test above has neither: the raise lands
         # *after* the block has parked once, so its worker is dead while still
@@ -559,152 +566,153 @@ class TestDeferredErrors:
         # the engine core inside vLLM's own state update, taking every tenant's
         # request with it.
         with pytest.raises(RuntimeError, match="ValueError"):
-            with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=4,
+            with vllm_qwen.trace(ET_prompt, temperature=0.0, max_tokens=4,
                                  ignore_eos=True):
-                hidden = vllm_gpt2.transformer.h[5].output.save()
+                hidden = vllm_qwen.model.layers[5].output.save()
                 raise ValueError("after the first read")
 
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_a_raise_inside_an_iter_loop_spares_the_engine(self, vllm_gpt2,
+    def test_a_raise_inside_an_iter_loop_spares_the_engine(self, vllm_qwen,
                                                            ET_prompt):
         # The same, reached the way a generation loop reaches it.
         with pytest.raises(RuntimeError, match="ValueError"):
-            with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=6,
+            with vllm_qwen.trace(ET_prompt, temperature=0.0, max_tokens=6,
                                  ignore_eos=True) as tracer:
                 for step in tracer.iter[:6]:
-                    logits = vllm_gpt2.logits.save()
+                    logits = vllm_qwen.logits.save()
                     if step == 1:
                         raise ValueError("mid-loop")
 
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_out_of_order_read_surfaces(self, vllm_gpt2, ET_prompt):
+    def test_out_of_order_read_surfaces(self, vllm_qwen, ET_prompt):
         # Reading a layer the forward already ran past leaves the worker parked with
         # nowhere to be served. When the request finishes it is surfaced as an
         # OutOfOrderError rather than left to hang silently to max_tokens.
         with pytest.raises(RuntimeError, match="already ran past"):
-            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=3):
-                _later = vllm_gpt2.transformer.h[5].output
-                _earlier = vllm_gpt2.transformer.h[0].output
-                vllm_gpt2.logits.save()
+            with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=3):
+                _later = vllm_qwen.model.layers[5].output
+                _earlier = vllm_qwen.model.layers[0].output
+                vllm_qwen.logits.save()
 
     @torch.no_grad()
-    def test_out_of_order_edit_surfaces(self, vllm_gpt2, ET_prompt):
+    def test_out_of_order_edit_surfaces(self, vllm_qwen, ET_prompt):
         # Same as the read case but the parked worker is mid-edit (a swap), whose
         # pending event carries the replacement value — a differently shaped tuple.
         # It must still surface as an OutOfOrderError, not crash the shared engine.
         with pytest.raises(RuntimeError, match="already ran past"):
-            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=3):
-                later = vllm_gpt2.transformer.h[5].output
-                vllm_gpt2.transformer.h[3].output = later
-                vllm_gpt2.logits.save()
+            with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=3):
+                later = vllm_qwen.model.layers[5].output
+                vllm_qwen.model.layers[3].output = later
+                vllm_qwen.logits.save()
 
         # The engine is unharmed — a later trace runs normally.
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_error_in_one_invoke_isolated(self, vllm_gpt2, ET_prompt, MSG_prompt):
+    def test_error_in_one_invoke_isolated(self, vllm_qwen, ET_prompt, MSG_prompt):
         with pytest.raises(RuntimeError):
-            with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+            with vllm_qwen.trace(temperature=0.0, top_p=1) as tracer:
                 with tracer.invoke(ET_prompt):
-                    vllm_gpt2.logits.save()
+                    vllm_qwen.logits.save()
                 with tracer.invoke(MSG_prompt):
                     _ = 1 / 0
-                    vllm_gpt2.logits.save()
+                    vllm_qwen.logits.save()
 
         # The engine and its other tenants are unharmed.
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
 
 class TestCache:
     @torch.no_grad()
-    def test_cache_specific_modules(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(
+    def test_cache_specific_modules(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(
             ET_prompt, temperature=0.0, top_p=1, max_tokens=1
         ) as tracer:
             cache = tracer.cache(
-                modules=[vllm_gpt2.transformer.h[0], vllm_gpt2.transformer.h[-1]]
+                modules=[vllm_qwen.model.layers[0], vllm_qwen.model.layers[-1]]
             )
 
-        assert "model.transformer.h.0" in cache
-        assert "model.transformer.h.11" in cache
-        assert "model.transformer.h.5" not in cache
-        assert cache["model.transformer.h.0"].output is not None
+        assert "model.model.layers.0" in cache
+        assert "model.model.layers.23" in cache
+        assert "model.model.layers.5" not in cache
+        assert cache["model.model.layers.0"].output is not None
 
     @torch.no_grad()
-    def test_cache_all_modules(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(
+    def test_cache_all_modules(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(
             ET_prompt, temperature=0.0, top_p=1, max_tokens=1
         ) as tracer:
             cache = tracer.cache()
 
-        assert cache["model.transformer.h.0"].output is not None
-        assert cache["model.transformer.h.11"].output is not None
+        assert cache["model.model.layers.0"].output is not None
+        assert cache["model.model.layers.23"].output is not None
 
     @torch.no_grad()
-    def test_cache_excludes_inputs_by_default(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(
+    def test_cache_excludes_inputs_by_default(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(
             ET_prompt, temperature=0.0, top_p=1, max_tokens=1
         ) as tracer:
-            cache = tracer.cache(modules=[vllm_gpt2.transformer.h[0]])
+            cache = tracer.cache(modules=[vllm_qwen.model.layers[0]])
 
-        assert cache["model.transformer.h.0"].output is not None
-        assert cache["model.transformer.h.0"].inputs is None
+        assert cache["model.model.layers.0"].output is not None
+        assert cache["model.model.layers.0"].inputs is None
 
     @torch.no_grad()
-    def test_cache_includes_inputs_when_asked(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(
+    def test_cache_includes_inputs_when_asked(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(
             ET_prompt, temperature=0.0, top_p=1, max_tokens=1
         ) as tracer:
             cache = tracer.cache(
-                modules=[vllm_gpt2.transformer.h[0]], include_inputs=True
+                modules=[vllm_qwen.model.layers[0]], include_inputs=True
             )
 
-        assert cache["model.transformer.h.0"].inputs is not None
+        assert cache["model.model.layers.0"].inputs is not None
 
     @torch.no_grad()
-    def test_cache_narrows_to_each_invoke(self, vllm_gpt2, ET_prompt, MSG_prompt):
-        et_n = len(vllm_gpt2.tokenizer.encode(ET_prompt))
-        msg_n = len(vllm_gpt2.tokenizer.encode(MSG_prompt))
+    def test_cache_narrows_to_each_invoke(self, vllm_qwen, ET_prompt, MSG_prompt):
+        et_n = len(vllm_qwen.tokenizer.encode(ET_prompt))
+        msg_n = len(vllm_qwen.tokenizer.encode(MSG_prompt))
 
-        with vllm_gpt2.trace(temperature=0.0, top_p=1, max_tokens=1) as tracer:
+        with vllm_qwen.trace(temperature=0.0, top_p=1, max_tokens=1) as tracer:
             with tracer.invoke(ET_prompt):
-                et_cache = tracer.cache(modules=[vllm_gpt2.transformer.h[0]])
+                et_cache = tracer.cache(modules=[vllm_qwen.model.layers[0]])
             with tracer.invoke(MSG_prompt):
-                msg_cache = tracer.cache(modules=[vllm_gpt2.transformer.h[0]])
+                msg_cache = tracer.cache(modules=[vllm_qwen.model.layers[0]])
 
         # Each invoke's cache records only its own tokens, not the combined batch.
-        assert et_cache["model.transformer.h.0"].output.shape[0] == et_n
-        assert msg_cache["model.transformer.h.0"].output.shape[0] == msg_n
+        assert et_cache["model.model.layers.0"].output[0].shape[0] == et_n
+        assert msg_cache["model.model.layers.0"].output[0].shape[0] == msg_n
 
     @torch.no_grad()
-    def test_cache_captures_each_generation_step(self, vllm_gpt2, MSG_prompt):
-        n_prompt = len(vllm_gpt2.tokenizer.encode(MSG_prompt))
+    def test_cache_captures_each_generation_step(self, vllm_qwen, MSG_prompt):
+        n_prompt = len(vllm_qwen.tokenizer.encode(MSG_prompt))
 
-        with vllm_gpt2.trace(
+        with vllm_qwen.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=3
         ) as tracer:
-            cache = tracer.cache(modules=[vllm_gpt2.transformer.h[0]])
+            cache = tracer.cache(modules=[vllm_qwen.model.layers[0]])
 
-        entry = cache["model.transformer.h.0"]
+        entry = cache["model.model.layers.0"]
         # One capture per step over the whole request, not just the prefill.
         assert len(entry) == 3
         outputs = entry.output
         # The prefill spans every prompt token, then one token per decode step.
-        assert outputs[0].shape[0] == n_prompt
-        assert outputs[1].shape[0] == 1
-        assert outputs[2].shape[0] == 1
+        # A layer's output is (hidden, residual); the hidden state's rows are the tokens.
+        assert outputs[0][0].shape[0] == n_prompt
+        assert outputs[1][0].shape[0] == 1
+        assert outputs[2][0].shape[0] == 1
 
 
 class TestLazyDispatch:
@@ -720,14 +728,14 @@ class TestLazyDispatch:
     def test_first_trace_dispatches_and_reads(self, ET_prompt):
         from nnsight.modeling.vllm import VLLM
 
-        model = VLLM("gpt2", gpu_memory_utilization=0.1)
+        model = VLLM("Qwen/Qwen2.5-0.5B", gpu_memory_utilization=0.1)
         assert not model.dispatched
         # The meta tree is there to write interventions against before any engine.
         assert model.tokenizer is not None
-        assert model.transformer.h[5] is not None
+        assert model.model.layers[5] is not None
 
         with model.trace(ET_prompt, temperature=0.0, top_p=1):
-            hidden = model.transformer.h[5].output.save()
+            hidden = model.model.layers[5].output[0].save()
             logits = model.logits.save()
 
         assert model.dispatched
@@ -743,7 +751,7 @@ class TestLazyDispatch:
 
         from nnsight.modeling.vllm import VLLM
 
-        model = VLLM("gpt2", gpu_memory_utilization=0.1)
+        model = VLLM("Qwen/Qwen2.5-0.5B", gpu_memory_utilization=0.1)
         tree = model._module
 
         with mock.patch.object(
@@ -759,10 +767,10 @@ class TestLazyDispatch:
         # `edit()` dispatches for itself, since the block has to go to an engine.
         from nnsight.modeling.vllm import VLLM
 
-        model = VLLM("gpt2", gpu_memory_utilization=0.1,
+        model = VLLM("Qwen/Qwen2.5-0.5B", gpu_memory_utilization=0.1,
                      enable_prefix_caching=False)
         with model.edit() as (tracer, edit):
-            hidden = model.transformer.h[5].output.save()
+            hidden = model.model.layers[5].output[0].save()
         try:
             assert model.dispatched
             output = model.generate([ET_prompt], max_tokens=2, temperature=0.0,
@@ -780,59 +788,59 @@ class TestPromptForms:
     """
 
     @torch.no_grad()
-    def test_a_string(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+    def test_a_string(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_a_token_id_list(self, vllm_gpt2, ET_prompt):
-        ids = vllm_gpt2.tokenizer.encode(ET_prompt)
-        with vllm_gpt2.trace(ids, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+    def test_a_token_id_list(self, vllm_qwen, ET_prompt):
+        ids = vllm_qwen.tokenizer.encode(ET_prompt)
+        with vllm_qwen.trace(ids, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_a_tokenizer_output(self, vllm_gpt2, ET_prompt):
-        inputs = vllm_gpt2.tokenizer(ET_prompt)
-        with vllm_gpt2.trace(inputs, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+    def test_a_tokenizer_output(self, vllm_qwen, ET_prompt):
+        inputs = vllm_qwen.tokenizer(ET_prompt)
+        with vllm_qwen.trace(inputs, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_a_vllm_tokens_prompt(self, vllm_gpt2, ET_prompt):
+    def test_a_vllm_tokens_prompt(self, vllm_qwen, ET_prompt):
         from vllm import TokensPrompt
 
-        ids = vllm_gpt2.tokenizer.encode(ET_prompt)
-        with vllm_gpt2.trace(
+        ids = vllm_qwen.tokenizer.encode(ET_prompt)
+        with vllm_qwen.trace(
             TokensPrompt(prompt_token_ids=ids), temperature=0.0, top_p=1
         ):
-            hidden = vllm_gpt2.transformer.h[5].output.save()
-            logits = vllm_gpt2.logits.save()
+            hidden = vllm_qwen.model.layers[5].output[0].save()
+            logits = vllm_qwen.logits.save()
 
         assert hidden.shape[0] == len(ids)
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_a_vllm_text_prompt(self, vllm_gpt2, ET_prompt):
-        with vllm_gpt2.trace({"prompt": ET_prompt}, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.save()
-        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+    def test_a_vllm_text_prompt(self, vllm_qwen, ET_prompt):
+        with vllm_qwen.trace({"prompt": ET_prompt}, temperature=0.0, top_p=1):
+            logits = vllm_qwen.logits.save()
+        assert vllm_qwen.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
-    def test_each_invoke_takes_its_own_form(self, vllm_gpt2, ET_prompt, MSG_prompt):
+    def test_each_invoke_takes_its_own_form(self, vllm_qwen, ET_prompt, MSG_prompt):
         # The forms mix freely, since each invoke is converted on its own.
         from vllm import TokensPrompt
 
-        ids = vllm_gpt2.tokenizer.encode(MSG_prompt)
-        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+        ids = vllm_qwen.tokenizer.encode(MSG_prompt)
+        with vllm_qwen.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(ET_prompt):
-                et = vllm_gpt2.logits.save()
+                et = vllm_qwen.logits.save()
             with tracer.invoke(TokensPrompt(prompt_token_ids=ids)):
-                msg = vllm_gpt2.logits.save()
+                msg = vllm_qwen.logits.save()
 
-        assert vllm_gpt2.tokenizer.decode(et.argmax(dim=-1)) == " Paris"
-        assert vllm_gpt2.tokenizer.decode(msg.argmax(dim=-1)) == " New"
+        assert vllm_qwen.tokenizer.decode(et.argmax(dim=-1)) == " Paris"
+        assert vllm_qwen.tokenizer.decode(msg.argmax(dim=-1)) == " New"
 
 
 class TestModelRunnerSelection:

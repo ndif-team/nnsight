@@ -5,9 +5,9 @@ collects nothing here. Tensor-parallel fixtures parametrize over the parallel
 sizes the machine has GPUs for; on a single-GPU box the parallel sizes drop out
 and those tests skip rather than fail.
 
-Two checkpoints are used: gpt2 for the single-rank tracing and request-tracking
-tests, and Qwen2.5-0.5B for tensor parallelism, since it shards cleanly across
-ranks where gpt2's fused layers do not.
+The tests use Qwen2.5-0.5B, single-rank and sharded alike: it shards cleanly
+across ranks. A Qwen decoder layer's ``.output`` is ``(hidden, residual)`` and
+its ``.input`` is the positions tensor; its MLP's ``.output`` is the hidden state.
 """
 
 import os
@@ -46,20 +46,20 @@ def MSG_prompt() -> str:
 
 
 @pytest.fixture(scope="module")
-def vllm_gpt2():
-    """A dispatched single-rank gpt2 for tracing and request-tracking tests."""
+def vllm_qwen():
+    """A dispatched single-rank Qwen for tracing and request-tracking tests."""
     from nnsight.modeling.vllm import VLLM
 
     if GPU_COUNT < 1:
         pytest.skip("vLLM tests need a GPU")
     return VLLM(
-        "gpt2", tensor_parallel_size=1, gpu_memory_utilization=0.1, dispatch=True
+        "Qwen/Qwen2.5-0.5B", tensor_parallel_size=1, gpu_memory_utilization=0.1, dispatch=True
     )
 
 
 @pytest.fixture(scope="module")
-def vllm_gpt2_uncached():
-    """A gpt2 with prefix caching off, which a registration needs.
+def vllm_qwen_uncached():
+    """A Qwen with prefix caching off, which a registration needs.
 
     A prefix-cached token is served without a forward pass, so no hook fires for
     it and a registered block sees fewer rows than the prompt has — silently. A
@@ -71,7 +71,7 @@ def vllm_gpt2_uncached():
     if GPU_COUNT < 1:
         pytest.skip("vLLM tests need a GPU")
     return VLLM(
-        "gpt2",
+        "Qwen/Qwen2.5-0.5B",
         tensor_parallel_size=1,
         gpu_memory_utilization=0.1,
         enable_prefix_caching=False,
