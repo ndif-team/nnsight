@@ -57,9 +57,14 @@ class ResponseModel(BaseModel):
         return f"[{self.id}] {self.status.value.ljust(12)} {self.description}"
 
     def pickle(self) -> bytes:
-        """Serialize to bytes via ``torch.save`` (carries tensors in ``data``)."""
+        """Serialize to bytes via ``torch.save`` (carries tensors in ``data``).
+
+        Pickle protocol 4: ``torch.save``'s default protocol 2 has no bytes
+        opcode and writes a ``bytes`` value in ``data`` through a latin-1
+        ``str``, 1.5x the size and several times slower to save and load.
+        """
         with io.BytesIO() as file:
-            torch.save(self.model_dump(exclude_unset=True), file)
+            torch.save(self.model_dump(exclude_unset=True), file, pickle_protocol=4)
             return file.getvalue()
 
     @classmethod
