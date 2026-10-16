@@ -21,23 +21,10 @@ does five small steps, each overridable by a subclass:
 4. **Compile** — compile the body to a code object.
 5. **Execute** — run the code object and push results back into the caller's frame.
 
+Between compile and execute, `__enter__` arms a skip hook so the body does not run
+inline; `__exit__` hands the compiled body to the backend.
+
 ## Architecture
-
-### The five steps
-
-```mermaid
-flowchart LR
-  A[Tracer.__init__] --> B[__enter__ -> capture]
-  B --> C[source]
-  C --> D[parse]
-  D --> E[build]
-  E --> F[compile]
-  F --> G[arm skip hook]
-  G --> H[body would run
-ExitTracingException]
-  H --> I[__exit__ -> backend]
-  I --> J[tracer.execute code]
-```
 
 Capture happens on `__enter__` (`tracer.py`). The tracer object is constructed
 earlier when the user wrote `model.trace(...)`, but nothing is read until the
@@ -58,8 +45,8 @@ On serialization (`Info.__getstate__`) the live frame is replaced by a
 `SerializedFrame` (`src/nnsight/tracing/util.py`) that keeps only the code
 metadata; the real code object and captured scope are rebuilt on the remote side
 from the source-reduced interventions payload (see
-`docs/developing/serialization.md`). `Info` carries only those two fields: the AST
-node lives on the tracer (`tracer.node`) and the per-site cache is separate (below).
+[serialization.md](./serialization.md)). The AST node lives on the tracer
+(`tracer.node`), not in `Info`.
 
 ### The per-site cache
 
@@ -83,10 +70,6 @@ the negative verdict isn't re-derived every call —
 `SOURCES` (`globals.py`) caches raw file text keyed by filename. Neither cache
 is evicted or re-validated against on-disk changes — a file edited mid-run is
 traced as it was first seen. Both are process-wide.
-
-There is no per-tracer-type code cache: a given `with` line is only ever entered
-under one tracer type, and a compiled *body* is tracer-type-independent — the
-subclass differences are all in `execute`, not in the compiled code.
 
 ### Finding the caller's frame
 
@@ -115,24 +98,22 @@ once and cached in `SOURCES`. It handles three contexts:
    whether any source was recovered and whether the filename is a file still on
    disk, since the way out differs for each.
 
-> **Running examples:** `with model.trace(...):` reads its own source to capture
-> the block, so it does **not** work from `python -c "..."`-style one-liners that
-> aren't the `-c` program itself, or from a heredoc with no registered source.
-> Write snippets to a `.py` file and run the file.
+> **Running examples:** because the block is captured from source, a trace does
+> not work from a heredoc, `exec` string or anything else with no registered
+> source. Write snippets to a `.py` file and run the file.
 
 ### Parse
 
 `Tracer.parse(source, lineno)` (`tracer.py`) finds the `ast.With` /
-`ast.AsyncWith` node that starts on `lineno`. It first tries `_parse_block`
-(`tracer.py`), which slices just the block out by indentation and bracket
-depth, dedents it to column 0, parses that, and shifts line numbers back. Getting
-the slice bound wrong is mostly safe: too much just parses trailing statements (the
-`with` is still `body[0]`); too little makes the slice unparseable and falls back
-to parsing the whole file. The exception is a bound that cuts the body where the
-block could plausibly have ended — the slice still parses, as a `with` missing part
-of its body — which is why blank lines and comments, whose indentation Python
-ignores, never end the slice. `parse` returns `None` if there's no `with` at that
-line (the site isn't a trace block).
+`ast.AsyncWith` node entered from `lineno`: the `with` line on Python 3.10/3.11,
+the line the tracer's own item starts on from 3.12, which in a parenthesized or
+backslash-continued header sits below the `with`. It first tries `_parse_block`
+(`tracer.py`), which slices just the block out by indentation and bracket depth,
+dedents it, parses it, and shifts line numbers back; an unparseable slice falls
+back to parsing the whole file. The one dangerous error is a slice that ends early
+yet still parses (a `with` missing part of its body), which is why blank lines and
+comments never end the slice. `parse` returns `None` if there is no `with` at that
+line.
 
 ### Build + compile
 
@@ -216,7 +197,7 @@ into the caller's frame. `save` (`tracer.py`, exposed as `nnsight.save` and
 behind `.save()`) marks a value by identity in a per-thread set; the **outermost**
 trace filters `push_result` to only the marked values, while a nested trace pushes
 everything up to its enclosing block. Depth is tracked around the backend call in
-`__exit__` (`inc()`/`dec()`, `tracer.py`/`193`).
+`__exit__` (`inc()`/`dec()`, `tracer.py`).
 
 `save()` **raises** if called with no trace running (`tracer.py`):
 
@@ -239,53 +220,23 @@ write-through mapping (PEP 667) and a plain `update` suffices.
 
 ## Key files / classes
 
-- `src/nnsight/tracing/tracer.py` — `Tracer`. Capture/parse/build/compile/execute.
-- `src/nnsight/tracing/tracer.py` — `Tracer.Info`. Frame + compiled code.
-- `src/nnsight/tracing/tracer.py` — `Tracer.capture`. Source lookup + per-site cache.
-- `src/nnsight/tracing/tracer.py` — `Tracer.source`. File / IPython / `-c` text.
-- `src/nnsight/tracing/tracer.py` — `Tracer.parse`. Find the `with` node.
-- `src/nnsight/tracing/tracer.py` — `skip_context`. The `f_trace` skip hook.
-- `src/nnsight/tracing/tracer.py` — `save`; `mark`; `push_result`.
-- `src/nnsight/tracing/util.py` — `Scope`.
-- `src/nnsight/tracing/globals.py` — `SOURCES`; `BLOCKS`.
-- `src/nnsight/tracing/backend.py` — `Backend`.
-- `src/nnsight/intervention/tracer.py` — `InterleavingTracer`; `ScanningTracer`; `Invoker`.
-- `src/nnsight/intervention/iterator.py` — `Iterations`.
-- `src/nnsight/intervention/editing.py` — `EditingTracer`.
+- `src/nnsight/tracing/tracer.py` — `Tracer` (`Info`, `capture`, `source`, `parse`,
+  `build`, `compile`, `execute`), `skip_context`, `save`, `mark`, `push_result`.
+- `src/nnsight/tracing/util.py` — `Scope`, `push`, `SerializedFrame`.
+- `src/nnsight/tracing/globals.py` — `SOURCES`, `BLOCKS`.
+- `src/nnsight/intervention/tracer.py` — `InterleavingTracer`, `ScanningTracer`, `Invoker`.
+- `src/nnsight/intervention/iterator.py` — `Iterations`; `editing.py` — `EditingTracer`.
 
-## Lifecycle / sequence
-
-For `with model.trace("hi") as tracer: hidden = model.layer.output.save()`:
-
-1. `Envoy.trace("hi")` → `InterleavingTracer(self, "__call__", "hi")` — args stored.
-2. `with` enters → `__enter__` → `capture()`: `sys._getframe(2)` is the user frame;
-   `source` reads its file; `parse` finds the `with`; `build`+`compile` produce the
-   body code; `BLOCKS[key] = (node, code)`. Since the body has real code,
-   `skip_context` arms the `f_trace` hook.
-3. Python reaches `hidden = ...`; the hook raises `ExitTracingException`.
-4. `__exit__` swallows it, `inc()`, calls `self.backend(self)` → base `Backend`
-   → `tracer.execute(tracer.info.code)`.
-5. `InterleavingTracer.execute`: builds the `Batcher`; `_batch_size("hi")` > 0,
-   so one `Mediator` runs the whole block; `Envoy.interleave` runs the forward.
-6. The worker parks on `model.layer.output.i0`; the module's controller calls
-   `handle`, serving the value; the worker `.save()`s it and finishes.
-7. `push_result(frame, mediator.lcls)` writes back; `__exit__`'s outermost `dec()`
-   filters to `.save()`-ed names. `hidden` is now in the caller's frame.
-
-## Extension points
-
-- **A new tracer type.** Subclass `Tracer`/`InterleavingTracer` and override
-  `execute()`. Override `build`/`compile` only if you need a different wrapping of
-  the body (rare — nnsight's subclasses all leave the body compilation alone).
-- **A new backend.** Subclass `Backend`; the captured `tracer.info.code` is already
-  compiled. See `docs/developing/adding-a-new-backend.md`.
-- **Source capture for a new context.** Add a branch in `Tracer.source` that
-  produces text for a new filename shape (e.g. a hosted-notebook cell store).
+The end-to-end sequence for one trace is in
+[architecture-overview.md](./architecture-overview.md#lifecycle--sequence); new
+tracer types and backends are in its
+[extension points](./architecture-overview.md#extension-points). Two extension
+points are specific to this page: override `build`/`compile` only for a different
+wrapping of the body (no nnsight subclass does), and add a branch in
+`Tracer.source` to capture source from a new filename shape (e.g. a hosted-notebook
+cell store).
 
 ## Related
 
-- `docs/developing/architecture-overview.md` — where the tracer sits.
-- `docs/developing/interleaver-internals.md` — what `execute` hands off to.
-- `docs/developing/backends.md` — how `execute` is chosen/replaced.
-- `docs/developing/serialization.md` — how `Info` and the block survive remote transmission.
-- `docs/concepts/deferred-execution.md` — the mental-model version.
+- [serialization.md](./serialization.md) — how `Info` and the block survive remote transmission.
+- [deferred-execution.md](../concepts/deferred-execution.md) — the mental-model version.

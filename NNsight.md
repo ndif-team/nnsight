@@ -15,13 +15,13 @@ This document explains the whole system: the problem it solves, the design
 principles behind it, and how the layers — tracing, interleaving, the envoy tree,
 the feature set, the model wrappers, remote execution — actually work. It favors the
 *why* and the mental model over exhaustive API listing; the recipe-style pages under
-[`docs/`](docs/) (routed by [`CLAUDE.md`](CLAUDE.md)) are the task reference, and the
+[`docs/`](docs/index.md) (routed by [`CLAUDE.md`](CLAUDE.md)) are the task reference, and the
 source is the final word. Where a section maps to a `docs/` page or a source file,
 it says so.
 
 This is 0.8 — the pipeline rewrite. If you knew an older nnsight, see
 [What changed in 0.8](#what-changed-in-08) and
-[docs/reference/version-history.md](docs/reference/version-history.md).
+[docs/reference/migrating-to-0.8.md](docs/reference/migrating-to-0.8.md).
 
 ---
 
@@ -122,7 +122,7 @@ Everything downstream follows from a few commitments:
 
 0.8 is a ground-up rewrite around a compile-and-interleave pipeline. The
 old→new delta, for readers of an earlier nnsight, is
-[docs/reference/version-history.md](docs/reference/version-history.md); the rest of
+[docs/reference/migrating-to-0.8.md](docs/reference/migrating-to-0.8.md); the rest of
 this document describes 0.8 as it is.
 
 ---
@@ -251,8 +251,9 @@ target binds before the block is skipped.
 
 ### 3.2 Parse
 
-Parsing finds the `ast.With` (or `ast.AsyncWith`) node that starts on the trace line
-and turns its body into a compilable code object. Parsing a whole source file is
+Parsing finds the `ast.With` (or `ast.AsyncWith`) node the trace was entered from —
+the `with` line, or on Python 3.12+ the line of the tracer's own item, which a
+parenthesized header puts below it — and turns its body into a compilable code object. Parsing a whole source file is
 `O(its AST)` and dominates a cold capture, so `parse` first tries `_parse_block`,
 which slices *just* the block out of the source — the (possibly multi-line) header
 and its body, bounded by indentation and open-bracket depth — dedents it to column
@@ -1137,7 +1138,7 @@ Two ways this goes wrong, both worth internalizing:
 
 A comprehension follows the same one rule: `hiddens = nnsight.save([b.output for b in model.transformer.h])` — save the whole list, keep the elements raw.
 
-**Two forms, and when to prefer each.** `x.save()` is mounted on *every* Python object by an optional C extension gated by `CONFIG.APP.PYMOUNT` (default on). Tensors read from `.output`/`.input` always carry `.save()`; but for plain Python values (ints, lists, `torch.Size`) the method exists only if the extension built, so `nnsight.save(x)` — a plain function with no mount dependency — is the safe choice there. When in doubt, use `nnsight.save(x)`. (`docs/usage/save.md`, `docs/gotchas/save.md`.)
+**Two forms, and when to prefer each.** `x.save()` is mounted on *every* Python object by an optional C extension gated by `CONFIG.APP.PYMOUNT` (default on). Tensors read from `.output`/`.input` always carry `.save()`; but for plain Python values (ints, lists, `torch.Size`) the method exists only if the extension built, so `nnsight.save(x)` — a plain function with no mount dependency — is the safe choice there. When in doubt, use `nnsight.save(x)`. (`docs/usage/save.md`, `docs/usage/save.md`.)
 
 Saving nests cleanly. Only the *outermost* trace filters to saved values; an inner trace pushes all its locals up to the enclosing block. This is what makes [sessions](#611-sessions) and [gradient blocks](#66-gradients) let values flow without a `save` at every boundary.
 
@@ -1189,7 +1190,7 @@ with model.generate("Hello", max_new_tokens=3, do_sample=False) as tracer:
     ids = tracer.result.save()                       # runs, because the loop was bounded
 ```
 
-`max_new_tokens` is a cap, not a guarantee — if the model stops early (EOS), the steps that didn't happen warn but the reached steps' saved values are kept. Negative indices raise `ValueError` (there is no "last step" shorthand), and there is **no `tracer.next()`** — the old manual-stepping API is gone. The `with tracer.iter[...]:` block form still works but is deprecated in favor of the `for` loop. (`docs/usage/iter-all-next.md`.)
+`max_new_tokens` is a cap, not a guarantee — if the model stops early (EOS), the steps that didn't happen warn but the reached steps' saved values are kept. Negative indices raise `ValueError` (there is no "last step" shorthand), and there is **no `tracer.next()`** — the old manual-stepping API is gone. The `with tracer.iter[...]:` block form still works but is deprecated in favor of the `for` loop. (`docs/usage/iteration.md`.)
 
 ### 6.4 Editing a model
 
@@ -1399,7 +1400,7 @@ Note that values produced inside one invoke are not visible in another; sharing 
 
 It works across tasks — text-generation, fill-mask, text-classification, image-classification, image-text-to-text, feature-extraction, and more — and accepts either a repo id **or** a pre-loaded module. From a repo id, the pipeline loads the model and infers every preprocessor. From a pre-loaded module the factory can't infer, so the task is inferred from the architecture (`_infer_task`: a generative model is text-generation, otherwise the class-name suffix decides) or taken from `task=`, and preprocessors are sourced from what you passed or the model's `name_or_path`. Other construction options: `peft=<repo_id>` applies a LoRA adapter at load time (and can be swapped per request server-side via the remote env hooks); `rename=`, `envoys=`, and `dispatch=` are the standard Envoy/Meta arguments.
 
-**Batching specifics.** `_batch_size`/`_num_rows` classify every input format — a string is one row, a list of strings one per prompt, a flat token-id list one row, a 2-D tensor or list-of-sequences one per leading entry, a chat conversation one row (not one per message). `_batch` dispatches on which run mode is active: `pipe` hands prompts to the pipeline with `batch_size`; `trace`/`generate` assemble model inputs here — each invoke's text goes through the task's own `preprocess`, and the per-invoke encodings are padded together by the pipeline's `pad_collate_fn`, while pre-tokenized ids and raw feature tensors bypass preprocessing. Padding side is the model's business, not the task's: causal decoders left-pad (so `output[:, -1]` is every row's real last token) and get mask-derived `position_ids` so an absolute-position model doesn't mispredict a short prompt padded up to a longer one; encoders keep right padding. Inputs that can't be padded into an `input_ids` batch — a raw feature tensor, a multimodal encoding — are carried straight to the model as a lone invoke, and asking to batch several of them raises rather than silently mangling them.
+**Batching specifics.** `_batch_size` (`processing.batch_size`) classifies every input format — a string is one row, a list of strings one per prompt, a flat token-id list one row, a 2-D tensor or list-of-sequences one per leading entry, a chat conversation one row (not one per message). `_batch` dispatches on which run mode is active: `pipe` hands prompts to the pipeline with `batch_size`; `trace`/`generate` assemble model inputs in `modeling/processing.py` — each invoke's text goes through the task's own `preprocess`, and the per-invoke encodings are padded together by `processing.collate`, while pre-tokenized ids and raw feature tensors bypass preprocessing. Padding side is the model's business, not the task's: causal decoders left-pad (so `output[:, -1]` is every row's real last token) and get mask-derived `position_ids` so an absolute-position model doesn't mispredict a short prompt padded up to a longer one; encoders keep right padding. Inputs that can't be padded into an `input_ids` batch — a raw feature tensor, a multimodal encoding — are carried straight to the model as a lone invoke, and asking to batch several of them raises rather than silently mangling them.
 
 Full page: [docs/models/transformers-model.md](docs/models/transformers-model.md).
 
@@ -1572,7 +1573,7 @@ The `.i<n>` suffix on the location is the occurrence tag — which visit of that
 location the request targets; `.i0` outside iteration, counting up per step
 inside a generation loop. Import it from `nnsight.intervention.interleaver` to
 catch it. (`docs/errors/out-of-order-error.md`,
-`docs/errors/value-was-not-provided.md`.)
+`docs/errors/module-never-fired.md`.)
 
 **`Cannot access '<location>' outside of interleaving`** (a `ValueError`).
 Reading or writing an Envoy value — `.output`, `.input`, `.inputs`, `.source` —
@@ -1909,9 +1910,9 @@ stacked on top (see [The mixin architecture](#71-the-mixin-architecture)), and
 every value you can read or write is an `eproperty` over one location string
 (see [eproperties: how values are hooked](#52-eproperties-how-values-are-hooked)).
 Extending nnsight means adding to one of those three layers. The recipe-style
-reference for all of this is `docs/usage/extending.md`; the developer deep-dives
+reference for all of this is `docs/developing/extending.md`; the developer deep-dives
 are `docs/developing/extending-envoy.md`, `docs/developing/adding-a-new-runtime.md`,
-and `docs/developing/adding-a-new-backend.md`.
+and `docs/developing/backends.md#adding-a-backend`.
 
 ### 10.1 Subclassing NNsight and Envoy
 
@@ -2222,7 +2223,7 @@ round-trips it through serialization to validate. You wire a backend in with
 `model.trace(..., backend=MyBackend())`, or, for a remote-style backend keyed off
 `remote=`, by adding a branch in your model's `Remotable._remote_backend`. The
 full recipe — including the async dual-call pattern and how saved values are
-pushed back — is `docs/developing/adding-a-new-backend.md`.
+pushed back — is `docs/developing/backends.md#adding-a-backend`.
 
 **Runtimes.** A new runtime subclasses the mixin chain from
 [Subclassing NNsight and Envoy](#101-subclassing-nnsight-and-envoy) and fills in

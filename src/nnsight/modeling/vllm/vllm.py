@@ -221,6 +221,37 @@ class VLLM(Remotable):
         with mock.patch("torch.cuda.get_device_capability", return_value=(8, 0)):
             yield
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _meta_values():
+        """Let a constructor read back a tensor it just built, on a device that holds no values.
+
+        The tree is built on meta, where a tensor has a shape and nothing in
+        it. A few of vLLM's models compute a small table while constructing and
+        read it straight back as a list: BLOOM, MPT and Falcon hand their ALiBi
+        slopes to the attention layer that way. ``tolist`` on a meta tensor
+        raises, which made those models unbuildable here; within this context it
+        answers with zeros of the tensor's shape. The tree is only ever read for
+        its structure, and the engine's worker builds the model for real and
+        computes the real table.
+        """
+        from unittest import mock
+
+        real = torch.Tensor.tolist
+
+        def tolist(tensor: torch.Tensor) -> Any:
+            if not tensor.is_meta:
+                return real(tensor)
+            zero = 0.0 if tensor.is_floating_point() else 0
+
+            def zeros(shape: tuple) -> Any:
+                return zero if not shape else [zeros(shape[1:]) for _ in range(shape[0])]
+
+            return zeros(tuple(tensor.shape))
+
+        with mock.patch.object(torch.Tensor, "tolist", tolist):
+            yield
+
     def _load_meta(self, repo_id: str, **kwargs: Any) -> "Module":
         from vllm.config import set_current_vllm_config
         from vllm.engine.arg_utils import EngineArgs
@@ -247,7 +278,8 @@ class VLLM(Remotable):
                 # DummyModelLoader still fills its dummy weights; the tree is only
                 # needed for its structure, so skip the fill entirely.
                 loader.load_weights = lambda *args, **kwargs: None
-                model = loader.load_model(vllm_config, vllm_config.model_config)
+                with self._meta_values():
+                    model = loader.load_model(vllm_config, vllm_config.model_config)
 
         # Rotary embeddings are cached globally by config, so a meta-built entry
         # would be handed to the real engine on dispatch.
@@ -298,6 +330,13 @@ class VLLM(Remotable):
         # the budget to max_model_len so one prompt always fits). A caller who
         # turns it on is told, per request, when a prompt was chunked.
         kwargs.setdefault("enable_chunked_prefill", False)
+        # A prefix-cached token is served from the KV cache without a forward
+        # pass, so no hook fires for it and a block sees a short activation with
+        # no error. A trace flags its own requests to be recomputed, but an
+        # installed edit runs on every request, including ones nnsight never
+        # submitted and cannot flag, and only the engine's scheduler decides. So
+        # off unless asked for; editing an engine that has it on warns.
+        kwargs.setdefault("enable_prefix_caching", False)
 
         if self.taps:
             # vLLM's breakable graphs are what let a Python callable run at a

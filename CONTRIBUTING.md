@@ -84,10 +84,10 @@ src/nnsight/
 nnsight runs on **deferred, interleaved execution**. Code inside `with model.trace(...)`
 is captured as source, compiled, and run as a **greenlet** interleaved with the
 model's forward pass: reading `.output` parks the greenlet until the model reaches
-that module and a forward hook hands the value over; assigning to `.output` splices a
-value in. The event protocol is `VALUE`/`SWAP`/`SKIP`/`BARRIER`. The full picture is
-in [NNsight.md](./NNsight.md); the task docs are under [`docs/`](docs/), routed by
-[CLAUDE.md](./CLAUDE.md).
+that module and the controller nnsight installs as the module's `forward` hands the
+value over; assigning to `.output` splices a value in. The event protocol is
+`VALUE`/`SWAP`/`SKIP`/`BARRIER`. The full picture is in [NNsight.md](./NNsight.md);
+the task docs are under `docs/`, routed by [docs/index.md](docs/index.md).
 
 ## Making changes
 
@@ -105,15 +105,43 @@ its history); comments only where the logic isn't self-evident; keep changes foc
   optional dependencies.
 - To collect values across a trace, **save the container** and store raw values —
   `xs = nnsight.save([]); xs.append(model...output)` — never `xs.append(x.save())`
-  (see [docs/gotchas/save.md](docs/gotchas/save.md)).
+  (see [docs/usage/save.md](docs/usage/save.md)).
 
 ## Submitting changes
 
-1. Branch from the latest `main`: `git checkout -b my-feature main`.
-2. Make the change and add tests; run `CUDA_VISIBLE_DEVICES="" pytest tests/ -q --ignore=tests/vllm`.
+Development happens on `dev`; `main` is the release branch. CI runs on every pull
+request and on pushes to `main` and `dev`.
+
+1. Branch from the latest `dev`: `git checkout -b my-feature origin/dev`.
+2. Make the change and add tests; run `CUDA_VISIBLE_DEVICES="" pytest tests/ -q --ignore=tests/vllm --ignore=tests/tp`
+   (drop `--ignore=tests/tp` on transformers >= 5.19).
+   Update the docs the change affects (see [Documentation](#documentation)).
 3. Commit with an `area: summary` subject (e.g. `tracing: ...`, `docs: ...`) and open
-   a PR against `main`.
+   a PR against `dev`.
 4. In the PR: what the change does and why, related issues, and any breaking changes.
+
+Which tests to run for what you touched, and the commit conventions in full:
+[docs/developing/contributing.md](docs/developing/contributing.md).
+
+## Documentation
+
+The docs under [`docs/`](docs/index.md) exist so a reader — often a coding agent — can find
+the one page for their task and apply it without reading anything else. Keep them
+that way:
+
+- **Update docs in the same PR** as the code change that invalidates them.
+- **One topic, one home.** Merge overlapping material; when a topic is needed in two
+  places, give it one full treatment and link from the other. Index pages route;
+  content lives in leaf pages.
+- **Compact.** State the rule, show one good example, stop. No restating the same
+  point, no motivational intros, no history narration ("previously", "now raises") —
+  describe the code as it is.
+- **Nothing environment-specific.** No machine or host names, personal usernames or
+  paths, SSH tunnels, personal environment names, or one operator's deployment
+  details. Generalize the requirement ("needs these env vars") or leave it out.
+- **Put a new page in the right section** of [docs/index.md](docs/index.md) and add a
+  line for it to that section's `index.md`, describing what it answers in the words
+  someone would search for.
 
 ## Reporting bugs
 

@@ -13,6 +13,27 @@ from nnsight.intervention.interleaver import OutOfOrderError
 from nnsight.intervention.source import STATE, Controller, SourceNotAvailable
 
 
+def _torch_compile_available() -> bool:
+    """Whether `torch.compile` can wrap a module in this interpreter.
+
+    A torch older than the Python it runs on refuses outright. Only that
+    refusal skips; any other error from `torch.compile` still fails.
+    """
+    try:
+        torch.compile(nn.Identity(), backend="eager")
+    except RuntimeError as error:
+        if "torch.compile is not supported" in str(error):
+            return False
+        raise
+    return True
+
+
+needs_torch_compile = pytest.mark.skipif(
+    not _torch_compile_available(),
+    reason="this torch build does not support torch.compile on this Python",
+)
+
+
 class MLP(nn.Module):
     def __init__(self):
         super().__init__()
@@ -740,6 +761,7 @@ class TestInstall:
         assert torch.allclose(out, expected)
         assert torch.allclose(model(x), expected)
 
+    @needs_torch_compile
     def test_compiled_module_still_runs(self, x):
         # torch.compile's OptimizedModule keeps its forward on the instance too.
         compiled = torch.compile(MLP(), backend="eager")
@@ -903,6 +925,19 @@ class TestRecursive:
         # add(a, a): first arg is relu(fc(x)).
         assert torch.allclose(first, torch.relu(model.fc(x)))
         assert torch.allclose(both, first)
+
+    def test_two_invokes_drill_same_call(self, x):
+        # Both invokes ask for the same drill before the call fires; the second
+        # must wait for it too rather than read the first one's placeholder.
+        model = Calls()
+        envoy = Envoy(model)
+        with envoy.trace() as tracer:
+            with tracer.invoke(x):
+                relu = nnsight.save(envoy.source.relu_double_0.source.torch_relu_0.output)
+            with tracer.invoke():
+                add = nnsight.save(envoy.source.relu_double_0.source.torch_add_0.output)
+        assert torch.allclose(relu, torch.relu(model.fc(x)))
+        assert torch.allclose(add, relu + relu)
 
     def test_bound_method_recursion(self, x):
         model = Methoded()

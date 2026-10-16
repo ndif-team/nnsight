@@ -3,7 +3,9 @@
 Each update NDIF pushes for a job — whether streamed over a blocking websocket or
 saved to the object store and polled — arrives as a [`ResponseModel`][nnsight.schema.response.ResponseModel]. Its
 `Status` names where the job is in its lifecycle; on ``COMPLETED`` the
-returned values ride in [`data`][nnsight.schema.response.ResponseModel.data].
+returned values ride in [`data`][nnsight.schema.response.ResponseModel.data]
+and what the run cost the server rides in
+[`meta`][nnsight.schema.response.ResponseModel.meta].
 """
 
 from __future__ import annotations
@@ -37,7 +39,10 @@ class ResponseModel(BaseModel):
 
     Streamed over the websocket for a blocking job, or saved to the object store
     and fetched by the client for a non-blocking one. [`data`][nnsight.schema.response.ResponseModel.data] holds the
-    saved values only on a ``COMPLETED`` response.
+    saved values only on a ``COMPLETED`` response, and [`meta`][nnsight.schema.response.ResponseModel.meta]
+    what the run cost on the server -- on ``COMPLETED`` and on a failure alike,
+    since a job that ran out of memory or timed out is exactly when its cost is
+    worth reading.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
@@ -46,14 +51,20 @@ class ResponseModel(BaseModel):
     status: Status
     description: str = ""
     data: Optional[Any] = None
+    meta: Optional[dict] = None
 
     def __str__(self) -> str:
         return f"[{self.id}] {self.status.value.ljust(12)} {self.description}"
 
     def pickle(self) -> bytes:
-        """Serialize to bytes via ``torch.save`` (carries tensors in ``data``)."""
+        """Serialize to bytes via ``torch.save`` (carries tensors in ``data``).
+
+        Pickle protocol 4: ``torch.save``'s default protocol 2 has no bytes
+        opcode and writes a ``bytes`` value in ``data`` through a latin-1
+        ``str``, 1.5x the size and several times slower to save and load.
+        """
         with io.BytesIO() as file:
-            torch.save(self.model_dump(exclude_unset=True), file)
+            torch.save(self.model_dump(exclude_unset=True), file, pickle_protocol=4)
             return file.getvalue()
 
     @classmethod

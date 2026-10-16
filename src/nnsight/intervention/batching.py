@@ -160,11 +160,13 @@ class Batcher:
     def _widen_tensor(self, full: torch.Tensor, group: list, edited: torch.Tensor) -> torch.Tensor:
         """Write ``edited`` into ``full``'s ``group`` rows (base dim-0-stack layout).
 
-        A tensor is batched only when its leading dim is [`total`][nnsight.intervention.batching.Batcher.total]; otherwise it
-        passes through. Overridden for non-stacked layouts.
+        A tensor is batched only when its leading dim is [`total`][nnsight.intervention.batching.Batcher.total]. Any other
+        tensor was served whole to every invoke (`_narrow_tensor` passes it
+        through), so an invoke's edit of it is the whole tensor and replaces it.
+        Overridden for non-stacked layouts.
         """
         if full.shape[0] != self.total:
-            return full
+            return edited
         start, size = group
         # cat (not in-place) keeps autograd correct for leaves/views and avoids
         # aliasing when `edited` is a narrowed view of `full`.

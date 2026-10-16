@@ -1,4 +1,6 @@
 
+import weakref
+
 import pytest
 import torch
 import nnsight
@@ -267,6 +269,97 @@ class TestSharedEntries:
         assert torch.allclose(middle, module.layers[1](module.shared(x)))
 
 
+class AdapterLayer(nn.Module):
+    """A layer holding the module it replaced, as an adapter's layer does."""
+
+    def __init__(self, inner):
+        super().__init__()
+        self.base_layer = inner
+        self.extra = nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.base_layer(x) + self.extra(x)
+
+
+class TestUpdate:
+    """`_update` re-points the tree at a module whose structure may have changed."""
+
+    def test_entries_the_module_gained_and_lost_follow_it(self):
+        stack = Envoy(Stack())
+        kept = stack.layers[1]
+        # Wrap one layer in place and add a sibling; the module changed, the tree did not.
+        module = stack._module
+        module.layers[1] = AdapterLayer(module.layers[1])
+        module.tail = nn.Linear(8, 8)
+        stack._update(module)
+
+        assert {node.path for node in stack.modules()} == module_paths(module)
+        # The envoy of a module still in the tree is the same object, re-pointed.
+        assert stack.layers[1] is kept and kept._module is module.layers[1]
+        assert stack.layers[1].base_layer.path == "model.layers.1.base_layer"
+        assert stack.tail.path == "model.tail"
+        assert [child.path for child in stack._children] == [
+            f"model.{name}" for name, _ in module.named_children()
+        ]
+
+        # Take the wrapper out again: its children go, the held module is back.
+        module.layers[1] = module.layers[1].base_layer
+        del module.tail
+        stack._update(module)
+        assert {node.path for node in stack.modules()} == module_paths(module)
+        assert stack.layers[1] is kept and kept._module is module.layers[1]
+        assert "base_layer" not in kept.__dict__ and "tail" not in stack.__dict__
+        assert stack.interleaver.envoys[id(module.layers[1])] is kept
+
+    def test_a_dropped_entry_that_shares_its_module_keeps_the_other_entry(self):
+        shared = Envoy(SharedStack())
+        module = shared._module
+        first = shared.layers[0]
+        assert shared.layers[2] is first
+        # Entry 2 goes; the module stays, under entry 0 and `shared`.
+        module.layers = nn.ModuleList(list(module.layers)[:2])
+        shared._update(module)
+        assert {node.path for node in shared.modules()} == module_paths(module)
+        assert shared.layers[0] is first and shared.shared is first
+        assert len(list(shared.layers)) == 2
+        assert shared.interleaver.envoys[id(module.shared)] is first
+
+    def test_aliases_of_a_dropped_entry_go_with_it(self):
+        stack = Envoy(Stack(), rename={"layers": "blocks", "layers.1": "second"})
+        module = stack._module
+        assert stack.blocks is stack.layers and stack.second is stack.layers[1]
+        del module.layers
+        module.tail = nn.Linear(8, 8)
+        stack._update(module)
+        assert "layers" not in stack.__dict__ and "blocks" not in stack.__dict__
+        assert "second" not in stack.__dict__ and not stack._aliases
+        assert {node.path for node in stack.modules()} == module_paths(module)
+
+    def test_the_same_structure_is_only_re_pointed(self):
+        # Swapping meta weights for real ones: every envoy is the same object,
+        # in the same order, re-pointed at the new module's entry.
+        stack = Envoy(Stack())
+        before = [node for node in stack.modules()]
+        fresh = Stack()
+        stack._update(fresh)
+        assert [node for node in stack.modules()] == before
+        assert all(node._module is fresh.get_submodule(node.path.removeprefix("model.")) for node in before if node.path != "model")
+        assert stack._module is fresh
+
+    def test_the_updated_tree_traces(self):
+        stack = Envoy(Stack())
+        module = stack._module
+        module.layers[1] = AdapterLayer(module.layers[1])
+        stack._update(module)
+        x = torch.randn(1, 8)
+        with stack.trace(x):
+            into = stack.layers[1].input.save()
+            held = stack.layers[1].base_layer.output.save()
+            whole = stack.layers[1].output.save()
+        assert torch.allclose(held, module.layers[1].base_layer(into))
+        assert torch.allclose(whole, held + module.layers[1].extra(into))
+
+
 class TestRebuiltContainer:
     """A container rebuilt from modules the tree already wraps — truncating layers."""
 
@@ -360,7 +453,7 @@ class TestSelfNamingAttribute:
         assert {node.path for node in envoy.modules()} == before
 
     def test_a_rename_through_it_resolves(self):
-        # A duplicate envoy re-ran `_bind_aliases` on the same module: RecursionError.
+        # A duplicate envoy re-ran `aliasing.bind` on the same module: RecursionError.
         envoy = Envoy(SelfNaming(), rename={"base_model.layer": "inner"})
         assert envoy.inner is envoy.layer
 
@@ -407,6 +500,40 @@ class TestLookup:
     def test_len_of_modulelist(self, envoy):
         assert len(envoy.layers) == 3
 
+    # -- truthiness ------------------------------------------------------
+    #
+    # `__bool__` mirrors the wrapped module rather than falling back to
+    # `__len__`, which a module that is not a container does not have.
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            pytest.param("", id="root"),
+            pytest.param("layers.0", id="block"),
+            pytest.param("layers.0.mlp.fc", id="linear"),
+            pytest.param("layers", id="modulelist"),
+        ],
+    )
+    def test_an_envoy_is_truthy(self, envoy, path):
+        assert bool(envoy.get(path) if path else envoy) is True
+
+    def test_if_envoy_does_not_raise(self, envoy):
+        # The idiom that hit it, rather than `bool()` spelled out.
+        if envoy.layers[0].mlp.fc:
+            reached = True
+        assert reached
+        assert (envoy.head or None) is envoy.head
+
+    def test_an_empty_container_is_falsy_like_the_module(self, module):
+        # Mirroring the module keeps a container's emptiness meaningful:
+        # torch says an empty ModuleList is falsy, so this does too.
+        module.spare = nn.ModuleList()
+        envoy = Envoy(module)
+
+        assert bool(module.spare) is False
+        assert bool(envoy.spare) is False
+        assert len(envoy.spare) == 0
+
     def test_get_dotted_path_to_envoy(self, envoy):
         assert envoy.get("layers.0.mlp").path == "model.layers.0.mlp"
 
@@ -430,6 +557,60 @@ class TestLookup:
         named = dict(envoy.named_modules())
         assert set(named) == module_paths(module)
         assert named["model.head"].path == "model.head"
+
+
+def assert_parents(root):
+    """Every envoy's `parent` is the envoy whose `_children` holds it."""
+    assert root.parent is None
+    for node in root.modules():
+        for child in node._children:
+            assert child.parent is node, (child.path, node.path)
+
+
+class TestParent:
+    def test_each_child_points_at_its_parent(self, envoy):
+        assert_parents(envoy)
+        assert envoy.layers[1].mlp.parent is envoy.layers[1]
+        assert envoy.layers.parent is envoy
+
+    def test_root_walks_up_to_the_model(self, envoy):
+        assert envoy.layers[2].mlp.fc.root is envoy
+        assert envoy.root is envoy
+
+    def test_the_link_is_weak(self, envoy):
+        assert isinstance(envoy.layers[0].__dict__["_parent"], weakref.ref)
+
+    def test_an_alias_does_not_change_the_parent(self, module):
+        # `first_mlp` binds on the root, but the envoy it names is still layer 0's.
+        model = Envoy(module, rename={"mlp": "block_mlp", "layers.0.mlp": "first_mlp"})
+        assert_parents(model)
+        assert model.layers[0].block_mlp.parent is model.layers[0]
+        assert model.first_mlp is model.layers[0].mlp
+        assert model.first_mlp.parent is model.layers[0]
+
+    def test_a_shared_module_keeps_its_first_parent(self):
+        shared = Envoy(SharedStack())
+        assert_parents(shared)
+        # `shared` comes first in the module, so the root is its parent; the
+        # container's two entries naming it are aliases of that one envoy.
+        assert shared.layers[0] is shared.shared
+        assert shared.shared.parent is shared
+        assert shared.layers[1].parent is shared.layers
+
+    def test_a_replaced_child_takes_its_new_parent(self, envoy):
+        envoy.layers[0].mlp = nn.Linear(8, 8)
+        assert envoy.layers[0].mlp.parent is envoy.layers[0]
+        assert_parents(envoy)
+
+    def test_links_survive_update(self, envoy):
+        kept = envoy.layers[1].mlp
+        module = Model(n_layers=4)
+        envoy._update(module)
+        assert_parents(envoy)
+        assert envoy.layers[1].mlp is kept and kept.parent is envoy.layers[1]
+        # An entry the new module gained is built under its own parent.
+        assert envoy.layers[3].parent is envoy.layers
+        assert envoy.layers[3].attn.root is envoy
 
 
 class TestRename:
@@ -759,3 +940,167 @@ class TestMultipleWrappers:
         with w2.trace(x):
             a2 = w2.a.output.save()
         assert torch.allclose(a1, a2)
+
+
+class Scan(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
+class Attn(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
+class MixerBlock(nn.Module):
+    """One child under one native name, of a class that varies per block."""
+
+    def __init__(self, mixer):
+        super().__init__()
+        self.norm = nn.LayerNorm(8)
+        self.mixer = mixer
+
+    def forward(self, x):
+        return x + self.mixer(self.norm(x))
+
+
+class Hybrid(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList([MixerBlock(Scan()), MixerBlock(Attn()), MixerBlock(Scan())])
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+class TwoNorms(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.a = nn.LayerNorm(8)
+        self.b = nn.LayerNorm(8)
+
+    def forward(self, x):
+        return self.b(self.a(x))
+
+
+class TestRenameByClass:
+    def test_a_class_key_binds_where_one_child_is_of_that_class(self):
+        model = Envoy(Hybrid(), rename={Scan: "linear_attn", Attn: "self_attn"})
+        assert model.blocks[0].linear_attn is model.blocks[0].mixer
+        assert model.blocks[2].linear_attn is model.blocks[2].mixer
+        assert model.blocks[1].self_attn is model.blocks[1].mixer
+        assert "linear_attn" not in model.blocks[1].__dict__ and "self_attn" not in model.blocks[0].__dict__
+        assert model.get("blocks.1.self_attn") is model.blocks[1].mixer
+
+    def test_it_is_recorded_as_an_alias_of_the_child_name(self):
+        model = Envoy(Hybrid(), rename={Scan: "linear_attn"})
+        assert model.blocks[0]._aliases["linear_attn"] == "mixer"
+        assert "(linear_attn/mixer):" in repr(model.blocks[0])
+        assert "(mixer):" in repr(model.blocks[1])
+
+    def test_a_class_key_can_take_several_aliases_and_mix_with_paths(self):
+        model = Envoy(Hybrid(), rename={Scan: ["linear_attn", "ssm"], "norm": "input_layernorm", "blocks": "layers"})
+        assert model.blocks[0].ssm is model.blocks[0].linear_attn is model.blocks[0].mixer
+        assert model.layers[0].input_layernorm is model.blocks[0].norm
+
+    def test_two_matching_children_is_an_error(self):
+        with pytest.raises(ValueError, match="matches 2 modules under `model` \\(a, b\\)"):
+            Envoy(TwoNorms(), rename={nn.LayerNorm: "norm"})
+
+    def test_the_alias_serves_the_child(self):
+        model = Envoy(Hybrid(), rename={Scan: "linear_attn"})
+        x = torch.randn(2, 8)
+        with model.trace(x):
+            through_alias = model.blocks[0].linear_attn.output.save()
+            through_name = model.blocks[2].mixer.output.save()
+        assert through_alias.shape == (2, 8) and through_name.shape == (2, 8)
+
+
+class TestEpropertyRepr:
+    """An eproperty with a description is one line of the repr; its stub's return annotation follows an arrow."""
+
+    def test_annotated_stub_shows_its_return_type(self):
+        from nnsight.intervention.eproperty import eproperty
+
+        @eproperty(description="the block's output as a tensor")
+        def typed(self, value) -> torch.Tensor:
+            return value
+
+        @eproperty(description="whatever comes out")
+        def untyped(self, value):
+            return value
+
+        assert str(typed) == "(typed) -> Tensor: the block's output as a tensor"
+        assert str(untyped) == "(untyped): whatever comes out"
+
+    def test_repr_line_is_the_eproperty_str(self):
+        from nnsight.intervention.eproperty import eproperty
+
+        class Typed(Envoy):
+            @eproperty(description="a view")
+            def view(self, value) -> torch.Tensor:
+                return value
+
+        envoy = Typed(torch.nn.Linear(2, 2))
+        assert "(view) -> Tensor: a view" in repr(envoy)
+
+
+class Backbone(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.h = nn.ModuleList([nn.Linear(8, 8) for _ in range(2)])
+        self.ln_f = nn.LayerNorm(8)
+
+
+class Wrapped(nn.Module):
+    """A backbone under a name that differs by architecture, beside a head."""
+
+    def __init__(self):
+        super().__init__()
+        self.transformer = Backbone()
+        self.head = nn.Linear(8, 8)
+
+
+class TestRenameWildcard:
+    def test_a_wildcard_stands_for_whichever_entry_holds_the_rest(self):
+        model = Envoy(Wrapped(), rename={"*.h": "layers"})
+        assert model.layers is model.transformer.h
+        assert model._aliases["layers"] == "transformer.h"
+        assert "layers" not in model.transformer.__dict__
+
+    def test_a_wildcard_matching_two_modules_is_an_error(self):
+        with pytest.raises(ValueError, match="'h.\\*' matches 2 modules under `model.transformer` \\(h.0, h.1\\)"):
+            Envoy(Wrapped(), rename={"h.*": "block"})
+
+    def test_a_wildcard_matching_nothing_is_skipped(self):
+        model = Envoy(Wrapped(), rename={"*.layers": "layers"})
+        assert "layers" not in model.__dict__
+
+    def test_a_wildcard_alias_is_a_spelling_for_envoys(self):
+        class Block(Envoy):
+            pass
+
+        model = Envoy(Wrapped(), rename={"*.h": "layers"}, envoys={"layers.*": Block, "layers": Block})
+        assert type(model.layers) is Block
+        assert all(type(block) is Block for block in model.layers)
+        assert type(model.transformer.ln_f) is Envoy
+
+    def test_a_key_that_binds_nowhere_is_no_spelling(self):
+        class Block(Envoy):
+            pass
+
+        # `model.transformer` resolves from no envoy (the root's path is not
+        # part of a key), so no `backbone` alias exists for `envoys=` to match.
+        model = Envoy(Wrapped(), rename={"model.transformer": "backbone"}, envoys={"backbone": Block})
+        assert "backbone" not in model.__dict__
+        assert type(model.transformer) is Envoy

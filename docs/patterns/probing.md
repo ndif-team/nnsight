@@ -16,15 +16,8 @@ accuracy per layer. The curve says where in depth the property becomes readable.
 
 A probe measures what *you* can decode, not what the model computes or uses. The
 controls below are what separate those, and they are the part of the recipe most
-often skipped.
-
-## When to use
-
-- Testing whether a property (truth, sentiment, entity type, an eventual answer)
-  is present in the residual stream, and from which layer.
-- Extracting a direction to steer along — see [steering](steering.md).
-- Comparing two prompts sets, two positions, or two sublayers on the same property.
-- Screening before a causal method: a probe is cheap, patching is not.
+often skipped. Probes are also a source of directions to steer along — see
+[steering](steering.md) — and a cheap screen before a causal method.
 
 ## Canonical pattern
 
@@ -93,14 +86,7 @@ for layer in range(0, n_layers, 2):
     print(f"layer {layer:2d}  test accuracy {accuracy:.2f}")
 ```
 
-```
-layer  0  test accuracy 1.00
-layer  2  test accuracy 1.00
-layer  4  test accuracy 1.00
-layer  6  test accuracy 1.00
-layer  8  test accuracy 1.00
-layer 10  test accuracy 1.00
-```
+Every layer prints `test accuracy 1.00`.
 
 **Perfect accuracy at layer 0 is a red flag, not a result.** Layer 0 has barely
 processed anything, so a probe that succeeds there is reading token identity:
@@ -134,9 +120,8 @@ accuracy, _ = train_probe(activations[6], labels, kept, held_out)
 print(f"held-out template at layer 6: {accuracy:.2f}")      # 1.00
 ```
 
-**A random direction of the same norm** is the floor for any claim that a
-direction *encodes* something. It appears under [Causal validation](#causal-validation)
-below, where it does the most work.
+The third control, a random direction of the same norm, belongs to
+[Causal validation](#causal-validation) below.
 
 On this dataset the controls pass and the honest summary is still deflationary:
 the probe has learned the adjective vocabulary, which generalizes across templates
@@ -171,19 +156,14 @@ accuracy = ((projections > threshold).float() == labels[test_idx]).float().mean(
 print(f"difference-in-means at layer {LAYER}: {float(accuracy):.2f}")     # 1.00
 ```
 
-### Other sites
+### Other sites and larger datasets
 
-`block.output` at the last position is the default. The same collection works on
-`block.mlp.output` (what was computed), `block.attn.output[0]` (what was moved),
-and any token position — `[:, -1, :]` is a choice, and for a property mentioned
-mid-prompt it is usually the wrong one.
-
-### Larger datasets
-
-For a dataset too large for one batch, chunk the texts and concatenate the
-results — still one forward pass per chunk, never one pass per layer.
-`tracer.cache(modules=...)` is the alternative when you want inputs and outputs of
-many modules at once; see `docs/usage/cache.md`.
+The same collection works on `block.mlp.output` (what was computed),
+`block.attn.output[0]` (what was moved), and any token position — `[:, -1, :]` is a
+choice, and for a property mentioned mid-prompt it is usually the wrong one. For a
+dataset too large for one batch, chunk the texts and concatenate — one forward pass
+per chunk, never one per layer. To collect many modules at once, see
+[cache](../usage/cache.md).
 
 ## Causal validation
 
@@ -234,8 +214,8 @@ random directions: mean +1.020   max +1.846
 
 The probe direction moves the gap by `+4.19` and its negation by `-4.08`, while
 eight random directions of the same norm land between `-0.02` and `+1.85`,
-straddling the baseline. Without that last line the first two numbers would be consistent with
-"any perturbation of this size moves the logits".
+straddling the baseline. Without that control the first two numbers would be
+consistent with "any perturbation of this size moves the logits".
 
 A direction that steers nothing is also a result: a decodable feature the model
 does not read. Report it rather than tuning the scale until something moves — for
@@ -262,10 +242,7 @@ which band to sweep, see [steering](steering.md).
   is already built by then.
 - **A block's `.output` is a plain tensor**, so `block.output[0]` selects batch
   row 0 — a silent 1-of-N dataset, not a layer. See
-  [logit-lens](logit-lens.md#check-the-wiring).
-- **Collect in forward order.** Reading layer 9 and then layer 7 in one trace
-  raises `OutOfOrderError`; the list comprehension above is in order by
-  construction.
+  [access-and-modify](../usage/access-and-modify.md).
 - **Fit on training rows only**, including the standardization statistics. A
   probe standardized with test-set means has already seen the answer.
 
@@ -276,4 +253,4 @@ which band to sweep, see [steering](steering.md).
 - [activation-patching](activation-patching.md) — component-level causality.
 - [sae-and-auxiliary-modules](sae-and-auxiliary-modules.md) — unsupervised
   features instead of supervised probes.
-- `docs/usage/cache.md` — collecting many modules at once.
+- [cache](../usage/cache.md) — collecting many modules at once.

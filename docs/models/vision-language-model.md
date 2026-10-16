@@ -10,14 +10,11 @@ sources: [src/nnsight/modeling/vlm.py, tests/test_vlm.py]
 
 > **Deprecated.** `VisionLanguageModel` is a [`TransformersModel`](transformers-model.md) with the task pinned to `"image-text-to-text"`. Use `TransformersModel(repo_id, task="image-text-to-text")`.
 
-Constructing one warns:
+Constructing one emits `nnsight.NNsightDeprecationWarning` (a `FutureWarning`, so it shows wherever the construction happens):
 
 ```
-NNsightDeprecationWarning: VisionLanguageModel is deprecated; use
-TransformersModel(repo_id, task='image-text-to-text') instead.
+VisionLanguageModel is deprecated; use TransformersModel(repo_id, task='image-text-to-text') instead.
 ```
-
-`NNsightDeprecationWarning` is a `FutureWarning`, so the warning reaches you wherever the construction lives, not only in `__main__`.
 
 ## Migration
 
@@ -31,9 +28,7 @@ from nnsight import TransformersModel
 model = TransformersModel("llava-hf/llava-1.5-7b-hf", task="image-text-to-text", dispatch=True)
 ```
 
-The task string is exactly `"image-text-to-text"`. Everything else carries over unchanged — `trace`, `scan`, `pipe`, `model.processor`, `model.tokenizer`, and interventions on the vision tower, the projector and the language stack.
-
-One behavior does not carry over. `VisionLanguageModel.generate` runs the processor itself over `text=` and `images=` and returns generated **token ids**:
+Only the constructor changes. The alias overrides nothing but the task, so `trace`, `scan`, `pipe`, `model.processor`, `model.tokenizer`, and `generate` over `text=` and `images=` returning token ids all behave the same on both:
 
 ```python
 with model.generate(text=prompt, images=[img], max_new_tokens=3, do_sample=False) as tracer:
@@ -41,15 +36,7 @@ with model.generate(text=prompt, images=[img], max_new_tokens=3, do_sample=False
 print(model.tokenizer.batch_decode(ids))
 ```
 
-On `TransformersModel(task="image-text-to-text")`, `trace` / `scan` / `generate` take the same prompt and `images=` and the processor still runs for you, so the call above needs no change beyond the constructor. Running the processor yourself and passing the encoding is equivalent, and gives you the `input_ids` to compute image-token positions from:
-
-```python
-encoding = model.processor(images=img, text=prompt, return_tensors="pt")
-with model.trace(encoding):
-    logits = model.output.logits.save()
-```
-
-Neither form batches across invokes: an encoding carrying `pixel_values` cannot be padded into a batch, and a second invoke raises `NotImplementedError: Can't batch these inputs; pass text or token ids.`
+Input forms (chat messages with inline images, a processor encoding), generation keywords, the image-token span and why VLM inputs don't batch across invokes are covered in [transformers-model.md](transformers-model.md#vision-language-models).
 
 ## Related
 

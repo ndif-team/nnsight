@@ -1,6 +1,6 @@
 ---
 title: The Controller
-one_liner: One controller forward per module, installed when the envoy tree is built, carries the input/output handoff, the skip gate and the source-instrumented body; no PyTorch hooks are registered.
+one_liner: One controller forward per module, installed when the envoy tree is built, carries the input/output handoff, the skip gate and the source-instrumented body; no `nn.Module` hooks are registered.
 tags: [internals, dev]
 related: [docs/developing/interleaver-internals.md, docs/developing/architecture-overview.md, docs/developing/source-internals.md]
 sources: [src/nnsight/intervention/source.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py]
@@ -13,7 +13,7 @@ sources: [src/nnsight/intervention/source.py, src/nnsight/intervention/interleav
 How nnsight makes a module's forward pass observable and editable: every wrapped
 module's `forward` is a **controller** that hands the module's input and output to
 the interleaver, offers a `.skip` gate, and runs the real body — or, once `.source`
-has been used, an instrumented copy of it. No PyTorch hooks are registered, on any
+has been used, an instrumented copy of it. No `nn.Module` hooks are registered, on any
 runtime.
 
 ## The controller
@@ -43,13 +43,11 @@ controller is stored in the module's instance `__dict__` under `forward`, so
 weakref (the module owns it) and keeps the original's signature with
 `functools.update_wrapper`, which `generate()` introspects.
 
-It is an object rather than a closure so that copying a module can rebind it:
+Copying or pickling a wrapped module rebinds its controller to the copy:
 `Controller.__deepcopy__` looks the copied module up in `deepcopy`'s memo (the copy
 is registered there before its `__dict__` is copied) and binds to it, and
-`__reduce__` pickles it as the module and its `State`. A function is atomic to both,
-so a closure came through a copy still pointing at the module it was built for —
-the copy computed with the original's weights, silently and outside any trace — and
-a wrapped module could not be pickled at all.
+`__reduce__` pickles it as the module and its `State`. A copy therefore computes
+with its own weights, never the original's.
 
 Being the forward rather than a hook keeps the module on PyTorch's fast call path.
 It also means the controller runs *inside* whatever hooks the runtime itself
@@ -124,21 +122,8 @@ handoffs (`.input` / `.skip` / `.output`) one level down. The controller is
 unchanged; only its `body` swaps. See
 [source-internals.md](source-internals.md).
 
-## Caches
-
-`tracer.cache(...)` registers a `Cache` on the calling worker's mediator.
-`Interleaver.handle` feeds each location's post-intervention value to the caches
-subscribed to it, narrowed to the worker's batch rows. A cache observes exactly what
-the controllers surface — nothing extra is installed on the module.
-
-## Key files / classes
-
-- `src/nnsight/intervention/source.py` — `install_controller`, `Controller`,
-  `module_body`, `State` (`routes`, `active`), `install_source`, `run_op`.
-- `src/nnsight/intervention/interleaver.py` — `Interleaver.instrument` (fragments
-  first, then the controller), `Interleaver.handle` (what the controller calls).
-- `src/nnsight/intervention/envoy.py` — `Envoy.__init__` / `_update` call
-  `instrument` for every module.
+Caches (`tracer.cache(...)`) observe the values the controllers hand to
+`Interleaver.handle`; see [interleaver-internals.md](interleaver-internals.md#caches).
 
 ## Lifecycle / sequence
 
@@ -157,14 +142,10 @@ For `with model.trace("hi"): model.layer.skip(model.layer.input)`:
 5. The controller hands the returned value through `handle("model.layer.output",
    replacement)`, so downstream reads see the skip result.
 
-## Extension points
-
-- **A new location.** Anything served by `handle(location, value)` and read or
-  written by an `Envoy` property works — you add locations, not hooks. This is how
-  `tracer.result` and vLLM's `.logits`/`.samples` work.
-- **A module that bypasses `forward`.** If a runtime calls a module's computation
-  some other way, the controller never runs; expose the values by having the driver
-  call `interleaver.handle(location, value)` directly.
+A module a runtime calls without going through `forward`, and new served
+locations, are covered in
+[interleaver-internals.md](interleaver-internals.md#extension-points) and
+[extending-envoy.md](extending-envoy.md).
 
 ## Related
 

@@ -2,7 +2,7 @@
 title: Activation Patching
 one_liner: Replace activations from one run (e.g. clean) into another (e.g. corrupt) at a specific module to measure that component's causal contribution.
 tags: [pattern, interpretability, causal-mediation, patching]
-related: [docs/usage/barrier.md, docs/usage/invoke-and-batching.md, docs/patterns/attribution-patching.md, docs/patterns/multi-prompt-comparison.md]
+related: [docs/usage/barrier.md, docs/usage/invoke-and-batching.md, docs/patterns/attribution-patching.md]
 sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/barrier.py]
 ---
 
@@ -10,33 +10,22 @@ sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/envoy.py,
 
 ## What this is for
 
-Activation patching (a.k.a. causal mediation analysis, ROME-style "denoising")
-asks: **does this component carry the information that determines the answer?** You
-run two prompts:
+Activation patching (causal mediation analysis, "denoising") asks: **does this
+component carry the information that determines the answer?** Run a **clean** prompt
+that produces the correct answer and a **corrupt** prompt that produces a different
+one, take an activation from the clean run and paste it into the corrupt run at the
+same module and position. If the corrupt run now predicts the clean answer, that
+activation was sufficient to flip the model. Swapping the roles (corrupt into clean,
+"noising") is the same code with the prompts exchanged.
 
-- a **clean** prompt that produces the correct answer
-- a **corrupt** prompt that produces a different answer
-
-You take a single activation from the clean run and **paste it into the corrupt
-run** at the corresponding module / position. If the corrupt run now predicts the
-clean answer, that activation was sufficient to flip the model.
-
-In nnsight you do this with two `tracer.invoke(...)` calls in one `trace()`. Because
-both invokes touch the same module on the same forward, use a `tracer.barrier(n)` to
-synchronize the value hand-off — see `docs/usage/barrier.md`. On `VLLM` there is
-no barrier and no cross-invoke hand-off: save the clean activations in one trace and
-patch them in the next, index rows as `hs[POS]` (no batch axis), and write both
-elements of the layer's `(hidden, residual)` output — see
+In nnsight this is two `tracer.invoke(...)` calls in one `trace()`, with a
+`tracer.barrier(n)` to hand the value across — see [barrier](../usage/barrier.md).
+On `VLLM`, patching takes two traces instead — see
 [Passing values between invokes](../models/vllm.md#passing-values-between-invokes).
 
-Tutorial mirror: https://nnsight.net/notebooks/tutorials/activation_patching/
-
-## When to use
-
-- Localizing where a fact / behavior lives (which layer, which position, which head).
-- Confirming that a candidate component (from a probe, attention pattern) is causal.
-- Constructing causal traces over a (layer, position) grid.
-- IOI, factual recall, and any task with a paired clean/corrupt design.
+Use it to localize where a fact or behavior lives (layer, position, head), to
+confirm that a candidate from a probe or attention pattern is causal, and for IOI or
+factual-recall designs with paired prompts.
 
 ## Canonical pattern
 
@@ -50,11 +39,6 @@ model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 clean   = "The Eiffel Tower is in the city of"   # next token: " Paris"
 corrupt = "The Colosseum is in the city of"      # both prompts are 10 tokens
-
-# NB: GPT-2 small is near-degenerate on the corrupt prompt -- its top-5 spans 0.3
-# logits and " Rome" only ranks 3rd (' P', ' T', ' C', ' Rome', ' B'). Compare the
-# *logit difference* below, not the top token, or small numerical differences
-# between runs will flip the argmax and look like a bug.
 
 paris = model.tokenizer.encode(" Paris")[0]
 rome  = model.tokenizer.encode(" Rome")[0]
@@ -73,9 +57,7 @@ with model.trace() as tracer:
     # Invoke 2: corrupt run, with the clean subject activations patched in.
     with tracer.invoke(corrupt):
         barrier()                       # wait until clean_hs is materialized
-        hs = model.transformer.h[LAYER].output
-        hs[:, SUBJECT, :] = clean_hs[:, SUBJECT, :]
-        model.transformer.h[LAYER].output = hs
+        model.transformer.h[LAYER].output[:, SUBJECT, :] = clean_hs[:, SUBJECT, :]
         patched_logits = model.lm_head.output[:, -1, :].save()
 
     # Invoke 3: corrupt-only baseline, no patching.
@@ -87,26 +69,24 @@ print(f"baseline corrupt: P(Paris)={pb[0,paris]:.3f} P(Rome)={pb[0,rome]:.3f}")
 print(f"patched  corrupt: P(Paris)={pp[0,paris]:.3f} P(Rome)={pp[0,rome]:.3f}")
 ```
 
-Real output — patching the subject token at layer 0 pushes the corrupt run toward
-the clean answer:
-
 ```
 baseline corrupt: P(Paris)=0.003 P(Rome)=0.014
 patched  corrupt: P(Paris)=0.064 P(Rome)=0.006
 ```
 
-**Why the barrier?** Both invokes access `model.transformer.h[LAYER].output`.
-Without it, invoke 2 tries to use `clean_hs` before invoke 1 has produced it — a
-`NameError`. The barrier parks invoke 1 *after* it reads `clean_hs` and invoke 2
-*before* it writes, so the value crosses cleanly. See `docs/usage/barrier.md`.
+GPT-2 small is near-degenerate on the corrupt prompt (`' Rome'` ranks only 4th), so
+compare probabilities or the logit difference, not the top token.
 
-**The reassignment is optional here.** Reading `.output` returns the live tensor,
-so `hs[:, SUBJECT, :] = ...` has already propagated; `model...output = hs` just
-makes the intent explicit. You need a real assignment only when you have a
-*different* tensor to put in place of the old one — a reshape, a stack, an
-arithmetic result. For a tuple `.output`, assign the rebuilt tuple
-(`module.output = (new,) + tuple(out[1:])`), since a tuple's elements cannot be
-reassigned individually.
+!!! warning "Do not score with raw logits"
+
+    GPT-2's logits carry a large shared offset that moves between prompts. On this
+    pair the clean `' Paris'` logit (`-92.09`) is *below* the corrupt one (`-91.96`),
+    so a raw-logit "recovery" has the wrong sign. Use probability, log-prob, or the
+    `Paris - Rome` logit difference (`+2.42` clean, `-1.49` corrupt), normalized as
+    `(patched - corrupt) / (clean - corrupt)`.
+
+The value handed across by the barrier needs no `.clone()`: the write lands
+correctly without it. Clone only when you will also modify the source tensor.
 
 ## Variations
 
@@ -122,52 +102,54 @@ for layer in range(len(model.transformer.h)):
             barrier()
         with tracer.invoke(corrupt):
             barrier()
-            hs = model.transformer.h[layer].output
-            hs[:, SUBJECT, :] = hs_clean[:, SUBJECT, :]
-            model.transformer.h[layer].output = hs
+            model.transformer.h[layer].output[:, SUBJECT, :] = hs_clean[:, SUBJECT, :]
             logits = model.lm_head.output[:, -1, :].save()
     results[layer] = logits.softmax(-1)[0, paris].item()
-
-for layer, p in results.items():
-    print(f"layer {layer:2d}: P(Paris)={p:.3f}")
 ```
 
-```
-layer  0: P(Paris)=0.064
-layer  1: P(Paris)=0.057
-layer  2: P(Paris)=0.051
-layer  3: P(Paris)=0.044
-layer  4: P(Paris)=0.040
-layer  5: P(Paris)=0.034
-layer  6: P(Paris)=0.023
-layer  7: P(Paris)=0.021
-layer  8: P(Paris)=0.012
-layer  9: P(Paris)=0.005
-layer 10: P(Paris)=0.004
-layer 11: P(Paris)=0.003
+`P(Paris)` decays monotonically from `0.064` at layer 0 to `0.003` at layer 11.
+
+The same sweep fits in **one** trace: one clean invoke, one corrupt invoke per layer
+and a baseline, with one barrier round per layer (see
+[barrier](../usage/barrier.md#several-sites-one-round-each-and-fence-every-read)).
+It matches the per-layer traces to every printed digit:
+
+```python
+import nnsight
+
+N = len(model.transformer.h)
+with model.trace() as tracer:
+    barrier = tracer.barrier(N + 1)              # the clean invoke + one per layer
+    results = nnsight.save({})
+    with tracer.invoke(clean):
+        hs = []
+        for block in model.transformer.h:
+            hs.append(block.output)
+            barrier()                            # round L: layer L is ready
+    for layer in range(N):
+        with tracer.invoke(corrupt):
+            for r in range(N):                   # attend every round, write in its own
+                barrier()
+                if r == layer:
+                    model.transformer.h[layer].output[:, SUBJECT, :] = hs[layer][:, SUBJECT, :]
+            results[layer] = model.lm_head.output[0, -1].softmax(-1)[paris].item()
+    with tracer.invoke(corrupt):                 # baseline: no barrier
+        results["baseline"] = model.lm_head.output[0, -1].softmax(-1)[paris].item()
 ```
 
-Read this as a curve about **reach**, not about where the fact lives. Patching
-`block.output` at layer L overwrites everything the model computed at those
-positions up to and including L, so both ends of the sweep are fixed by the
-architecture rather than by the prompt: patch the embeddings and you reproduce the
-clean run exactly, and patch the last block and a non-final position has no path
-left to the final position's logits. A monotone decay between those two ends is
-the null result for a whole-span residual sweep, not a finding.
+!!! warning "A whole-span residual sweep measures reach, not location"
 
-Two measurements make that concrete on this prompt pair. Patching the five *suffix*
-tokens — `' is'`, `' in'`, `' the'`, `' city'`, `' of'`, which are identical in both
-prompts and carry no subject content — produces the mirror-image curve, from
-`P(Paris)=0.004` at layer 0 up to the full clean `0.070` at layer 11. And a
-random donor of matched norm at the subject positions moves the logit difference by
-up to `+3.6` at layer 3, further than the real effect at layers 8–11. Sweep the
-layers to see depth; use the map below to localize.
+    Patching `block.output` at layer L overwrites everything computed at those
+    positions up to L. Patch the embeddings and you reproduce the clean run; patch the
+    last block and a non-final position has no path left to the logits. A monotone
+    decay between those ends is the null result, not a finding — patching the
+    identical *suffix* tokens gives the mirror-image curve. Use the layer × position
+    map below to localize.
 
 ### Layer × position map
 
-Patching one (layer, position) cell at a time separates the two things the sweep
-conflates. Cache the clean run once and batch a whole layer's positions into one
-forward pass:
+Patching one (layer, position) cell at a time separates what the sweep conflates.
+Cache the clean run once and batch a whole layer's positions into one forward pass:
 
 ```python
 import nnsight
@@ -185,6 +167,7 @@ for layer in range(0, 12, 2):
         for pos in range(len(corrupt_ids)):
             with tracer.invoke(corrupt):
                 model.transformer.h[layer].output[:, pos, :] = clean_resid[layer][:, pos, :]
+                # .detach(): drop the graph so the saved values don't retain it
                 row.append(model.output.logits[0, -1].softmax(-1)[paris].detach())
     grid.append([float(x) for x in row])
 
@@ -214,86 +197,50 @@ positions are flat everywhere, which is what the sweep alone could not show.
 
 ### Patch the last position instead
 
-`SUBJECT = slice(-1, None)` (or `[:, -1, :]`) answers "is the *final* prediction
-sensitive to this layer?" On this pair it gives
-`0.003 0.003 0.003 0.003 0.004 0.004 0.006 0.007 0.017 0.036 0.052 0.070`: flat
-through layer 7, then rising to the full clean probability. Read together with the
-subject sweep above, the pair says the answer is present at the subject early and
-at the final position late — the same two sites the map resolves. Position choice
-changes the question you are asking.
-
-### Patch attention output / MLP output instead of residual
+Patch the final position instead of the subject to ask "is the *final* prediction
+sensitive to this layer?" — the corrupt invoke of the per-layer sweep becomes:
 
 ```python
-# Attention output of block LAYER (a tuple -> element 0 is the tensor)
-clean_attn = model.transformer.h[LAYER].attn.output[0][:, -1, :]
-# ...
-out = model.transformer.h[LAYER].attn.output
-new = out[0]
-new[:, -1, :] = clean_attn
-model.transformer.h[LAYER].attn.output = (new,) + tuple(out[1:])
-
-# MLP output of block LAYER (a plain tensor)
-clean_mlp = model.transformer.h[LAYER].mlp.output[:, -1, :]
-# ...
-mlp = model.transformer.h[LAYER].mlp.output
-mlp[:, -1, :] = clean_mlp
-model.transformer.h[LAYER].mlp.output = mlp
+barrier()
+model.transformer.h[layer].output[:, -1, :] = hs_clean[:, -1, :]
+logits = model.lm_head.output[:, -1, :].save()
 ```
 
-Check tuple-vs-tensor with `isinstance(module.output, tuple)` (or `model.scan`)
-before indexing — see `docs/usage/access-and-modify.md`.
+On this pair `P(Paris)` stays near the corrupt `0.003` through layer 7 (`0.007`),
+then rises to the full clean `0.070` by layer 11. Patching the subject localizes the *source* of a fact; patching the last
+position tests the *sensitivity* of the final prediction.
 
-### Per-head patching
+### Per-head or sub-block patching
 
-Reshape the attention output to `[batch, seq, n_heads, head_dim]` and patch a
-single head. See `docs/patterns/per-head-attention.md`.
-
-### Noising direction (corrupt the clean run)
-
-Start from a clean run and *inject* a corrupt activation. The pattern is symmetric —
-swap the prompts and invoke order.
+Patch `attn.output[0]` or `mlp.output` instead of the block residual to isolate one
+sub-block; for a single head, patch a slice of `attn.c_proj.input` — see
+[per-head-attention](per-head-attention.md).
 
 ## Interpretation tips
 
-- **Always run a no-patch baseline** for the corrupt prompt in the same `trace()`.
-  Tokenizer / batch effects shift logits slightly; the baseline is the reference.
-- **Patching the residual at layer L is cumulative** — it overwrites everything up
-  to and including L. To isolate one component, patch the sub-block (`.attn` /
-  `.mlp`) or use attribution patching.
-- **Position is critical.** Patching the subject token localizes the *source* of a
-  fact; patching the last position tests *sensitivity* of the final prediction.
+- **Always run a no-patch baseline** for the corrupt prompt in the same `trace()`;
+  it is the reference.
 - **Effects can be small.** A few-percent shift on a sharp prompt is often real.
   Average over several prompt pairs.
-- **Barrier count = number of invokes that call `barrier()`.** A third no-patch
-  invoke that doesn't synchronize is not counted.
+- **Barrier count = number of invokes that call `barrier()`.** The no-patch
+  baseline invoke does not synchronize and is not counted.
 
 ## Gotchas
 
-- **The barrier is needed because invoke 2 *uses* a value from invoke 1.** If both
-  invokes only read their own activations (no value flowing between them), no
-  barrier is needed.
-- Within one invoke, modules must be accessed in forward-pass order, or you hit
-  `OutOfOrderError`. You cannot capture `h[5]` after `h[10]` in the same invoke.
-- Clean and corrupt prompts of **different token lengths** can't share a position
-  slice. Match lengths, or patch a common suffix / the last position. Every invoke
-  in a batched trace sees its activations padded to the batch's longest prompt, so
-  an absolute index like `slice(1, 5)` means something different depending on what
-  else is in the batch; `[:, -1, :]` survives left padding, an absolute index does
-  not. See `docs/usage/invoke-and-batching.md`.
-- Block outputs are plain tensors in current `transformers`; attention outputs are
-  tuples. Adjust `[0]` indexing accordingly. See `docs/usage/access-and-modify.md`.
-- Patching mutates the running tensor. `.clone().save()` first if you also want the
-  unmodified state.
+- Clean and corrupt prompts of **different token lengths** can't share an absolute
+  position slice, and padding shifts absolute indices with whatever else is in the
+  batch; `[:, -1, :]` survives left padding. See
+  [invoke-and-batching](../usage/invoke-and-batching.md).
+- Barrier semantics, forward-order access, tuple outputs, and cloning before an
+  in-place write: [barrier](../usage/barrier.md),
+  [out-of-order-error](../errors/out-of-order-error.md),
+  [access-and-modify](../usage/access-and-modify.md).
 
 ## Related
 
 - [attribution-patching](attribution-patching.md) — linear approximation that gets a
   whole causal map from one clean + one corrupt run.
-- [multi-prompt-comparison](multi-prompt-comparison.md)
-- [per-head-attention](per-head-attention.md)
-- `docs/usage/barrier.md`
-- `docs/usage/invoke-and-batching.md`
+- [invoke-and-batching](../usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces)
 - https://nnsight.net/notebooks/tutorials/activation_patching/
 - Meng et al. (2022), "Locating and Editing Factual Associations in GPT" (ROME).
 - Wang et al. (2022), "Interpretability in the Wild" (IOI).

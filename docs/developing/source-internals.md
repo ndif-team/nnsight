@@ -107,7 +107,7 @@ decorates?" by parsing the wrapper's own source for the free names it *calls
 directly*, and keeping those whose cell holds a Python function. Exactly one
 candidate is the decorated function.
 
-Neither of the other two answers is a failure:
+The other two answers are not failures:
 
 - **None** — the wrapper does not call what it closes over. transformers' experts
   wrapper hands `original_forward` to a lookup and calls the result, running a fused
@@ -133,10 +133,8 @@ models nobody is tracing.
 `.source` on a module already sourced is a dict lookup. A callable with no `__code__`
 raises `SourceNotAvailable` before the lookup.
 
-Failures are not cached. The assignment into `FORWARD_CACHE` happens only on a
-successful return, so a forward whose source cannot be recovered re-attempts (and
-re-raises) on every access. That keeps the cache to things that exist, at the cost of
-re-parsing a hopeless callable — which nothing in a hot path does.
+Failures are not cached: a forward whose source cannot be recovered re-attempts
+(and re-raises) on every access.
 
 ## Drilling in
 
@@ -153,7 +151,7 @@ callee), instruments what is left, and stores `(instrumented, compiled)` back un
 the same key. The model side reads the entry again and calls the instrumented copy,
 so *its* operations land under `{base}.source.*` — recursively, to any depth.
 
-Two consequences worth knowing when changing this:
+Two consequences:
 
 - The `.fn` handoff happens **before** the call runs, one step earlier than the
   operation's own `.output`. A worker that reads `op.output` and then asks for
@@ -189,14 +187,9 @@ the stored source text with `Compiled.lines`.
 
 ## Key files
 
-- `src/nnsight/intervention/source.py` — `Instrument`, `compile_source`, `compiled`,
-  `peel_index`, `decorator_chain`, `rewrap`, `instrument`, `run_op`, `make_op`,
-  `Source`, `SourceEnvoy`.
-- `src/nnsight/intervention/envoy.py` — `Envoy.source`.
-- `tests/test_source.py`, `tests/test_interleaving.py::TestSourceIteration`.
+- `src/nnsight/intervention/source.py` — every function named above, plus
+  `make_op`; `src/nnsight/intervention/envoy.py` — `Envoy.source`.
+- Tests: `tests/test_source.py`, `tests/test_interleaving.py::TestSourceIteration`.
 
-## Related
-
-- [Source Tracing](../concepts/source-tracing.md) — the mental model.
-- [The Controller](controller.md) — `State`, `active()`, the module's own handoffs.
-- [interleaver-internals.md](interleaver-internals.md) — `handle` semantics.
+See also [interleaver-internals.md](interleaver-internals.md) for `handle`
+semantics.

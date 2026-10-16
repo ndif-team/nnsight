@@ -30,9 +30,22 @@ class Heads(Envoy):
         return value.view(b, s, self.n_heads, h // self.n_heads).transpose(1, 2)
 
     @heads.transform
-    def heads(self, value):
+    def heads(self, value, raw):
         b, nh, s, hd = value.shape
         return value.transpose(1, 2).reshape(b, s, nh * hd)
+
+
+class HiddenCopy(Envoy):
+    """A copy of the first element of a tuple output; the transform rebuilds the
+    tuple around the edited copy from the raw served value."""
+
+    @eproperty(key="output")
+    def hidden(self, value):
+        return value[0].clone()
+
+    @hidden.transform
+    def hidden(self, edited, raw):
+        return (edited.clone(), *raw[1:])
 
 
 @pytest.fixture(scope="module")
@@ -324,6 +337,17 @@ class TestCombinedWith:
         ) as tracer:
             ids = tracer.result.save()
         assert isinstance(ids, torch.Tensor) and ids.shape == (1, 12)
+
+    def test_parenthesized_header_one_item_per_line(self, gpt2):
+        # The layout ruff and black give a header too long for one line: each item
+        # on its own line, so the trace is entered from a line below the `with`.
+        with (
+            gpt2.trace(PROMPT) as tracer,
+            torch.no_grad(),
+        ):
+            hidden = gpt2.transformer.h[0].output[0].save()
+        assert hidden.shape[-1] == 768
+        assert tracer.info is not None
 
     def test_combined_with_invoke_inside(self, gpt2):
         with torch.no_grad(), gpt2.trace() as tracer:
@@ -729,6 +753,42 @@ class TestRename:
             via_name = gpt2.transformer.h[0].mlp.input.save()
         assert torch.equal(via_alias, via_name)
 
+    @torch.no_grad()
+    def test_dotted_alias_binds_on_its_prefix(self):
+        # GPT-2 spells the attention's output projection and the MLP's down
+        # projection both `c_proj`; a dotted alias tells them apart.
+        from nnsight.intervention.aliasing import spellings
+
+        rename = {"attn": "self_attn", "attn.c_proj": "attn.o_proj", "mlp.c_proj": "mlp.down_proj"}
+        gpt2 = TransformersModel("gpt2", task="text-generation", dispatch=True, rename=rename)
+        block = gpt2.transformer.h[0]
+        assert block.attn.o_proj is block.attn.c_proj
+        assert block.mlp.down_proj is block.mlp.c_proj
+        assert block._aliases == {"self_attn": "attn"}
+        assert block.attn._aliases == {"o_proj": "c_proj"}
+        assert block.mlp._aliases == {"down_proj": "c_proj"}
+        assert "model.transformer.h.0.self_attn.o_proj" in spellings(
+            rename, "model.transformer.h.0.attn.c_proj"
+        )
+
+        with gpt2.trace(PROMPT):
+            via_alias = block.self_attn.o_proj.output.save()
+            via_name = block.attn.c_proj.output.save()
+            clean = gpt2.output.logits.save()
+        assert torch.equal(via_alias, via_name)
+        with gpt2.trace(PROMPT):
+            block.mlp.down_proj.input[:] = 0
+            edited = gpt2.output.logits.save()
+        with gpt2.trace(PROMPT):
+            block.mlp.c_proj.input[:] = 0
+            expected = gpt2.output.logits.save()
+        assert torch.equal(edited, expected) and not torch.equal(edited, clean)
+
+    @pytest.mark.parametrize("rename", [{"*.h": "*.layers"}, {"attn.c_proj": "mlp.o_proj"}])
+    def test_dotted_alias_prefix_must_name_an_ancestor(self, rename):
+        with pytest.raises(ValueError, match="names no ancestor"):
+            TransformersModel("gpt2", task="text-generation", rename=rename)
+
 
 @pytest.fixture(scope="module")
 def gpt2_meta():
@@ -775,6 +835,20 @@ class TestScan:
         assert real.device.type != "meta"
         assert torch.isfinite(real).all()
 
+    def test_parent_links_survive_dispatch(self):
+        model = TransformersModel("gpt2", task="text-generation")
+        block = model.transformer.h[3]
+        model.dispatch()
+        # Dispatch re-points every envoy at the real module; none is rebuilt, and
+        # each still points at its live parent.
+        assert model.parent is None
+        for node in model.modules():
+            for child in node._children:
+                assert child.parent is node, child.path
+        assert model.transformer.h[3] is block and block.parent is model.transformer.h
+        assert block.mlp.c_fc.root is model
+        assert model.generator.parent is model
+
     @pytest.mark.parametrize("key", ["dtype", "torch_dtype"])
     @torch.no_grad()
     def test_dtype_auto_builds_on_meta(self, key):
@@ -803,6 +877,86 @@ class TestScan:
         )
         assert all(p.dtype == torch.float16 for p in model._module.parameters())
 
+    @pytest.mark.parametrize(
+        "repo, key",
+        [
+            ("hf-internal-testing/tiny-random-MixtralForCausalLM", "experts_implementation"),
+            ("gpt2", "attn_implementation"),
+        ],
+    )
+    def test_implementation_kwargs_reach_the_meta_config(self, repo, key):
+        """An `*_implementation=` load kwarg is on the meta model's config.
+
+        The real load stores it on the config; the meta build must agree, so
+        that what the lazy model reports before dispatch is what it runs after.
+        """
+        model = TransformersModel(repo, task="text-generation", **{key: "eager"})
+        assert model.dispatched is False
+        assert getattr(model._module.config, f"_{key}") == "eager"
+        model.dispatch()
+        assert getattr(model._module.config, f"_{key}") == "eager"
+
+    def test_meta_config_unchanged_without_config_kwargs(self):
+        """Placement kwargs are still dropped, and leave the config as it was."""
+        plain = TransformersModel("gpt2", task="text-generation")
+        placed = TransformersModel(
+            "gpt2", task="text-generation", device_map="cpu", max_memory={"cpu": "1GB"}
+        )
+        assert placed.dispatched is False
+        assert placed._module.config.to_dict() == plain._module.config.to_dict()
+        assert placed._module.config._attn_implementation == plain._module.config._attn_implementation
+
+    @pytest.mark.parametrize("dispatch", [False, True])
+    @torch.no_grad()
+    def test_config_kwarg_builds_the_model(self, dispatch):
+        """A `config=` load kwarg is the config the model is built from.
+
+        Neither route passes it to transformers by itself: AutoConfig returns it
+        as unused, and `pipeline()` only resolves the model class with it.
+        """
+        from transformers import AutoConfig
+
+        repo = "hf-internal-testing/tiny-random-GPTNeoXForCausalLM"
+        config = AutoConfig.from_pretrained(repo)
+        parallel = config.use_parallel_residual
+        config.use_parallel_residual = not parallel
+        config.num_hidden_layers = 1
+
+        model = TransformersModel(
+            repo, task="text-generation", config=config, dispatch=dispatch
+        )
+        assert model.dispatched is dispatch
+        assert model._module.config.use_parallel_residual is not parallel
+        assert len(model.gpt_neox.layers) == 1
+        # The caller's object is copied, not built on.
+        assert model._module.config is not config
+        if not dispatch:
+            model.dispatch()
+            assert model._module.config.use_parallel_residual is not parallel
+            assert len(model.gpt_neox.layers) == 1
+        assert all(p.device.type != "meta" for p in model._module.parameters())
+        with model.trace(PROMPT):
+            logits = model.output.logits.save()
+        assert torch.isfinite(logits).all()
+
+    @torch.no_grad()
+    def test_unchanged_config_kwarg_loads_the_checkpoint(self, gpt2):
+        """A `config=` load still loads the checkpoint's weights and preprocessors."""
+        from transformers import AutoConfig
+
+        model = TransformersModel(
+            "gpt2",
+            task="text-generation",
+            config=AutoConfig.from_pretrained("gpt2"),
+            dispatch=True,
+        )
+        assert model.tokenizer is not None
+        with model.trace(PROMPT):
+            logits = model.output.logits.save()
+        with gpt2.trace(PROMPT):
+            expected = gpt2.output.logits.save()
+        assert torch.equal(logits, expected)
+
 
 def _has_lora(model) -> bool:
     return any("lora" in name.lower() for name, _ in model._module.named_modules())
@@ -823,6 +977,36 @@ def lora_adapter(tmp_path_factory):
     config = LoraConfig(task_type="CAUSAL_LM", target_modules=["c_attn"], r=4)
     get_peft_model(base, config).save_pretrained(str(path))
     return str(path)
+
+
+@pytest.fixture(scope="module")
+def tiny_peft_bundle(tmp_path_factory):
+    """A fully local base checkpoint and two adapters for env-transition tests."""
+    from peft import LoraConfig, get_peft_model
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    root = tmp_path_factory.mktemp("tiny_peft_bundle")
+    base_path = root / "base"
+    config = GPT2Config(
+        vocab_size=32,
+        n_positions=16,
+        n_embd=8,
+        n_layer=1,
+        n_head=1,
+        bos_token_id=0,
+        eos_token_id=1,
+    )
+    GPT2LMHeadModel(config).save_pretrained(base_path)
+
+    adapters = []
+    for name, rank in (("adapter_a", 2), ("adapter_b", 4)):
+        adapter_path = root / name
+        base = GPT2LMHeadModel(config)
+        lora = LoraConfig(task_type="CAUSAL_LM", target_modules=["c_attn"], r=rank)
+        get_peft_model(base, lora).save_pretrained(adapter_path)
+        adapters.append(str(adapter_path))
+
+    return str(base_path), *adapters
 
 
 @pytest.mark.skipif(not peft_installed, reason="peft is not installed")
@@ -862,6 +1046,10 @@ class TestPeft:
 
         model._remoteable_set_env({"peft": lora_adapter})  # None -> X
         assert model.peft == lora_adapter and _has_lora(model)
+        assert model.transformer.h[0].path == "model.transformer.h.0"
+        assert model.transformer.h[0].attn.c_attn.lora_A.path == (
+            "model.transformer.h.0.attn.c_attn.lora_A"
+        )
 
         module_after_load = model._module
         model._remoteable_set_env({"peft": lora_adapter})  # X -> X (no-op)
@@ -873,6 +1061,258 @@ class TestPeft:
         with model.trace(PROMPT):
             out = model.transformer.h[0].attn.output[0].save()
         assert out.shape[-1] == 768
+
+    @torch.no_grad()
+    def test_set_env_swap_rebuilds_paths_offline(self, tiny_peft_bundle):
+        base_path, adapter_a, adapter_b = tiny_peft_bundle
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+
+        for adapter in (adapter_a, adapter_b):
+            model._remoteable_set_env({"peft": adapter})
+            assert model.peft == adapter and _has_lora(model)
+            assert model.transformer.h[0].path == "model.transformer.h.0"
+            assert model.transformer.h[0].attn.c_attn.lora_A.path == (
+                "model.transformer.h.0.attn.c_attn.lora_A"
+            )
+
+        model._remoteable_set_env({})
+        assert model.peft is None and not _has_lora(model)
+        assert model.transformer.h[0].path == "model.transformer.h.0"
+
+    @torch.no_grad()
+    def test_swap_keeps_custom_envoy_classes_and_aliases(self, tiny_peft_bundle):
+        from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
+
+        class Mlp(Envoy):
+            pass
+
+        base_path, adapter_a, _ = tiny_peft_bundle
+        model = TransformersModel(
+            base_path, task="text-generation", dispatch=True,
+            rename={"mlp": "ffn"}, envoys={GPT2MLP: Mlp},
+        )
+        model.load_adapter(adapter_a)
+        block = model.transformer.h[0]
+        assert _has_lora(model)
+        assert type(block.mlp) is Mlp and block.ffn is block.mlp
+
+        model.load_adapter(None)
+        block = model.transformer.h[0]
+        assert type(block.mlp) is Mlp and block.ffn is block.mlp
+
+    @torch.no_grad()
+    def test_load_adapter_builds_the_tree_construction_does(self, tiny_peft_bundle):
+        base_path, adapter_a, _ = tiny_peft_bundle
+        built = TransformersModel(base_path, task="text-generation", peft=adapter_a, dispatch=True)
+        loaded = TransformersModel(base_path, task="text-generation", dispatch=True)
+        loaded.load_adapter(adapter_a)
+        paths = lambda model: [envoy.path for envoy in model.modules()]
+        assert paths(loaded) == paths(built)
+
+    @torch.no_grad()
+    def test_an_adapter_leaves_the_base_paths_where_they_were(self, tiny_peft_bundle):
+        # The adapter is attached in place: every path of the base model is
+        # still a path of the adapted one, and names the same kind of thing.
+        base_path, adapter_a, _ = tiny_peft_bundle
+        base = TransformersModel(base_path, task="text-generation", dispatch=True)
+        adapted = TransformersModel(base_path, task="text-generation", peft=adapter_a, dispatch=True)
+        paths = lambda model: [envoy.path for envoy in model.modules()]
+        assert set(paths(base)) < set(paths(adapted))
+        assert type(adapted._module) is type(base._module)
+
+        # The targeted module holds what it replaced.
+        c_attn = adapted.transformer.h[0].attn.c_attn
+        assert type(c_attn.base_layer._module) is type(base.transformer.h[0].attn.c_attn._module)
+
+    @torch.no_grad()
+    def test_an_attached_adapter_computes_what_pefts_wrapper_does(self, tiny_peft_bundle):
+        from peft import PeftModel
+        from transformers import GPT2LMHeadModel
+
+        base_path, adapter_a, _ = tiny_peft_bundle
+        ids = torch.tensor([[2, 5, 7, 3]])
+        reference = PeftModel.from_pretrained(GPT2LMHeadModel.from_pretrained(base_path), adapter_a)
+        # A freshly initialised lora_B is zero; give it values so the adapter
+        # is not the identity and the comparison means something.
+        for name, parameter in reference.named_parameters():
+            if "lora_B" in name:
+                torch.nn.init.normal_(parameter, generator=torch.Generator().manual_seed(0))
+        path = base_path + "-trained"
+        reference.save_pretrained(path)
+        expected = reference.eval()(input_ids=ids).logits
+        plain = GPT2LMHeadModel.from_pretrained(base_path).eval()(input_ids=ids).logits
+        assert not torch.allclose(expected, plain, atol=1e-4)
+
+        model = TransformersModel(base_path, task="text-generation", dispatch=True, device="cpu")
+        model.load_adapter(path)
+        with model.trace(ids):
+            logits = model.output.logits.save()
+        torch.testing.assert_close(logits, expected, atol=1e-5, rtol=1e-4)
+
+        # Removing it gives back the base model, module for module.
+        model.load_adapter(None)
+        base = TransformersModel(base_path, task="text-generation", dispatch=True, device="cpu")
+        assert [envoy.path for envoy in model.modules()] == [envoy.path for envoy in base.modules()]
+        assert not hasattr(model._module, "peft_config")
+        with model.trace(ids):
+            logits = model.output.logits.save()
+        torch.testing.assert_close(logits, plain, atol=1e-5, rtol=1e-4)
+
+    @torch.no_grad()
+    def test_one_block_of_code_runs_with_and_without_an_adapter(self, tiny_peft_bundle):
+        base_path, adapter_a, _ = tiny_peft_bundle
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        shapes = []
+        for adapter in (None, adapter_a, None):
+            model.load_adapter(adapter)
+            with model.trace(torch.tensor([[2, 5, 7, 3]])):
+                hidden = model.transformer.h[0].attn.c_attn.output.save()
+            shapes.append(tuple(hidden.shape))
+        assert shapes[0] == shapes[1] == shapes[2]
+
+    def test_an_adapter_whose_weights_have_no_place_is_refused(self, tiny_peft_bundle, tmp_path):
+        import json, shutil
+
+        base_path, adapter_a, _ = tiny_peft_bundle
+        # The same config with weights saved for a module this model does not have.
+        from safetensors.torch import load_file, save_file
+
+        broken = tmp_path / "broken"
+        shutil.copytree(adapter_a, broken)
+        weights = load_file(broken / "adapter_model.safetensors")
+        save_file(
+            {key.replace("transformer.h.0", "transformer.h.7"): value for key, value in weights.items()},
+            broken / "adapter_model.safetensors",
+        )
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        with pytest.raises(ValueError, match="did not attach"):
+            model.load_adapter(str(broken))
+        # Left as it was: no adapter, the base tree, and it still runs.
+        assert model.peft is None and not _has_lora(model)
+        with torch.no_grad(), model.trace(torch.tensor([[2, 5, 7, 3]])):
+            out = model.transformer.h[0].output.save()
+        assert out is not None
+
+    def test_modules_to_save_are_put_back(self, tmp_path):
+        from peft import LoraConfig, get_peft_model
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        config = GPT2Config(vocab_size=32, n_positions=16, n_embd=8, n_layer=1, n_head=1)
+        GPT2LMHeadModel(config).save_pretrained(tmp_path / "base")
+        lora = LoraConfig(target_modules=["c_attn"], modules_to_save=["ln_f"], r=2)
+        get_peft_model(GPT2LMHeadModel(config), lora).save_pretrained(tmp_path / "adapter")
+
+        base_path = str(tmp_path / "base")
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        before = [envoy.path for envoy in model.modules()]
+        model.load_adapter(str(tmp_path / "adapter"))
+        assert type(model.transformer.ln_f._module).__name__ != "LayerNorm"
+        model.load_adapter(None)
+        assert [envoy.path for envoy in model.modules()] == before
+        assert type(model.transformer.ln_f._module).__name__ == "LayerNorm"
+
+    def test_a_prompt_learning_adapter_is_refused(self, tmp_path):
+        from peft import PromptTuningConfig, get_peft_model
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        config = GPT2Config(vocab_size=32, n_positions=16, n_embd=8, n_layer=1, n_head=1)
+        GPT2LMHeadModel(config).save_pretrained(tmp_path / "base")
+        prompt = PromptTuningConfig(task_type="CAUSAL_LM", num_virtual_tokens=2)
+        get_peft_model(GPT2LMHeadModel(config), prompt).save_pretrained(tmp_path / "adapter")
+        model = TransformersModel(str(tmp_path / "base"), task="text-generation", dispatch=True)
+        with pytest.raises(ValueError, match="cannot be attached to its\s+modules in place"):
+            model.load_adapter(str(tmp_path / "adapter"))
+
+    @torch.no_grad()
+    def test_a_remote_request_with_an_adapter_runs_on_a_server_without_one(self, tiny_peft_bundle):
+        # What NDIF does: the client is a meta model built with `peft=`, the
+        # server holds the dispatched base; the request carries the adapter id,
+        # the server attaches it, and the request's module paths resolve there.
+        from nnsight.schema.request import RequestModel
+        from nnsight.tracing.backend import Backend
+
+        base_path, adapter_a, _ = tiny_peft_bundle
+        client = TransformersModel(base_path, task="text-generation", peft=adapter_a)
+        server = TransformersModel(base_path, task="text-generation", dispatch=True)
+        assert all(p.device.type == "meta" for p in client._module.parameters())
+
+        class Server(Backend):
+            def __call__(self, tracer):
+                blob = RequestModel.serialize(tracer, compress=False)
+                server._remoteable_set_env(client._remoteable_get_env())
+                remote = RequestModel.deserialize(
+                    blob, server._remoteable_persistent_objects(), compress=False
+                )
+                remote.execute(remote.info.code)
+                self.saves = dict(remote.info.frame.f_locals)
+
+        ids = torch.tensor([[2, 5, 7, 3]])
+        backend = Server()
+        with client.trace(ids, backend=backend):
+            lora = client.transformer.h[0].attn.c_attn.lora_A.default.output.save()
+            client.transformer.h[0].output[0][:, -1] = 0
+            logits = client.output.logits.save()
+        assert server.peft == adapter_a
+        assert backend.saves["lora"].shape[:2] == (1, 4)
+        with server.trace(ids):
+            server.transformer.h[0].output[0][:, -1] = 0
+            direct = server.output.logits.save()
+        torch.testing.assert_close(backend.saves["logits"], direct)
+
+        # A request without an adapter takes it off the server again.
+        client = TransformersModel(base_path, task="text-generation")
+        with client.trace(ids, backend=Server()):
+            client.output.logits.save()
+        assert server.peft is None and not _has_lora(server)
+
+    def test_load_adapter_before_dispatch(self, lora_adapter):
+        # The post-hoc form of `peft=`: on a meta model only the adapter's
+        # config is grafted (safetensors cannot load onto meta — issue #555),
+        # and the weights arrive with the base's at dispatch.
+        model = TransformersModel("gpt2", task="text-generation")
+        assert not _has_lora(model)
+
+        model.load_adapter(lora_adapter)
+        assert model.dispatched is False
+        assert _has_lora(model)
+        assert all(p.device.type == "meta" for p in model._module.parameters())
+        assert model._remoteable_get_env() == {"peft": lora_adapter}
+
+        with torch.no_grad(), model.trace(PROMPT):  # first trace dispatches
+            out = model.transformer.h[0].attn.output[0].save()
+        assert model.dispatched is True
+        assert _has_lora(model)
+        assert out.shape[-1] == 768
+        assert torch.isfinite(out).all()
+
+    def test_load_adapter_before_dispatch_removed_again(self, lora_adapter):
+        model = TransformersModel("gpt2", task="text-generation")
+        model.load_adapter(lora_adapter)
+        model.load_adapter(None)
+        assert model.peft is None and not _has_lora(model)
+        assert model._remoteable_get_env() == {}
+
+    @torch.no_grad()
+    def test_load_adapter_after_dispatch(self, lora_adapter):
+        model = TransformersModel("gpt2", task="text-generation", dispatch=True)
+        model.load_adapter(lora_adapter)
+        assert _has_lora(model)
+        with model.trace(PROMPT):
+            out = model.transformer.h[0].attn.output[0].save()
+        assert out.shape[-1] == 768
+
+        model.load_adapter(None)
+        assert model.peft is None and not _has_lora(model)
+        with model.trace(PROMPT):
+            out = model.transformer.h[0].attn.output[0].save()
+        assert out.shape[-1] == 768
+
+    def test_load_adapter_shadows_the_module_method(self, lora_adapter):
+        # Reached by fallthrough, transformers' own load_adapter would mutate
+        # the module structure without the envoy tree noticing (and fail
+        # outright on meta). Ours must win the name.
+        model = TransformersModel("gpt2", task="text-generation")
+        assert type(model).load_adapter is TransformersModel.load_adapter
 
 
 def _hidden(block_output):
@@ -1066,6 +1506,162 @@ class TestCustomEnvoys:
         )
         assert isinstance(model.transformer.h[2].mlp, Heads)
 
+    def test_string_key_matches_rename_alias(self):
+        """A suffix key written in an alias's name reaches the module the alias
+        points at — one `envoys=` map can then serve several architectures."""
+        model = TransformersModel(
+            "gpt2", task="text-generation", rename={"mlp": "ffn"}, envoys={"ffn": Heads}
+        )
+        block = model.transformer.h[2]
+        assert type(block.ffn) is Heads
+        assert block.mlp is block.ffn  # same envoy, now of the mapped class
+
+    def test_multi_component_alias_matches_on_binding_envoy(self):
+        class Layers(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"transformer.h": "layers"}, envoys={"layers": Layers},
+        )
+        assert type(model.layers) is Layers
+        assert model.transformer.h is model.layers
+        assert type(model.transformer.h[0]) is Envoy  # the blocks are not `layers`
+
+    def test_native_match_stands_over_alias_match(self):
+        class Other(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"mlp": "ffn"}, envoys={"mlp": Heads, "ffn": Other},
+        )
+        assert type(model.transformer.h[0].ffn) is Heads
+
+    @torch.no_grad()
+    def test_eproperty_reads_a_sibling_through_parent(self):
+        """An eproperty on `attn` reaches the block's `mlp` through `self.parent`;
+        the MLP runs after attention, so the read is in order."""
+
+        class Attn(Envoy):
+            @eproperty(key="output")
+            def with_mlp(self, value):
+                return value[0] + self.parent.mlp.output
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True, envoys={"attn": Attn}
+        )
+        with model.trace("hello world"):
+            summed = model.transformer.h[1].attn.with_mlp.save()
+        with model.trace("hello world"):
+            attn = model.transformer.h[1].attn.output[0].save()
+            mlp = model.transformer.h[1].mlp.output.save()
+        assert torch.allclose(summed, attn + mlp)
+
+    def test_class_key_alias_matches(self):
+        from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", rename={GPT2MLP: "ffn"}, envoys={"ffn": Heads}
+        )
+        assert type(model.transformer.h[0].ffn) is Heads
+
+    @torch.no_grad()
+    def test_eproperty_works_on_alias_matched_envoy(self):
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True,
+            rename={"mlp": "ffn"}, envoys={"ffn": Heads},
+        )
+        with model.trace("hello world"):
+            view = model.transformer.h[0].ffn.heads.save()
+        assert view.ndim == 4 and view.shape[1] == Heads.n_heads
+
+    def test_alias_key_reaches_descendants_of_aliased_modules(self):
+        """Spellings compose through ancestors: a key can name a module under an
+        aliased container, in the names the user types (`model.layers[0].self_attn`)."""
+        class Attn(Envoy):
+            pass
+
+        class Proj(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"transformer.h": "layers", "attn": "self_attn", "mlp": "ffn"},
+            envoys={"layers.0.self_attn": Attn, "ffn.c_fc": Proj},
+        )
+        assert type(model.layers[0].self_attn) is Attn
+        assert type(model.layers[1].self_attn) is Envoy  # the key says block 0
+        assert type(model.layers[3].ffn.c_fc) is Proj
+        assert type(model.layers[3].ffn.c_proj) is Envoy
+
+    def test_wildcard_key_names_every_entry_of_an_aliased_container(self):
+        class Block(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"transformer.h": "layers"}, envoys={"layers.*": Block},
+        )
+        assert len(model.layers) == 12
+        assert all(type(block) is Block for block in model.layers)
+        # Not the container, nor the blocks' children: the key ends the path.
+        assert type(model.layers) is Envoy
+        assert type(model.layers[0].attn) is Envoy
+
+    def test_wildcard_rename_alias_is_a_spelling(self):
+        """`*` means the same in a `rename` key, so an alias bound through one
+        is a spelling an `envoys=` key can be written in."""
+        class Block(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={"*.h": "layers"}, envoys={"layers.*": Block},
+        )
+        assert model.layers is model.transformer.h
+        assert all(type(block) is Block for block in model.layers)
+
+    def test_class_key_alias_does_not_spell_what_is_under_it(self):
+        from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
+
+        class Proj(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation",
+            rename={GPT2MLP: "ffn"}, envoys={"ffn.c_fc": Proj},
+        )
+        assert model.transformer.h[0].ffn.c_fc is model.transformer.h[0].mlp.c_fc
+        assert type(model.transformer.h[0].ffn.c_fc) is Envoy
+
+    def test_wildcard_key_on_a_native_path(self):
+        class Block(Envoy):
+            pass
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", envoys={"transformer.h.*": Block}
+        )
+        assert all(type(block) is Block for block in model.transformer.h)
+        assert type(model.transformer.h) is Envoy
+
+    def test_wildcard_does_not_match_a_shorter_path(self):
+        from nnsight.intervention.aliasing import path_ends_with
+
+        assert path_ends_with("model.layers.0", "layers.*")
+        assert not path_ends_with("model.layers", "layers.*")
+        assert not path_ends_with("model.layers.0.attn", "layers.*")
+
+    @torch.no_grad()
+    def test_eproperty_works_on_wildcard_matched_envoy(self):
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True,
+            rename={"transformer.h": "layers"}, envoys={"layers.*": Heads},
+        )
+        with model.trace("hello world"):
+            view = model.layers[5].heads.save()
+        assert view.ndim == 4 and view.shape[1] == Heads.n_heads
+
     @torch.no_grad()
     def test_custom_eproperty_reads_per_head_view(self, heads_model):
         with heads_model.trace("hello world"):
@@ -1080,3 +1676,74 @@ class TestCustomEnvoys:
             heads_model.transformer.h[0].mlp.heads[:, 5] = 0  # zero head 5
             edited = heads_model.output.logits.save()
         assert not torch.allclose(base, edited)
+
+    @torch.no_grad()
+    def test_a_repeated_read_is_the_same_view(self, heads_model):
+        """``x[...] += f(x)`` reads twice; both reads are the view the write-back carries."""
+        mlp = heads_model.transformer.h[0].mlp
+        with heads_model.trace("hello world"):
+            first = mlp.heads
+            same = nnsight.save(mlp.heads is first)
+            first[:, 5] *= 2
+            once = heads_model.output.logits.save()
+        with heads_model.trace("hello world"):
+            mlp.heads[:, 5] += mlp.heads[:, 5]
+            twice = heads_model.output.logits.save()
+        with heads_model.trace("hello world"):
+            base = heads_model.output.logits.save()
+        assert same and torch.equal(once, twice) and not torch.allclose(base, once)
+
+    @torch.no_grad()
+    def test_an_edit_by_the_last_statement_goes_back(self, heads_model):
+        """The block ends without another request; the write-back is flushed at its end."""
+        seen = []
+        handle = heads_model._module.lm_head.register_forward_hook(lambda module, args, out: seen.append(out.clone()))
+        try:
+            with heads_model.trace("hello world"):
+                pass
+            with heads_model.trace("hello world"):
+                heads_model.transformer.h[0].mlp.heads[:, 5] = 0
+        finally:
+            handle.remove()
+        assert len(seen) == 2 and not torch.allclose(seen[0], seen[1])
+
+    @torch.no_grad()
+    def test_another_view_of_the_location_is_its_own(self, heads_model):
+        """The memo is per eproperty: ``.output`` after ``.heads`` is the model's tensor, not the heads view."""
+        mlp = heads_model.transformer.h[0].mlp
+        with heads_model.trace("hello world"):
+            heads = mlp.heads
+            out = mlp.output
+            shapes = nnsight.save((heads.ndim, out.ndim, out is heads))
+        assert shapes == (4, 3, False)
+
+    @torch.no_grad()
+    def test_a_view_is_read_anew_on_every_step(self, heads_model):
+        """One view a step and nothing else between: each step's is the next call's, not the last view."""
+        mlp = heads_model.transformer.h[0].mlp
+        with heads_model.generate("hello world", max_new_tokens=3, min_new_tokens=3, do_sample=False) as tracer:
+            views = nnsight.save([])
+            for step in tracer.iter[:3]:
+                views.append(mlp.heads)
+        assert [v.shape[2] for v in views[1:]] == [1, 1] and views[0].shape[2] > 1
+        assert not torch.equal(views[1], views[2])
+
+    @torch.no_grad()
+    def test_transform_with_raw_rebuilds_a_tuple(self):
+        """The transform's raw argument: a copied element of a tuple output is
+        written back into the tuple, and the copy stays the user's."""
+        from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", dispatch=True, envoys={GPT2Attention: HiddenCopy}
+        )
+        with model.trace("hello world"):
+            base = model.output.logits.save()
+        with model.trace("hello world"):
+            model.transformer.h[0].attn.hidden[:] = 0
+            kept = model.transformer.h[0].attn.hidden.save()
+            out = model.transformer.h[0].attn.output.save()
+            edited = model.output.logits.save()
+        assert not torch.allclose(base, edited)
+        assert torch.equal(kept, torch.zeros_like(kept))
+        assert isinstance(out, tuple) and torch.equal(out[0], torch.zeros_like(out[0]))

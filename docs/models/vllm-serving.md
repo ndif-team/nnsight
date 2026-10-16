@@ -8,7 +8,6 @@ sources: [src/nnsight/modeling/vllm/async_backend.py, src/nnsight/modeling/vllm/
 
 # Async mode and serving
 
-
 Construct with `mode="async"`; a trace then streams `RequestOutput`s. Iterate `tracer.backend` (an attribute, not a call):
 
 ```python
@@ -33,19 +32,15 @@ if __name__ == "__main__":
 
 Both halves of that shape are required. `AsyncLLM` binds to the loop that built it, where it keeps its output handler and its per-request futures, so build the model **inside** the coroutine you will await it from: an engine built at import and then used from two `asyncio.run()` calls never answers the second, and does not error either. The `__main__` guard is what makes the file runnable at all — see [the engine page](vllm.md).
 
-Saves are attached **only to the finished output** (`output.finished == True`), fetched from the worker via `collect_nnsight` at that point (`async_backend.py`). Intermediate yields carry no saves — accumulate per-step values inside `tracer.iter[:]` instead.
-
-Await the backend to drain the stream and get just the last output:
+Saves are attached **only to the finished output** (`output.finished == True`); intermediate yields
+carry none, so accumulate per-step values inside `tracer.iter[:]`. The async path does not push
+saved names back into your frame: read them off the output, keyed by the name you saved under.
+Awaiting the backend drains the stream and returns the last output:
 
 ```python
 last = await tracer.backend
-print(last.saves["logits"].shape)
+print(last.saves["logits"].shape)       # `logits` itself is still unbound
 ```
-
-**Read saves off the output, not out of your variables.** The async path is the one backend that
-does not push saved names back into the calling frame: `logits` is still unbound after the stream,
-and the tensor is `last.saves["logits"]`, exactly as written above. The name you save under is the
-key you read.
 
 ## Async notes
 
@@ -54,8 +49,6 @@ key you read.
 - A stream closed before it finishes aborts the request and frees its worker (`async_backend.py`).
 - Errors in the block surface when you iterate the stream (a `1/0` raises `RuntimeError: ...ZeroDivisionError`).
 - `model.generate(...)` on an async engine returns a coroutine; `await` it.
-- `remote=True` skips async-backend injection (`vllm.py`).
-
 ## Remote / serve
 
 - `trace(..., remote=True)` runs on NDIF. The model key is the repo id (`vllm.py`).
@@ -64,7 +57,7 @@ key you read.
 Start a server (holds one dispatched async engine):
 
 ```bash
-nnsight-serve gpt2 --port 8000 --enable-prefix-caching False [--api-key SECRET] [--gpu-memory-utilization 0.1]
+nnsight-serve gpt2 --port 8000 [--api-key SECRET] [--gpu-memory-utilization 0.1]
 ```
 
 `--help` lists only the server's own options (`--host`, `--port`, `--api-key`); every other
@@ -80,7 +73,7 @@ nnsight-serve gpt2 --port 8000 --enable-prefix-caching False [--api-key SECRET] 
   arrives as a string, which the engine iterates one character at a time and refuses with
   `ValueError: Tap 'm' names no module`. Build a tapped engine in Python.
 
-Prefix caching must be off if you will `edit(serve=...)` (below). Poll `GET /health` for `{"status": "ok"}`
+Leave prefix caching off if you will `edit(serve=...)`; see [vllm-editing.md](vllm-editing.md#when-to-edit-instead-of-trace). Poll `GET /health` for `{"status": "ok"}`
 before sending traces; the engine takes a minute or two to build. The server exposes only the
 nnsight routes (`/health`, `/v1/nnsight/generate`, `/v1/nnsight/register/{id}`, `.../clear`) —
 it is **not** an OpenAI-compatible server, and a "plain" request is a trace whose body saves only

@@ -91,10 +91,9 @@ class TPEnvoy(Envoy):
         if fragments is None or not fragments.enabled:
             return super().__call__(*args, hook=hook, **kwargs)
 
-        # Asked of the fragments rather than read off the module: up to 5.15
-        # transformers stamped the style on each module it sharded, and 5.16
-        # keeps the plan on the model and stamps nothing, so the tree's own
-        # record is the only spelling that works on both.
+        # Asked of the fragments rather than read off the module: transformers
+        # keeps the plan on the model and stamps nothing on the modules it
+        # shards, so the tree's own record is the only spelling there is.
         style, mesh = fragments.style_at(self.path)
         into = f"{self.path}.input"
         if fragments.fragmented(into) and style not in SPLITS_ITS_OWN_INPUT:

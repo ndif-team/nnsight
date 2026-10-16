@@ -1,4 +1,5 @@
 import ast
+import contextlib
 import linecache
 import os
 import runpy
@@ -214,6 +215,33 @@ class TestSkip:
         ) as tracer:
             ran.append(tracer is not None)
         assert ran == [True]
+
+    def test_header_item_on_a_later_line_is_captured(self):
+        # `__enter__` runs from the line the tracer's own item sits on, which is
+        # not the line the `with` statement starts on once the header continues
+        # past it. Capture has to find the block from that later line.
+        with contextlib.nullcontext(), \
+             Tracer():
+            value = save(1)
+        assert value == 1
+
+    def test_parenthesized_header_is_captured(self):
+        # The same header in the parenthesized form the language documents for
+        # multi-line `with` statements: the item sits one line below the `with`.
+        with (
+            Tracer()
+        ):
+            value = save(2)
+        assert value == 2
+
+    def test_parenthesized_header_with_several_items_is_captured(self):
+        with (
+            contextlib.nullcontext(),
+            Tracer() as tracer,
+        ):
+            value = save(3)
+        assert value == 3
+        assert tracer.info is not None
 
     def test_pass_on_the_with_line_is_allowed(self):
         # Nothing to skip, so nothing runs twice.

@@ -1,25 +1,20 @@
 ---
 title: Concepts Index
-one_liner: Mental-model docs for nnsight's capture, greenlet-interleaving, hook, and source machinery.
+one_liner: Mental models for how a trace runs — deferred execution, workers, controllers, Envoys, invokes and .source.
 tags: [concept, index]
-related: [docs/usage/index.md, docs/reference/index.md]
-sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/source.py, src/nnsight/tracing/tracer.py]
+related: [docs/usage/index.md, docs/developing/index.md]
+sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py, src/nnsight/tracing/tracer.py]
 ---
 
 # Concepts Index
 
-Foundational mental models for working with nnsight. Read these in order for a top-down picture of how `with model.trace(...)` actually runs.
+Up: [docs/index.md](../index.md) — all sections.
 
-## Docs
+Why nnsight behaves the way it does. For recipes see [usage/](../usage/index.md); for the code see [developing/](../developing/index.md).
 
-- [Deferred Execution](deferred-execution.md) — How `with model.trace(...)` captures a code block (`capture → parse → build → compile → execute`), then runs it interleaved with the model instead of inline. `save()` and the nesting/save boundary.
-- [Threading and Mediators](threading-and-mediators.md) — Each block is one `Mediator` running in a **greenlet** (not a thread). Workers *park* and *switch*, exchanging typed events with the model side: `VALUE` / `SWAP` / `SKIP` / `BARRIER`.
-- [Interleaver and Controller](interleaver-and-controller.md) — One shared `Interleaver` installs a controller forward on every module at wrap time; it passes through when not interleaving and hands off through `Interleaver.handle` when it is. Occurrence tagging (`.i{n}`) and out-of-order detection.
-- [Envoy](envoy.md) — `Envoy` wraps a `torch.nn.Module` and exposes `.input` / `.inputs` / `.output` as `eproperty` descriptors over `Mediator.value` / `Mediator.swap`, plus `.skip` (method) and `.source` (property). Extension by subclassing, by attaching modules (`__call__(hook=True)`, edits), and by adding custom `eproperty` values served with `.provide`.
-- [Batching and Invokers](batching-and-invokers.md) — `tracer.invoke(...)` as one worker on its own batch slice; the `Batcher` `narrow`/`widen`; empty invokes on the full batch; `barrier()` for cross-invoke value sharing.
-- [Source Tracing](source-tracing.md) — `.source` rewrites a module's forward AST so every call site becomes a hookable location, bracketed through the same `Interleaver.handle` primitive. `Source`, `SourceEnvoy`, recursive `.source`, and the per-module controller.
-
-## Related
-
-- [Usage Index](../usage/index.md) — recipe pages for `trace`, `generate`, `pipe`, `scan`, `edit`, `session`.
-- [Models Index](../models/index.md) — `NNsight`, `TransformersModel`, and the deprecated aliases.
+- [Deferred Execution](deferred-execution.md) — a trace body is captured and run alongside the forward pass, not inline.
+- [Threading and Mediators](threading-and-mediators.md) — each block is a worker that takes turns with the model on one thread; why order matters.
+- [Interleaver and Controller](interleaver-and-controller.md) — how each module serves its input/skip/output, and what an occurrence (`.i0`) is.
+- [Envoy](envoy.md) — the module wrapper: `.input`, `.output`, `.skip`, `.source`, calling a module, changing the tree.
+- [Batching and Invokers](batching-and-invokers.md) — invokes as workers over their own rows of one batch; empty invokes; which values get scoped.
+- [Source Tracing](source-tracing.md) — `.source` as finer-grained locations inside a forward, under the same rules.

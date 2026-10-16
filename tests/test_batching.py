@@ -952,3 +952,41 @@ class TestVLLMBatcherCloneReads:
         stats.mul_(1000)
         assert served is not stats
         assert torch.all(served == 1)
+
+
+class _FlatMLP(nn.Module):
+    """``fc1`` runs on the rows reshaped two per input, so its output's leading dim is not the batch."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(4, 4)
+        self.fc2 = nn.Linear(8, 8)
+
+    def forward(self, x):
+        flat = self.fc1(x.reshape(-1, 4))  # [2 * batch, 4]
+        return self.fc2(torch.relu(flat.reshape(x.shape[0], 8)))
+
+
+class TestUnbatchedTensorWrites:
+    """A tensor whose leading dim is not the batch is served whole to every invoke, so an
+    invoke's assignment to it is the whole tensor and lands, as an in-place edit does."""
+
+    @torch.no_grad()
+    def test_assignment_under_two_invokes_lands(self):
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_FlatMLP())
+        a_in, b_in = torch.randn(2, 8), torch.randn(3, 8)
+        with envoy.trace() as tracer:
+            with tracer.invoke(a_in):
+                clean_a = envoy.output.save()
+            with tracer.invoke(b_in):
+                clean_b = envoy.output.save()
+        with envoy.trace() as tracer:
+            with tracer.invoke(a_in):
+                envoy.fc1.output = torch.zeros_like(envoy.fc1.output)
+                edited_a = envoy.output.save()
+            with tracer.invoke(b_in):
+                edited_b = envoy.output.save()
+        assert not torch.equal(edited_a, clean_a)
+        assert not torch.equal(edited_b, clean_b)  # the whole tensor: the other invoke's rows too
+        assert torch.equal(edited_a, envoy._module.fc2.bias.expand(2, 8))

@@ -71,10 +71,7 @@ via `AutoConfig` + `from_config`; `_load` via `from_pretrained`.
 
 ### Input & batching — `_batch_size` and `_batch`
 
-The standard tracer builds the run's batcher as
-`self.envoy._batcher_class(self.envoy, self.kwargs)` (`intervention/tracer.py`) —
-the base `Batcher` unless the model names a subclass (see below). It calls back
-into your model for the row math:
+The run's `Batcher` calls back into your model for the row math:
 
 - `_batch_size(*inputs, **kwargs) -> int` (`envoy.py`) — how many batch rows an
   invoke contributes. **Base default:** `1` if there's any input else `0`. Override to
@@ -87,23 +84,13 @@ into your model for the row math:
   `vllm.py`, extends prompt/params/lora lists — one request per invoke).
 
 For an **exotic tensor layout** (a first dim that isn't the batch — vLLM's flat
-`[total_tokens, hidden]`, tensor-parallel shards), subclass `Batcher`
-(`intervention/batching.py`), override the per-tensor `_narrow_tensor` /
-`_widen_tensor`, and name the subclass on the model class:
-
-```python
-class MyModel(NNsight):
-    _batcher_class = MyBatcher
-```
-
-That is the whole installation — both the standard tracer and the vLLM tracer build
-the run's batcher as `self.envoy._batcher_class(self.envoy, self.kwargs)`.
-`DiffusionModel` is the one-line reference (`_batcher_class = DiffusionBatcher`, for
-classifier-free-guidance doubling); `VLLMBatcher` (`vllm/batching.py`) is the
-worked example of a genuinely different layout, and is the exception — vLLM's model
-runner assigns it onto the live interleaver rather than going through
-`_batcher_class`, because the engine, not a tracer, owns the run. See
-[batching-internals.md](./batching-internals.md).
+`[total_tokens, hidden]`, tensor-parallel shards), subclass `Batcher`, override
+`_narrow_tensor` / `_widen_tensor`, and set `_batcher_class = MyBatcher` on the model
+class; the tracer builds the run's batcher from it. `DiffusionModel` is the one-line
+reference (`_batcher_class = DiffusionBatcher`). vLLM is the exception: its model
+runner assigns `VLLMBatcher` onto the live interleaver, because the engine, not a
+tracer, owns the run. See
+[batching-internals.md](./batching-internals.md#subclassing-the-batcher).
 
 ### Execution — the forward the tracer runs
 
@@ -125,16 +112,10 @@ own method:
 
 ### Runtime-internal values — `eproperty`
 
-To expose an engine value that isn't a module output (logits, samples, telemetry),
-add an `eproperty` to your model class. The decorated stub is the read-side
-preprocess — `def logits(self, value): return value` for an identity view — and its
-location is `"{self.path}.{key}"`. Serve it where the value is produced, inside an
-open interleaver context, with the eproperty's `.provide`:
-`type(model).logits.provide(model, value)` (which forwards to
-`self.interleaver.handle(location, value)` and returns it, edited if a worker wrote
-back). Give it a `description=` to surface it in the model's repr. vLLM's
-`logits`/`samples` (`vllm.py`, served in `GPUModelRunner.py`) are the
-reference. Full recipe in [extending-envoy.md](./extending-envoy.md).
+An engine value that isn't a module output (logits, samples, telemetry) is an
+`eproperty` on your model class, served where it is produced with
+`type(model).<name>.provide(model, value)` — see
+[extending-envoy.md](./extending-envoy.md); vLLM's `logits`/`samples` are the reference.
 
 ### Remote support — the `Remotable` extension points
 
@@ -164,19 +145,14 @@ Inject a backend or `tracer_cls` from your `trace` override for non-standard
 execution (async streaming, HTTP serve). vLLM injects `AsyncVLLMBackend` +
 `VLLMTracer` for `mode="async"` and `LocalServeBackend` for `serve=url`
 (`vllm.py`). See [vllm-integration.md](./vllm-integration.md) and
-[adding-a-new-backend.md](./adding-a-new-backend.md).
+[backends.md](./backends.md#adding-a-backend).
 
 ## Lifecycle of a runtime trace
 
-1. `with model.trace(input)` — the tracer captures the block.
-2. On `__exit__`, the backend runs the compiled block; the batcher runs each
-   invoke's `_batch_size`/`_batch` to build the call input and per-invoke groups.
-3. `model.interleave(fn, *args, **kwargs)` runs (dispatching first if needed). `fn`
-   (your `_call`/`generate`/pipeline) executes the forward; each module's
-   controller calls `handle` to serve parked interventions; the batcher
-   narrows/widens per invoke.
-4. The run's return is served at `"result"`; saved values are pushed back into the
-   caller's frame.
+A runtime trace follows the [trace lifecycle](./architecture-overview.md#lifecycle--sequence):
+the batcher calls `_batch_size`/`_batch` to build the call input, and
+`model.interleave(fn, ...)` (dispatching first if needed) runs your `fn` as the
+forward.
 
 ## Reference implementations
 
@@ -184,10 +160,3 @@ execution (async streaming, HTTP serve). vLLM injects `AsyncVLLMBackend` +
 - `src/nnsight/modeling/transformers.py` — pipeline-backed HF, full custom batching
 - `src/nnsight/modeling/diffusion.py` — pipeline-as-module, custom loading
 - `src/nnsight/modeling/base.py` — the trivial `NNsight(Envoy)` leaf
-
-## Related
-
-- [extending-envoy.md](./extending-envoy.md) — exposing runtime-internal values
-- [vllm-integration.md](./vllm-integration.md) — vLLM as the reference non-PyTorch runtime
-- [batching-internals.md](./batching-internals.md) — the `Batcher` contract
-- [serialization.md](./serialization.md) — the `Remotable` persistent-object protocol
