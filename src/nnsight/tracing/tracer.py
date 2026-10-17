@@ -121,7 +121,9 @@ def skip_context(tracer: Tracer) -> None:
     Sets a per-frame trace hook on the user's frame that raises
     [`ExitTracingException`][nnsight.tracing.tracer.ExitTracingException] as soon as the body is about to execute. The
     global ``sys.settrace`` is set to a no-op so Python actually delivers
-    per-frame trace events (it won't call ``f_trace`` otherwise).
+    per-frame trace events (it won't call ``f_trace`` otherwise). Whatever tracer
+    the thread had — a debugger, coverage — is kept on ``tracer`` for
+    `Tracer.__exit__` to hand back.
 
     Python delivers those events per *line*, so the body has to start on a line of
     its own for the hook to reach it first. A body written on the ``with`` line
@@ -163,6 +165,7 @@ def skip_context(tracer: Tracer) -> None:
         raise ExitTracingException()
 
     frame = sys._getframe(2)
+    tracer._displaced_trace = sys.gettrace()
     sys.settrace(lambda *args, **kwargs: None)
     frame.f_trace = skip
 
@@ -578,7 +581,11 @@ class Tracer:
         internals are dropped, leaving the user's own frames (across any files).
         Any *other* exception from the body propagates normally (returns ``False``).
         """
-        sys.settrace(None)
+        # The skip hook's raise has already cleared the thread's tracer; put back
+        # the one it displaced, and drop the reference before the backend pickles
+        # this tracer (a debugger's trace function doesn't travel).
+        if hasattr(self, "_displaced_trace"):
+            sys.settrace(self.__dict__.pop("_displaced_trace"))
         if exc_type is ExitTracingException or exc_type is None:
 
             inc()
