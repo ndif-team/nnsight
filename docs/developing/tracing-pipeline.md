@@ -129,7 +129,9 @@ If the block has real code (`skippable`, `tracer.py` — a body that is only
 `pass`/docstring/`...` is left to run harmlessly), `__enter__` calls `skip_context`
 (`tracer.py`). It sets a per-frame `f_trace` hook that raises
 `ExitTracingException` the moment execution reaches the body's first line, and sets
-a no-op global `sys.settrace` so Python actually delivers per-frame events.
+a no-op global `sys.settrace` so Python actually delivers per-frame events. The
+tracer it displaces (a debugger, coverage) is kept on the tracer and restored in
+`__exit__`.
 
 Two constraints fall out of this line-based mechanism:
 
