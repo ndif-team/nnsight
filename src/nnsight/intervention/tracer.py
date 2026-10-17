@@ -303,25 +303,23 @@ class InterleavingTracer(Tracer):
         # The model picks its batcher class (diffusion doubles for guidance);
         # the trace's forward kwargs (num_images_per_prompt, ...) reach it there.
         self.batcher = self.envoy._batcher_class(self.envoy, self.kwargs)
+        # The frame as this trace found it: every worker's scope starts from it,
+        # and push_result leaves out what is still bound to it.
+        captured = dict(frame.f_locals)
         try:
             # Is there actual input data, or only params? _batch_size reports the
             # number of data rows: >0 means direct input (one implicit invoke); 0
             # means invoke mode (the body defines the batch via tracer.invoke(...)).
             # Trace-level params that aren't data (max_new_tokens) go to the call.
             if self.envoy._batch_size(*self.args, **self.kwargs):
-                mediator = Mediator(
-                    code,
-                    glbls,
-                    dict(frame.f_locals),
-                    node=self.node,
-                )
+                mediator = Mediator(code, glbls, captured, node=self.node)
                 mediator.batch_group = self.batcher.add(*self.args, **self.kwargs)
                 interleaver.mediators.append(mediator)
                 forward_kwargs = {}
             else:
                 forward_kwargs = dict(self.kwargs)
                 # Invokers append their workers as this runs.
-                exec(code, Scope(dict(frame.f_locals), shared_locals(frame), glbls))
+                exec(code, Scope(captured, shared_locals(frame), glbls))
                 if not interleaver.mediators:
                     raise ValueError(
                         "trace() needs an input, or at least one "
@@ -335,7 +333,7 @@ class InterleavingTracer(Tracer):
             # params (e.g. max_new_tokens) ride alongside and win over assembled kwargs.
             self.envoy.interleave(self.fn, batcher=self.batcher, **forward_kwargs)
             for mediator in mediators:
-                push_result(frame, mediator.lcls)
+                push_result(frame, mediator.lcls, captured)
         finally:
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before interleave doesn't leave workers/batcher behind.

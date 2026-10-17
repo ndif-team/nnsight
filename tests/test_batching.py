@@ -478,6 +478,49 @@ class TestInvokeScope:
         assert isinstance(inside, torch.Tensor) and inside.shape[0] == 1
 
     @torch.no_grad()
+    def test_rebind_in_an_earlier_invoke_survives_the_later_ones_in_a_session(self):
+        # Each invoke's scope starts from the frame as the trace found it, so an
+        # invoke that leaves a name alone still holds its old value.
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            value = "before"
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(1, 8)):
+                    value = envoy.fc1.output
+                with tracer.invoke(torch.randn(1, 8)):
+                    envoy.fc2.output
+            kind = nnsight.save(type(value))
+        assert kind is torch.Tensor
+
+    @torch.no_grad()
+    def test_rebind_in_a_session_loop_reaches_each_iteration(self):
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            kinds = nnsight.save([])
+            value = None
+            for _ in range(2):
+                with envoy.trace() as tracer:
+                    with tracer.invoke(torch.randn(1, 8)):
+                        value = envoy.fc1.output
+                    with tracer.invoke(torch.randn(1, 8)):
+                        envoy.fc2.output
+                kinds.append(type(value))
+        assert kinds == [torch.Tensor, torch.Tensor]
+
+    @torch.no_grad()
+    def test_name_bound_beside_the_invokes_reaches_the_session(self):
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            with envoy.trace() as tracer:
+                rows = []
+                with tracer.invoke(torch.randn(1, 8)):
+                    rows.append(envoy.fc1.output)
+                with tracer.invoke(torch.randn(2, 8)):
+                    rows.append(envoy.fc1.output)
+            shapes = nnsight.save([row.shape[0] for row in rows])
+        assert shapes == [1, 2]
+
+    @torch.no_grad()
     def test_read_before_the_bind_raises(self, gpt2):
         # Reading a name an earlier invoke binds, before parking past where it binds
         # it: the reader runs first, up to its first park, so the name isn't there.
