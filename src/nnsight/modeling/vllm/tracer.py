@@ -94,6 +94,8 @@ class VLLMTracer(InterleavingTracer):
 
     def execute(self, code: CodeType) -> None:
         """Build the workers, run the forward interleaved, push results back."""
+        # The frame as the workers' scopes start from it (see `push_result`).
+        captured = dict(self.info.frame.f_locals)
         try:
             mediators, args, kwargs = self.prepare(code)
             try:
@@ -104,7 +106,7 @@ class VLLMTracer(InterleavingTracer):
                 # on success would hand back a frame with none of the values that
                 # did arrive — including the ones from the invokes that finished.
                 for mediator in mediators:
-                    push_result(self.info.frame, mediator.lcls)
+                    push_result(self.info.frame, mediator.lcls, captured)
         finally:
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before it doesn't leave workers/batcher behind.
