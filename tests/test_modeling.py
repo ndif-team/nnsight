@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 
 import nnsight
 import pytest
@@ -251,6 +253,21 @@ class TestMeta:
 
 
 class TestScan:
+    def test_import_leaves_the_fake_tensor_machinery_unloaded(self):
+        # `ShapeEnv` pulls in sympy, most of a second of `import nnsight` that only
+        # a scan needs. Measured against torch and transformers, which nnsight
+        # imports anyway, so a version of either that loads sympy itself passes.
+        probe = (
+            "import sys, torch, transformers\n"
+            "before = 'sympy' in sys.modules\n"
+            "import nnsight\n"
+            "print(before or 'sympy' not in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        )
+        assert result.stdout.strip() == "True"
+
     def test_scan_reads_shapes(self):
         envoy = MetaModel("id", n_layers=2)
         captured = {}
