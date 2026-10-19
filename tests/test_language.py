@@ -1021,10 +1021,10 @@ class TestPeft:
 
     def test_get_env_reports_peft(self, lora_adapter):
         model = TransformersModel("gpt2", task="text-generation", peft=lora_adapter)
-        assert model._remoteable_get_env() == {"peft": lora_adapter}
+        assert model._remoteable_get_env()["peft"] == lora_adapter
 
-    def test_get_env_empty_without_peft(self, gpt2):
-        assert gpt2._remoteable_get_env() == {}
+    def test_get_env_omits_peft_without_an_adapter(self, gpt2):
+        assert "peft" not in gpt2._remoteable_get_env()
 
     @torch.no_grad()
     def test_dispatch_and_trace_with_peft(self, lora_adapter):
@@ -1276,7 +1276,7 @@ class TestPeft:
         assert model.dispatched is False
         assert _has_lora(model)
         assert all(p.device.type == "meta" for p in model._module.parameters())
-        assert model._remoteable_get_env() == {"peft": lora_adapter}
+        assert model._remoteable_get_env()["peft"] == lora_adapter
 
         with torch.no_grad(), model.trace(PROMPT):  # first trace dispatches
             out = model.transformer.h[0].attn.output[0].save()
@@ -1290,7 +1290,7 @@ class TestPeft:
         model.load_adapter(lora_adapter)
         model.load_adapter(None)
         assert model.peft is None and not _has_lora(model)
-        assert model._remoteable_get_env() == {}
+        assert "peft" not in model._remoteable_get_env()
 
     @torch.no_grad()
     def test_load_adapter_after_dispatch(self, lora_adapter):
@@ -1747,3 +1747,76 @@ class TestCustomEnvoys:
         assert not torch.allclose(base, edited)
         assert torch.equal(kept, torch.zeros_like(kept))
         assert isinstance(out, tuple) and torch.equal(out[0], torch.zeros_like(out[0]))
+
+
+class TestAttnImplementation:
+    """The attention implementation travels with every remote request."""
+
+    def _weights(self, model):
+        with model.trace(PROMPT):
+            weights = model.transformer.h[0].attn.output[1].save()
+        return weights
+
+    def test_get_env_carries_the_resolved_implementation(self):
+        # Sent even when nothing was asked for: the server's model is shared,
+        # and the previous request may have moved it off the default.
+        model = TransformersModel("gpt2", task="text-generation")
+        assert model.attn_implementation == "sdpa"
+        assert model._remoteable_get_env() == {"attn_implementation": "sdpa"}
+
+        model = TransformersModel(
+            "gpt2", task="text-generation", attn_implementation="eager"
+        )
+        assert model._remoteable_get_env() == {"attn_implementation": "eager"}
+
+    @torch.no_grad()
+    def test_set_env_switches_the_implementation(self):
+        # Server-side: sdpa returns no attention weights, eager does, and a
+        # request from a client that loaded the default switches back.
+        model = TransformersModel("gpt2", task="text-generation", dispatch=True)
+        assert model.attn_implementation == "sdpa"
+        assert self._weights(model) is None
+
+        model._remoteable_set_env({"attn_implementation": "eager"})
+        assert model.attn_implementation == "eager"
+        weights = self._weights(model)
+        assert weights.shape[1] == model._module.config.n_head
+        assert torch.allclose(weights.sum(-1), torch.ones_like(weights.sum(-1)))
+
+        model._remoteable_set_env({"attn_implementation": "sdpa"})
+        assert model.attn_implementation == "sdpa"
+        assert self._weights(model) is None
+
+    def test_set_env_from_an_older_client_leaves_it(self, gpt2_meta):
+        # No attention key at all is a client that predates it, not a request
+        # for the default.
+        gpt2_meta._remoteable_set_env({"attn_implementation": "eager"})
+        gpt2_meta._remoteable_set_env({})
+        assert gpt2_meta.attn_implementation == "eager"
+        gpt2_meta._remoteable_set_env({"attn_implementation": "sdpa"})
+
+    def test_same_implementation_is_a_no_op(self, gpt2_meta, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            type(gpt2_meta._module), "set_attn_implementation",
+            lambda self, name, **kw: calls.append(name),
+        )
+        gpt2_meta._remoteable_set_env(
+            {"attn_implementation": gpt2_meta.attn_implementation}
+        )
+        assert calls == []
+
+    def test_unknown_implementation_is_refused(self, gpt2_meta):
+        with pytest.raises(ValueError, match="bogus"):
+            gpt2_meta._remoteable_set_env({"attn_implementation": "bogus"})
+        assert gpt2_meta.attn_implementation == "sdpa"
+
+    def test_a_switch_that_does_not_take_is_refused(self, gpt2_meta, monkeypatch):
+        # transformers only warns for a model that cannot switch dynamically;
+        # the user asked for weights and would silently get none.
+        monkeypatch.setattr(
+            type(gpt2_meta._module), "set_attn_implementation",
+            lambda self, name, **kw: None,
+        )
+        with pytest.raises(ValueError, match="cannot switch"):
+            gpt2_meta._remoteable_set_env({"attn_implementation": "eager"})
