@@ -134,8 +134,9 @@ def _get(
 class NdifStatus:
     """A view of NDIF's deployed models, with a formatted table on ``print``.
 
-    ``deployments`` maps repo id -> ``{model_class, repo_id, task, revision,
-    level, state}`` for each HOT/WARM model; ``status`` is the derived service
+    ``deployments`` maps repo id -> ``{model_class, repo_id, task,
+    trust_remote_code, revision, level, state}`` for each HOT/WARM model;
+    ``status`` is the derived service
     state. Indexing/iteration delegate to ``deployments`` for convenience.
     Replicas of one deployment fold into one entry (healthiest state wins). A
     checkpoint deployed under several tasks appears once per task, keyed
@@ -191,13 +192,14 @@ class NdifStatus:
                 value["model_class"],
                 value["repo_id"],
                 value.get("task") or "-",
+                "yes" if value.get("trust_remote_code") else "-",
                 value["revision"],
                 value["level"],
                 value["state"],
             ])
             colors.append(_STATE_COLOR.get(value["state"]))
         table = _render_table(
-            ["Model Class", "Repo ID", "Task", "Revision", "Level", "State"],
+            ["Model Class", "Repo ID", "Task", "Remote Code", "Revision", "Level", "State"],
             rows,
             colors,
         )
@@ -253,6 +255,9 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
             "model_class": model_class,
             "repo_id": value.get("repo_id", name),
             "task": value.get("task"),
+            # In the model key: a client reaches this deployment only when it
+            # builds the model with the same value.
+            "trust_remote_code": bool(value.get("trust_remote_code")),
             "revision": value.get("revision") or "main",
             "level": value.get("deployment_level"),
             "state": value.get("application_state", "UNHEALTHY"),
@@ -306,19 +311,23 @@ def ndif_status(raw: bool = False) -> Union[dict, NdifStatus]:
 
 
 def is_model_running(
-    repo_id: str, revision: str = "main", task: Optional[str] = None
+    repo_id: str,
+    revision: str = "main",
+    task: Optional[str] = None,
+    trust_remote_code: Optional[bool] = None,
 ) -> bool:
     """Whether ``repo_id`` (at ``revision``) is currently RUNNING on NDIF.
 
     Returns ``False`` if the service is unreachable. The repo id is canonicalized
-    via the Hub so different spellings match the deployed key. ``task`` narrows
-    the check to one deployment when the same checkpoint is up under several
-    pipeline tasks; unset, any task counts.
+    via the Hub so different spellings match the deployed key. ``task`` and
+    ``trust_remote_code`` narrow the check to one deployment, since both are
+    part of the model key; unset, any value counts.
 
     Examples:
         >>> import nnsight
         >>> nnsight.is_model_running("openai-community/gpt2")
         >>> nnsight.is_model_running("openai-community/gpt2", task="text-generation")
+        >>> nnsight.is_model_running("x/custom", trust_remote_code=True)
     """
     try:
         response = _get("/status")
@@ -334,6 +343,10 @@ def is_model_running(
             value.get("repo_id") == repo_id
             and (value.get("revision") or "main") == revision
             and (task is None or value.get("task") == task)
+            and (
+                trust_remote_code is None
+                or bool(value.get("trust_remote_code")) == trust_remote_code
+            )
             and value.get("application_state") == "RUNNING"
         ):
             return True
