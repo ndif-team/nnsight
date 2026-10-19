@@ -15,8 +15,7 @@ logger = logging.getLogger("nnsight")
 # so different spellings of the same model produce the same remote key).
 _ID_CACHE: dict[str, str] = {}
 
-# Configs already read, keyed by model_key — see `_config`. The key names
-# everything the read depends on (repo, revision, whether repo code may run).
+# Configs already read, keyed by model_key — see `_config`.
 _CONFIG_CACHE: dict[str, Any] = {}
 
 # How long to wait on the Hub when describing a checkpoint. These calls happen on
@@ -185,7 +184,11 @@ class HuggingFaceModel(Remotable):
         from transformers import AutoConfig
 
         check_tp_request(
-            AutoConfig.from_pretrained(repo_id, revision=self.revision),
+            AutoConfig.from_pretrained(
+                repo_id,
+                revision=self.revision,
+                trust_remote_code=kwargs.get("trust_remote_code", False),
+            ),
             tp_size,
             requested_expert_parallel(distributed)
         )
@@ -208,12 +211,7 @@ class HuggingFaceModel(Remotable):
             _ID_CACHE[self.repo_id] = HfApi().model_info(self.repo_id).id
 
         data = {"repo_id": _ID_CACHE[self.repo_id], "revision": self.revision}
-        # Whether the checkpoint's own code may run is part of its identity: a
-        # repo that ships its architecture loads a different module tree with
-        # it than without (or does not load at all), and a server deciding
-        # whether to run that code needs the request to say so. Only ever
-        # written when set, so the key of an ordinary checkpoint is unchanged
-        # and still names the deployment an older client minted.
+        # Omitted unless set, so an ordinary checkpoint's key is unchanged.
         if self.kwargs.get("trust_remote_code"):
             data["trust_remote_code"] = True
         return json.dumps(data)
@@ -310,10 +308,7 @@ class HuggingFaceModel(Remotable):
         process first asked", which is already true of every other read on this
         path.
 
-        Whether the repo's own configuration code may run comes from the key
-        (``trust_remote_code``), not from the caller: a checkpoint that defines
-        its architecture in its repo has no readable config without it, and the
-        key is where a server checks whether the caller may ask for that.
+        ``trust_remote_code`` comes from the key.
 
         Returns ``None`` when the repo has no readable config.
 

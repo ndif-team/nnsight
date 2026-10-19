@@ -343,7 +343,7 @@ Reading, editing, gradients, `skip`, `tracer.cache` and `rename=` work as on any
 
 ## Remote
 
-`TransformersModel` is remoteable (`trace(..., remote=True)`; see [docs/remote/](../remote/index.md)). `model.to_model_key()` is the repo id + revision, canonicalized via the Hub, plus the resolved pipeline task, so each task of a checkpoint is its own remote model and the server rebuilds the exact pipeline you traced. The deprecated aliases use this class's key with their pinned task, so they reach a deployment only when its task is `text-generation` / `image-text-to-text` respectively.
+`TransformersModel` is remoteable (`trace(..., remote=True)`; see [docs/remote/](../remote/index.md)). `model.to_model_key()` is the repo id + revision, canonicalized via the Hub, plus the resolved pipeline task and `trust_remote_code` when set (the fields are defined in [backends.md](../developing/backends.md#model-identity-to_model_key)), so each task of a checkpoint is its own remote model and the server rebuilds the exact pipeline you traced. The deprecated aliases use this class's key with their pinned task, so they reach a deployment only when its task is `text-generation` / `image-text-to-text` respectively.
 
 ## Related
 

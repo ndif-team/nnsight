@@ -491,10 +491,7 @@ class TestHuggingFace:
         assert rebuilt.revision == "abc123"
 
     def test_key_carries_trust_remote_code_only_when_set(self):
-        # Whether the checkpoint's own code may run is part of its identity:
-        # the server reads it off the key to decide whether this caller may
-        # deploy such a model. Omitted when unset, so an ordinary checkpoint's
-        # key is unchanged from what older clients mint.
+        # Omitted when unset, so an ordinary checkpoint's key is unchanged.
         from nnsight.modeling.huggingface import _ID_CACHE
 
         _ID_CACHE["openai-community/gpt2"] = "openai-community/gpt2"

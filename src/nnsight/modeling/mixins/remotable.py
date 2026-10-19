@@ -264,10 +264,6 @@ class Remotable(Meta):
         Elements are counted rather than bytes summed, because the size wanted is
         the size *as it will be held*, and that can be a dtype the meta build
         cannot use (a 4-bit quantization has no torch dtype to build with).
-
-        Everything the build depends on is in the key — including whether the
-        checkpoint's own code may run, for a wrapper whose key carries that —
-        so there is nothing to pass besides it.
         """
         model = cls.from_model_key(
             f"{to_import_path(cls)}:{model_key}", dispatch=False
@@ -339,16 +335,14 @@ class Remotable(Meta):
 
         Splits off the class import path, resolves it to the wrapper class, and
         defers to that class's `_remoteable_from_model_key` to rebuild from the
-        model-specific suffix. ``kwargs`` are forwarded to the reconstruction as
-        load options (device, dtype, dispatch); the key says what the model
-        *is*, and wins where the two overlap.
+        model-specific suffix. ``kwargs`` are forwarded to the reconstruction.
         """
         import_path, model_key = model_key.split(":", 1)
         model_cls: type[Remotable] = from_import_path(import_path)
         return model_cls._remoteable_from_model_key(model_key, **kwargs)
 
     @classmethod
-    def estimate_bytes(cls, model_key: str, dtype: str, **kwargs: Any) -> int:
+    def estimate_bytes(cls, model_key: str, dtype: str) -> int:
         """How much memory this checkpoint's weights need, without loading them.
 
         Resolves the wrapper class from the key the same way
@@ -365,12 +359,10 @@ class Remotable(Meta):
         """
         import_path, suffix = model_key.split(":", 1)
         model_cls: type[Remotable] = from_import_path(import_path)
-        return model_cls._remoteable_estimate_bytes(suffix, dtype, **kwargs)
+        return model_cls._remoteable_estimate_bytes(suffix, dtype)
 
     @classmethod
-    def describe_checkpoint(
-        cls, model_key: str, dtype: str, **kwargs: Any
-    ) -> "CheckpointInfo":
+    def describe_checkpoint(cls, model_key: str, dtype: str) -> "CheckpointInfo":
         """What this checkpoint is, without loading it.
 
         One call rather than one per question, because the questions a server
@@ -386,10 +378,10 @@ class Remotable(Meta):
         """
         import_path, suffix = model_key.split(":", 1)
         model_cls: type[Remotable] = from_import_path(import_path)
-        return model_cls._remoteable_describe_checkpoint(suffix, dtype, **kwargs)
+        return model_cls._remoteable_describe_checkpoint(suffix, dtype)
 
     @classmethod
-    def max_tp_size(cls, model_key: str, **kwargs: Any) -> Optional[int]:
+    def max_tp_size(cls, model_key: str) -> Optional[int]:
         """The largest number of ranks this checkpoint's weights split into.
 
         ``None`` when the model cannot be tensor-parallel at all. Otherwise the
@@ -400,4 +392,4 @@ class Remotable(Meta):
         """
         import_path, suffix = model_key.split(":", 1)
         model_cls: type[Remotable] = from_import_path(import_path)
-        return model_cls._remoteable_max_tp_size(suffix, **kwargs)
+        return model_cls._remoteable_max_tp_size(suffix)

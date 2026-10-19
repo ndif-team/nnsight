@@ -71,11 +71,7 @@ import-path part comes from `_remoteable_class()` (`remotable.py`), which a
 deprecated alias overrides to return the canonical class, so a model wrapped as
 `LanguageModel` and one wrapped as `TransformersModel` produce the *same* key. The
 suffix is JSON: `HuggingFaceModel` puts the canonical repo id and revision in it,
-plus `"trust_remote_code": true` when the model was built with that option (a
-checkpoint whose code may run is a different model from the same checkpoint
-whose code may not, and a server has to see the request to decide whether to
-honor it; the field is omitted when unset, so an ordinary checkpoint's key is the
-same one older clients mint). `TransformersModel` adds the resolved pipeline
+plus `"trust_remote_code": true` when set (omitted otherwise). `TransformersModel` adds the resolved pipeline
 `task`, so two tasks over one checkpoint (which can load different architecture
 classes) are two deployments and the server rebuilds the pipeline from the key
 rather than re-inferring it. The server reconstructs with `from_model_key`, which
