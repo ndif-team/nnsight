@@ -166,7 +166,17 @@ class TestStatusGrouping:
         assert "openai-community/gpt2" in s
         assert len(s) == 1
         assert s["openai-community/gpt2"]["state"] == "RUNNING"
+        assert s["openai-community/gpt2"]["hot_replicas"] == 2
         assert s.status is ndif.NdifStatus.Status.UP
+
+    def test_hot_replicas_counts_hot_only(self, monkeypatch):
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TG_KEY: _replica(_TG_KEY, "RUNNING", level="HOT"),
+            "b:ModelActor:" + _TG_KEY: _replica(_TG_KEY, "NOT_STARTED", level="WARM"),
+        })
+        s = nnsight.status()
+        assert s["openai-community/gpt2"]["hot_replicas"] == 1
+        assert "HOT Replicas" in str(s)
 
     def test_two_tasks_key_per_task(self, monkeypatch):
         self._serve(monkeypatch, {

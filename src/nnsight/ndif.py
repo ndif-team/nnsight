@@ -135,10 +135,11 @@ class NdifStatus:
     """A view of NDIF's deployed models, with a formatted table on ``print``.
 
     ``deployments`` maps repo id -> ``{model_class, repo_id, task,
-    trust_remote_code, revision, level, state}`` for each HOT/WARM model;
-    ``status`` is the derived service
+    trust_remote_code, revision, level, state, hot_replicas}`` for each HOT/WARM
+    model; ``status`` is the derived service
     state. Indexing/iteration delegate to ``deployments`` for convenience.
-    Replicas of one deployment fold into one entry (healthiest state wins). A
+    Replicas of one deployment fold into one entry (healthiest state wins;
+    ``hot_replicas`` counts the HOT ones). A
     checkpoint deployed under several tasks appears once per task, keyed
     ``"repo_id (task)"`` — with the revision joining the key when the tasks
     tie, and ``trust_remote_code`` when those tie too.
@@ -196,10 +197,11 @@ class NdifStatus:
                 value["revision"],
                 value["level"],
                 value["state"],
+                value.get("hot_replicas", 0),
             ])
             colors.append(_STATE_COLOR.get(value["state"]))
         table = _render_table(
-            ["Model Class", "Repo ID", "Task", "Remote Code", "Revision", "Level", "State"],
+            ["Model Class", "Repo ID", "Task", "Remote Code", "Revision", "Level", "State", "HOT Replicas"],
             rows,
             colors,
         )
@@ -244,6 +246,7 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
     level_rank = {"HOT": 0, "WARM": 1}
     state_rank = {"RUNNING": 0, "DEPLOYING": 1, "NOT_STARTED": 2, "UNHEALTHY": 3}
     groups: dict = {}
+    hot_replicas: dict = {}
     for name, value in response.get("deployments", {}).items():
         if value.get("deployment_level") not in _DEPLOYED_LEVELS:
             continue  # deployed models only (skip COLD downloaded)
@@ -262,6 +265,7 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
             "level": value.get("deployment_level"),
             "state": value.get("application_state", "UNHEALTHY"),
         }
+        hot_replicas[model_key] = hot_replicas.get(model_key, 0) + (entry["level"] == "HOT")
         held = groups.get(model_key)
         if held is None:
             groups[model_key] = entry
@@ -273,6 +277,8 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
             state_rank.get(held["state"], 9),
         ):
             groups[model_key] = entry
+    for model_key, entry in groups.items():
+        entry["hot_replicas"] = hot_replicas[model_key]
 
     # Keyed by repo id for the common case (`"gpt2" in nnsight.status()`). Only
     # when several *distinct deployments* share a repo does the task join the
