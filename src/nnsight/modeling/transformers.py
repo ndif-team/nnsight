@@ -699,16 +699,36 @@ class TransformersModel(HuggingFaceModel):
         """Apply a per-request environment on the server side.
 
         The base model is identified by the model key; this applies what is
-        layered on it. See `peft.swap` for the adapter transitions and
-        `set_attn_implementation` for the attention one. A request with no
-        attention implementation at all came from an older client, and leaves
-        the model running whatever it was.
+        layered on it. See `peft.swap` for the adapter transitions. The
+        attention implementation is switched in place when it differs from
+        what the model runs: the module tree is unchanged, and the attention
+        modules pick the implementation up from the config on their next
+        forward. A request with no implementation at all came from an older
+        client, and leaves the model running whatever it was.
+
+        The switch is checked rather than trusted: transformers only warns
+        when a model cannot switch dynamically (one not written against its
+        attention interface), and a request for ``"eager"`` that silently
+        stays on ``"sdpa"`` is exactly the run that returns no attention
+        weights without saying why.
+
+        Raises:
+            ValueError: for an implementation transformers does not know, or
+                one this model cannot switch to.
         """
         env = env or {}
         peft.swap(self, env.get("peft"))
         requested = env.get("attn_implementation")
-        if requested is not None:
-            self.set_attn_implementation(requested)
+        if requested is None or requested == self.attn_implementation:
+            return
+        self._module.set_attn_implementation(requested)
+        if self.attn_implementation != requested:
+            raise ValueError(
+                f"{type(self._module).__name__} cannot switch its attention "
+                f"implementation to {requested!r}: it does not follow "
+                "transformers' attention interface, so it keeps "
+                f"{self.attn_implementation!r}."
+            )
 
     @property
     def attn_implementation(self) -> Optional[str]:
@@ -716,40 +736,9 @@ class TransformersModel(HuggingFaceModel):
 
         What transformers resolved the ``attn_implementation=`` kwarg (or its
         absence) to, so it is set from construction on, meta model included.
+        Sent with every remote request (`_remoteable_get_env`).
         """
         return getattr(self._module.config, "_attn_implementation", None)
-
-    def set_attn_implementation(self, attn_implementation: str) -> None:
-        """Switch the attention implementation in place.
-
-        The post-hoc form of the ``attn_implementation=`` kwarg: the module tree
-        is unchanged, and the attention modules pick the implementation up from
-        the config on their next forward. A request for what the model already
-        runs is a no-op. Also what a remote request applies server-side
-        (`_remoteable_set_env`), so the server runs the implementation the
-        client loaded with — ``"eager"`` when attention weights are wanted.
-
-        This shadows ``PreTrainedModel.set_attn_implementation``, which the
-        envoy would otherwise reach by fallthrough, to check that the change
-        took: transformers only warns when a model cannot switch dynamically
-        (one not written against its attention interface), and a request for
-        ``"eager"`` that silently stays on ``"sdpa"`` is exactly the run that
-        returns no attention weights without saying why.
-
-        Raises:
-            ValueError: for an implementation transformers does not know, or
-                one this model cannot switch to.
-        """
-        if attn_implementation == self.attn_implementation:
-            return
-        self._module.set_attn_implementation(attn_implementation)
-        if self.attn_implementation != attn_implementation:
-            raise ValueError(
-                f"{type(self._module).__name__} cannot switch its attention "
-                f"implementation to {attn_implementation!r}: it does not follow "
-                "transformers' attention interface, so it keeps "
-                f"{self.attn_implementation!r}."
-            )
 
     def load_adapter(self, peft_id: Optional[str]) -> None:
         """Attach a PEFT adapter — the post-hoc form of the ``peft=`` kwarg.

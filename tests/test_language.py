@@ -1790,10 +1790,10 @@ class TestAttnImplementation:
     def test_set_env_from_an_older_client_leaves_it(self, gpt2_meta):
         # No attention key at all is a client that predates it, not a request
         # for the default.
-        gpt2_meta.set_attn_implementation("eager")
+        gpt2_meta._remoteable_set_env({"attn_implementation": "eager"})
         gpt2_meta._remoteable_set_env({})
         assert gpt2_meta.attn_implementation == "eager"
-        gpt2_meta.set_attn_implementation("sdpa")
+        gpt2_meta._remoteable_set_env({"attn_implementation": "sdpa"})
 
     def test_same_implementation_is_a_no_op(self, gpt2_meta, monkeypatch):
         calls = []
@@ -1801,12 +1801,14 @@ class TestAttnImplementation:
             type(gpt2_meta._module), "set_attn_implementation",
             lambda self, name, **kw: calls.append(name),
         )
-        gpt2_meta.set_attn_implementation(gpt2_meta.attn_implementation)
+        gpt2_meta._remoteable_set_env(
+            {"attn_implementation": gpt2_meta.attn_implementation}
+        )
         assert calls == []
 
     def test_unknown_implementation_is_refused(self, gpt2_meta):
         with pytest.raises(ValueError, match="bogus"):
-            gpt2_meta.set_attn_implementation("bogus")
+            gpt2_meta._remoteable_set_env({"attn_implementation": "bogus"})
         assert gpt2_meta.attn_implementation == "sdpa"
 
     def test_a_switch_that_does_not_take_is_refused(self, gpt2_meta, monkeypatch):
@@ -1817,4 +1819,4 @@ class TestAttnImplementation:
             lambda self, name, **kw: None,
         )
         with pytest.raises(ValueError, match="cannot switch"):
-            gpt2_meta.set_attn_implementation("eager")
+            gpt2_meta._remoteable_set_env({"attn_implementation": "eager"})
