@@ -74,7 +74,8 @@ suffix is JSON: `HuggingFaceModel` puts the canonical repo id and revision in it
 plus `"trust_remote_code": true` when set (omitted otherwise). `TransformersModel` adds the resolved pipeline
 `task`, so two tasks over one checkpoint (which can load different architecture
 classes) are two deployments and the server rebuilds the pipeline from the key
-rather than re-inferring it. The server reconstructs with `from_model_key`, which
+rather than re-inferring it. A `VLLM` key's suffix is the bare repo id and carries
+no fields. The server reconstructs with `from_model_key`, which
 splats the key's fields into the constructor. `TestModelKey` in
 `tests/test_serialization.py` covers the key's shape.
 

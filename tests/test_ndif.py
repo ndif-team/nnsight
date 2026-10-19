@@ -188,6 +188,16 @@ class TestStatusGrouping:
         assert "openai-community/gpt2 (text-generation, main)" in s
         assert "openai-community/gpt2 (text-generation, abc123)" in s
 
+    def test_trust_twins_key_by_the_flag(self, monkeypatch):
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TG_KEY: _replica(_TG_KEY),
+            "b:ModelActor:" + _TRC_KEY: _replica(_TRC_KEY, trust_remote_code=True),
+        })
+        s = nnsight.status()
+        assert len(s) == 2
+        assert s["openai-community/gpt2 (text-generation, main, trust_remote_code)"]["trust_remote_code"]
+        assert "openai-community/gpt2 (text-generation, main, no trust_remote_code)" in s
+
     def test_entries_carry_trust_remote_code_and_the_table_shows_it(self, monkeypatch):
         self._serve(monkeypatch, {
             "a:ModelActor:" + _TRC_KEY: _replica(_TRC_KEY, trust_remote_code=True),

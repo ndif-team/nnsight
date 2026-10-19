@@ -141,7 +141,7 @@ class NdifStatus:
     Replicas of one deployment fold into one entry (healthiest state wins). A
     checkpoint deployed under several tasks appears once per task, keyed
     ``"repo_id (task)"`` — with the revision joining the key when the tasks
-    tie (several revisions under one task).
+    tie, and ``trust_remote_code`` when those tie too.
     """
 
     class Status(str, Enum):
@@ -275,9 +275,9 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
             groups[model_key] = entry
 
     # Keyed by repo id for the common case (`"gpt2" in nnsight.status()`). Only
-    # when several *distinct deployments* share a repo — the same checkpoint
-    # under several tasks, or several revisions — does the task join the dict
-    # key (plus the revision, when the tasks tie) to keep every entry visible.
+    # when several *distinct deployments* share a repo does the task join the
+    # dict key, then the revision when the tasks tie, then trust_remote_code
+    # when those tie too, so every entry stays visible.
     by_repo: dict = {}
     for entry in groups.values():
         by_repo.setdefault(entry["repo_id"], []).append(entry)
@@ -288,11 +288,16 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
             deployments[repo_id] = repo_entries[0]
             continue
         tasks = [entry["task"] for entry in repo_entries]
+        pairs = [(entry["task"], entry["revision"]) for entry in repo_entries]
         for entry in repo_entries:
-            suffix = entry["task"] or "?"
+            parts = [entry["task"] or "?"]
             if tasks.count(entry["task"]) > 1:
-                suffix = f"{suffix}, {entry['revision']}"
-            deployments[f"{repo_id} ({suffix})"] = entry
+                parts.append(entry["revision"])
+            if pairs.count((entry["task"], entry["revision"])) > 1:
+                parts.append(
+                    "trust_remote_code" if entry["trust_remote_code"] else "no trust_remote_code"
+                )
+            deployments[f"{repo_id} ({', '.join(parts)})"] = entry
     return NdifStatus(deployments)
 
 

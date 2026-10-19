@@ -93,7 +93,7 @@ TransformersModel(
 | `dispatch` | `True` loads real weights during `__init__`; `False` (default) builds the architecture on the `meta` device and loads weights lazily on the first `trace`/`generate`/`pipe`. |
 | `dtype` | Forwarded. A torch dtype, or a quantization name (`"nf4"`, `"int8"`, ...) — see [quantization.md](quantization.md). The transformers 4 spelling `torch_dtype` is still accepted. |
 | `device` | The single device to load onto (`"cpu"`, `"cuda:1"`, `0`). Defaults to the first accelerator. See [Choosing a device](#choosing-a-device). |
-| `device_map`, `trust_remote_code`, `attn_implementation`, ... | Forwarded to the pipeline / `from_pretrained`. `device_map` spreads a model across devices; a single-device map such as `"cpu"` is overridden by the pipeline's `device`. |
+| `device_map`, `trust_remote_code`, `attn_implementation`, ... | Forwarded to the pipeline / `from_pretrained`; `trust_remote_code` also joins the remote model key (see [Remote](#remote)). `device_map` spreads a model across devices; a single-device map such as `"cpu"` is overridden by the pipeline's `device`. |
 | `config` | A config object the model is built from in place of the checkpoint's own, on the meta build and the real load alike. Keyword overrides are not merged into it, as with `from_pretrained`. |
 | `rename` | Module-path aliases (see [rename-modules.md](../usage/rename-modules.md)). |
 
