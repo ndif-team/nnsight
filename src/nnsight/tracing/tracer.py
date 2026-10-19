@@ -51,7 +51,15 @@ class ExitTracingException(Exception):
     Raised by the installed trace function the moment execution reaches the
     block, and caught in `Tracer.__exit__`, which then runs the captured
     code through the backend instead. Not an error — never surfaces to the user.
+
+    Carries the trace function the skip hook displaced (a debugger, coverage),
+    since raising from a trace hook makes Python clear the thread's slot;
+    `Tracer.__exit__` puts it back.
     """
+
+    def __init__(self, displaced: Any = None) -> None:
+        super().__init__()
+        self.displaced = displaced
 
 
 class WithBlockNotFoundError(Exception):
@@ -122,8 +130,8 @@ def skip_context(tracer: Tracer) -> None:
     [`ExitTracingException`][nnsight.tracing.tracer.ExitTracingException] as soon as the body is about to execute. The
     global ``sys.settrace`` is set to a no-op so Python actually delivers
     per-frame trace events (it won't call ``f_trace`` otherwise). Whatever tracer
-    the thread had — a debugger, coverage — is kept on ``tracer`` for
-    `Tracer.__exit__` to hand back.
+    the thread had — a debugger, coverage — rides on the raised
+    `ExitTracingException` for `Tracer.__exit__` to hand back.
 
     Python delivers those events per *line*, so the body has to start on a line of
     its own for the hook to reach it first. A body written on the ``with`` line
@@ -159,13 +167,14 @@ def skip_context(tracer: Tracer) -> None:
             "`try`, or move the `try` outside the block."
         )
 
+    displaced = sys.gettrace()
+
     def skip(frame: FrameType, event: str, arg: Any) -> Any:
         if frame.f_lineno < body:
             return skip  # still in the header; stay armed
-        raise ExitTracingException()
+        raise ExitTracingException(displaced)
 
     frame = sys._getframe(2)
-    tracer._displaced_trace = sys.gettrace()
     sys.settrace(lambda *args, **kwargs: None)
     frame.f_trace = skip
 
@@ -581,11 +590,10 @@ class Tracer:
         internals are dropped, leaving the user's own frames (across any files).
         Any *other* exception from the body propagates normally (returns ``False``).
         """
-        # The skip hook's raise has already cleared the thread's tracer; put back
-        # the one it displaced, and drop the reference before the backend pickles
-        # this tracer (a debugger's trace function doesn't travel).
-        if hasattr(self, "_displaced_trace"):
-            sys.settrace(self.__dict__.pop("_displaced_trace"))
+        # Raising from the skip hook made Python clear the thread's tracer; put
+        # back the one it displaced before the backend runs the body.
+        if exc_type is ExitTracingException:
+            sys.settrace(exc_value.displaced)
         if exc_type is ExitTracingException or exc_type is None:
 
             inc()
