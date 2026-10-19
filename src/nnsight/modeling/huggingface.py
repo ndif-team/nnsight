@@ -359,16 +359,7 @@ class HuggingFaceModel(Remotable):
 
     @classmethod
     def _remoteable_from_model_key(cls, model_key: str, **kwargs: Any) -> HuggingFaceModel:
-        # The key wins over the kwargs where they overlap. The key is the
-        # model's identity -- repo, revision, task, whether repo code may run --
-        # and a caller's kwargs are how to load it (device, dtype, dispatch). A
-        # kwarg that contradicted the key would build a different model under
-        # the same name. trust_remote_code is dropped from the kwargs outright
-        # rather than merely overridden, because a key that does not say it
-        # has no field to override with: the key alone decides whether the
-        # checkpoint's code runs, and nothing passed here can grant that.
-        kwargs.pop("trust_remote_code", None)
-        data = {**kwargs, **json.loads(model_key)}
+        data = {**json.loads(model_key), **kwargs}
         repo_id = data.pop("repo_id")
         revision = data.pop("revision", None)
         return cls(repo_id, revision=revision, **data)

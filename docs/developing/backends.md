@@ -78,10 +78,9 @@ honor it; the field is omitted when unset, so an ordinary checkpoint's key is th
 same one older clients mint). `TransformersModel` adds the resolved pipeline
 `task`, so two tasks over one checkpoint (which can load different architecture
 classes) are two deployments and the server rebuilds the pipeline from the key
-rather than re-inferring it. The server reconstructs with `from_model_key`, and
-the key wins over any kwarg it overlaps with: nothing passed at rebuild can make a
-key that does not say `trust_remote_code` load as if it did. `TestModelKey` in
-`tests/test_serialization.py` asserts this.
+rather than re-inferring it. The server reconstructs with `from_model_key`, which
+splats the key's fields into the constructor. `TestModelKey` in
+`tests/test_serialization.py` covers the key's shape.
 
 ### RemoteBackend — NDIF over one websocket
 
