@@ -785,6 +785,23 @@ class TestModelKey:
         other = TransformersModel("openai-community/gpt2", task="feature-extraction")
         assert other.to_model_key() != gpt2.to_model_key()
 
+    def test_key_carries_trust_remote_code_when_set(self, gpt2):
+        # A checkpoint whose own code may run is a different deployment from
+        # the same checkpoint whose code may not: the server reads the flag off
+        # the key to decide whether this caller may deploy it. Omitted when
+        # unset, so an ordinary model's key is unchanged.
+        import json
+
+        _seed_id_cache()
+        from nnsight.modeling.transformers import TransformersModel
+
+        trusting = TransformersModel("openai-community/gpt2", trust_remote_code=True)
+        suffix = json.loads(trusting.to_model_key().split(":", 1)[1])
+        assert suffix["trust_remote_code"] is True
+        assert suffix["task"] == "text-generation"
+        assert "trust_remote_code" not in json.loads(gpt2.to_model_key().split(":", 1)[1])
+        assert trusting.to_model_key() != gpt2.to_model_key()
+
     def test_key_is_stable_across_rebuild(self, gpt2):
         # mint -> from_model_key -> re-mint must be a fixed point: the server
         # rebuilds from the key and anything it re-mints (status, logs) must

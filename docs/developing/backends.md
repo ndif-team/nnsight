@@ -71,10 +71,16 @@ import-path part comes from `_remoteable_class()` (`remotable.py`), which a
 deprecated alias overrides to return the canonical class, so a model wrapped as
 `LanguageModel` and one wrapped as `TransformersModel` produce the *same* key. The
 suffix is JSON: `HuggingFaceModel` puts the canonical repo id and revision in it,
-and `TransformersModel` adds the resolved pipeline `task`, so two tasks over one
-checkpoint (which can load different architecture classes) are two deployments and
-the server rebuilds the pipeline from the key rather than re-inferring it. The
-server reconstructs with `from_model_key`; `TestModelKey` in
+plus `"trust_remote_code": true` when the model was built with that option (a
+checkpoint whose code may run is a different model from the same checkpoint
+whose code may not, and a server has to see the request to decide whether to
+honor it; the field is omitted when unset, so an ordinary checkpoint's key is the
+same one older clients mint). `TransformersModel` adds the resolved pipeline
+`task`, so two tasks over one checkpoint (which can load different architecture
+classes) are two deployments and the server rebuilds the pipeline from the key
+rather than re-inferring it. The server reconstructs with `from_model_key`, and
+the key wins over any kwarg it overlaps with: nothing passed at rebuild can make a
+key that does not say `trust_remote_code` load as if it did. `TestModelKey` in
 `tests/test_serialization.py` asserts this.
 
 ### RemoteBackend — NDIF over one websocket

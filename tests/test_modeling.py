@@ -490,6 +490,53 @@ class TestHuggingFace:
         assert rebuilt.repo_id == "openai-community/gpt2"
         assert rebuilt.revision == "abc123"
 
+    def test_key_carries_trust_remote_code_only_when_set(self):
+        # Whether the checkpoint's own code may run is part of its identity:
+        # the server reads it off the key to decide whether this caller may
+        # deploy such a model. Omitted when unset, so an ordinary checkpoint's
+        # key is unchanged from what older clients mint.
+        from nnsight.modeling.huggingface import _ID_CACHE
+
+        _ID_CACHE["openai-community/gpt2"] = "openai-community/gpt2"
+        plain = FakeHF("openai-community/gpt2")
+        trusting = FakeHF("openai-community/gpt2", trust_remote_code=True)
+        declined = FakeHF("openai-community/gpt2", trust_remote_code=False)
+
+        assert "trust_remote_code" not in json.loads(plain._remoteable_model_key())
+        assert json.loads(declined._remoteable_model_key()) == json.loads(
+            plain._remoteable_model_key()
+        )
+        assert json.loads(trusting._remoteable_model_key()) == {
+            "repo_id": "openai-community/gpt2",
+            "revision": None,
+            "trust_remote_code": True,
+        }
+        assert trusting.to_model_key() != plain.to_model_key()
+
+    def test_trust_remote_code_round_trips_and_the_key_wins(self):
+        # The rebuilt model loads with the flag the key carries, as a load
+        # kwarg (where `_load` reads it); and a kwarg at rebuild cannot
+        # contradict the key -- the key is the identity, kwargs are how to
+        # load it.
+        from nnsight.modeling.huggingface import _ID_CACHE
+
+        _ID_CACHE["openai-community/gpt2"] = "openai-community/gpt2"
+        key = FakeHF("openai-community/gpt2", trust_remote_code=True).to_model_key()
+
+        rebuilt = FakeHF.from_model_key(key)
+        assert rebuilt.kwargs["trust_remote_code"] is True
+        assert rebuilt.to_model_key() == key
+
+        contradicted = FakeHF.from_model_key(key, trust_remote_code=False)
+        assert contradicted.kwargs["trust_remote_code"] is True
+
+        plain_key = FakeHF("openai-community/gpt2").to_model_key()
+        escalated = FakeHF.from_model_key(plain_key, trust_remote_code=True)
+        assert "trust_remote_code" not in json.loads(
+            escalated._remoteable_model_key()
+        ), "a rebuild kwarg must not grant what the key does not say"
+        assert not escalated.kwargs.get("trust_remote_code")
+
     def test_module_passthrough(self):
         # A bare module: no repo id, treated as already-loaded.
         model = HuggingFaceModel(nn.Linear(8, 8))

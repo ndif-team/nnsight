@@ -15,8 +15,9 @@ logger = logging.getLogger("nnsight")
 # so different spellings of the same model produce the same remote key).
 _ID_CACHE: dict[str, str] = {}
 
-# Configs already read, keyed by (model_key, trust_remote_code) — see `_config`.
-_CONFIG_CACHE: dict[tuple, Any] = {}
+# Configs already read, keyed by model_key — see `_config`. The key names
+# everything the read depends on (repo, revision, whether repo code may run).
+_CONFIG_CACHE: dict[str, Any] = {}
 
 # How long to wait on the Hub when describing a checkpoint. These calls happen on
 # a placement path — a server deciding where a model goes, before it loads
@@ -206,14 +207,19 @@ class HuggingFaceModel(Remotable):
 
             _ID_CACHE[self.repo_id] = HfApi().model_info(self.repo_id).id
 
-        return json.dumps(
-            {"repo_id": _ID_CACHE[self.repo_id], "revision": self.revision}
-        )
+        data = {"repo_id": _ID_CACHE[self.repo_id], "revision": self.revision}
+        # Whether the checkpoint's own code may run is part of its identity: a
+        # repo that ships its architecture loads a different module tree with
+        # it than without (or does not load at all), and a server deciding
+        # whether to run that code needs the request to say so. Only ever
+        # written when set, so the key of an ordinary checkpoint is unchanged
+        # and still names the deployment an older client minted.
+        if self.kwargs.get("trust_remote_code"):
+            data["trust_remote_code"] = True
+        return json.dumps(data)
 
     @classmethod
-    def _remoteable_estimate_bytes(
-        cls, model_key: str, dtype: str, trust_remote_code: bool = False
-    ) -> int:
+    def _remoteable_estimate_bytes(cls, model_key: str, dtype: str) -> int:
         """Size the weights from the Hub's parameter count.
 
         The size half of
@@ -222,9 +228,7 @@ class HuggingFaceModel(Remotable):
         two must not be able to disagree about how big a model is, since one of
         them decides where it goes.
         """
-        return cls._remoteable_describe_checkpoint(
-            model_key, dtype, trust_remote_code=trust_remote_code
-        ).size_bytes
+        return cls._remoteable_describe_checkpoint(model_key, dtype).size_bytes
 
     @staticmethod
     def _hub_parameter_count(repo_id: str, revision: Optional[str]) -> Optional[int]:
@@ -253,7 +257,7 @@ class HuggingFaceModel(Remotable):
 
     @classmethod
     def _remoteable_describe_checkpoint(
-        cls, model_key: str, dtype: str, trust_remote_code: bool = False
+        cls, model_key: str, dtype: str
     ) -> "CheckpointInfo":
         """Describe the repo from its metadata: one config read, one Hub record.
 
@@ -283,22 +287,20 @@ class HuggingFaceModel(Remotable):
                 f"No parameter count published for {repo_id!r}; sizing it by "
                 "building the architecture instead"
             )
-            size_bytes = super()._remoteable_estimate_bytes(
-                model_key, dtype, trust_remote_code=trust_remote_code
-            )
+            size_bytes = super()._remoteable_estimate_bytes(model_key, dtype)
         else:
             size_bytes = math.ceil(parameters * bytes_per_element(dtype))
 
         return CheckpointInfo(
             size_bytes=size_bytes,
             n_params=parameters,
-            config=cls._config(model_key, trust_remote_code),
+            config=cls._config(model_key),
             revision=revision,
         )
 
     @classmethod
-    def _config(cls, model_key: str, trust_remote_code: bool) -> Optional[Any]:
-        """The repo's config, fetched at most once per (key, trust) pair.
+    def _config(cls, model_key: str) -> Optional[Any]:
+        """The repo's config, fetched at most once per key.
 
         Memoized because several of the questions a server asks before placing a
         model are all answered from this one object — its size, how many ways it
@@ -308,14 +310,18 @@ class HuggingFaceModel(Remotable):
         process first asked", which is already true of every other read on this
         path.
 
+        Whether the repo's own configuration code may run comes from the key
+        (``trust_remote_code``), not from the caller: a checkpoint that defines
+        its architecture in its repo has no readable config without it, and the
+        key is where a server checks whether the caller may ask for that.
+
         Returns ``None`` when the repo has no readable config.
 
         Raises:
             CheckpointUnreachable: if the Hub could not be read at all.
         """
-        cache_key = (model_key, trust_remote_code)
-        if cache_key in _CONFIG_CACHE:
-            return _CONFIG_CACHE[cache_key]
+        if model_key in _CONFIG_CACHE:
+            return _CONFIG_CACHE[model_key]
 
         from transformers import AutoConfig
 
@@ -324,7 +330,7 @@ class HuggingFaceModel(Remotable):
             config = AutoConfig.from_pretrained(
                 data.get("repo_id"),
                 revision=data.get("revision"),
-                trust_remote_code=trust_remote_code,
+                trust_remote_code=data.get("trust_remote_code", False),
             )
         except Exception as error:
             if _unreachable(error):
@@ -332,16 +338,14 @@ class HuggingFaceModel(Remotable):
                     f"could not read a config for {data.get('repo_id')!r}: {error}"
                 ) from error
             logger.debug(f"Could not read a config for {data.get('repo_id')!r}")
-            _CONFIG_CACHE[cache_key] = None
+            _CONFIG_CACHE[model_key] = None
             return None
 
-        _CONFIG_CACHE[cache_key] = config
+        _CONFIG_CACHE[model_key] = config
         return config
 
     @classmethod
-    def _remoteable_max_tp_size(
-        cls, model_key: str, trust_remote_code: bool = False
-    ) -> Optional[int]:
+    def _remoteable_max_tp_size(cls, model_key: str) -> Optional[int]:
         """The largest tensor-parallel degree, read from the checkpoint's config.
 
         Config only — no weights, no architecture — since the sharding plan and
@@ -350,12 +354,21 @@ class HuggingFaceModel(Remotable):
         """
         from .tp import max_tp_size
 
-        config = cls._config(model_key, trust_remote_code)
+        config = cls._config(model_key)
         return max_tp_size(config) if config is not None else None
 
     @classmethod
     def _remoteable_from_model_key(cls, model_key: str, **kwargs: Any) -> HuggingFaceModel:
-        data = {**json.loads(model_key), **kwargs}
+        # The key wins over the kwargs where they overlap. The key is the
+        # model's identity -- repo, revision, task, whether repo code may run --
+        # and a caller's kwargs are how to load it (device, dtype, dispatch). A
+        # kwarg that contradicted the key would build a different model under
+        # the same name. trust_remote_code is dropped from the kwargs outright
+        # rather than merely overridden, because a key that does not say it
+        # has no field to override with: the key alone decides whether the
+        # checkpoint's code runs, and nothing passed here can grant that.
+        kwargs.pop("trust_remote_code", None)
+        data = {**kwargs, **json.loads(model_key)}
         repo_id = data.pop("repo_id")
         revision = data.pop("revision", None)
         return cls(repo_id, revision=revision, **data)

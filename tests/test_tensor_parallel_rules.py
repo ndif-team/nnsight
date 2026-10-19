@@ -748,9 +748,9 @@ class TestConfigIsReadOnce:
         monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", counted)
 
         key = '{"repo_id": "x", "revision": null}'
-        hf._CONFIG_CACHE.pop((key, False), None)
-        first = hf.HuggingFaceModel._config(key, False)
-        second = hf.HuggingFaceModel._config(key, False)
+        hf._CONFIG_CACHE.pop(key, None)
+        first = hf.HuggingFaceModel._config(key)
+        second = hf.HuggingFaceModel._config(key)
 
         assert first is second
         assert len(calls) == 1, f"the config was fetched {len(calls)} times"
@@ -771,7 +771,7 @@ class TestConfigIsReadOnce:
             return Config()
 
         key = '{"repo_id": "shared", "revision": null}'
-        hf._CONFIG_CACHE.pop((key, False), None)
+        hf._CONFIG_CACHE.pop(key, None)
 
         import transformers
 
@@ -830,7 +830,7 @@ class TestDescribeCheckpoint:
         import nnsight.modeling.huggingface as hf
 
         key = '{"repo_id": "r", "revision": "abc123"}'
-        hf._CONFIG_CACHE[(key, False)] = None
+        hf._CONFIG_CACHE[key] = None
         monkeypatch.setattr(
             hf.HuggingFaceModel, "_hub_parameter_count", staticmethod(lambda *a: 1_000)
         )
@@ -847,7 +847,7 @@ class TestDescribeCheckpoint:
         import nnsight.modeling.huggingface as hf
 
         key = '{"repo_id": "r2", "revision": null}'
-        hf._CONFIG_CACHE[(key, False)] = None
+        hf._CONFIG_CACHE[key] = None
         monkeypatch.setattr(
             hf.HuggingFaceModel, "_hub_parameter_count", staticmethod(lambda *a: 7_777)
         )
