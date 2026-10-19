@@ -93,7 +93,7 @@ TransformersModel(
 | `dispatch` | `True` loads real weights during `__init__`; `False` (default) builds the architecture on the `meta` device and loads weights lazily on the first `trace`/`generate`/`pipe`. |
 | `dtype` | Forwarded. A torch dtype, or a quantization name (`"nf4"`, `"int8"`, ...) — see [quantization.md](quantization.md). The transformers 4 spelling `torch_dtype` is still accepted. |
 | `device` | The single device to load onto (`"cpu"`, `"cuda:1"`, `0`). Defaults to the first accelerator. See [Choosing a device](#choosing-a-device). |
-| `device_map`, `trust_remote_code`, `attn_implementation`, ... | Forwarded to the pipeline / `from_pretrained`; `trust_remote_code` also joins the remote model key (see [Remote](#remote)). `device_map` spreads a model across devices; a single-device map such as `"cpu"` is overridden by the pipeline's `device`. |
+| `device_map`, `trust_remote_code`, `attn_implementation`, ... | Forwarded to the pipeline / `from_pretrained`; `trust_remote_code` also joins the remote model key (see [Remote](#remote)). `device_map` spreads a model across devices; a single-device map such as `"cpu"` is overridden by the pipeline's `device`. `attn_implementation` (`"eager"` when attention weights are wanted) can be switched after construction with `model.set_attn_implementation(name)`, is read back as `model.attn_implementation`, and travels with every remote request so the server runs the same one (see [Remote](#remote)). |
 | `config` | A config object the model is built from in place of the checkpoint's own, on the meta build and the real load alike. Keyword overrides are not merged into it, as with `from_pretrained`. |
 | `rename` | Module-path aliases (see [rename-modules.md](../usage/rename-modules.md)). |
 
@@ -344,6 +344,8 @@ Reading, editing, gradients, `skip`, `tracer.cache` and `rename=` work as on any
 ## Remote
 
 `TransformersModel` is remoteable (`trace(..., remote=True)`; see [docs/remote/](../remote/index.md)). `model.to_model_key()` is the repo id + revision, canonicalized via the Hub, plus the resolved pipeline task and `trust_remote_code` when set (the fields are defined in [backends.md](../developing/backends.md#model-identity-to_model_key)), so each task of a checkpoint is its own remote model and the server rebuilds the exact pipeline you traced. The deprecated aliases use this class's key with their pinned task, so they reach a deployment only when its task is `text-generation` / `image-text-to-text` respectively.
+
+A request also carries what is layered on the base model, and the server applies it before running: the PEFT adapter (`peft=`), when there is one, and the attention implementation. The implementation is always sent, as the model resolved it locally (`model.attn_implementation`), because the server's model is shared with other callers: the previous request may have switched it to `"eager"`, and a request that said nothing would otherwise run with that. So a model loaded with `attn_implementation="eager"` gets attention weights out of `attn.output[1]` remotely as it does locally, and one loaded with the default gets the default. A model that cannot switch dynamically (one not written against transformers' attention interface) refuses the request rather than silently keeping its implementation.
 
 ## Related
 
