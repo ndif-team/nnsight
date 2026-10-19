@@ -109,7 +109,7 @@ Imported from the top-level `nnsight` package.
 | `nnsight.register` | `nnsight.register(module \| "name")` | Ship a local module's source with remote requests (cloudpickle by value). |
 | `nnsight.status` | `nnsight.status(raw=False)` | Query NDIF; `print()` shows deployed models and state. |
 | `nnsight.ndif_status` | `nnsight.ndif_status(raw=False)` | **Deprecated** alias for `status()`. |
-| `nnsight.is_model_running` | `nnsight.is_model_running(repo_id, revision="main") -> bool` | Whether a model is currently RUNNING on NDIF. |
+| `nnsight.is_model_running` | `nnsight.is_model_running(repo_id, revision="main", task=None, trust_remote_code=None) -> bool` | Whether a model is currently RUNNING on NDIF. |
 | `nnsight.compare` | `nnsight.compare() -> EnvComparison` | Diff local vs NDIF Python/package versions; `print()` for the table. |
 | `nnsight.CONFIG` | `Config` | The config singleton (see [config.md](./config.md)). |
 | `nnsight.Object` | type | Tensor-like static type for values read inside a trace (typing hints). |
@@ -129,4 +129,4 @@ Pass `remote=` to `model.trace(...)` / `model.generate(...)` / `model.session(..
 
 `RemoteBackend` extra kwargs: `blocking`, `job_id`, `verbose`. `AsyncRemoteBackend` (built by `VLLM` async traces and available directly) supports `await backend` → the saves dict, and `async for update in backend` → status updates then the saves dict last.
 
-Model identity for remote: `model.to_model_key()` → `"import.path.Class:model_key"`, reversed by `Class.from_model_key(key)`. A `TransformersModel` key carries repo id, revision and resolved task, so each task of a checkpoint is a distinct remote model.
+Model identity for remote: `model.to_model_key()` → `"import.path.Class:model_key"`, reversed by `Class.from_model_key(key)`. A `TransformersModel` key carries repo id, revision, resolved task and `trust_remote_code` (only when set), so each task of a checkpoint is a distinct remote model.
