@@ -29,8 +29,6 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 from greenlet import getcurrent
-from torch._subclasses.fake_tensor import FakeTensorMode
-from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from ..tracing.backend import Backend
 from ..tracing.tracer import Tracer, push_result, save
@@ -393,6 +391,11 @@ class ScanningTracer(InterleavingTracer):
         ``allow_non_fake_inputs`` lets the meta-device parameters take part without
         being faked first.
         """
+        # Imported here, not at module level: `ShapeEnv` pulls in sympy, which
+        # would otherwise make up a large share of `import nnsight`.
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
         with FakeTensorMode(
             allow_non_fake_inputs=True,
             shape_env=ShapeEnv(assume_static_by_default=True),
