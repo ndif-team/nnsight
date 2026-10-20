@@ -217,9 +217,6 @@ def skippable(node: ast.With | ast.AsyncWith) -> bool:
 
 _local = threading.local()
 
-#: Sentinel for a name the frame did not bind when the trace captured it.
-_UNBOUND = object()
-
 
 def _saves() -> set:
     """This thread's set of saved object ids."""
@@ -299,22 +296,13 @@ def dec() -> None:
         _saves().clear()
 
 
-def push_result(frame: FrameType, variables: dict, captured: dict | None = None) -> None:
+def push_result(frame: FrameType, variables: dict) -> None:
     """Write a trace body's ``variables`` back into ``frame``.
 
     An inner trace pushes everything, so values flow up to the enclosing block.
     The outermost trace — depth 1 here, since every nested trace has already left
     — pushes only the values marked with `save`.
-
-    ``captured`` is ``frame``'s locals as the trace found them. A name still bound
-    to its captured value is left out: the frame already holds it. Every invoke's
-    scope starts from that snapshot, so an invoke that leaves a name alone would
-    otherwise push the old value back over the one a sibling invoke bound.
     """
-    if captured is not None:
-        variables = {
-            k: v for k, v in variables.items() if captured.get(k, _UNBOUND) is not v
-        }
     if getattr(_local, "depth", 0) == 1:
         saves = _saves()
         variables = {k: v for k, v in variables.items() if id(v) in saves}

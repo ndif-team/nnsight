@@ -197,11 +197,11 @@ into the caller's frame. `save` (`tracer.py`, exposed as `nnsight.save` and
 behind `.save()`) marks a value by identity in a per-thread set; the **outermost**
 trace filters `push_result` to only the marked values, while a nested trace pushes
 everything up to its enclosing block. Depth is tracked around the backend call in
-`__exit__` (`inc()`/`dec()`, `tracer.py`). An interleaving trace also passes the
-frame's locals as it captured them, and `push_result` leaves out every name still
-bound to its captured value: each invoke's scope starts from that snapshot, so an
-invoke that leaves a name alone would otherwise push it back over a sibling's
-rebind.
+`__exit__` (`inc()`/`dec()`, `tracer.py`). An interleaving trace pushes only what
+each block bound (`Scope.writes()`, `util.py`): every invoke's scope starts from the
+same snapshot of the frame, so pushing a scope whole would put the old value back
+over a sibling's rebind. `push` marks what a nested trace writes into a block's
+scope as bound by that block, so it rides on up too.
 
 `save()` **raises** if called with no trace running (`tracer.py`):
 

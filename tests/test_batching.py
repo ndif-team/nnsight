@@ -521,6 +521,32 @@ class TestInvokeScope:
         assert shapes == [1, 2]
 
     @torch.no_grad()
+    def test_rebind_back_to_the_captured_value_in_a_later_invoke_wins(self):
+        # Only what a block binds is pushed, so a later invoke that resets a
+        # name to the value the frame started with still has the last word.
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            flag = 0
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(1, 8)):
+                    flag = 1
+                with tracer.invoke(torch.randn(1, 8)):
+                    flag = 0
+            final = nnsight.save(flag)
+        assert final == 0
+
+    @torch.no_grad()
+    def test_name_bound_after_the_last_invoke_reaches_the_session(self):
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(1, 8)):
+                    envoy.fc1.output
+                after = "bound after the invokes"
+            value = nnsight.save(after)
+        assert value == "bound after the invokes"
+
+    @torch.no_grad()
     def test_read_before_the_bind_raises(self, gpt2):
         # Reading a name an earlier invoke binds, before parking past where it binds
         # it: the reader runs first, up to its first park, so the name isn't there.
