@@ -193,7 +193,7 @@ passing both raises, since they are two answers to how the weights are held.
 ## On NDIF
 
 A **client cannot ask for a quantization.** A remote model key is the repo id,
-revision and task, and says nothing about how the weights are held; the
+revision, task and `trust_remote_code`, and says nothing about how the weights are held; the
 deployment decides. A client-side `dtype=` only shapes its own meta build.
 
 ## Related

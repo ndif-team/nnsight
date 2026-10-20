@@ -74,6 +74,8 @@ class Scope(dict):
         super().__init__(own)
         self.shared = shared
         self.glbls = glbls
+        #: The names the block bound; what `push` carries back to the frame.
+        self.written: set[str] = set()
 
     def __missing__(self, key: str) -> Any:
         try:
@@ -84,6 +86,11 @@ class Scope(dict):
     def __setitem__(self, key: str, value: Any) -> None:
         super().__setitem__(key, value)
         self.shared[key] = value
+        self.written.add(key)
+
+    def writes(self) -> dict:
+        """The names this block bound, with their current values."""
+        return {k: self[k] for k in self.written if k in self}
 
     def copy(self) -> "Scope":
         """A scope with this one's names, sharing the same frame and globals."""
@@ -187,7 +194,13 @@ def push(frame: FrameType, variables: dict[str, Any]) -> None:
             for one, whose ``f_locals`` is an ordinary dict.
         variables: Names and values to set on that frame.
     """
-    frame.f_locals.update(variables)
+    target = frame.f_locals
+    target.update(variables)
+    # A block's own frame (an invoke body running under exec) has a Scope for its
+    # locals, and dict.update bypasses Scope.__setitem__: mark what a nested trace
+    # pushed in as written, so the block's own push carries it on up.
+    if isinstance(target, Scope):
+        target.written.update(variables)
     # A SerializedFrame is not a PyFrameObject: its plain-dict update is the whole
     # job, and handing it to the C API dereferences it as a frame (segfault on
     # 3.10, silent undefined behavior on 3.11/3.12).

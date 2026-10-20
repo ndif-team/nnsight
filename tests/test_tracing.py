@@ -168,6 +168,23 @@ class TestSkip:
         assert computed == 5
         assert label == "done"
 
+    def test_the_threads_tracer_survives_a_trace(self):
+        # A debugger or coverage owns `sys.settrace`; arming the skip hook borrows
+        # it, and the trace hands it back.
+        def tracer(frame, event, arg):
+            return None
+
+        previous = sys.gettrace()
+        sys.settrace(tracer)
+        try:
+            with Tracer():
+                value = save(1)
+            current = sys.gettrace()
+        finally:
+            sys.settrace(previous)
+        assert current is tracer
+        assert value == 1
+
     def test_body_on_the_with_line_is_refused(self):
         # The body is skipped via a per-line trace hook, so a body sharing the
         # `with` line would run where it stands and again through the backend.

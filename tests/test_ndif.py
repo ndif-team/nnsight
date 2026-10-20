@@ -129,9 +129,10 @@ _FX_KEY = (
 )
 
 
-def _replica(key, state="RUNNING", level="HOT", revision=None, task="text-generation"):
+def _replica(key, state="RUNNING", level="HOT", revision=None, task="text-generation",
+             trust_remote_code=False):
     # One /status entry, shaped like the controller's: per *replica*, carrying
-    # the deployment's model_key and task.
+    # the deployment's model_key, task and trust_remote_code.
     return {
         "deployment_level": level,
         "application_state": state,
@@ -139,7 +140,11 @@ def _replica(key, state="RUNNING", level="HOT", revision=None, task="text-genera
         "repo_id": "openai-community/gpt2",
         "revision": revision,
         "task": task,
+        "trust_remote_code": trust_remote_code,
     }
+
+
+_TRC_KEY = _TG_KEY.replace('"task"', '"trust_remote_code": true, "task"')
 
 
 class TestStatusGrouping:
@@ -161,7 +166,17 @@ class TestStatusGrouping:
         assert "openai-community/gpt2" in s
         assert len(s) == 1
         assert s["openai-community/gpt2"]["state"] == "RUNNING"
+        assert s["openai-community/gpt2"]["hot_replicas"] == 2
         assert s.status is ndif.NdifStatus.Status.UP
+
+    def test_hot_replicas_counts_hot_only(self, monkeypatch):
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TG_KEY: _replica(_TG_KEY, "RUNNING", level="HOT"),
+            "b:ModelActor:" + _TG_KEY: _replica(_TG_KEY, "NOT_STARTED", level="WARM"),
+        })
+        s = nnsight.status()
+        assert s["openai-community/gpt2"]["hot_replicas"] == 1
+        assert "HOT Replicas" in str(s)
 
     def test_two_tasks_key_per_task(self, monkeypatch):
         self._serve(monkeypatch, {
@@ -182,6 +197,27 @@ class TestStatusGrouping:
         s = nnsight.status()
         assert "openai-community/gpt2 (text-generation, main)" in s
         assert "openai-community/gpt2 (text-generation, abc123)" in s
+
+    def test_trust_twins_key_by_the_flag(self, monkeypatch):
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TG_KEY: _replica(_TG_KEY),
+            "b:ModelActor:" + _TRC_KEY: _replica(_TRC_KEY, trust_remote_code=True),
+        })
+        s = nnsight.status()
+        assert len(s) == 2
+        assert s["openai-community/gpt2 (text-generation, main, trust_remote_code)"]["trust_remote_code"]
+        assert "openai-community/gpt2 (text-generation, main, no trust_remote_code)" in s
+
+    def test_entries_carry_trust_remote_code_and_the_table_shows_it(self, monkeypatch):
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TRC_KEY: _replica(_TRC_KEY, trust_remote_code=True),
+        })
+        s = nnsight.status()
+        assert s["openai-community/gpt2"]["trust_remote_code"] is True
+        assert "Remote Code" in str(s) and "yes" in str(s)
+
+        self._serve(monkeypatch, {"a:ModelActor:" + _TG_KEY: _replica(_TG_KEY)})
+        assert nnsight.status()["openai-community/gpt2"]["trust_remote_code"] is False
 
 
 class TestIsModelRunningTask:
@@ -206,6 +242,14 @@ class TestIsModelRunningTask:
         assert nnsight.is_model_running("openai-community/gpt2", task="text-generation") is True
         assert nnsight.is_model_running("openai-community/gpt2", task="feature-extraction") is False
         assert nnsight.is_model_running("openai-community/gpt2", task="absent-task") is False
+
+    def test_trust_remote_code_narrows_too(self, monkeypatch):
+        self._serve(monkeypatch, {
+            "a:ModelActor:" + _TRC_KEY: _replica(_TRC_KEY, "RUNNING", trust_remote_code=True),
+        })
+        assert nnsight.is_model_running("openai-community/gpt2") is True
+        assert nnsight.is_model_running("openai-community/gpt2", trust_remote_code=True) is True
+        assert nnsight.is_model_running("openai-community/gpt2", trust_remote_code=False) is False
 
 
 class TestGracefulFailure:

@@ -678,18 +678,67 @@ class TransformersModel(HuggingFaceModel):
         """The per-request environment this model wants applied server-side.
 
         Returned client-side and carried with a remote request; the server
-        applies it via `_remoteable_set_env` before running. Only the PEFT
-        adapter is transported — the base model is identified by the model key.
+        applies it via `_remoteable_set_env` before running. The base model is
+        identified by the model key; what travels here is the state layered on
+        it: the PEFT adapter, when there is one, and the attention
+        implementation.
+
+        The attention implementation is always sent, resolved rather than as
+        passed, because the server's model is shared: the previous request may
+        have moved it off the deployment's default, and a request that said
+        nothing would otherwise run with that choice. Sending what this model
+        resolved to locally makes a remote run match the local one, whatever
+        the last caller did.
         """
-        return {} if self.peft is None else {"peft": self.peft}
+        env = {"attn_implementation": self.attn_implementation}
+        if self.peft is not None:
+            env["peft"] = self.peft
+        return env
 
     def _remoteable_set_env(self, env: Optional[dict]) -> None:
         """Apply a per-request environment on the server side.
 
-        Only the PEFT adapter travels — the base model is identified by the
-        model key. See `peft.swap` for the transitions.
+        The base model is identified by the model key; this applies what is
+        layered on it. See `peft.swap` for the adapter transitions. The
+        attention implementation is switched in place when it differs from
+        what the model runs: the module tree is unchanged, and the attention
+        modules pick the implementation up from the config on their next
+        forward. A request with no implementation at all came from an older
+        client, and leaves the model running whatever it was.
+
+        The switch is checked rather than trusted: transformers only warns
+        when a model cannot switch dynamically (one not written against its
+        attention interface), and a request for ``"eager"`` that silently
+        stays on ``"sdpa"`` is exactly the run that returns no attention
+        weights without saying why.
+
+        Raises:
+            ValueError: for an implementation transformers does not know, or
+                one this model cannot switch to.
         """
-        peft.swap(self, env.get("peft") if env else None)
+        env = env or {}
+        peft.swap(self, env.get("peft"))
+        requested = env.get("attn_implementation")
+        if requested is None or requested == self.attn_implementation:
+            return
+        self._module.set_attn_implementation(requested)
+        if self.attn_implementation != requested:
+            raise ValueError(
+                f"{type(self._module).__name__} cannot switch its attention "
+                f"implementation to {requested!r}: it does not follow "
+                "transformers' attention interface, so it keeps "
+                f"{self.attn_implementation!r}."
+            )
+
+    @property
+    def attn_implementation(self) -> Optional[str]:
+        """The attention implementation the model runs with (``"sdpa"``, ``"eager"``, ...).
+
+        What transformers resolved the ``attn_implementation=`` kwarg (or its
+        absence) to, so it is set from construction on, meta model included.
+        Sent with every remote request (`_remoteable_get_env`).
+        """
+        return getattr(self._module.config, "_attn_implementation", None)
 
     def load_adapter(self, peft_id: Optional[str]) -> None:
         """Attach a PEFT adapter — the post-hoc form of the ``peft=`` kwarg.

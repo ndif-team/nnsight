@@ -29,8 +29,6 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 from greenlet import getcurrent
-from torch._subclasses.fake_tensor import FakeTensorMode
-from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from ..tracing.backend import Backend
 from ..tracing.tracer import Tracer, push_result, save
@@ -321,7 +319,9 @@ class InterleavingTracer(Tracer):
             else:
                 forward_kwargs = dict(self.kwargs)
                 # Invokers append their workers as this runs.
-                exec(code, Scope(dict(frame.f_locals), shared_locals(frame), glbls))
+                body = Scope(dict(frame.f_locals), shared_locals(frame), glbls)
+                exec(code, body)
+                push_result(frame, body.writes())
                 if not interleaver.mediators:
                     raise ValueError(
                         "trace() needs an input, or at least one "
@@ -334,8 +334,11 @@ class InterleavingTracer(Tracer):
             # interleave assembles the batcher into the combined call; trace-level
             # params (e.g. max_new_tokens) ride alongside and win over assembled kwargs.
             self.envoy.interleave(self.fn, batcher=self.batcher, **forward_kwargs)
+            # Only what each block bound: every scope started from the same
+            # snapshot of the frame, so pushing it whole would put the old value
+            # back over a sibling's rebind.
             for mediator in mediators:
-                push_result(frame, mediator.lcls)
+                push_result(frame, mediator.lcls.writes())
         finally:
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before interleave doesn't leave workers/batcher behind.
@@ -393,6 +396,11 @@ class ScanningTracer(InterleavingTracer):
         ``allow_non_fake_inputs`` lets the meta-device parameters take part without
         being faked first.
         """
+        # Imported here, not at module level: `ShapeEnv` pulls in sympy, which
+        # would otherwise make up a large share of `import nnsight`.
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
         with FakeTensorMode(
             allow_non_fake_inputs=True,
             shape_env=ShapeEnv(assume_static_by_default=True),

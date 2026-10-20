@@ -24,10 +24,10 @@ nnsight.is_model_running("meta-llama/Llama-3.1-70B")       # -> True / False
 ```
 NDIF Service: Up 🟢
 
-Model Class        Repo ID                   Task             Revision  Level  State
------------------  ------------------------  ---------------  --------  -----  ---------
-TransformersModel  meta-llama/Llama-3.1-70B  text-generation  main      HOT    RUNNING
-TransformersModel  openai-community/gpt2     text-generation  main      WARM   DEPLOYING
+Model Class        Repo ID                   Task             Remote Code  Revision  Level  State      HOT Replicas
+-----------------  ------------------------  ---------------  -----------  --------  -----  ---------  ------------
+TransformersModel  meta-llama/Llama-3.1-70B  text-generation  -            main      HOT    RUNNING    2
+TransformersModel  openai-community/gpt2     text-generation  -            main      WARM   DEPLOYING  0
 ```
 
 Only **deployed** models appear — level `HOT` or `WARM`; `COLD` (downloaded but not up) is filtered out. Per-model `state` is `RUNNING` (live), `DEPLOYING` (coming up; requests queue) or `UNHEALTHY` (deployment problem).
@@ -45,7 +45,7 @@ for repo_id in s:                    # iterates deployment keys
     print(repo_id, info["model_class"], info["level"], info["state"])
 ```
 
-Each `info` dict has `model_class`, `repo_id`, `task`, `revision`, `level`, `state`. `NdifStatus` supports `s[key]`, `key in s`, `len(s)`, `s.keys()` and iteration. Replicas of one deployment fold into a single entry (healthiest state wins). A checkpoint deployed under several pipeline tasks is several deployments, each keyed `"repo_id (task)"`; when the tasks tie (several revisions under one task), the revision joins the key.
+Each `info` dict has `model_class`, `repo_id`, `task`, `trust_remote_code`, `revision`, `level`, `state` and `hot_replicas` (how many HOT replicas serve it). `NdifStatus` supports `s[key]`, `key in s`, `len(s)`, `s.keys()` and iteration. Replicas of one deployment fold into a single entry (healthiest state wins; `hot_replicas` counts the HOT ones). A checkpoint deployed under several pipeline tasks is several deployments, each keyed `"repo_id (task)"`; when the tasks tie, the revision joins the key, and `trust_remote_code` when those tie too.
 
 `NdifStatus.status` is one of:
 
@@ -72,6 +72,7 @@ The repo id is canonicalized via the Hugging Face Hub (aliases and redirects mat
 ```python
 nnsight.is_model_running("meta-llama/Llama-3.1-70B", revision="my-finetune-branch")
 nnsight.is_model_running("openai-community/gpt2", task="text-generation")
+nnsight.is_model_running("x/custom", trust_remote_code=True)   # the key carries it too
 ```
 
 Both functions query `{CONFIG.API.HOST}/status`, so they follow a custom host — see [api-key-and-config.md](./api-key-and-config.md#pointing-at-a-different-host).

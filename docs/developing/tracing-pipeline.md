@@ -129,7 +129,9 @@ If the block has real code (`skippable`, `tracer.py` — a body that is only
 `pass`/docstring/`...` is left to run harmlessly), `__enter__` calls `skip_context`
 (`tracer.py`). It sets a per-frame `f_trace` hook that raises
 `ExitTracingException` the moment execution reaches the body's first line, and sets
-a no-op global `sys.settrace` so Python actually delivers per-frame events.
+a no-op global `sys.settrace` so Python actually delivers per-frame events. The
+tracer it displaces (a debugger, coverage) rides on the `ExitTracingException`
+and is restored in `__exit__`.
 
 Two constraints fall out of this line-based mechanism:
 
@@ -197,7 +199,11 @@ into the caller's frame. `save` (`tracer.py`, exposed as `nnsight.save` and
 behind `.save()`) marks a value by identity in a per-thread set; the **outermost**
 trace filters `push_result` to only the marked values, while a nested trace pushes
 everything up to its enclosing block. Depth is tracked around the backend call in
-`__exit__` (`inc()`/`dec()`, `tracer.py`).
+`__exit__` (`inc()`/`dec()`, `tracer.py`). An interleaving trace pushes only what
+each block bound (`Scope.writes()`, `util.py`): every invoke's scope starts from the
+same snapshot of the frame, so pushing a scope whole would put the old value back
+over a sibling's rebind. `push` marks what a nested trace writes into a block's
+scope as bound by that block, so it rides on up too.
 
 `save()` **raises** if called with no trace running (`tracer.py`):
 
