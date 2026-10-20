@@ -626,11 +626,13 @@ class Interleaver:
         # reachable by two paths gets one envoy (the first path) and an alias.
         # Weak: the tree's parent links own the envoys; this only looks them up.
         self.envoys: "weakref.WeakValueDictionary[int, Any]" = weakref.WeakValueDictionary()
-        # The locations some worker is parked on, so a visit with nobody waiting
-        # costs one set lookup. Rebuilt from the workers by `reindex` at the run
-        # boundaries and by `handle` after it has served anyone (the only time a
-        # worker can park outside those).
-        self.parked: set[str] = set()
+        # The locations a visit has to stop for: some worker is parked on them,
+        # or a cache observes them. Every other visit is a count bump, done by
+        # the controller itself without a call into here, so a run whose block
+        # reads one layer costs the other modules one set lookup each. Rebuilt
+        # by `reindex` at the run boundaries and by `handle` after it has served
+        # anyone (the only time a worker can park outside those).
+        self.watched: set[str] = set()
         # How many times each location has been handled, for the life of the
         # tree. A worker's own count of a location is this minus what it stood at
         # when the worker started (`Mediator.occurrence`), so one increment per
@@ -670,7 +672,7 @@ class Interleaver:
         self.defer_exceptions = False
 
     def reindex(self) -> None:
-        """Rebuild the parked set, cache routes and `busy` from `mediators`.
+        """Rebuild the cache routes, the watched set and `busy` from `mediators`.
 
         Called by `__enter__` once the workers have started, and by a driver that
         replaces the list while a run is in progress (a scheduler reshuffling
@@ -678,19 +680,19 @@ class Interleaver:
         """
         self.observers = {}
         self.busy = bool(self.mediators)
-        self._reindex_parked()
-
         for mediator in self.mediators:
             for cache in mediator.caches:
                 for provider, selected in cache.subscriptions().items():
                     self.observers.setdefault(provider, []).append((mediator, cache, selected))
+        self._reindex_watched()
 
-    def _reindex_parked(self) -> None:
-        self.parked = {
+    def _reindex_watched(self) -> None:
+        self.watched = {
             pending.provider
             for mediator in self.mediators
             if (pending := mediator.pending) is not None and pending.provider is not None
         }
+        self.watched.update(self.observers)
 
     def _ready(self, provider: str) -> list[Mediator]:
         """The workers parked on this visit of ``provider``."""
@@ -772,8 +774,11 @@ class Interleaver:
         """Route ``value`` to this provider's consumers; return it, edited if any
         intervention wrote to this location.
 
-        The provider index picks only workers parked here and caches that selected
-        it. The visit is counted once, on the interleaver, after everyone parked on
+        The watched set says whether anything stops here at all; a controller
+        reads it and bumps the count itself for a location nothing watches, so
+        this is reached for every visit only from a driver that has no controller
+        (an engine value, a gradient hook). The visit is counted once, on the
+        interleaver, after everyone parked on
         it has been served — so a worker that arrives here *during* the visit
         (released from a barrier by one that was served) asks for this occurrence
         and is served in it too, whichever order the workers were written in.
@@ -788,13 +793,10 @@ class Interleaver:
         which case it is recorded on its own worker and the run continues.
         """
         occurrence = self.counts.get(provider, 0)
-        observers = (
-            self.observers.get(provider, ())
-        )
-        # The common path: nobody parked here and no cache observing.
-        if provider not in self.parked and not observers:
+        if provider not in self.watched:
             self.counts[provider] = occurrence + 1
             return value
+        observers = self.observers.get(provider, ())
 
         # A fragment is made whole before any consumer sees it, but only when a
         # worker will be served on *this* occurrence or a selected cache records
@@ -827,7 +829,7 @@ class Interleaver:
                         raise
                     mediator.pending = None
         if served:
-            self._reindex_parked()
+            self._reindex_watched()
         self.counts[provider] = occurrence + 1
 
         # A batched skip leaves its invokes' replacements gathered rather than one

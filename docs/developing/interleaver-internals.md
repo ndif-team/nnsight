@@ -125,25 +125,30 @@ location and then assign it before parking elsewhere or finishing. See
 ## The Interleaver class
 
 `Interleaver`'s fields — `mediators`, `batcher`, the `interleaving`/`busy` gate the
-controller reads, the `parked` and `observers` indexes, `counts`, `fragments`,
+controller reads, the `watched` and `observers` indexes, `counts`, `fragments`,
 `defer_exceptions` — are documented in its docstring in the same file.
 `Interleaver.instrument(envoy)` installs a module's controller; see
 [controller.md](controller.md).
 
 ### reindex
 
-`reindex()` rebuilds `parked`, `observers` and `busy` from `mediators`. `__enter__`
-calls it once the workers have parked; a driver that replaces the list while a run
-is in progress (a scheduler reshuffling which workers are in the batch) calls it
-itself afterwards, since nothing else notices the swap. `parked` is also rebuilt by
-`handle` after it has served anyone — the only other time a worker can park.
+`reindex()` rebuilds `observers`, `watched` and `busy` from `mediators`. `watched`
+is every location a visit has to stop for: one some worker is parked on, or one a
+cache keeps. `__enter__` calls `reindex` once the workers have parked; a driver
+that replaces the list while a run is in progress (a scheduler reshuffling which
+workers are in the batch) calls it itself afterwards, since nothing else notices
+the swap. `watched` is also rebuilt by `handle` after it has served anyone — the
+only other time a worker can park.
 
 ### handle — one visit
 
-`Interleaver.handle(provider, value)` is what the controller calls:
+`Interleaver.handle(provider, value)` is what the controller calls for a location
+in `watched` (for one that is not, the controller bumps `counts` itself and never
+reaches here; a driver with no controller — an engine value, a gradient hook —
+calls it for every visit):
 
-1. **Fast path.** If nobody is parked on `provider` and no cache observes it, bump
-   `counts[provider]` and return the value untouched. This is the common case.
+1. **Fast path.** If `provider` is not in `watched`, bump `counts[provider]` and
+   return the value untouched.
 2. **Whole.** If the runtime's `fragments` say the value is a shard or partial sum
    and a worker will be served on this occurrence (or a cache keeps it), make it
    whole — one collective per visit, on every rank alike.

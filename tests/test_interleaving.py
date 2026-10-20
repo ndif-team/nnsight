@@ -178,7 +178,7 @@ class TestInterleaver:
         il.mediators.append(requester(s1))
         il.mediators.append(requester(s2))
         with il:
-            assert il.parked == {"loc"}
+            assert il.watched == {"loc"}
             il.handle("loc", 7)
         assert s1["got"] == 7
         assert s2["got"] == 7
@@ -241,19 +241,19 @@ class TestInterleaver:
         assert store["got"] == 7
         assert il.counts["loc"] == 1
 
-    def test_parked_set_is_rebuilt_each_run(self):
+    def test_watched_set_is_rebuilt_each_run(self):
         # A prior run's wait count must not leak into the next run.
         il = Interleaver()
         first = requester({}, "a")
         il.mediators.append(first)
         with il:
-            assert il.parked == {"a"}
+            assert il.watched == {"a"}
         il.cancel()
 
         second = requester({}, "b")
         il.mediators.append(second)
         with il:
-            assert il.parked == {"b"}
+            assert il.watched == {"b"}
 
     def test_cache_routes_do_not_stick_across_runs(self):
         class Cache:
@@ -303,9 +303,9 @@ class TestInterleaver:
         il.mediators.append(mediator)
 
         with il:
-            assert il.parked == {"a"}
+            assert il.watched == {"a"}
             il.handle("a", 1)
-            assert il.parked == {"b"}
+            assert il.watched == {"b"}
             il.handle("b", 2)
 
         assert store == {"a": 1, "b": 2}
@@ -418,6 +418,23 @@ class TestEnvoyAccess:
         with envoy.trace(x):
             captured["l1"] = envoy.l1.output
         assert torch.allclose(captured["l1"], model.l1(x))
+
+    def test_unwatched_locations_are_counted_without_a_handoff(self, envoy, model, x, monkeypatch):
+        # A module nothing reads never calls into the interleaver, but its visit
+        # is still counted: a later `tracer.iter` step binds against those counts.
+        il = envoy.interleaver
+        handled = []
+        real = Interleaver.handle
+        monkeypatch.setattr(Interleaver, "handle", lambda self, p, v: handled.append(p) or real(self, p, v))
+        before = dict(il.counts)
+        with envoy.trace(x):
+            captured = envoy.l1.output.save()
+        assert handled == ["model.l1.output", "result"]
+        for name, _ in model.named_modules():
+            path = f"model.{name}" if name else "model"
+            for key in ("input", "skip", "output"):
+                assert il.counts[f"{path}.{key}"] == before.get(f"{path}.{key}", 0) + 1
+        assert torch.allclose(captured, model.l1(x))
 
     def test_alias_reads_same_activation(self, model, x):
         # A renamed module reads the same activation through its alias.

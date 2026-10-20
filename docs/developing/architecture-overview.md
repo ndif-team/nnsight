@@ -82,8 +82,10 @@ Everything above the model reduces to a single call. The interleaver exposes a
 and `Interleaver.handle(location, value)`, which offers a produced value to every
 worker parked on that location and returns whatever they wrote back.
 
-A module's controller calls it three times (input, skip gate, output). A runtime
-calls it for an engine value. `.source` calls it for an operation inside a forward.
+A module's controller offers three locations (input, skip gate, output), calling
+it for each one that `Interleaver.watched` lists and counting the visit itself
+otherwise. A runtime calls it for an engine value. `.source` calls it for an
+operation inside a forward.
 There is no second mechanism: read every other page in this folder as "what calls
 `handle`, and with which location".
 
