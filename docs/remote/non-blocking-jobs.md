@@ -47,7 +47,7 @@ result["logits"].shape
 How it works:
 
 - The trace's `__exit__` calls the backend once. With `job_id` still `None`, that runs `submit()` — a POST to `{HOST}/request` **without** a websocket. It stores the returned `job_id` and returns `None`.
-- Each later `backend()` call runs `poll()`: a GET against `{HOST}/response/{job_id}`. It returns the saves dict on `COMPLETED`, raises `RemoteError` on `ERROR`, and returns `None` while the job is still running (or before its first status lands). Saved values are **not** pushed back into your variables — read them from the returned dict.
+- Each later `backend()` call runs `poll()`: a GET against `{HOST}/response/{job_id}`. It returns the saves dict on `COMPLETED`, raises `RemoteError` on `ERROR`, and returns `None` while the job is still running (or before its first status lands). Saved values are **not** pushed back into your variables — read them from the returned dict, which also stays on `backend.results`.
 
 ## Reattaching to an existing job
 

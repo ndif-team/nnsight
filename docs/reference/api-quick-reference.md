@@ -127,6 +127,6 @@ Pass `remote=` to `model.trace(...)` / `model.generate(...)` / `model.session(..
 | `"local"` | `LocalSimulationBackend` | Serialize/deserialize and run in-process — an offline dry run of the remote path. |
 | `"<host url>"` | `RemoteBackend` | Like `True`, overriding the host for this call. |
 
-`RemoteBackend` extra kwargs: `blocking`, `job_id`, `verbose`. `AsyncRemoteBackend` (built by `VLLM` async traces and available directly) supports `await backend` → the saves dict, and `async for update in backend` → status updates then the saves dict last.
+`RemoteBackend` extra kwargs: `blocking`, `job_id`, `verbose`, `inject_results` (see [keeping the saves on the backend](../remote/remote-trace.md#keeping-the-saves-on-the-backend)). `AsyncRemoteBackend` (built by `VLLM` async traces and available directly) supports `await backend` → the saves dict, and `async for update in backend` → status updates then the saves dict last.
 
 Model identity for remote: `model.to_model_key()` → `"import.path.Class:model_key"`, reversed by `Class.from_model_key(key)`. A `TransformersModel` key carries repo id, revision, resolved task and `trust_remote_code` (only when set), so each task of a checkpoint is a distinct remote model.

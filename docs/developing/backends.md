@@ -91,7 +91,7 @@ modes share one serialize+send step:
   blob arrives inline as a binary websocket frame or as a presigned URL to download,
   depending on its size, and is `torch.load`ed. The saved values are
   marked (`save`) and pushed back into the caller's frame, just like a local trace
-  (`_push`, `remote.py`).
+  (`_push`, `remote.py`) — unless the backend was built with `inject_results=False`.
 - **Non-blocking** (`blocking=False`) — `submit` (`remote.py`) POSTs without a
   websocket (the server saves each status to the object store) and stores the
   server-assigned `job_id`; `poll` (`remote.py`) GETs `/response/{job_id}` and
@@ -104,11 +104,14 @@ Serialization is done by `RequestModel.serialize` (`schema/request.py`), after
 `pull_env()` registers local (non-installed) modules for by-value pickling so their
 source ships with the request (`_serialize`, `remote.py`). Status rendering,
 compression, and result download are shared helpers (`note`/`handle`/
-`download_result`/`finalize`). `StatusDisplay` (`backends/display.py`) animates the
+`download_result`/`finalize`); `handle` also keeps a completed job's saves on
+`results` when they aren't injected (see
+[remote-trace.md](../remote/remote-trace.md#keeping-the-saves-on-the-backend)).
+`StatusDisplay` (`backends/display.py`) animates the
 progress display when remote logging or `verbose` is on.
 
 Config comes from `CONFIG.API` / `CONFIG.APP` (`schema/config.py`): `HOST`,
-`APIKEY`, `COMPRESS`, `APP.DEBUG`, `APP.REMOTE_LOGGING` (env: `NDIF_API_KEY`,
+`APIKEY`, `COMPRESS`, `APP.DEBUG`, `APP.REMOTE_LOGGING`, `APP.INJECT_RESULTS` (env: `NDIF_API_KEY`,
 `NDIF_HOST`).
 
 ### AsyncRemoteBackend — the same request, awaited

@@ -35,6 +35,11 @@ class AppConfig(BaseModel):
     DEBUG: bool = False
     #: Whether to show the live status display while a remote job runs.
     REMOTE_LOGGING: bool = True
+    #: Whether a blocking remote run injects its saves into the block's variables;
+    #: when ``False`` they are kept on the backend's ``results`` instead. The
+    #: default for a [`RemoteBackend`][nnsight.intervention.backends.remote.RemoteBackend]'s
+    #: ``inject_results``, read when the backend is built.
+    INJECT_RESULTS: bool = True
     #: Whether to mount ``.save()`` on every object so ``value.save()`` works in a
     #: trace. When ``False`` (or if the C extension didn't build), use
     #: ``nnsight.save(value)`` instead. Mounting adds ``.save`` to all objects
