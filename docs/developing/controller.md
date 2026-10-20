@@ -29,12 +29,19 @@ def __call__(self, *args, **kwargs):
     interleaver, path, locations = state.active()     # the trace reaching this module now
     if interleaver is None:                           # no trace, or no workers
         return body(module, *args, **kwargs)
-    args, kwargs = interleaver.handle(locations[0], (args, kwargs))   # "{path}.input"
-    output = interleaver.handle(locations[1], NO_SKIP)                # "{path}.skip"
-    if output is NO_SKIP:
-        output = body(module, *args, **kwargs)
-    return interleaver.handle(locations[2], output)                   # "{path}.output"
+    inputs, skip, output = locations                  # "{path}.input" / ".skip" / ".output"
+    args, kwargs = offer(inputs, (args, kwargs))
+    replacement = offer(skip, NO_SKIP)
+    value = body(module, *args, **kwargs) if replacement is NO_SKIP else replacement
+    return offer(output, value)
 ```
+
+where `offer(location, value)` is `interleaver.handle(location, value)` when the
+location is in `interleaver.watched` (a worker is parked on it, or a cache keeps
+it) and otherwise just bumps `interleaver.counts[location]` inline: the visit is
+counted either way, and a module nothing is reading costs three set lookups rather
+than three calls into the interleaver. `watched` is read afresh at each of the
+three, since serving a worker at one location may park it on the next.
 
 Each handoff **returns** the handled value, so an intervention can rewrite the
 module's input (`(args, kwargs)`) or its output, in place or by replacement. The

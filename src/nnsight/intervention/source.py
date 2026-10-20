@@ -610,13 +610,31 @@ class Controller:
         interleaver, _, locations = state.active()
         if interleaver is None:
             return run_body(state, module, args, kwargs)
-        handle = interleaver.handle
-        args, kwargs = handle(locations[0], (args, kwargs))
-        output = handle(locations[1], NO_SKIP)  # the skip gate
-        if output is NO_SKIP:
-            return handle(locations[2], run_body(state, module, args, kwargs))
-        # A skipped module's output is the replacement the worker supplied.
-        return handle(locations[2], _as_fragment(interleaver, locations[2], output))
+        # A location nothing watches is counted here rather than handed off:
+        # three calls into the interleaver per module, on every module of every
+        # traced forward, would be most of what a trace costs over the bare model.
+        # `watched` is read afresh each time: serving a worker rebuilds it, and
+        # the worker served at one location may park on the next.
+        counts = interleaver.counts
+        inputs, skip, output = locations
+        if inputs in interleaver.watched:
+            args, kwargs = interleaver.handle(inputs, (args, kwargs))
+        else:
+            counts[inputs] = counts.get(inputs, 0) + 1
+        if skip in interleaver.watched:
+            replacement = interleaver.handle(skip, NO_SKIP)  # the skip gate
+        else:
+            counts[skip] = counts.get(skip, 0) + 1
+            replacement = NO_SKIP
+        if replacement is NO_SKIP:
+            value = run_body(state, module, args, kwargs)
+        else:
+            # A skipped module's output is the replacement the worker supplied.
+            value = _as_fragment(interleaver, output, replacement)
+        if output in interleaver.watched:
+            return interleaver.handle(output, value)
+        counts[output] = counts.get(output, 0) + 1
+        return value
 
     def __deepcopy__(self, memo: dict) -> "Controller":
         """Rebind to the copied module, so the copy runs on its own weights.
