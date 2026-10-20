@@ -1059,3 +1059,27 @@ class TestUnbatchedTensorWrites:
         assert not torch.equal(edited_a, clean_a)
         assert not torch.equal(edited_b, clean_b)  # the whole tensor: the other invoke's rows too
         assert torch.equal(edited_a, envoy._module.fc2.bias.expand(2, 8))
+
+
+class TestSanitizeOncePerPipeline:
+    """The generate-argument names ``sanitize`` lifts out of an invoke's kwargs
+    come from signatures that do not change within a process, so a batched trace
+    reads them once per pipeline class, not once per invoke."""
+
+    def test_signatures_read_once(self, gpt2, monkeypatch):
+        import inspect
+
+        from nnsight.modeling import processing
+
+        processing._GENERATION_NAMES.clear()
+        calls = []
+        real = inspect.signature
+        monkeypatch.setattr(inspect, "signature", lambda *a, **k: calls.append(a) or real(*a, **k))
+
+        first = processing.sanitize(gpt2, {"max_new_tokens": 3, "truncation": True})
+        read = len(calls)
+        second = processing.sanitize(gpt2, {"max_new_tokens": 3, "truncation": True})
+
+        assert read > 0 and len(calls) == read
+        assert first == second
+        assert first[1]["max_new_tokens"] == 3 and first[0]["truncation"] is True
