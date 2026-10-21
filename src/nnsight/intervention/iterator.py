@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Iterator
 from greenlet import getcurrent
 
 from .. import NNsightDeprecationWarning
-from ..tracing.tracer import Tracer, push_result
+from ..tracing.tracer import Tracer
 from ..tracing.util import Scope
 from .interleaver import OutOfOrderError
 
@@ -191,4 +191,4 @@ class Iterations(Tracer):
             pass  # ran fewer steps than asked; keep what the reached steps saved
         finally:
             mediator.iteration = previous
-        push_result(frame, scope)
+        self.push_result(frame, scope)

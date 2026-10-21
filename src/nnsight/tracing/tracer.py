@@ -223,7 +223,7 @@ def skippable(node: ast.With | ast.AsyncWith) -> bool:
 # ``nnsight.save``) marks a value to survive past the *outermost* trace. Inner
 # (nested) traces push all their locals up to the enclosing block, so values flow
 # freely; only the outermost trace — the boundary back into ordinary user code —
-# filters to just the saved values ([`push_result`][nnsight.tracing.tracer.push_result]). Depth is tracked around
+# filters to just the saved values ([`Tracer.push_result`][nnsight.tracing.tracer.Tracer.push_result]). Depth is tracked around
 # the backend call in `Tracer.__exit__`. All state is per-thread, so
 # concurrent traces never share saved sets or nesting depth.
 
@@ -308,19 +308,6 @@ def dec() -> None:
         _saves().clear()
 
 
-def push_result(frame: FrameType, variables: dict) -> None:
-    """Write a trace body's ``variables`` back into ``frame``.
-
-    An inner trace pushes everything, so values flow up to the enclosing block.
-    The outermost trace — depth 1 here, since every nested trace has already left
-    — pushes only the values marked with `save`.
-    """
-    if getattr(_local, "depth", 0) == 1:
-        saves = _saves()
-        variables = {k: v for k, v in variables.items() if id(v) in saves}
-    push(frame, variables)
-
-
 class Tracer:
     """Context manager that captures a ``with`` block and runs it via a backend.
 
@@ -375,9 +362,12 @@ class Tracer:
         # captured); a tracer run after deserialization — a remote request executed
         # server-side — has no block to point at. execute() still reads self.node,
         # so restore it as None: the mediators it builds run and are never
-        # re-serialized, which is exactly the node=None case.
+        # re-serialized, which is exactly the node=None case. The backend was
+        # dropped too; push_result reads it, and None means inject, which is what
+        # the server's run of the block needs.
         self.__dict__.update(state)
         self.node = None
+        self.backend = None
 
     def capture(self) -> None:
         """Capture the ``with`` block at the call site into [`info`][nnsight.tracing.tracer.Tracer.info].
@@ -561,19 +551,43 @@ class Tracer:
         """Run the captured body and write its results back to the user's frame.
 
         Executes the block against a copy of the caller's locals, then
-        [`push_result`][nnsight.tracing.tracer.push_result] writes results back — a nested
+        [`Tracer.push_result`][nnsight.tracing.tracer.Tracer.push_result] writes results back — a nested
         trace passes all its locals up to the enclosing block, while the outermost
         trace returns only the values marked with `nnsight.save`.
 
         Subclasses override this to change *how* the block runs (interleaved with a
         forward pass, a backward pass, ...), ending with the same
-        [`push_result`][nnsight.tracing.tracer.push_result]; the trace-scope depth it reads
+        [`Tracer.push_result`][nnsight.tracing.tracer.Tracer.push_result]; the trace-scope depth it reads
         is managed by `__exit__`.
         """
         frame = self.info.frame
         scope = Scope(dict(frame.f_locals), {}, frame.f_globals)
         exec(code, scope)
-        push_result(frame, scope)
+        self.push_result(frame, scope)
+
+    def push_result(self, frame: FrameType, variables: dict) -> None:
+        """Write a body's ``variables`` back into ``frame``.
+
+        An inner trace pushes everything, so values flow up to the enclosing
+        block. The outermost trace — depth 1 here, since every nested trace has
+        already left — passes on only the values marked with `save`: into the
+        frame, or, when this tracer's backend doesn't inject results, onto
+        ``backend.results`` (merged, since a batched trace pushes once per
+        invoke). Only the outermost block's own pushes land at depth 1 — inner
+        traces, a session's traces and ``with tracer.iter[...]`` blocks push one
+        level deeper — so those always reach their enclosing block. A tracer
+        rebuilt from a request (the server's copy) has no backend, and injects.
+        """
+        if getattr(_local, "depth", 0) == 1:
+            saves = _saves()
+            variables = {k: v for k, v in variables.items() if id(v) in saves}
+            backend = self.backend
+            if backend is not None and not backend.inject_results:
+                if backend.results is None:
+                    backend.results = {}
+                backend.results.update(variables)
+                return
+        push(frame, variables)
 
     def __exit__(
         self,

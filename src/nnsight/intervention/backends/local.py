@@ -37,13 +37,18 @@ _SERVER_MODULES = {
 class LocalSimulationBackend(Backend):
     """Serialize/deserialize a trace locally (user modules hidden), then run it."""
 
-    def __init__(self, model: Any, verbose: bool = False) -> None:
+    def __init__(
+        self, model: Any, verbose: bool = False, inject_results: bool | None = None
+    ) -> None:
+        super().__init__(inject_results=inject_results)
         self.model = model
         self.verbose = verbose
 
     def __call__(self, tracer: Any) -> None:
         from ...ndif import pull_env
         from ...schema.request import RequestModel
+
+        self.results = None
 
         # Register local modules for by-value pickling (same as the remote path).
         pull_env()

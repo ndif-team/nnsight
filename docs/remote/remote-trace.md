@@ -43,7 +43,7 @@ The blocking path (`RemoteBackend.request`):
 3. A websocket connects to `{HOST}/subscribe` and receives a session id — subscribing first means no update is missed.
 4. The payload is POSTed to `{HOST}/request`; the initial `RECEIVED` response returns over HTTP.
 5. The client reads status updates off the websocket until `COMPLETED` or `ERROR` (status values: [ndif-overview.md](./ndif-overview.md#job-status-values)).
-6. On `COMPLETED`, the result arrives either inline on the websocket or, depending on its size, as a presigned URL the client downloads. Either way it is decompressed, loaded with `torch.load(..., map_location="cpu")`, and pushed back into your frame, so your saved variables populate.
+6. On `COMPLETED`, the result arrives either inline on the websocket or, depending on its size, as a presigned URL the client downloads. Either way it is decompressed, loaded with `torch.load(..., map_location="cpu")`, and pushed back into your frame, so your saved variables populate — or, with a `RemoteBackend(..., inject_results=False)`, kept on `backend.results` instead (see [below](#keeping-the-saves-on-the-backend)).
 
 ## .save() is what comes back
 
@@ -56,6 +56,25 @@ with model.trace("Hello", remote=True):
 ```
 
 Saved tensors always land on CPU. Calling `.detach().cpu()` before `.save()` on a large activation still helps: it drops the autograd graph and converts server-side, where the tensor lives.
+
+## Keeping the saves on the backend
+
+A synchronous, blocking run's saves are never returned to you or stored anywhere: the backend runs as the block exits and what it returns is discarded, so injecting them into the block's variables is the only way they reach you. Non-blocking and async runs are different — they return their saves (from the poll or the await) and never inject.
+
+To have a blocking run keep its saves instead, build the backend with `inject_results=False`: the variables stay unfilled and the saves land on `backend.results`, a dict keyed by the saved variable names. This is useful when the code that reads the result is not the code that wrote the block, such as a library that runs a trace on a caller's behalf:
+
+```python
+from nnsight.intervention.backends.remote import RemoteBackend
+
+backend = RemoteBackend(model.to_model_key(), inject_results=False)
+
+with model.trace("Hello", backend=backend):
+    logits = model.lm_head.output.save()
+
+backend.results["logits"]   # `logits` itself was never filled in
+```
+
+The same backend works for `model.session(backend=backend)`. To make it the default for every remote backend — including the one `model.trace(..., remote=True)` builds, read from `tracer.backend.results` — set `CONFIG.APP.INJECT_RESULTS = False`; an explicit `inject_results=` still wins. A blocking run that injects leaves `backend.results` as `None`. A non-blocking run also keeps its saves on `backend.results` once a poll completes; an async run hands them back from `await` / `async for`.
 
 ## Print statements appear as LOG status
 

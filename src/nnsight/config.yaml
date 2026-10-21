@@ -9,6 +9,9 @@ API:
 APP:
   DEBUG: false
   REMOTE_LOGGING: true
+  # Inject a local or blocking remote run's saves into the block's variables
+  # (else keep them on the backend's `results`).
+  INJECT_RESULTS: true
   # Mount .save() on every object so `value.save()` works (else use
   # `nnsight.save(value)`). Adds `.save` to all objects process-wide.
   PYMOUNT: true

@@ -283,3 +283,111 @@ class TestBackendMeta:
         )
         monkeypatch.setattr(backend, "send", lambda _request, _blob: None)
         assert backend(object()) is backend
+
+
+def _saves_blob(saves, compress):
+    # A result blob as the server sends it: torch.save'd, zstd-compressed when the
+    # request was.
+    import io
+
+    import torch
+
+    buffer = io.BytesIO()
+    torch.save(saves, buffer)
+    blob = buffer.getvalue()
+    if compress:
+        import zstandard as zstd
+
+        blob = zstd.ZstdCompressor().compress(blob)
+    return blob
+
+
+class TestBackendResults:
+    """`handle` keeps a completed job's saves on `results` whenever they aren't
+    injected into the caller's frame: a blocking run with `inject_results=False`,
+    and every non-blocking poll. An injecting blocking run, and an async run
+    (whose saves come back from await / async for), leave it empty."""
+
+    @staticmethod
+    def _completed(backend, monkeypatch, saves):
+        # A COMPLETED update whose (stubbed) download yields `saves`.
+        monkeypatch.setattr(backend, "download_result", lambda _url: saves)
+        return ResponseModel(
+            id="job", status=Status.COMPLETED, data="https://bucket.test/result"
+        )
+
+    def test_finalize_only_decodes(self):
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test", inject_results=False)
+        saves = {"out": 42}
+        assert backend.finalize(_saves_blob(saves, backend.compress)) == saves
+        assert backend.results is None
+
+    @pytest.mark.parametrize(
+        "blocking, inject, kept",
+        [(True, True, False), (True, False, True), (False, True, True)],
+    )
+    def test_kept_by_handle_unless_injected(self, monkeypatch, blocking, inject, kept):
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(
+            MODEL_KEY, host="http://ndif.test", blocking=blocking, inject_results=inject
+        )
+        saves = {"out": 7}
+        assert backend.handle(self._completed(backend, monkeypatch, saves)) == saves
+        assert backend.results == (saves if kept else None)
+
+    @pytest.mark.parametrize("inject", [True, False])
+    def test_blocking_run_injects_only_when_asked(self, monkeypatch, inject):
+        """The `__call__` gate: whether the saves reach the frame (`results` is
+        `handle`'s, covered above)."""
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test", inject_results=inject)
+        saves = {"out": 5}
+        completed = self._completed(backend, monkeypatch, saves)
+        pushed = []
+
+        monkeypatch.setattr(backend, "request", lambda _r, _t: backend.handle(completed))
+        monkeypatch.setattr(backend, "_push", lambda result, _t: pushed.append(result))
+        assert backend(object()) == saves
+        assert pushed == ([saves] if inject else [])
+
+    def test_async_run_returns_saves_without_keeping_them(self):
+        backend = _backend([Status.RUNNING, Status.COMPLETED], result={"out": 3})
+        assert asyncio.run(backend.resolve()) == {"out": 3}
+        assert backend.results is None
+
+    def test_new_job_clears_the_previous_jobs_results(self, monkeypatch):
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test")
+        backend.results = {"stale": 1}
+
+        def request(_request, _tracer):
+            assert backend.results is None
+            return None
+
+        monkeypatch.setattr(backend, "request", request)
+        backend(object())
+
+
+class TestInjectResultsConfig:
+    """`CONFIG.APP.INJECT_RESULTS` is a `RemoteBackend`'s default `inject_results`."""
+
+    @pytest.mark.parametrize("configured", [True, False])
+    def test_default_follows_config(self, monkeypatch, configured):
+        from nnsight.intervention.backends.remote import RemoteBackend
+        from nnsight.schema.config import CONFIG
+
+        monkeypatch.setattr(CONFIG.APP, "INJECT_RESULTS", configured)
+        assert RemoteBackend(MODEL_KEY, host="http://ndif.test").inject_results is configured
+
+    def test_explicit_inject_results_overrides_config(self, monkeypatch):
+        from nnsight.intervention.backends.remote import RemoteBackend
+        from nnsight.schema.config import CONFIG
+
+        monkeypatch.setattr(CONFIG.APP, "INJECT_RESULTS", False)
+        backend = RemoteBackend(MODEL_KEY, host="http://ndif.test", inject_results=True)
+        assert backend.inject_results is True

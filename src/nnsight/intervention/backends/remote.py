@@ -64,7 +64,9 @@ class RemoteBackend(Backend):
 
     - ``blocking=True`` (default): hold one ``/subscribe`` websocket open, stream
       status updates until COMPLETED, then download the saves and push them back
-      into the caller's frame so its ``h = ...save()`` variables populate.
+      into the caller's frame so its ``h = ...save()`` variables populate
+      (``inject_results=False``, defaulting to ``CONFIG.APP.INJECT_RESULTS``,
+      skips that; the saves are then read off ``results``).
     - ``blocking=False``: [`submit`][nnsight.intervention.backends.remote.RemoteBackend.submit] the job over plain HTTP (no websocket)
       and store its [`job_id`][nnsight.intervention.backends.remote.RemoteBackend.job_id]; the server records each status to the object
       store, and each later call [`poll`][nnsight.intervention.backends.remote.RemoteBackend.poll]\\ s until the result is ready.
@@ -82,7 +84,9 @@ class RemoteBackend(Backend):
         blocking: bool = True,
         job_id: Optional[str] = None,
         verbose: bool = False,
+        inject_results: Optional[bool] = None,
     ) -> None:
+        super().__init__(inject_results=inject_results)
         self.model_key = model_key
         # Per-request environment (e.g. a PEFT adapter) the server applies to the
         # model before running; travels in the request envelope. See RequestModel.env.
@@ -122,6 +126,7 @@ class RemoteBackend(Backend):
 
     def __call__(self, tracer: Optional[Tracer] = None) -> Optional[RESULT]:
         self.meta = None
+        self.results = None
         # Non-blocking: submit on the first call (no job_id yet), poll thereafter.
         # A poll returns the saved values on COMPLETED, else None (still running);
         # call again to re-poll. See submit()/poll().
@@ -136,7 +141,7 @@ class RemoteBackend(Backend):
         )
 
         # Push returned values back into the caller's frame, like local execute.
-        if isinstance(result, dict):
+        if self.inject_results and isinstance(result, dict):
             self._push(result, tracer)
         return result
 
@@ -195,8 +200,19 @@ class RemoteBackend(Backend):
         the result blob itself — the server sent it back on the response — or a
         presigned url to download it from. Which one depends on the result's
         size against the server's limit, so both have to be handled.
+
+        A result that won't be injected into the caller's frame — a non-blocking
+        poll's, or a blocking run's with ``inject_results=False`` — is also kept on
+        [`results`][nnsight.intervention.backends.remote.RemoteBackend.results].
         """
-        return self.download_result(response.data) if self.note(response) else None
+        if not self.note(response):
+            return None
+        result = self.download_result(response.data)
+        # An injected result already lives in the caller's variables; keeping it
+        # too would hold a second reference to it.
+        if not (self.blocking and self.inject_results):
+            self.results = result
+        return result
 
     def download_result(self, url: Optional[str]) -> Optional[RESULT]:
         """Deserialize the result, downloading it first if it is not already here.
@@ -332,6 +348,7 @@ class RemoteBackend(Backend):
         None — call [`poll`][nnsight.intervention.backends.remote.RemoteBackend.poll] (or the backend again) to fetch the result.
         """
         self.meta = None
+        self.results = None
         blob = self._serialize(tracer)
         request = RequestModel(
             model_key=self.model_key, compress=self.compress, env=self.env

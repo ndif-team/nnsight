@@ -15,7 +15,7 @@ tags: [reference, config]
 from nnsight import CONFIG
 print(CONFIG)
 # API=ApiConfig(HOST='https://api.ndif.us', APIKEY=None, COMPRESS=True)
-# APP=AppConfig(DEBUG=False, REMOTE_LOGGING=True, PYMOUNT=True, DISABLE_CPP_BACKTRACE=True)
+# APP=AppConfig(DEBUG=False, REMOTE_LOGGING=True, INJECT_RESULTS=True, PYMOUNT=True, DISABLE_CPP_BACKTRACE=True)
 ```
 
 ## How config is loaded
@@ -52,6 +52,7 @@ CONFIG.set_default_api_key("YOUR_NDIF_KEY")   # set APIKEY and save in one call
 |------|------|---------|--------------|----------------|
 | `APP.DEBUG` | `bool` | `False` | When `True`, tracebacks keep nnsight's internal frames (when `False`, they are filtered to your own code), and remote runs are verbose: payload/result byte sizes, and each status on its own line instead of one in-place spinner. See [debug-mode.md](../errors/debug-mode.md). | Turn on to debug an exception you suspect is in nnsight internals. Also enabled by `NNSIGHT_DEBUG`. |
 | `APP.REMOTE_LOGGING` | `bool` | `True` | Show the remote status display (spinner + RECEIVED/QUEUED/RUNNING/LOG …) and the download progress bar; `print(...)` in a remote block arrives as `LOG` status here. | Disable for silent runs. |
+| `APP.INJECT_RESULTS` | `bool` | `True` | Whether a synchronous run — local, or a blocking remote one — injects its outermost block's saves into the block's variables. It applies only to synchronous runs: their saves are never returned or stored anywhere, so injecting them into the frame is the only way they reach you. When `False`, they are kept on `backend.results` instead and the variables stay unbound. Non-blocking and async remote runs return their saves (from the poll or the await) and never inject. It is the default `inject_results` for every backend, read when the backend is built — including the ones `model.trace(...)` and `model.trace(remote=True)` build. See [save.md](../usage/save.md#keeping-the-saves-off-your-variables) and [remote-trace.md](../remote/remote-trace.md#keeping-the-saves-on-the-backend). | Disable when the code reading a remote result isn't the code that wrote the block, e.g. a library running traces for its caller. |
 | `APP.PYMOUNT` | `bool` | `True` | Mount `.save()` onto every Python object (via the optional C extension) so `value.save()` works in a trace. When `False` (or the extension didn't build), use `nnsight.save(value)`. Mounting adds `.save` to all objects process-wide, so anything checking `hasattr(x, "save")` will see it. | Disable if you only use `nnsight.save()`, or a class's own `.save()` conflicts. |
 | `APP.DISABLE_CPP_BACKTRACE` | `bool` | `True` | At import, neutralize glibc `backtrace()` so a torch C++ error raised inside an interleaving greenlet surfaces as a normal Python exception instead of segfaulting the process. Empties torch's (rarely used) *C++* backtrace string process-wide; Python tracebacks and error messages are unaffected. Only glibc/x86-64 Linux is touched. | Turn off (via `NNSIGHT_DISABLE_CPP_BACKTRACE=0`) only if you need torch's C++ stack traces and accept the crash risk. |
 
