@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 import torch
 
-from ..tracing.tracer import Tracer, WithBlockNotFoundError, push_result
+from ..tracing.tracer import Tracer, WithBlockNotFoundError
 from .interleaver import Interleaver, Mediator
 
 
@@ -215,7 +215,7 @@ class BackwardTracer(Tracer):
             with interleaver, torch.autograd.set_multithreading_enabled(False):
                 self.fn(self.tensor, *self.args, **self.kwargs)
             interleaver.check_dangling_mediators()
-            push_result(frame, mediator.lcls)
+            self.push_result(frame, mediator.lcls)
         finally:
             torch.Tensor.grad = original
             for handle in hooks:

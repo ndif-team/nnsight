@@ -79,6 +79,22 @@ with model.trace("Hello"):
         grad = a1.grad.clone().save()
 ```
 
+## Keeping the saves off your variables
+
+A trace's saves reach you only by being injected into the block's variables — the run returns nothing and stores them nowhere else. To keep them on the backend instead, pass a backend built with `inject_results=False`; the saves land on `backend.results`, a dict keyed by the saved names, and the variables stay unbound:
+
+```python
+from nnsight.tracing.backend import Backend
+
+backend = Backend(inject_results=False)
+with model.trace("Hello", backend=backend):
+    logits = nnsight.save(model.lm_head.output)
+
+backend.results["logits"]   # `logits` itself was never bound
+```
+
+`CONFIG.APP.INJECT_RESULTS = False` makes it the default for every trace, read from `tracer.backend.results`. It governs only the outermost block: inner traces in a session, and loops over `tracer.iter`, still hand their values on inside the block. Remote runs follow the same setting — see [remote-trace.md](../remote/remote-trace.md#keeping-the-saves-on-the-backend).
+
 ## Remote traces
 
 `.save()` tells the remote backend which values to ship back; anything unsaved is computed on the server and discarded. Move tensors to CPU before saving for smaller transfers: `out = model.output.logits.detach().cpu().save()`.

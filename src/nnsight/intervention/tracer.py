@@ -31,7 +31,7 @@ import torch
 from greenlet import getcurrent
 
 from ..tracing.backend import Backend
-from ..tracing.tracer import Tracer, push_result, save
+from ..tracing.tracer import Tracer, save
 from ..tracing.util import Scope, clean_traceback
 from .util import clear_shared_locals, shared_locals
 from .barrier import Barrier
@@ -321,7 +321,7 @@ class InterleavingTracer(Tracer):
                 # Invokers append their workers as this runs.
                 body = Scope(dict(frame.f_locals), shared_locals(frame), glbls)
                 exec(code, body)
-                push_result(frame, body.writes())
+                self.push_result(frame, body.writes())
                 if not interleaver.mediators:
                     raise ValueError(
                         "trace() needs an input, or at least one "
@@ -338,7 +338,7 @@ class InterleavingTracer(Tracer):
             # snapshot of the frame, so pushing it whole would put the old value
             # back over a sibling's rebind.
             for mediator in mediators:
-                push_result(frame, mediator.lcls.writes())
+                self.push_result(frame, mediator.lcls.writes())
         finally:
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before interleave doesn't leave workers/batcher behind.

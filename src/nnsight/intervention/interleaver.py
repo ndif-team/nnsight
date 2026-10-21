@@ -141,7 +141,7 @@ class Mediator:
         glbls: The globals the block was written against.
         lcls: The [`Scope`][nnsight.tracing.util.Scope] the block runs in — its
             capture-time names, the frame it shares with the blocks written beside
-            it, and those globals behind them. Doubles as what [`push_result`][nnsight.tracing.tracer.push_result]
+            it, and those globals behind them. Doubles as what [`Tracer.push_result`][nnsight.tracing.tracer.Tracer.push_result]
             reads the block's results back out of.
         copy: Whether to exec against a fresh copy of [`lcls`][nnsight.intervention.interleaver.Mediator.lcls] each run. Set
             for an edit, which is replayed on every later trace and so must not

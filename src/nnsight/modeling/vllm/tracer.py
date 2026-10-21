@@ -16,7 +16,6 @@ from typing import Any
 
 from ...intervention.interleaver import Mediator
 from ...intervention.tracer import InterleavingTracer
-from ...tracing.tracer import push_result
 from ...intervention.util import clear_shared_locals, shared_locals
 from ...tracing.util import Scope
 
@@ -104,7 +103,7 @@ class VLLMTracer(InterleavingTracer):
                 # on success would hand back a frame with none of the values that
                 # did arrive — including the ones from the invokes that finished.
                 for mediator in mediators:
-                    push_result(self.info.frame, mediator.lcls.writes())
+                    self.push_result(self.info.frame, mediator.lcls.writes())
         finally:
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before it doesn't leave workers/batcher behind.

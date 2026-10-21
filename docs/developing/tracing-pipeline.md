@@ -145,12 +145,12 @@ Two constraints fall out of this line-based mechanism:
 ### Execute (varies by tracer type)
 
 `Tracer.execute(code)` (`tracer.py`, the base) runs the block against a `Scope`
-built from the caller's locals, then `push_result` writes results back:
+built from the caller's locals, then `Tracer.push_result` writes results back:
 
 ```python
 scope = Scope(dict(frame.f_locals), frame.f_locals, frame.f_globals)
 exec(code, scope)
-push_result(frame, scope)
+self.push_result(frame, scope)
 ```
 
 Subclasses override `execute` to change *how* the block runs:
@@ -194,10 +194,10 @@ blocks written beside it.
 
 ### push_result and saving
 
-`push_result(frame, variables)` (`tracer.py`) writes a block's variables back
-into the caller's frame. `save` (`tracer.py`, exposed as `nnsight.save` and
+`Tracer.push_result(frame, variables)` (`tracer.py`) writes a block's variables
+back into the caller's frame — every tracer type's `execute` ends with it. `save` (`tracer.py`, exposed as `nnsight.save` and
 behind `.save()`) marks a value by identity in a per-thread set; the **outermost**
-trace filters `push_result` to only the marked values, while a nested trace pushes
+trace filters `Tracer.push_result` to only the marked values, while a nested trace pushes
 everything up to its enclosing block. Depth is tracked around the backend call in
 `__exit__` (`inc()`/`dec()`, `tracer.py`). An interleaving trace pushes only what
 each block bound (`Scope.writes()`, `util.py`): every invoke's scope starts from the
@@ -227,7 +227,7 @@ write-through mapping (PEP 667) and a plain `update` suffices.
 ## Key files / classes
 
 - `src/nnsight/tracing/tracer.py` — `Tracer` (`Info`, `capture`, `source`, `parse`,
-  `build`, `compile`, `execute`), `skip_context`, `save`, `mark`, `push_result`.
+  `build`, `compile`, `execute`, `push_result`), `skip_context`, `save`, `mark`.
 - `src/nnsight/tracing/util.py` — `Scope`, `push`, `SerializedFrame`.
 - `src/nnsight/tracing/globals.py` — `SOURCES`, `BLOCKS`.
 - `src/nnsight/intervention/tracer.py` — `InterleavingTracer`, `ScanningTracer`, `Invoker`.

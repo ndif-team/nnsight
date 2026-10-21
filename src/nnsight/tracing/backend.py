@@ -21,8 +21,25 @@ class Backend:
     Subclasses override `__call__` to run the block somewhere else (a remote
     worker, a simulation), reading the compiled code and captured frame from
     [`info`][nnsight.tracing.tracer.Tracer.info].
+
+    ``inject_results`` decides where an outermost run's saves go: injected into
+    the block's variables (the default, ``CONFIG.APP.INJECT_RESULTS``), or kept
+    on ``results``, a dict keyed by the saved names. A backend that doesn't call
+    ``Backend.__init__`` keeps the class defaults and always injects.
     """
+
+    inject_results: bool = True
+    results: dict | None = None
+
+    def __init__(self, inject_results: bool | None = None) -> None:
+        from ..schema.config import CONFIG
+
+        self.inject_results = (
+            CONFIG.APP.INJECT_RESULTS if inject_results is None else inject_results
+        )
+        self.results = None
 
     def __call__(self, tracer: Tracer) -> None:
         """Execute ``tracer``'s captured block in the caller's process."""
+        self.results = None
         tracer.execute(tracer.info.code)

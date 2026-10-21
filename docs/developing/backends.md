@@ -39,6 +39,11 @@ not a backend concern (`EditingTracer.execute` stores the block as a replayed
 ### How a backend is selected
 
 `Tracer.__init__` defaults `self.backend` to `Backend()` (`tracing/tracer.py`).
+`Backend.inject_results` (default `CONFIG.APP.INJECT_RESULTS`) decides where the
+outermost block's saves go: every tracer hands its body's values on through
+`Tracer.push_result`, which, at depth 1 with a backend that doesn't inject,
+merges the saves into `backend.results` instead of the caller's frame
+(`RemoteBackend` applies it to its own `_push`).
 The model layer intercepts the `remote=` kwarg in `Remotable.trace`
 (`src/nnsight/modeling/mixins/remotable.py`):
 

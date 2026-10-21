@@ -86,6 +86,7 @@ class RemoteBackend(Backend):
         verbose: bool = False,
         inject_results: Optional[bool] = None,
     ) -> None:
+        super().__init__(inject_results=inject_results)
         self.model_key = model_key
         # Per-request environment (e.g. a PEFT adapter) the server applies to the
         # model before running; travels in the request envelope. See RequestModel.env.
@@ -99,11 +100,6 @@ class RemoteBackend(Backend):
         self.job_id = job_id
         self.status: Optional[Status] = None
         self.meta: Optional[dict] = None
-        # The last job's saves when they aren't injected (see handle).
-        self.results: Optional[RESULT] = None
-        self.inject_results = (
-            CONFIG.APP.INJECT_RESULTS if inject_results is None else inject_results
-        )
         self.host = host or CONFIG.API.HOST
         if not self.host.startswith(("http://", "https://")):
             raise ValueError(

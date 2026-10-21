@@ -125,7 +125,7 @@ A typical `with model.trace("hello") as tracer: hidden = model.layer.output.save
 8. After the forward returns, `interleave` serves the return value at `"result"`,
    then `check_dangling_mediators()` surfaces any worker still parked on a location
    the model never reached.
-9. Back in `execute`, `push_result(frame, mediator.lcls)` writes the block's
+9. Back in `execute`, `self.push_result(frame, mediator.lcls)` writes the block's
    variables back; `__exit__`'s outermost `dec()` filters to just the `.save()`-ed
    values. `hidden` now lives in the caller's frame.
 

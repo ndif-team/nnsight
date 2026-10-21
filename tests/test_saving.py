@@ -166,3 +166,103 @@ class TestThreadSafety:
         assert not errors
         for i in range(8):
             assert torch.allclose(results[i], torch.full((2, 8), float(i)))
+
+
+class TestInjectResults:
+    """A local run whose backend doesn't inject keeps the outermost block's saves
+    on `backend.results` instead of the block's variables; inner traces and
+    `tracer.iter` loops still pass their values on inside the block."""
+
+    def test_saves_kept_on_the_backend_not_the_variables(self, x):
+        from nnsight.tracing.backend import Backend
+
+        model = MLP()
+        envoy = Envoy(model)
+        backend = Backend(inject_results=False)
+        with envoy.trace(x, backend=backend):
+            h = nnsight.save(envoy.fc1.output)
+        assert "h" not in locals()
+        assert set(backend.results) == {"h"}
+        assert torch.allclose(backend.results["h"], model.fc1(x))
+
+    def test_injecting_backend_keeps_nothing(self, x):
+        from nnsight.tracing.backend import Backend
+
+        envoy = Envoy(MLP())
+        backend = Backend()
+        with envoy.trace(x, backend=backend):
+            h = nnsight.save(envoy.fc1.output)
+        assert h.shape == (2, 8)
+        assert backend.results is None
+
+    def test_config_sets_the_default_for_every_trace(self, x, monkeypatch):
+        """A library can switch injection off once, for traces it doesn't
+        build a backend for; an explicit backend still decides for itself."""
+        from nnsight.schema.config import CONFIG
+        from nnsight.tracing.backend import Backend
+
+        envoy = Envoy(MLP())
+        monkeypatch.setattr(CONFIG.APP, "INJECT_RESULTS", False)
+        with envoy.trace(x) as tracer:
+            out = nnsight.save(envoy.output)
+        assert "out" not in locals()
+        assert set(tracer.backend.results) == {"out"}
+
+        with envoy.trace(x, backend=Backend(inject_results=True)):
+            injected = nnsight.save(envoy.output)
+        assert injected.shape == (2, 8)
+
+    def test_session_inner_traces_still_feed_the_session(self, x):
+        from nnsight.tracing.backend import Backend
+
+        model = MLP()
+        envoy = Envoy(model)
+        backend = Backend(inject_results=False)
+        with envoy.session(backend=backend):
+            with envoy.trace(x):
+                hidden = envoy.fc1.output
+            total = nnsight.save(hidden.sum())
+        assert "total" not in locals()
+        assert torch.allclose(backend.results["total"], model.fc1(x).sum())
+
+    def test_a_failed_run_does_not_divert_the_next_one(self, x):
+        from nnsight.tracing.backend import Backend
+
+        envoy = Envoy(MLP())
+        with pytest.raises(ValueError, match="boom"):
+            with envoy.trace(x, backend=Backend(inject_results=False)):
+                nnsight.save(envoy.fc1.output)
+                raise ValueError("boom")
+        with envoy.trace(x):
+            h = nnsight.save(envoy.fc1.output)
+        assert h.shape == (2, 8)
+
+    @torch.no_grad()
+    def test_generation_with_an_iter_loop(self, gpt2):
+        """A name bound in the loop reaches the code after it; only the block's
+        saves go to `results`."""
+        from nnsight.tracing.backend import Backend
+
+        backend = Backend(inject_results=False)
+        with gpt2.generate(
+            "Hello", max_new_tokens=3, do_sample=False, backend=backend
+        ) as tracer:
+            for _ in tracer.iter[:3]:
+                last = gpt2.transformer.h[0].output[0]
+            last_rows = nnsight.save(last.shape[0])
+        assert "last_rows" not in locals()
+        assert backend.results == {"last_rows": 1}  # a cached decode step
+
+    @torch.no_grad()
+    def test_every_invoke_contributes_its_saves(self, gpt2):
+        from nnsight.tracing.backend import Backend
+
+        backend = Backend(inject_results=False)
+        with gpt2.trace(backend=backend) as tracer:
+            with tracer.invoke("Hello"):
+                first = nnsight.save(gpt2.lm_head.output)
+            with tracer.invoke("Goodbye world"):
+                second = nnsight.save(gpt2.lm_head.output)
+        assert set(backend.results) == {"first", "second"}
+        assert backend.results["first"].shape[0] == 1
+        assert backend.results["second"].shape[0] == 1
