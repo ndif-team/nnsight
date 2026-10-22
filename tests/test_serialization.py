@@ -9,8 +9,15 @@ import textwrap
 
 import pytest
 import torch
+import torch.nn as nn
 
-from nnsight.intervention.serialization import code_reduce, dumps, loads
+from nnsight.intervention.envoy import Envoy
+from nnsight.intervention.serialization import (
+    UnknownPersistentIdError,
+    code_reduce,
+    dumps,
+    loads,
+)
 from nnsight.ndif import get_local_env
 from nnsight.schema.request import RequestModel
 from nnsight.tracing.backend import Backend
@@ -32,6 +39,15 @@ def is_odd(n):
 # A local (test-module) helper used to prove ship-by-value under remote="local".
 def normalize(x):
     return x / x.norm(dim=-1, keepdim=True)
+
+
+def _persistent_map(root):
+    # What Remotable._remoteable_persistent_objects builds, for a bare Envoy.
+    objects = {"Interleaver": root.interleaver}
+    for envoy in root.modules():
+        objects[f"Envoy:{envoy.path}"] = envoy
+        objects[f"Module:{envoy.path}"] = envoy._module
+    return objects
 
 
 # Telling apart two same-signature lambdas written on one line needs the column
@@ -683,27 +699,66 @@ class TestServerExecution:
         assert frame.f_locals == {"a": 1}
 
 
+class TestEnvoyReference:
+    """An envoy travels as its path and resolves to the receiver's own envoy there,
+    unless it (or an envoy below it) carries state the receiver cannot have — an
+    edit, an alias, a custom envoy class — in which case it ships by value and its
+    children decide for themselves."""
+
+    def test_a_pristine_envoy_resolves_to_the_receivers_own(self, gpt2):
+        objects = gpt2._remoteable_persistent_objects()
+        assert loads(dumps(gpt2), objects) is gpt2
+        block = gpt2.transformer.h[0]
+        assert loads(dumps(block), objects) is block
+
+    def test_the_payload_carries_the_path_not_the_tree(self, gpt2):
+        assert len(dumps(gpt2)) < 64
+
+    def test_a_receiver_without_the_envoy_says_so(self, gpt2):
+        with pytest.raises(UnknownPersistentIdError, match="Envoy:model.transformer.h.0"):
+            loads(dumps(gpt2.transformer.h[0]), {})
+
+    def test_an_edited_envoy_ships_by_value_over_referenced_children(self, gpt2):
+        with gpt2.edit() as (tracer, edited):
+            edited.transformer.h[0].output[0][:] = 0
+        copy = loads(dumps(edited), gpt2._remoteable_persistent_objects())
+        assert copy is not edited and copy is not gpt2
+        assert len(copy._edits) == 1
+        assert copy._module is gpt2._module and copy.interleaver is gpt2.interleaver
+        assert copy.transformer is gpt2.transformer
+        assert gpt2.transformer.parent is gpt2  # the receiver's tree is left alone
+
+    def test_an_alias_ships_by_value(self):
+        root = Envoy(nn.Sequential(nn.Linear(2, 2)), rename={"0": "first"})
+        copy = loads(dumps(root), _persistent_map(root))
+        assert copy is not root and copy.first is root.first
+
+
 class TestParentLinks:
-    """The weak parent link is not pickled; it is rebuilt on the receiving side."""
+    """The weak parent link is not pickled; it is rebuilt on the receiving side for
+    what came by value, and left alone on what came by reference."""
 
-    @staticmethod
-    def _assert_parents(root):
-        for node in root.modules():
-            for child in node._children:
-                assert child.parent is node, child.path
-
-    def test_a_shipped_tree_relinks_itself(self, gpt2):
-        copy = loads(dumps(gpt2), gpt2._remoteable_persistent_objects())
-        assert copy is not gpt2 and copy.parent is None
-        self._assert_parents(copy)
-        assert copy.transformer.h[2].mlp.root is copy
+    def test_a_shipped_tree_relinks_itself(self):
+        # The root and its child both bind an alias, so both ship by value; the
+        # leaf has none and arrives as a reference to the receiver's own envoy.
+        root = Envoy(nn.Sequential(nn.Sequential(nn.Linear(2, 2))), rename={"0": "first"})
+        copy = loads(dumps(root), _persistent_map(root))
+        assert copy is not root and copy.parent is None
+        assert copy.first is not root.first and copy.first.parent is copy
+        assert copy.first.first is root.first.first
+        assert root.first.first.parent is root.first  # the live leaf keeps its live parent
+        assert root.first.parent is root
 
     def test_a_shipped_subtree_is_its_own_root(self, gpt2):
-        # Shipped without its parent, the top envoy has none; below it, the copies link to each other.
-        block = loads(dumps(gpt2.transformer.h[2]), gpt2._remoteable_persistent_objects())
-        assert block is not gpt2.transformer.h[2]
-        assert block.parent is None and block.root is block
-        assert block.mlp.parent is block
+        # Shipped without its parent, the top envoy has none; below it, the
+        # receiver's own envoys are untouched.
+        with gpt2.transformer.h[2].edit() as (tracer, block):
+            block.mlp.output[:] = 0
+        copy = loads(dumps(block), gpt2._remoteable_persistent_objects())
+        assert copy is not block
+        assert copy.parent is None and copy.root is copy
+        assert copy.mlp is gpt2.transformer.h[2].mlp
+        assert gpt2.transformer.h[2].mlp.parent is gpt2.transformer.h[2]
 
     @torch.no_grad()
     def test_a_deserialized_trace_reads_through_parent(self, gpt2):

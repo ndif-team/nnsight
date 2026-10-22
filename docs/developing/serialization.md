@@ -66,7 +66,9 @@ of pickling them).
   recoverable source — it falls back to cloudpickle's bytecode path, which only
   loads on a matching Python.
 - `persistent_id(obj)` (`serialization.py`) returns
-  `obj.__dict__["_persistent_id"]` when present (else `None`).
+  `obj.__dict__["_persistent_id"]` when present; otherwise, when the object's
+  class defines `_persistent_reference()`, whatever that returns (`Envoy`
+  answers `Envoy:<path>` or `None`, see below); else `None`.
 - `CustomCloudUnpickler(pickle.Unpickler)` (`serialization.py`) overrides
   `persistent_load(pid)` to return `self.persistent_objects[pid]`, raising
   `UnknownPersistentIdError` if the ID is absent.
@@ -148,25 +150,39 @@ self.copy}` — the edit block reduced to source plus referenced vars, and the
 travel. `__setstate__` recompiles the source (under filename `<edit>`)
 and re-inits.
 
-## Persistent objects — model/tokenizer by reference
+## Persistent objects — model, tokenizer and envoys by reference
 
 Heavy server-side objects (the model, its tokenizer, the module tree, the
 interleaver) are never serialized — they're referenced by ID and re-bound to the
-server actor's live objects.
+server actor's live objects. The envoy tree over the model is referenced the same
+way: the server wraps the same model in the same tree, so a request names an
+envoy by its path instead of shipping the tree with every request.
 
-- **Tagging (client):** `Envoy.__getstate__` (`envoy.py`) sets
-  `interleaver._persistent_id = "Interleaver"` and `_module._persistent_id =
-  f"Module:{self.path}"`. `TransformersModel.__getstate__` (`transformers.py`)
+- **Envoys (client):** `Envoy._persistent_reference()` (`envoy.py`) answers
+  `Envoy:<path>` for an envoy that holds nothing the server cannot have, and the
+  pickler writes that id in place of the object. An envoy that does hold such
+  state — an edit (`_edits`), an alias (`rename=`) or a custom envoy class
+  (`envoys=`), on itself or on any envoy below it — ships by value through
+  `__getstate__`, and each of its children is asked in turn. So `model` in a
+  trace travels as `Envoy:model`, while the `edited` copy that `model.edit()`
+  returns travels as its own `__dict__`, edits included, with its children by
+  reference.
+- **Tagging (client):** for an envoy shipped by value, `Envoy.__getstate__`
+  (`envoy.py`) sets `interleaver._persistent_id = "Interleaver"` and
+  `_module._persistent_id = f"Module:{self.path}"`. `TransformersModel.__getstate__` (`transformers.py`)
   additionally tags each non-`None` preprocessor and the pipeline, using the
   `_PERSISTENT` map (`transformers.py`): `tokenizer → "Tokenizer"`, `processor
   → "Processor"`, `image_processor → "ImageProcessor"`, `feature_extractor →
   "FeatureExtractor"`, `pipeline → "Pipeline"`.
 - **Resolving (server):** `Remotable._remoteable_persistent_objects()`
   (`remotable.py`) builds the `{id: object}` map — `{"Interleaver":
-  self.interleaver}` plus `Module:<path>` for every envoy in `self.modules()`.
-  `TransformersModel` extends it (`transformers.py`) with the tokenizer and
-  friends. This map is passed to `loads(..., persistent_objects=...)`; a missing ID
-  raises `UnknownPersistentIdError: <id>`.
+  self.interleaver}` plus `Envoy:<path>` and `Module:<path>` for every envoy in
+  `self.modules()`. `TransformersModel` extends it (`transformers.py`) with the
+  tokenizer and friends. This map is passed to `loads(...,
+  persistent_objects=...)`; a missing ID raises `UnknownPersistentIdError: <id>`.
+- **Parent links (server):** `Envoy.__setstate__` re-links the children that
+  came by value in the same payload; a child that came by reference is the
+  server's own envoy and keeps its parent.
 
 ### Model identity — `to_model_key`
 

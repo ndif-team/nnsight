@@ -321,22 +321,42 @@ class Envoy:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        # The parent link is not pickled (a weakref does not pickle). A parent in
-        # the same payload re-links its children here, which also covers a child
-        # whose parent was rebuilt first; the payload's top envoy has none.
+        # The parent link is not pickled (a weakref does not pickle). A child that
+        # came by value in the same payload has none yet and is re-linked here; the
+        # payload's top envoy has none either. A child that came by reference is
+        # the far side's own envoy and keeps its parent: re-pointing it would bend
+        # the live tree toward this copy.
         self.__dict__.setdefault("_parent", None)
         for child in self._children:
-            child._parent = weakref.ref(self)
+            if child.__dict__.get("_parent") is None:
+                child._parent = weakref.ref(self)
 
     def __getstate__(self) -> dict:
-        # For serialization: tag the heavy/server-side objects as persistent so
-        # they're referenced by id rather than serialized. The server resolves
+        # For serialization, when this envoy ships by value (see
+        # `_persistent_reference`): tag the heavy/server-side objects as persistent
+        # so they're referenced by id rather than serialized. The server resolves
         # them from its own model (Module:<path>) and interleaver (Interleaver).
+        # The children are envoys and decide for themselves.
         state = self.__dict__.copy()
         state.pop("_parent", None)
         state["interleaver"]._persistent_id = "Interleaver"
         state["_module"]._persistent_id = f"Module:{self.path}"
         return state
+
+    def _persistent_reference(self) -> str | None:
+        # How a request names this envoy (asked by the pickler, see
+        # serialization.CustomCloudPickler.persistent_id). The far side wraps the
+        # same model in the same tree, so an envoy holding nothing of its own
+        # travels as its path, `Envoy:<path>`, and resolves to the far side's envoy
+        # there (Remotable._remoteable_persistent_objects) — the whole tree is not
+        # rebuilt per request. What the far side cannot have is state set here:
+        # edits (`_edits`), aliases (`rename=`) and a custom envoy class per child
+        # (`envoys=`), on this envoy or any below it. Such an envoy ships by value
+        # (`__getstate__`), and each child is asked in turn.
+        for envoy in self.modules():
+            if envoy._edits or envoy._aliases or envoy._envoys is not None:
+                return None
+        return f"Envoy:{self.path}"
 
     def _update(self, module: torch.nn.Module) -> None:
         # Re-point an existing envoy tree at a new module (swapping meta weights

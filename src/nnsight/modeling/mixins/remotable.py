@@ -234,12 +234,16 @@ class Remotable(Meta):
 
     def _remoteable_persistent_objects(self) -> dict:
         # The server-side map used to resolve persistent ids when deserializing a
-        # request. Keys must match the ids tagged in __getstate__ (Envoy tags the
-        # interleaver and each module; subclasses add their own, e.g. tokenizers).
+        # request. Keys must match the ids the client writes: Envoy:<path> for an
+        # envoy shipped by reference (Envoy._persistent_reference), and the ids
+        # tagged in __getstate__ for one shipped by value (Envoy tags the
+        # interleaver and its module; subclasses add their own, e.g. tokenizers).
         objects = {"Interleaver": self.interleaver}
-        # Every module in the tree (modules() is the recursive walk; __iter__ is
-        # only direct children), so each Module:<path> id resolves server-side.
+        # Every envoy in the tree (modules() is the recursive walk; __iter__ is
+        # only direct children), so each Envoy:<path> and Module:<path> id
+        # resolves server-side.
         for envoy in self.modules():
+            objects[f"Envoy:{envoy.path}"] = envoy
             objects[f"Module:{envoy.path}"] = envoy._module
         return objects
 

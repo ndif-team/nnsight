@@ -140,7 +140,7 @@ those through `model.trace(...)`, or make the change in the weights instead.
 
 ## Remote edits
 
-Edits ride with the model to a remote server — they live in `envoy._edits`, which serializes by value:
+Edits ride with the model to a remote server — an envoy without edits travels as a reference to the server's own, one that carries edits ships by value, so its `_edits` arrive with it:
 
 ```python
 with model.edit() as (tracer, edited):

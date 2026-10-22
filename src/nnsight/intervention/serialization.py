@@ -13,9 +13,10 @@ Two mechanisms layer on top of cloudpickle:
   these tuples, and the function reducer runs a dynamic ``def``'s source/globals
   through it too; `_load_function` compiles the source back to a code
   object on the far side.
-* Persistent ids — objects carrying a ``_persistent_id`` in their ``__dict__``
-  are written as that id and resolved on the other side from a
-  ``persistent_objects`` map (keeps the model out of the payload).
+* Persistent ids — objects carrying a ``_persistent_id`` in their ``__dict__``,
+  and objects whose class answers ``_persistent_reference()`` with an id, are
+  written as that id and resolved on the other side from a ``persistent_objects``
+  map (keeps the model, and the envoy tree over it, out of the payload).
 """
 
 from __future__ import annotations
@@ -384,11 +385,15 @@ class CustomCloudPickler(cloudpickle.CloudPickler):
         return (_load_function, args, globals, None, None, _fill)
 
     def persistent_id(self, obj: Any) -> Optional[Any]:
-        # Reference (don't serialize) anything tagged with a _persistent_id.
+        # Reference (don't serialize) anything tagged with a _persistent_id, and
+        # anything whose class names it by id on request (`Envoy`, which decides
+        # per instance whether the far side's own envoy can stand in for it).
         try:
             return obj.__dict__["_persistent_id"]
         except (AttributeError, KeyError, TypeError):
-            return None
+            pass
+        reference = getattr(type(obj), "_persistent_reference", None)
+        return None if reference is None else reference(obj)
 
 
 class UnknownPersistentIdError(pickle.UnpicklingError):

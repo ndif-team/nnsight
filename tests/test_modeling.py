@@ -843,17 +843,25 @@ class TestSerialization:
     def _persistent_map(self, envoy):
         objects = {"Interleaver": envoy.interleaver}
         for node in envoy.modules():
+            objects[f"Envoy:{node.path}"] = node
             objects[f"Module:{node.path}"] = node._module
         return objects
 
     def test_modules_referenced_not_serialized(self):
         from nnsight.intervention.serialization import dumps, loads
 
+        # An envoy with nothing of its own is written as its path and resolves to
+        # the receiver's own envoy: neither its tree nor its modules travel.
         envoy = Envoy(Model())
-        restored = loads(dumps(envoy), self._persistent_map(envoy))
-        # modules and interleaver resolve to the same server-side objects
+        assert loads(dumps(envoy), self._persistent_map(envoy)) is envoy
+        # One carrying an edit travels by value; its module, interleaver and
+        # children still resolve to the receiver's own objects.
+        with envoy.edit() as (tracer, edited):
+            getattr(edited.layers, "0").attn.output[:] = 0
+        restored = loads(dumps(edited), self._persistent_map(envoy))
+        assert restored is not edited
         assert restored._module is envoy._module
-        assert getattr(restored.layers, "0").attn._module is getattr(envoy.layers, "0").attn._module
+        assert getattr(restored.layers, "0").attn is getattr(envoy.layers, "0").attn
         assert restored.interleaver is envoy.interleaver
         assert [n.path for n in restored] == [n.path for n in envoy]
 
