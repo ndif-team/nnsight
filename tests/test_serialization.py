@@ -700,23 +700,51 @@ class TestServerExecution:
 
 
 class TestEnvoyReference:
-    """An envoy travels as its path and resolves to the receiver's own envoy there,
-    unless it (or an envoy below it) carries state the receiver cannot have — an
-    edit, an alias, a custom envoy class — in which case it ships by value and its
-    children decide for themselves."""
+    """An envoy travels as its path. The receiver resolves it to a copy of its own
+    envoy made for that payload, so the tree is neither serialized nor shared with
+    other requests. An envoy carrying state the receiver cannot have (an edit, an
+    attribute set on it, a rename alias, a custom envoy class) ships by value, and
+    its children decide for themselves."""
 
-    def test_a_pristine_envoy_resolves_to_the_receivers_own(self, gpt2):
+    def test_a_pristine_envoy_resolves_to_the_receivers_copy(self, gpt2):
         objects = gpt2._remoteable_persistent_objects()
-        assert loads(dumps(gpt2), objects) is gpt2
-        block = gpt2.transformer.h[0]
-        assert loads(dumps(block), objects) is block
+        copy = loads(dumps(gpt2), objects)
+        assert copy is not gpt2
+        assert copy._module is gpt2._module and copy.interleaver is gpt2.interleaver
+        block = copy.transformer.h[0]
+        assert block is not gpt2.transformer.h[0] and block._module is gpt2.transformer.h[0]._module
+        assert block.parent is copy.transformer.h and copy.transformer.h.parent is copy.transformer
+        assert block.root is copy
+        assert gpt2.transformer.parent is gpt2
 
-    def test_the_payload_carries_the_path_not_the_tree(self, gpt2):
+    def test_the_payload_carries_only_the_path(self, gpt2):
         assert len(dumps(gpt2)) < 64
+        assert len(dumps(gpt2.transformer.h[0])) < 64
+
+    def test_one_payload_resolves_to_one_tree(self, gpt2):
+        objects = gpt2._remoteable_persistent_objects()
+        root, block = loads(dumps((gpt2, gpt2.transformer.h[0])), objects)
+        assert block.root is root
+        assert loads(dumps(gpt2), objects) is not loads(dumps(gpt2), objects)
 
     def test_a_receiver_without_the_envoy_says_so(self, gpt2):
         with pytest.raises(UnknownPersistentIdError, match="Envoy:model.transformer.h.0"):
             loads(dumps(gpt2.transformer.h[0]), {})
+
+    @torch.no_grad()
+    def test_what_a_request_does_to_an_envoy_stays_with_the_request(self, gpt2):
+        copy = loads(dumps(gpt2), gpt2._remoteable_persistent_objects())
+        with copy.edit(inplace=True):
+            copy.transformer.h[0].output[0][:] = 0
+        copy.transformer.h[1].steer = torch.zeros(3)
+        assert len(copy._edits) == 1 and gpt2._edits == []
+        assert "steer" not in gpt2.transformer.h[1].__dict__
+        with copy.trace("The Eiffel Tower is in"):
+            out = copy.transformer.h[0].output[0].save()
+        assert torch.all(out == 0)
+        with gpt2.trace("The Eiffel Tower is in"):
+            out = gpt2.transformer.h[0].output[0].save()
+        assert torch.any(out != 0)
 
     def test_an_edited_envoy_ships_by_value_over_referenced_children(self, gpt2):
         with gpt2.edit() as (tracer, edited):
@@ -725,39 +753,69 @@ class TestEnvoyReference:
         assert copy is not edited and copy is not gpt2
         assert len(copy._edits) == 1
         assert copy._module is gpt2._module and copy.interleaver is gpt2.interleaver
-        assert copy.transformer is gpt2.transformer
-        assert gpt2.transformer.parent is gpt2  # the receiver's tree is left alone
+        assert copy.transformer is not gpt2.transformer and copy.transformer.parent is copy
+        assert gpt2.transformer.parent is gpt2
 
-    def test_an_alias_ships_by_value(self):
+    def test_an_attribute_set_on_an_envoy_ships_by_value(self, gpt2):
+        block = gpt2.transformer.h[1]
+        block.steer = torch.ones(3)
+        try:
+            copy = loads(dumps(block), gpt2._remoteable_persistent_objects())
+            assert torch.equal(copy.steer, torch.ones(3))
+            assert copy.mlp._module is block.mlp._module
+        finally:
+            del block.__dict__["steer"]
+        assert len(dumps(block)) < 64
+
+    def test_an_alias_the_tree_binds_itself_does_not_count(self, gpt2):
+        gpt2.base_model  # records the `base_model` spelling as an alias on the root
+        assert "base_model" in gpt2._aliases
+        assert len(dumps(gpt2)) < 64
+
+    def test_a_rename_alias_ships_by_value(self):
         root = Envoy(nn.Sequential(nn.Linear(2, 2)), rename={"0": "first"})
         copy = loads(dumps(root), _persistent_map(root))
-        assert copy is not root and copy.first is root.first
+        assert copy is not root and copy.first is copy[0] and copy.first._module is root[0]._module
+
+    def test_the_receivers_objects_travel_as_ids_with_the_map(self, gpt2):
+        objects = gpt2._remoteable_persistent_objects()
+        tokenizer = loads(dumps(gpt2.tokenizer, persistent_objects=objects), objects)
+        module = loads(dumps(gpt2.transformer.h[0]._module, persistent_objects=objects), objects)
+        assert tokenizer is gpt2.tokenizer and module is gpt2.transformer.h[0]._module
+        assert len(dumps(gpt2.tokenizer, persistent_objects=objects)) < 64
+
+    def test_the_map_does_not_override_an_envoys_own_answer(self, gpt2):
+        objects = gpt2._remoteable_persistent_objects()
+        with gpt2.edit() as (tracer, edited):
+            edited.transformer.h[0].output[0][:] = 0
+        copy = loads(dumps(edited, persistent_objects=objects), objects)
+        assert len(copy._edits) == 1
 
 
 class TestParentLinks:
-    """The weak parent link is not pickled; it is rebuilt on the receiving side for
-    what came by value, and left alone on what came by reference."""
+    """The weak parent link is not pickled; the receiving side rebuilds it, for a
+    subtree that came by value and for the copies that stand in for references."""
 
     def test_a_shipped_tree_relinks_itself(self):
-        # The root and its child both bind an alias, so both ship by value; the
-        # leaf has none and arrives as a reference to the receiver's own envoy.
+        # The root and its child both bind a rename alias, so both ship by value;
+        # the leaf has none and arrives as a reference.
         root = Envoy(nn.Sequential(nn.Sequential(nn.Linear(2, 2))), rename={"0": "first"})
         copy = loads(dumps(root), _persistent_map(root))
         assert copy is not root and copy.parent is None
         assert copy.first is not root.first and copy.first.parent is copy
-        assert copy.first.first is root.first.first
-        assert root.first.first.parent is root.first  # the live leaf keeps its live parent
-        assert root.first.parent is root
+        assert copy.first.first is not root.first.first and copy.first.first.parent is copy.first
+        assert copy.first.first._module is root.first.first._module
+        assert root.first.first.parent is root.first and root.first.parent is root
 
     def test_a_shipped_subtree_is_its_own_root(self, gpt2):
-        # Shipped without its parent, the top envoy has none; below it, the
-        # receiver's own envoys are untouched.
+        # Shipped without its parent, the top envoy has none; the receiver's own
+        # envoys are untouched.
         with gpt2.transformer.h[2].edit() as (tracer, block):
             block.mlp.output[:] = 0
         copy = loads(dumps(block), gpt2._remoteable_persistent_objects())
         assert copy is not block
         assert copy.parent is None and copy.root is copy
-        assert copy.mlp is gpt2.transformer.h[2].mlp
+        assert copy.mlp.parent is copy
         assert gpt2.transformer.h[2].mlp.parent is gpt2.transformer.h[2]
 
     @torch.no_grad()

@@ -321,15 +321,14 @@ class Envoy:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        # The parent link is not pickled (a weakref does not pickle). A child that
-        # came by value in the same payload has none yet and is re-linked here; the
-        # payload's top envoy has none either. A child that came by reference is
-        # the far side's own envoy and keeps its parent: re-pointing it would bend
-        # the live tree toward this copy.
+        # The parent link is not pickled (a weakref does not pickle). A parent in
+        # the same payload re-links its children here; the payload's top envoy has
+        # none. A child that arrived as a reference is the receiver's copy for this
+        # payload (`_persistent_resolve`), so pointing it at this parent changes
+        # nothing the receiver keeps.
         self.__dict__.setdefault("_parent", None)
         for child in self._children:
-            if child.__dict__.get("_parent") is None:
-                child._parent = weakref.ref(self)
+            child._parent = weakref.ref(self)
 
     def __getstate__(self) -> dict:
         # For serialization, when this envoy ships by value (see
@@ -343,20 +342,92 @@ class Envoy:
         state["_module"]._persistent_id = f"Module:{self.path}"
         return state
 
-    def _persistent_reference(self) -> str | None:
-        # How a request names this envoy (asked by the pickler, see
-        # serialization.CustomCloudPickler.persistent_id). The far side wraps the
+    #: What every envoy's ``__dict__`` holds by construction. Any other entry on a
+    #: plain `Envoy` was set after construction (``envoy.steer = ...``), so the
+    #: receiver's envoy does not have it.
+    _SHAPE = frozenset(
+        {"_parent", "_module", "path", "interleaver", "_edits", "_rename",
+         "_aliases", "_envoys", "_children", "_child_map"}
+    )
+
+    def _persistent_reference(self, memo: dict) -> str | None:
+        # How a request names this envoy, asked by the pickler (see
+        # serialization.CustomCloudPickler.persistent_id). The receiver wraps the
         # same model in the same tree, so an envoy holding nothing of its own
-        # travels as its path, `Envoy:<path>`, and resolves to the far side's envoy
-        # there (Remotable._remoteable_persistent_objects) — the whole tree is not
-        # rebuilt per request. What the far side cannot have is state set here:
-        # edits (`_edits`), aliases (`rename=`) and a custom envoy class per child
-        # (`envoys=`), on this envoy or any below it. Such an envoy ships by value
-        # (`__getstate__`), and each child is asked in turn.
-        for envoy in self.modules():
-            if envoy._edits or envoy._aliases or envoy._envoys is not None:
-                return None
-        return f"Envoy:{self.path}"
+        # travels as its path, `Envoy:<path>`, and resolves there to the receiver's
+        # copy of its own envoy (Remotable._remoteable_persistent_objects and
+        # `_persistent_resolve`): the tree is not serialized per request. An envoy
+        # carrying state the receiver cannot have, on itself or on any envoy below
+        # it, ships by value (`__getstate__`), and each child is asked in turn.
+        # `memo` is the pickler's, one per payload, so a subtree is checked once.
+        return None if self._carries_state(memo) else f"Envoy:{self.path}"
+
+    def _carries_state(self, memo: dict) -> bool:
+        key = id(self)
+        if key not in memo:
+            memo[key] = self._own_state() or any(
+                child._carries_state(memo) for child in self._children
+            )
+        return memo[key]
+
+    def _own_state(self) -> bool:
+        # State the receiver's envoy at this path cannot have: edits; a custom
+        # envoy class (`envoys=`); an alias from the user's `rename=` (an alias
+        # the tree binds on its own, such as `E_output` for an overloaded name or
+        # a second path to a shared module, the receiver binds too, so only a tree
+        # built with `rename=` counts); and, on a plain `Envoy`, any attribute
+        # beyond its shape, its children and its aliases. A model class's root
+        # owns the attributes it sets (tokenizer, pipeline, ...), so a subclass is
+        # not checked for extra attributes.
+        if self._edits or self._envoys is not None:
+            return True
+        if self._rename is not None and self._aliases:
+            return True
+        if type(self) is Envoy:
+            for name, value in self.__dict__.items():
+                if name in self._SHAPE or (isinstance(value, Envoy) and (name in self._aliases or value in self._children)):
+                    continue
+                return True
+        return False
+
+    def _persistent_resolve(self, scope: dict) -> Envoy:
+        # What the receiver hands a payload in place of this live envoy, asked by
+        # the unpickler (see serialization.CustomCloudUnpickler.persistent_load).
+        # A copy of the whole tree is made once per payload (`scope` is the
+        # unpickler's), so every envoy the payload names comes from the same tree
+        # and a trace, an edit or an attribute set inside the request lands on the
+        # copy and not on the envoys the receiver keeps for the next request.
+        root = self.root
+        twins = scope.get(id(root))
+        if twins is None:
+            twins = scope[id(root)] = root._twins()
+        return twins[self.path]
+
+    def _twins(self) -> dict[str, Envoy]:
+        # Copies of every envoy in this tree, by path. Each copy shares the live
+        # envoy's module and interleaver and has its own `_edits` list; its
+        # children, aliases and parent are the copies of the live ones. One pass
+        # to copy, one to re-point: a few microseconds per envoy, no serialization.
+        pairs: dict[int, tuple[Envoy, Envoy]] = {}
+        stack = [self]
+        while stack:
+            envoy = stack.pop()
+            if id(envoy) in pairs:
+                continue
+            twin = object.__new__(type(envoy))
+            twin.__dict__.update(envoy.__dict__)
+            twin._edits = list(envoy._edits)
+            pairs[id(envoy)] = (envoy, twin)
+            stack.extend(envoy._children)
+        for envoy, twin in pairs.values():
+            for name, value in twin.__dict__.items():
+                if isinstance(value, Envoy) and id(value) in pairs:
+                    twin.__dict__[name] = pairs[id(value)][1]
+            twin._children = [pairs[id(child)][1] if id(child) in pairs else child for child in twin._children]
+            twin._child_map = {name: pairs[id(child)][1] if id(child) in pairs else child for name, child in twin._child_map.items()}
+            parent = envoy.parent
+            twin._parent = weakref.ref(pairs[id(parent)][1]) if parent is not None and id(parent) in pairs else None
+        return {twin.path: twin for _, twin in pairs.values()}
 
     def _update(self, module: torch.nn.Module) -> None:
         # Re-point an existing envoy tree at a new module (swapping meta weights

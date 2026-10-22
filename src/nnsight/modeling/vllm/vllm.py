@@ -1063,8 +1063,9 @@ class VLLM(Remotable):
                     "(temperature, top_p, max_tokens, ...)."
                 )
 
+        persistent = self._remoteable_persistent_objects()
         for mediator, param in zip(attached, params):
-            param.extra_args = {"nnsight_mediator": dumps(mediator)}
+            param.extra_args = {"nnsight_mediator": dumps(mediator, persistent_objects=persistent)}
             named = getattr(param, "nnsight_named", frozenset())
             edits = getattr(param, "nnsight_edits", None) if "edits" in named else trace_edits
             if edits is not None:

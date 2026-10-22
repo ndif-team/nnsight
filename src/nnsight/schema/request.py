@@ -12,6 +12,14 @@ from ..intervention.serialization import (
 )
 
 
+def _persistent_objects(tracer: Any) -> Optional[dict]:
+    """The traced model's persistent map, when it has one (a `Remotable`)."""
+    envoy = getattr(tracer, "envoy", None)
+    root = envoy.root if envoy is not None else None
+    build = getattr(root, "_remoteable_persistent_objects", None)
+    return build() if build is not None else None
+
+
 class RequestModel(BaseModel):
     """The JSON routing envelope for a remote request.
 
@@ -48,7 +56,9 @@ class RequestModel(BaseModel):
         glbls = tracer.info.frame.f_globals
         interventions = reduce_block(tracer.node, glbls, variables)
 
-        data = dumps((tracer, interventions))
+        # The receiver's persistent map, so its objects (the model's tokenizer, a
+        # module the block captured) travel as ids; see serialization.dumps.
+        data = dumps((tracer, interventions), persistent_objects=_persistent_objects(tracer))
         if compress:
             import zstandard as zstd
 

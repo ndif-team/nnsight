@@ -13,10 +13,16 @@ Two mechanisms layer on top of cloudpickle:
   these tuples, and the function reducer runs a dynamic ``def``'s source/globals
   through it too; `_load_function` compiles the source back to a code
   object on the far side.
-* Persistent ids — objects carrying a ``_persistent_id`` in their ``__dict__``,
-  and objects whose class answers ``_persistent_reference()`` with an id, are
-  written as that id and resolved on the other side from a ``persistent_objects``
-  map (keeps the model, and the envoy tree over it, out of the payload).
+* Persistent ids: an object is written as an id and resolved on the other side
+  from a ``persistent_objects`` map, which keeps the model, its tokenizer and the
+  envoy tree over it out of the payload. An object is referenced when it carries
+  a ``_persistent_id`` in its ``__dict__``, when its class answers
+  ``_persistent_reference(memo)`` with an id (`Envoy`, which answers for a tree
+  the receiver has and declines for one carrying client-side state), or when it
+  is a value of the ``persistent_objects`` map handed to ``dumps``. On the
+  receiving side a class may define ``_persistent_resolve(scope)`` to hand the
+  payload something other than the live object (`Envoy` hands a copy made for
+  that payload, so what a request does to an envoy stays with the request).
 """
 
 from __future__ import annotations
@@ -384,16 +390,31 @@ class CustomCloudPickler(cloudpickle.CloudPickler):
         )
         return (_load_function, args, globals, None, None, _fill)
 
+    def __init__(
+        self,
+        file: Any,
+        protocol: int = DEFAULT_PROTOCOL,
+        persistent_objects: Optional[dict] = None,
+    ) -> None:
+        super().__init__(file, protocol=protocol)
+        # The receiver's map, inverted: any of its values is written as its id.
+        self._ids = {id(obj): pid for pid, obj in (persistent_objects or {}).items()}
+        # Scratch for `_persistent_reference`, one per payload.
+        self._memo: dict = {}
+
     def persistent_id(self, obj: Any) -> Optional[Any]:
-        # Reference (don't serialize) anything tagged with a _persistent_id, and
-        # anything whose class names it by id on request (`Envoy`, which decides
-        # per instance whether the far side's own envoy can stand in for it).
+        # Reference (don't serialize) anything tagged with a _persistent_id;
+        # anything whose class answers for itself (`Envoy`: its answer is final,
+        # so an envoy carrying client-side state ships by value even when the map
+        # names it); and anything in the receiver's map.
         try:
             return obj.__dict__["_persistent_id"]
         except (AttributeError, KeyError, TypeError):
             pass
         reference = getattr(type(obj), "_persistent_reference", None)
-        return None if reference is None else reference(obj)
+        if reference is not None:
+            return reference(obj, self._memo)
+        return self._ids.get(id(obj))
 
 
 class UnknownPersistentIdError(pickle.UnpicklingError):
@@ -406,22 +427,40 @@ class CustomCloudUnpickler(pickle.Unpickler):
     def __init__(self, file: io.BufferedIOBase, persistent_objects: Optional[dict]):
         super().__init__(file)
         self.persistent_objects = persistent_objects or {}
+        # Scratch for `_persistent_resolve`, shared by every id of this payload.
+        self._scope: dict = {}
 
     def persistent_load(self, pid: Any) -> Any:
-        if pid in self.persistent_objects:
-            return self.persistent_objects[pid]
-        raise UnknownPersistentIdError(pid)
+        try:
+            obj = self.persistent_objects[pid]
+        except KeyError:
+            raise UnknownPersistentIdError(pid) from None
+        resolve = getattr(type(obj), "_persistent_resolve", None)
+        return obj if resolve is None else resolve(obj, self._scope)
 
 
-def dump(obj: Any, file: Any, protocol: int = DEFAULT_PROTOCOL) -> None:
-    """Serialize ``obj`` to an open binary file (``pickle.dump`` semantics)."""
-    CustomCloudPickler(file, protocol=protocol).dump(obj)
+def dump(
+    obj: Any,
+    file: Any,
+    protocol: int = DEFAULT_PROTOCOL,
+    persistent_objects: Optional[dict] = None,
+) -> None:
+    """Serialize ``obj`` to an open binary file (``pickle.dump`` semantics).
+
+    ``persistent_objects`` is the receiver's ``{id: object}`` map (what it passes
+    to `load`): any of its values met in ``obj`` is written as its id.
+    """
+    CustomCloudPickler(file, protocol=protocol, persistent_objects=persistent_objects).dump(obj)
 
 
-def dumps(obj: Any, protocol: int = DEFAULT_PROTOCOL) -> bytes:
-    """Serialize ``obj`` to bytes (``pickle.dumps`` semantics)."""
+def dumps(
+    obj: Any,
+    protocol: int = DEFAULT_PROTOCOL,
+    persistent_objects: Optional[dict] = None,
+) -> bytes:
+    """Serialize ``obj`` to bytes (``pickle.dumps`` semantics); see `dump`."""
     buffer = io.BytesIO()
-    dump(obj, buffer, protocol=protocol)
+    dump(obj, buffer, protocol=protocol, persistent_objects=persistent_objects)
     return buffer.getvalue()
 
 

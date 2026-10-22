@@ -851,19 +851,20 @@ class TestSerialization:
         from nnsight.intervention.serialization import dumps, loads
 
         # An envoy with nothing of its own is written as its path and resolves to
-        # the receiver's own envoy: neither its tree nor its modules travel.
+        # the receiver's copy of its envoy: neither its tree nor its modules travel.
         envoy = Envoy(Model())
-        assert loads(dumps(envoy), self._persistent_map(envoy)) is envoy
-        # One carrying an edit travels by value; its module, interleaver and
-        # children still resolve to the receiver's own objects.
+        restored = loads(dumps(envoy), self._persistent_map(envoy))
+        assert restored is not envoy
+        assert restored._module is envoy._module
+        assert getattr(restored.layers, "0").attn._module is getattr(envoy.layers, "0").attn._module
+        assert restored.interleaver is envoy.interleaver
+        assert [n.path for n in restored] == [n.path for n in envoy]
+        # One carrying an edit travels by value, over the same kind of copies.
         with envoy.edit() as (tracer, edited):
             getattr(edited.layers, "0").attn.output[:] = 0
         restored = loads(dumps(edited), self._persistent_map(envoy))
-        assert restored is not edited
-        assert restored._module is envoy._module
-        assert getattr(restored.layers, "0").attn is getattr(envoy.layers, "0").attn
-        assert restored.interleaver is envoy.interleaver
-        assert [n.path for n in restored] == [n.path for n in envoy]
+        assert restored is not edited and len(restored._edits) == 1
+        assert getattr(restored.layers, "0").parent is restored.layers and restored.layers.parent is restored
 
     def test_blob_excludes_weights(self):
         from nnsight.intervention.serialization import dumps
