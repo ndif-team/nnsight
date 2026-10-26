@@ -9,6 +9,8 @@ is then released — the realistic lifetime, and free of the CPython quirk where
 """
 
 import gc
+import os
+import types
 import weakref
 
 import pytest
@@ -313,3 +315,79 @@ class TestExceptionCleanup:
             return weakref.ref(tracer)
 
         assert run()() is None
+
+
+class TestEarlyStopCleanup:
+    """A ``tracer.stop()`` is swallowed by the interleaver, and the stop must die
+    with the trace: its traceback runs through every model frame it unwound, and
+    so holds the activations of the layers that ran (and a generation's KV
+    cache). GPU memory never triggers the cyclic collector, so a stop left in a
+    cycle is a stopped trace's activations kept until a collection happens."""
+
+    PROMPT = "The Eiffel Tower is in the city of"
+    PACKAGE = os.path.dirname(nnsight.__file__) + os.sep
+
+    def survivors(self, gpt2, run):
+        """Run ``run``; return how many of block 0's outputs outlived it, and the
+        names of the nnsight frames a collection then finds in cycles."""
+        outputs = []
+        handle = gpt2._module.transformer.h[0].register_forward_hook(
+            lambda module, args, output: outputs.append(
+                weakref.ref(output if isinstance(output, torch.Tensor) else output[0])
+            )
+        )
+        try:
+            # A first run's lazy imports leave cycles of their own; clear them.
+            run()
+            gc.collect()
+            outputs.clear()
+            run()
+            assert outputs, "block 0 never ran"
+            alive = sum(ref() is not None for ref in outputs)
+            gc.set_debug(gc.DEBUG_SAVEALL)
+            try:
+                gc.collect()
+                frames = {
+                    garbage.f_code.co_name
+                    for garbage in gc.garbage
+                    if isinstance(garbage, types.FrameType)
+                    and garbage.f_code.co_filename.startswith(self.PACKAGE)
+                }
+            finally:
+                gc.set_debug(0)
+                gc.garbage.clear()
+        finally:
+            handle.remove()
+        return alive, frames
+
+    @torch.no_grad()
+    def test_a_stopped_trace_leaves_no_cycle(self, gpt2):
+        def run():
+            with gpt2.trace(self.PROMPT) as tracer:
+                hidden = gpt2.transformer.h[1].output.save()
+                tracer.stop()
+
+        assert self.survivors(gpt2, run) == (0, set())
+
+    @torch.no_grad()
+    def test_a_stopped_generation_leaves_no_cycle(self, gpt2):
+        # Stopped on the second step, so the first step's KV cache is in play.
+        def run():
+            with gpt2.generate(self.PROMPT, max_new_tokens=4, do_sample=False) as tracer:
+                steps = nnsight.save([])
+                for _ in tracer.all():
+                    steps.append(gpt2.transformer.h[1].output)
+                    if len(steps) == 2:
+                        tracer.stop()
+
+        assert self.survivors(gpt2, run) == (0, set())
+
+    @torch.no_grad()
+    def test_a_stop_inside_a_session_leaves_no_cycle(self, gpt2):
+        def run():
+            with gpt2.session():
+                with gpt2.trace(self.PROMPT) as tracer:
+                    hidden = gpt2.transformer.h[1].output.save()
+                    tracer.stop()
+
+        assert self.survivors(gpt2, run) == (0, set())
