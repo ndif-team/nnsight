@@ -97,10 +97,8 @@ returns the full-width result it would on one GPU. The gather only fires when an
 intervention is parked on that location, and `tracer.cache()` gathers only the
 modules it selects.
 
-From transformers 5.21 the embedding is split by vocabulary on every sharded
-model (before, only on tied-embedding checkpoints), and the vocabulary need not
-divide by `tp_size`: the last ranks hold shorter slices of the embedding and of
-`lm_head`'s output. Both read whole, at full width.
+A vocabulary `tp_size` does not divide leaves the last ranks shorter slices of
+the embedding and of `lm_head`'s output; both still read whole.
 
 ### Parameters are DTensors
 

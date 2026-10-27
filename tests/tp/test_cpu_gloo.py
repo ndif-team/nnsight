@@ -56,9 +56,9 @@ def _nnsight_path() -> str:
 REPO = "hf-internal-testing/tiny-random-LlamaForCausalLM"
 TP_SIZE = 2
 
-# REPO with a vocabulary TP_SIZE does not divide, and tied embeddings. From 5.21
-# transformers shards it anyway, the last rank holding the shorter slice of the
-# embedding and of `lm_head`'s output; 5.20 refused it at load.
+# REPO with a vocabulary TP_SIZE does not divide, so the last rank holds the
+# shorter slice of the embedding and of `lm_head`'s output. Tied as well, as on
+# Llama-3.2, so the two share one vocab-parallel weight; REPO is untied.
 UNEVEN_VOCAB = 32001
 
 # float32 on a 2-rank CPU mesh drifts far less than bf16 on 4 GPUs, so this is
@@ -183,6 +183,7 @@ def test_the_ranks_agree(runs) -> None:
         "down_proj_in",       # a row-parallel input: pre-split
         "layer_out",
         "baseline_logits",
+        "nograd_logits",        # a plain local tensor: the rule's width decides
         "partial_edit_logits",  # an edit straddling the rank boundary
         "embed_out",            # a vocab-parallel embedding's single-use mask
         "embed_edited_logits",  # ... edited and handed back

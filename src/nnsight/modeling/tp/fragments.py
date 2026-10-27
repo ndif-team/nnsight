@@ -84,10 +84,9 @@ from ...util import apply
 #              every rank.
 #
 # A side left out is already whole there. Starred entries were measured on
-# Llama-3.2-3B at tp=4, and ^ entries against a single-process run on CPU
-# (tests/tp/test_cpu_gloo.py; a tiny qwen4_exp for embedding_colwise); the rest
-# follow from transformers/distributed/tensor_parallel.py but no model in the
-# test set exercised them — treat them as unverified.
+# Llama-3.2-3B at tp=4; the rest follow from
+# transformers/distributed/tensor_parallel.py but no model in the test set
+# exercised them — treat them as unverified.
 SIDES: Dict[str, Dict[str, str]] = {
     "colwise": {"output": "shard"},                       # * output features split
     "packed_colwise": {"output": "shard"},                #   (fused gate_up, same split)
@@ -97,12 +96,12 @@ SIDES: Dict[str, Dict[str, str]] = {
     "rowwise_split_input": {"input": "shard", "output": "partial"},  # its input transform splits the input
     "rowwise_rep": {"input": "shard", "output": "partial"},          # = rowwise_split_input
     "packed_rowwise": {"input": "shard", "output": "partial"},
-    "embedding_rowwise": {"output": "partial"},           # ^ vocab-parallel; see the note below
-    "embedding_colwise": {"output": "shard"},             # ^ (5.21) hidden dim split; gathered by its output transform
+    "embedding_rowwise": {"output": "partial"},           # * vocab-parallel: each rank looks up its own ids
+    "embedding_colwise": {"output": "shard"},             #   hidden dim split; gathered by its output transform
     "sequence_parallel": {"output": "partial"},           # + output transform reduce-scatters, on the LAST dim
     "all_reduce": {"output": "partial"},
     "replicated_with_grad_allreduce": {},                 #   params replicated; activations whole
-    "replicate": {},                                      #   (5.21) params replicated, transforms are the identity
+    "replicate": {},                                      #   params replicated, transforms are the identity
     "ep_router": {},                                      # * router is replicated; its post-transform
                                                           #   masks non-local experts, after us
     "grouped_gemm": {},                                   # * shards expert parameters only; the
@@ -130,17 +129,6 @@ SIDES: Dict[str, Dict[str, str]] = {
 # expert-parallel suite (tests/tp/test_cpu_expert_parallel.py), which compares
 # rank values — including an edit of ``experts.output`` — against a
 # single-process run.
-#
-# ``embedding_rowwise`` splits the vocabulary, and from 5.21 transformers applies it
-# to the ``embed_tokens`` of every model it shards, tied or not. Its value at the
-# handoff carries a ``_MaskPartial`` placement: each rank looked up only the ids in
-# its own slice, and the mask zeroing the rest is consumed by the first reduction.
-# The gather is that reduction, so `_fragment_tensor` hands back a plain sum
-# ``Partial`` for the module's own reduce rather than the spent mask.
-#
-# A shard's width need not divide by the TP size from 5.21 either: the last ranks
-# hold shorter slices, so a piece no longer says how wide the whole is. The rule
-# records it, read off the module as the style itself reads it (`_width`).
 
 # Styles refused rather than guessed at, with the reason a user is shown: these
 # slice something other than the last dim — by expert, or into a fused kv
@@ -223,9 +211,7 @@ def _width(module: Any, side: str) -> "int | None":
     return getattr(module, "out_features", getattr(module, "embedding_dim", None))
 
 
-def _from_local(
-    local: torch.Tensor, mesh: Any, placement: Any, shape: Any = None
-) -> Any:
+def _from_local(local: torch.Tensor, mesh: Any, placement: Any, shape: Any = None) -> Any:
     """``local`` as the DTensor it is this rank's piece of.
 
     ``shape`` is the whole's, needed whenever the pieces may differ in size;
@@ -233,15 +219,9 @@ def _from_local(
     """
     from torch.distributed.tensor import DTensor
 
-    if shape is None:
-        return DTensor.from_local(local, mesh, [placement], run_check=False)
+    stride = None if shape is None else torch.empty(shape, device="meta").stride()
     return DTensor.from_local(
-        local,
-        mesh,
-        [placement],
-        run_check=False,
-        shape=torch.Size(shape),
-        stride=torch.empty(shape, device="meta").stride(),
+        local, mesh, [placement], run_check=False, shape=shape, stride=stride
     )
 
 
@@ -253,8 +233,7 @@ def _whole_tensor(
     Reads the placement off the value when it carries one and asserts the rule's
     otherwise. A DTensor already knows what it is — including which axis holds the
     shard, which a rule cannot know once a ``view`` or ``transpose`` has moved it —
-    so it is always believed over the rule. ``width`` is the rule's whole size for
-    the sharded last dim (see `_width`).
+    so it is always believed over the rule.
 
     Written on DTensor rather than on transformers' private collective helpers:
     depending on a neighbour's internals is what once let a routine upstream
@@ -262,14 +241,12 @@ def _whole_tensor(
     all-gather concatenating on the last dim, an all-reduce summing — and
     depend on nothing but ``torch``.
     """
-    from torch.distributed.tensor import DTensor, Shard
+    from torch.distributed.tensor import DTensor
 
     if isinstance(tensor, DTensor):
         whole = tensor.full_tensor()
     else:
-        shape = None
-        if width is not None and isinstance(placement, Shard):
-            shape = (*tensor.shape[:-1], width)
+        shape = None if width is None else torch.Size((*tensor.shape[:-1], width))
         whole = _from_local(tensor, mesh, placement, shape).full_tensor()
 
     # Returned as it comes. `full_tensor` is a custom autograd Function, so with
@@ -320,17 +297,14 @@ def _fragment_tensor(
 
     ``as_dtensor`` reproduces what arrived: a value that came in carrying its
     placement has to leave carrying it, because the post-transform downstream will
-    redistribute it and expects a DTensor to do that to. A partial leaves as a
-    plain sum whatever kind arrived: a vocab-parallel embedding's ``_MaskPartial``
-    zeroes the rows other ranks own, which would erase rank 0's whole.
-
-    A shard is cut as DTensor cuts one, so a width that does not divide by the
-    mesh leaves the last ranks the shorter pieces, as transformers lays them out.
+    redistribute it and expects a DTensor to do that to.
     """
     from torch.distributed.tensor import DTensor, Partial, Replicate
 
     if isinstance(placement, Partial):
         local = _OnRankZero.apply(whole, mesh.get_local_rank() == 0)
+        # A vocab-parallel embedding arrives as a `_MaskPartial`, whose mask the
+        # gather's reduce consumed; a second reduce with it asserts.
         placement = Partial()
     else:
         local = (
@@ -514,7 +488,8 @@ def gather(model: Any, value: Any, dim: int = -1) -> Any:
     inside a branch that could go differently on different ranks. Returns the
     value unchanged on an unsharded model, so the same block runs either way —
     which also means a one-GPU run never checks ``dim``: a wrong axis only
-    shows itself at ``tp_size > 1``.
+    shows itself at ``tp_size > 1``. The pieces must be equal along ``dim``, as
+    they are for heads and the MLP width.
     """
     from torch.distributed.tensor import Shard
 

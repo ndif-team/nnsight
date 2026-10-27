@@ -100,6 +100,12 @@ def main() -> None:
         record("layer_out", layer.output[0].save())
         record("baseline_logits", model.lm_head.output.save())
 
+    # Under no_grad transformers hands a Linear's output over as this rank's
+    # plain tensor, so the gather has only the rule to go on, including the
+    # whole width an uneven vocabulary needs.
+    with torch.no_grad(), model.trace(PROMPT):
+        record("nograd_logits", model.lm_head.output.save())
+
     # An edit straddling rank boundaries: only correct if the gather assembled in
     # true rank order and the re-split put the edit back where it came from.
     width = results["gate_proj_out"].shape[-1]
@@ -112,9 +118,9 @@ def main() -> None:
         layer.mlp.gate_proj.output = edited
         record("partial_edit_logits", model.lm_head.output.save())
 
-    # A vocab-parallel embedding (every sharded plan from 5.21, tied ones
-    # before): each rank looks up only its own ids, and the value at the handoff
-    # carries a mask its first reduction consumes. Read, and edited back.
+    # A vocab-parallel embedding: each rank looks up only its own ids, and the
+    # value at the handoff carries a mask its first reduction consumes. Read,
+    # and edited back.
     with model.trace(PROMPT):
         record("embed_out", model.model.embed_tokens.output.save())
 

@@ -94,8 +94,8 @@ def _sharded(style: str | None, path: str = "model.thing", size: int = 2, **attr
 
     # Stands in for the wrapper transformers installs when it shards a module:
     # `instrument` records a rule only for a module it actually wrapped. A
-    # Linear, because colwise and rowwise refuse anything without
-    # `out_features`/`in_features` from 5.21.
+    # Linear, because colwise and rowwise refuse a module without
+    # `out_features`/`in_features`.
     module = torch.nn.Linear(8, 6)
     module.__dict__["forward"] = _tp_wrapped_forward()
     for name, value in attrs.items():
@@ -175,10 +175,9 @@ class TestInstrument:
         assert isinstance(interleaver.tp_rules["model.o_proj.output"][1], Partial)
 
     def test_a_shard_records_its_whole_width(self):
-        # From 5.21 a shard's width need not divide by the TP size, so a rank's
-        # piece no longer says how wide the whole is. The rule carries it, read
-        # off the module as the style itself reads it. A partial is whole-width
-        # on every rank and needs none.
+        # A shard's width need not divide by the TP size, so a rank's piece does
+        # not say how wide the whole is; the rule carries it. A partial is
+        # whole-width on every rank and needs none.
         colwise = _sharded("colwise", path="model.q_proj")
         rowwise = _sharded("rowwise", path="model.o_proj")
 
@@ -210,8 +209,8 @@ class TestMaxTpSize:
     """The largest degree a checkpoint's config says it splits into.
 
     Divisibility is the whole constraint: transformers shards attention by head
-    and the MLP by its intermediate dimension, and its all-gather assumes equal
-    pieces — an uneven degree does not run slower, it does not run.
+    and the MLP by its intermediate dimension, and an uneven degree does not run
+    slower, it fails on the first forward (see `nnsight.modeling.tp.plan`).
     """
 
     def _config(self, **fields):
@@ -623,17 +622,6 @@ class TestReshardGuard:
         _reshard(torch.randn(1, 4, 7), FakeMesh(4), _placement("partial"), False)
         assert len(split) == 1
 
-    def test_a_shard_is_cut_whatever_its_width(self, monkeypatch):
-        """From 5.21 a shard need not divide by the TP size: a vocabulary of 32001
-        at tp=2 is 16001 + 16000. Left whole, it reached the module's own gather
-        as though it were one rank's piece, and the ranks' collectives disagreed
-        on size."""
-        from nnsight.modeling.tp.fragments import _placement, _reshard
-
-        split = self._calls(monkeypatch, "_fragment_tensor")
-        _reshard(torch.randn(1, 4, 7), FakeMesh(4), _placement("shard"), False)
-        assert len(split) == 1
-
 
 class TestHubFailuresAreDistinguishable:
     """"Couldn't read it" must not be reported as "there's nothing to read".
@@ -940,8 +928,7 @@ class TestCheckTpRequest:
             check_tp_request(self._shardable(), degree)
 
     def test_a_degree_that_does_not_divide_is_refused(self):
-        # Not a slower option: transformers' attention fails reshaping a piece
-        # that holds a fraction of a head.
+        # Not a slower option: the first forward fails.
         from nnsight.modeling.tp import UnshardableCheckpoint, check_tp_request
 
         with pytest.raises(UnshardableCheckpoint, match="splits at most 8 ways"):

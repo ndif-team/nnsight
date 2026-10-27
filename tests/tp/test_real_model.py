@@ -149,6 +149,7 @@ VALUES = [
     "down_proj_in",
     "layer_out",
     "baseline_logits",
+    "nograd_logits",
     "partial_edit_logits",
     "embed_out",
     "embed_edited_logits",
