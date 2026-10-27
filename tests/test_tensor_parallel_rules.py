@@ -93,8 +93,10 @@ def _sharded(style: str | None, path: str = "model.thing", size: int = 2, **attr
     root._device_mesh = _FakeMesh(size)
 
     # Stands in for the wrapper transformers installs when it shards a module:
-    # `instrument` records a rule only for a module it actually wrapped.
-    module = torch.nn.Identity()
+    # `instrument` records a rule only for a module it actually wrapped. A
+    # Linear, because colwise and rowwise refuse anything without
+    # `out_features`/`in_features` from 5.21.
+    module = torch.nn.Linear(8, 6)
     module.__dict__["forward"] = _tp_wrapped_forward()
     for name, value in attrs.items():
         setattr(module, name, value)
@@ -122,8 +124,11 @@ class TestStyleCoverage:
     # transformers while the floor trails it, so an entry for a style a newer
     # release added is not stale on an install that predates it. Each names
     # the release that introduced it; drop an entry here once the floor
-    # passes that release. Empty while the floor (5.19) is current.
-    FORWARD_STYLES: set = set()
+    # passes that release.
+    FORWARD_STYLES: set = {
+        "embedding_colwise",  # 5.21
+        "replicate",          # 5.21
+    }
 
     def test_no_rule_names_a_style_that_no_longer_exists(self):
         stale = (
@@ -168,6 +173,18 @@ class TestInstrument:
 
         assert interleaver.tp_rules["model.o_proj.input"][1] == Shard(-1)
         assert isinstance(interleaver.tp_rules["model.o_proj.output"][1], Partial)
+
+    def test_a_shard_records_its_whole_width(self):
+        # From 5.21 a shard's width need not divide by the TP size, so a rank's
+        # piece no longer says how wide the whole is. The rule carries it, read
+        # off the module as the style itself reads it. A partial is whole-width
+        # on every rank and needs none.
+        colwise = _sharded("colwise", path="model.q_proj")
+        rowwise = _sharded("rowwise", path="model.o_proj")
+
+        assert colwise.tp_rules["model.q_proj.output"][2] == 6    # out_features
+        assert rowwise.tp_rules["model.o_proj.input"][2] == 8     # in_features
+        assert rowwise.tp_rules["model.o_proj.output"][2] is None
 
     @pytest.mark.parametrize("style", sorted(UNSUPPORTED))
     def test_a_refused_style_raises(self, style, monkeypatch):
@@ -597,14 +614,24 @@ class TestReshardGuard:
     def test_a_partial_is_reduced_whatever_its_width(self, monkeypatch):
         """A partial is a whole-width term of a sum, so divisibility is irrelevant.
 
-        Guarding it with the shard's ``% world_size`` test would silently skip the
-        re-fragment on any width that does not divide, and the model's own reduce
-        would then sum the whole tensor once per rank.
+        Skipping the re-fragment on a width that does not divide would leave the
+        model's own reduce to sum the whole tensor once per rank.
         """
         from nnsight.modeling.tp.fragments import _placement, _reshard
 
         split = self._calls(monkeypatch, "_fragment_tensor")
         _reshard(torch.randn(1, 4, 7), FakeMesh(4), _placement("partial"), False)
+        assert len(split) == 1
+
+    def test_a_shard_is_cut_whatever_its_width(self, monkeypatch):
+        """From 5.21 a shard need not divide by the TP size: a vocabulary of 32001
+        at tp=2 is 16001 + 16000. Left whole, it reached the module's own gather
+        as though it were one rank's piece, and the ranks' collectives disagreed
+        on size."""
+        from nnsight.modeling.tp.fragments import _placement, _reshard
+
+        split = self._calls(monkeypatch, "_fragment_tensor")
+        _reshard(torch.randn(1, 4, 7), FakeMesh(4), _placement("shard"), False)
         assert len(split) == 1
 
 
@@ -913,8 +940,8 @@ class TestCheckTpRequest:
             check_tp_request(self._shardable(), degree)
 
     def test_a_degree_that_does_not_divide_is_refused(self):
-        # Not a slower option: the all-gather assumes equal pieces, so an uneven
-        # degree returns the wrong shape rather than failing outright.
+        # Not a slower option: transformers' attention fails reshaping a piece
+        # that holds a fraction of a head.
         from nnsight.modeling.tp import UnshardableCheckpoint, check_tp_request
 
         with pytest.raises(UnshardableCheckpoint, match="splits at most 8 ways"):

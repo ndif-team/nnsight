@@ -150,6 +150,8 @@ VALUES = [
     "layer_out",
     "baseline_logits",
     "partial_edit_logits",
+    "embed_out",
+    "embed_edited_logits",
     "cached_gate_out",
     "generated",
     "batched_first",

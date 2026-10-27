@@ -36,7 +36,7 @@ from typing import Any
 import torch
 
 from ...intervention.envoy import Envoy
-from .fragments import _gather, _placement
+from .fragments import _gather, _placement, _width
 
 #: Styles whose own input transform splits the input for them.
 #:
@@ -109,7 +109,9 @@ class TPEnvoy(Envoy):
         result = super().__call__(*args, hook=False, **kwargs)
 
         if style in SHARDED_AFTER_CALL:
-            result = _gather(result, mesh, _placement("shard"))
+            result = _gather(
+                result, mesh, _placement("shard"), _width(self._module, "output")
+            )
         return result
 
 
