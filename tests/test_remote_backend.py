@@ -283,3 +283,19 @@ class TestBackendMeta:
         )
         monkeypatch.setattr(backend, "send", lambda _request, _blob: None)
         assert backend(object()) is backend
+
+
+class TestHttpClient:
+    """`nnsight._httpx` resolves to httpx2 on 3.11+ and to httpx 0.x on 3.10.
+
+    Every other test here stubs above the HTTP layer, so this is the one that
+    imports the client module at all: whichever one this interpreter resolved has
+    to carry every name the remote backend, `nnsight.ndif` and vLLM serving call.
+    """
+
+    def test_the_resolved_client_has_what_nnsight_calls(self):
+        from nnsight._httpx import httpx
+
+        for name in ("Client", "AsyncClient", "Timeout", "HTTPError", "HTTPStatusError", "get"):
+            assert hasattr(httpx, name), f"{httpx.__name__} has no {name}"
+        httpx.Timeout(10.0, read=60.0)

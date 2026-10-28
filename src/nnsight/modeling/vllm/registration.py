@@ -240,7 +240,7 @@ class ServeRegistration(Registration):
         return path
 
     def _post(self, path: str, content: bytes = b"") -> None:
-        import httpx
+        from ..._httpx import httpx  # lazy: only needed for actual remote calls
 
         from .serve import http
 
@@ -254,7 +254,7 @@ class ServeRegistration(Registration):
             )
 
     async def _apost(self, path: str, content: bytes = b"") -> None:
-        import httpx
+        from ..._httpx import httpx  # lazy: only needed for actual remote calls
 
         from .serve import http
 

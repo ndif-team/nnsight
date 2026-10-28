@@ -119,7 +119,7 @@ def _get(
     timeout: tuple[float, float] = (5.0, 30.0),
     headers: Optional[dict] = None,
 ) -> dict:
-    import httpx  # lazy: only for actual NDIF calls
+    from ._httpx import httpx  # lazy: only needed for actual remote calls
 
     connect, read = timeout
     response = httpx.get(

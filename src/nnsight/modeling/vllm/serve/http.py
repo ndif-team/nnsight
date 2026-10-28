@@ -20,7 +20,7 @@ READ_TIMEOUT: float = 600.0
 
 
 def timeout() -> Any:
-    import httpx
+    from ...._httpx import httpx  # lazy: only needed for actual remote calls
 
     return httpx.Timeout(CONNECT_TIMEOUT, read=READ_TIMEOUT)
 
