@@ -735,27 +735,11 @@ class Interleaver:
         Returning ``True`` for [`EarlyStopException`][nnsight.intervention.interleaver.EarlyStopException] suppresses it: an
         intervention asked to halt the run and has already unwound the model, so
         it is not an error. Any other exception propagates.
-
-        A swallowed stop is cut loose from the frames it unwound first. Its
-        traceback, and the worker's that `Mediator.switch` stashed on it (by way
-        of ``f_back``), both reach the frame of `handle`, which holds the stop: a
-        cycle that keeps every model frame the stop passed through, and with them
-        the activations of the layers that ran (a generation's KV cache too). GPU
-        memory never triggers the cyclic collector, so a loop of stopped traces
-        would fill the device.
         """
         self.interleaving = False
         # An EarlyStopException means an intervention asked to halt the run; it
         # has done its job unwinding the model, so swallow it here.
-        if exc_type is not EarlyStopException:
-            return False
-        # Nothing reads a swallowed stop's traces, so drop all three: the stack
-        # it unwound, the worker's stack, and its context (the skip that opened
-        # the trace, whose traceback holds the caller's frame).
-        exc_value.__traceback__ = None
-        exc_value.__context__ = None
-        vars(exc_value).pop("__intervention_tb__", None)
-        return True
+        return exc_type is EarlyStopException
 
     def instrument(self, envoy: Envoy) -> None:
         """Route an envoy's module through this interleaver.
@@ -868,7 +852,13 @@ class Interleaver:
             value = undo(value)
         # The visit is complete; now let the stop unwind the model's forward.
         if stopped is not None:
-            raise stopped
+            try:
+                raise stopped
+            finally:
+                # The stop's traceback keeps this frame, so a frame that still
+                # held the stop would form a cycle keeping every model frame it
+                # unwound, and their activations, alive until a gc collection.
+                del stopped
         return value
 
     def check_dangling_mediators(self) -> None:
