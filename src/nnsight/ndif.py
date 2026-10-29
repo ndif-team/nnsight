@@ -116,16 +116,9 @@ _STATE_COLOR = {"RUNNING": "green", "DEPLOYING": "yellow", "UNHEALTHY": "red"}
 
 
 def resolve_host(host: Optional[str] = None) -> str:
-    """The base URL of an NDIF server, in the one spelling nnsight uses for it.
-
-    ``None`` means the configured host (``CONFIG.API.HOST``, read at call time so
-    a later change takes effect). A trailing slash is dropped: paths are appended
-    as ``f"{host}/env"``, and the per-host environment cache keys on this string,
-    so ``"http://h:5001"`` and ``"http://h:5001/"`` must be one server.
-    [`RemoteBackend`][nnsight.intervention.backends.remote.RemoteBackend] resolves
-    its per-call host (``remote="http://host:port"``) through here too.
-    """
-    host = (host or CONFIG.API.HOST).strip().rstrip("/")
+    """``host``, or the configured one, without a trailing slash: the one spelling
+    request URLs and the per-host environment cache use."""
+    host = (host or CONFIG.API.HOST).rstrip("/")
     if not host.startswith(("http://", "https://")):
         raise ValueError(
             f"Invalid host URL: {host!r}; must start with http:// or https://"
@@ -470,10 +463,8 @@ def main() -> None:
 
 # --- local vs remote environment comparison --------------------------------
 
-# Server environments by resolved host URL (see `resolve_host`). One process can
-# talk to several servers — the configured one and any per-call
-# ``remote="http://host:port"`` — and each has its own packages, so the cache is
-# per host. Seed or empty it with `set_remote_env` / `clear_remote_env`.
+# Server environments by resolved host: a per-call `remote="http://host:port"`
+# runs on that server's packages, not the configured one's.
 _REMOTE_ENVS: dict[str, dict] = {}
 
 
@@ -510,73 +501,19 @@ def get_local_env() -> dict:
 
 
 def get_remote_env(host: Optional[str] = None, *, force_refresh: bool = False) -> dict:
-    """An NDIF server's Python version and installed packages, cached per host.
-
-    Returns ``{"python_version": str, "packages": {import_name: version}}`` as the
-    server's ``/env`` reports it. Each host is fetched once per process; a fetch
-    that fails caches nothing, so the next call tries again.
-
-    Args:
-        host: The server's base URL — the same string a per-call
-            ``remote="http://host:port"`` takes. Defaults to the configured host
-            (``CONFIG.API.HOST``).
-        force_refresh: Fetch again even if this host's environment is cached.
-
-    Raises:
-        RuntimeError: The host is unreachable or does not serve ``/env``; the
-            message names the host.
-
-    Examples:
-        >>> from nnsight import ndif
-        >>> ndif.get_remote_env()["packages"]["torch"]
-        >>> ndif.get_remote_env("http://localhost:5001")["packages"].get("nnterp")
-    """
-    # `get_remote_env(True)` is the positional spelling of force_refresh; a bool is
-    # never a host, so read it as the flag rather than failing on it as a URL.
-    if isinstance(host, bool):
-        host, force_refresh = None, host
-    host = resolve_host(host)
-    if force_refresh or host not in _REMOTE_ENVS:
-        _REMOTE_ENVS[host] = _fetch_remote_env(host)
-    return _REMOTE_ENVS[host]
-
-
-def _fetch_remote_env(host: str) -> dict:
+    """An NDIF server's Python version and installed packages (default: the
+    configured host), fetched once per host."""
     import httpx  # lazy: only for actual NDIF calls
 
-    try:
-        return _get("/env", timeout=(5, 60), host=host)
-    except httpx.HTTPStatusError as error:
-        if error.response.status_code == 404:
+    host = resolve_host(host)
+    if force_refresh or host not in _REMOTE_ENVS:
+        try:
+            _REMOTE_ENVS[host] = _get("/env", timeout=(5, 60), host=host)
+        except httpx.HTTPError as error:
             raise RuntimeError(
-                f"The NDIF server at {host} does not serve /env, so its Python "
-                "environment cannot be read."
+                f"Could not read the environment of the NDIF server at {host}: {error}"
             ) from error
-        raise RuntimeError(
-            f"Could not read the environment of the NDIF server at {host}: {error}"
-        ) from error
-    except httpx.HTTPError as error:
-        raise RuntimeError(
-            f"Could not reach the NDIF server at {host} to read its environment: {error}"
-        ) from error
-
-
-def set_remote_env(env: dict, host: Optional[str] = None) -> None:
-    """Seed the cached environment for ``host`` (default: the configured host).
-
-    [`get_remote_env`][nnsight.ndif.get_remote_env] and [`compare`][nnsight.ndif.compare] then answer for that host
-    without a network call — the seam for tests and offline runs. ``env`` has the
-    ``/env`` shape: ``{"python_version": str, "packages": {import_name: version}}``.
-    """
-    _REMOTE_ENVS[resolve_host(host)] = env
-
-
-def clear_remote_env(host: Optional[str] = None) -> None:
-    """Forget the cached environment for ``host``, or for every host when ``None``."""
-    if host is None:
-        _REMOTE_ENVS.clear()
-    else:
-        _REMOTE_ENVS.pop(resolve_host(host), None)
+    return _REMOTE_ENVS[host]
 
 
 _PULLED_ENV = False
@@ -698,8 +635,7 @@ def compare(host: Optional[str] = None) -> EnvComparison:
     ``.mismatches`` / ``.critical_mismatches`` / ``.python_matches``.
 
     Args:
-        host: The server to compare against, as [`get_remote_env`][nnsight.ndif.get_remote_env] takes it.
-            Defaults to the configured host.
+        host: The server to compare against; defaults to the configured host.
 
     Examples:
         >>> import nnsight

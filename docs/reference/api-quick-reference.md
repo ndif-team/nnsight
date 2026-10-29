@@ -110,7 +110,7 @@ Imported from the top-level `nnsight` package.
 | `nnsight.status` | `nnsight.status(raw=False)` | Query NDIF; `print()` shows deployed models and state. |
 | `nnsight.ndif_status` | `nnsight.ndif_status(raw=False)` | **Deprecated** alias for `status()`. |
 | `nnsight.is_model_running` | `nnsight.is_model_running(repo_id, revision="main", task=None, trust_remote_code=None) -> bool` | Whether a model is currently RUNNING on NDIF. |
-| `nnsight.compare` | `nnsight.compare() -> EnvComparison` | Diff local vs NDIF Python/package versions; `print()` for the table. |
+| `nnsight.compare` | `nnsight.compare(host=None) -> EnvComparison` | Diff local vs an NDIF server's Python/package versions (default: the configured host); `print()` for the table. |
 | `nnsight.CONFIG` | `Config` | The config singleton (see [config.md](./config.md)). |
 | `nnsight.Object` | type | Tensor-like static type for values read inside a trace (typing hints). |
 | `nnsight.NNsightDeprecationWarning` | `FutureWarning` subclass | The category every nnsight deprecation is raised under ([migrating-to-0.8.md](./migrating-to-0.8.md#deprecated--warn-under-nnsightdeprecationwarning)). |
