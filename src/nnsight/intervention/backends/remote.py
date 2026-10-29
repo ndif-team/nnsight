@@ -216,7 +216,7 @@ class RemoteBackend(Backend):
 
         import io
 
-        from ..._httpx import httpx  # lazy: only needed for actual remote calls
+        import httpx
         from tqdm import tqdm
 
         buffer = io.BytesIO()
@@ -266,7 +266,7 @@ class RemoteBackend(Backend):
         the serialized payload. The response carries the server-assigned request
         id (used as the job id for non-blocking polling).
         """
-        from ..._httpx import httpx  # lazy: only needed for actual remote calls
+        import httpx  # lazy: only needed for actual remote calls
 
         # Stamp the send time so the server can measure client->server transit as
         # the first hop of the request's status-time breakdown. (Cross-clock, so
@@ -350,7 +350,7 @@ class RemoteBackend(Backend):
         than from any frame), raises on ERROR, and returns None while the job is
         still running (or before its first status lands). ``status`` holds the latest.
         """
-        from ..._httpx import httpx  # lazy: only needed for actual remote calls
+        import httpx  # lazy: only needed for actual remote calls
 
         headers = {"ndif-api-key": self.api_key} if self.api_key else None
         timeout = httpx.Timeout(_CONNECT_TIMEOUT, read=_READ_TIMEOUT)
@@ -524,7 +524,7 @@ class AsyncRemoteBackend(RemoteBackend):
 
         import io
 
-        from ..._httpx import httpx  # lazy: only needed for actual remote calls
+        import httpx
 
         buffer = io.BytesIO()
         timeout = httpx.Timeout(_CONNECT_TIMEOUT, read=_READ_TIMEOUT)

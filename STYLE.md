@@ -399,7 +399,7 @@ for breaking import cycles and for optional third-party types.
 **Deferred imports have exactly two justifications, and you say which inline:**
 
 ```python
-from ._httpx import httpx  # lazy: only needed for actual remote calls
+import httpx  # lazy: only needed for actual remote calls
 from .iterator import Iterations  # (cycle)
 ```
 

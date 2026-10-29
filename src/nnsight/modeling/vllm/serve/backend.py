@@ -47,7 +47,7 @@ class LocalServeBackend(Backend):
         self._push(saves, tracer)
 
     def _send(self, blob: bytes) -> dict:
-        from ...._httpx import httpx  # lazy: only needed for actual remote calls
+        import httpx
 
         from ....intervention.errors import raise_deferred
         from . import http

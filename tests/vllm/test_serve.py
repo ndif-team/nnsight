@@ -45,7 +45,7 @@ def _kill_tree(pid: int) -> None:
 def serve_url():
     if torch.cuda.device_count() < 1:
         pytest.skip("serve needs a GPU")
-    from nnsight._httpx import httpx
+    import httpx
 
     port = _free_port()
     env = dict(os.environ)
