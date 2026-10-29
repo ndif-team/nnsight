@@ -20,6 +20,7 @@ tokenizer, pipeline or task take the model first.
 
 from __future__ import annotations
 
+import functools
 import numbers
 import sys
 from collections.abc import Mapping
@@ -321,6 +322,25 @@ def preprocess_invoke(model, data: Any, kwargs: dict) -> tuple:
     return rows, forward_params
 
 
+@functools.cache
+def generation_names(pipeline: type) -> frozenset[str]:
+    """The generate arguments a pipeline class takes under ``generate_kwargs``,
+    read once per class since `sanitize` runs once per invoke."""
+    import inspect
+
+    from transformers import GenerationConfig, GenerationMixin
+
+    named = inspect.signature(pipeline._sanitize_parameters).parameters
+    if "generate_kwargs" not in named:
+        return frozenset()
+    # max_length is also the processor's truncation length, and the
+    # pipeline sends it there; leave it to the pipeline.
+    return frozenset(
+        set(GenerationConfig().to_dict())
+        | set(inspect.signature(GenerationMixin.generate).parameters)
+    ) - set(named) - {"max_length", "self", "inputs", "kwargs"}
+
+
 def sanitize(model, kwargs: dict) -> tuple:
     """Split an invoke's kwargs with the pipeline's ``_sanitize_parameters``,
     with generate arguments flat among the forward kwargs.
@@ -334,21 +354,9 @@ def sanitize(model, kwargs: dict) -> tuple:
     ``generate``, which rejects it. Here generate arguments go to the forward
     kwargs either way, flat, as ``text-generation``'s pipeline puts them.
     """
-    import inspect
-
-    from transformers import GenerationConfig, GenerationMixin
-
-    named = inspect.signature(model.pipeline._sanitize_parameters).parameters
-    generation = {}
-    if "generate_kwargs" in named:
-        # max_length is also the processor's truncation length, and the
-        # pipeline sends it there; leave it to the pipeline.
-        names = (
-            set(GenerationConfig().to_dict())
-            | set(inspect.signature(GenerationMixin.generate).parameters)
-        ) - set(named) - {"max_length", "self", "inputs", "kwargs"}
-        generation = {k: v for k, v in kwargs.items() if k in names}
-        kwargs = {k: v for k, v in kwargs.items() if k not in names}
+    names = generation_names(type(model.pipeline))
+    generation = {k: v for k, v in kwargs.items() if k in names}
+    kwargs = {k: v for k, v in kwargs.items() if k not in names}
     preprocess_params, forward_params, postprocess_params = (
         model.pipeline._sanitize_parameters(**kwargs)
     )

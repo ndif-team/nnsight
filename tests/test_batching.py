@@ -1059,3 +1059,14 @@ class TestUnbatchedTensorWrites:
         assert not torch.equal(edited_a, clean_a)
         assert not torch.equal(edited_b, clean_b)  # the whole tensor: the other invoke's rows too
         assert torch.equal(edited_a, envoy._module.fc2.bias.expand(2, 8))
+
+
+class TestSanitizeOncePerPipeline:
+    def test_generate_names_are_read_once_per_pipeline(self, gpt2):
+        from nnsight.modeling import processing
+
+        processing.generation_names.cache_clear()
+        for _ in range(2):
+            pre, forward, _ = processing.sanitize(gpt2, {"max_new_tokens": 3, "truncation": True})
+        assert processing.generation_names.cache_info().misses == 1
+        assert forward["max_new_tokens"] == 3 and pre["truncation"] is True
