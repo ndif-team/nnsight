@@ -1,4 +1,6 @@
 
+import weakref
+
 import pytest
 import torch
 import torch.nn as nn
@@ -187,6 +189,16 @@ class TestEditing:
         with envoy.trace(x):
             captured["fc1"] = envoy.fc1.output
         assert torch.allclose(captured["fc1"], torch.zeros(2, 8))
+
+    def test_values_an_edit_binds_are_freed_after_the_trace(self, x):
+        envoy = Envoy(MLP())
+        refs = []
+        with envoy.edit(inplace=True):
+            acts = envoy.fc1.output
+            refs.append(weakref.ref(acts))
+        with envoy.trace(x):
+            pass
+        assert refs[0]() is None
 
 
 class TestEditingWithAttachment:
