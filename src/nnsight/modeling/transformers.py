@@ -57,6 +57,7 @@ import warnings
 import torch
 
 from .. import NNsightDeprecationWarning
+from ..intervention.batching import Batcher
 from ..intervention.envoy import Envoy, traceable
 from . import peft, processing
 from .huggingface import HuggingFaceModel
@@ -225,6 +226,53 @@ class GeneratorEnvoy(Envoy):
             _GENERATOR_OUTPUT_DEPRECATED, NNsightDeprecationWarning, stacklevel=2
         )
         Envoy.output.__set__(self, value)
+
+
+class TransformersBatcher(Batcher):
+    """[`Batcher`][nnsight.intervention.batching.Batcher] for a batch that can carry media.
+
+    A media input (``pixel_values``, ``input_features``, ...) is collated with a
+    row per image or clip, not per prompt, and the vision or audio side of the
+    forward keeps that leading dim. When it differs from the prompt rows, those
+    activations can't be split by invoke: served whole, an invoke would read every
+    invoke's images and its edit would land on all of them. Refuse them instead.
+    """
+
+    def __init__(self, envoy: Any, kwargs: dict | None = None) -> None:
+        super().__init__(envoy, kwargs)
+        # Leading dims of the assembled media inputs that don't count prompt rows.
+        self.media_rows: set[int] = set()
+
+    def assemble(self, fn: Any) -> tuple:
+        args, kwargs = super().assemble(fn)
+        # A keyword the caller passed is a forward argument (a `head_mask`, say),
+        # not media the preprocessor collated; its leading dim counts nothing.
+        given = set(self.kwargs) | set(self.extra_kwargs)
+        for _, invoke_kwargs in self.invokes:
+            given.update(invoke_kwargs)
+        self.media_rows = {
+            value.shape[0]
+            for key, value in kwargs.items()
+            if key not in processing.ROW_FIELDS
+            and key not in given
+            and isinstance(value, torch.Tensor)
+            and value.dim() > 0
+            # One item is as likely a broadcast as a lone image; don't refuse it.
+            and value.shape[0] not in (1, self.total)
+        }
+        return args, kwargs
+
+    def _narrow_tensor(self, tensor: torch.Tensor, group: list) -> torch.Tensor:
+        # Refuse when serving, not when widening: an in-place edit
+        # (`output[:] = 0`) writes the served tensor itself and is never widened.
+        if tensor.dim() > 0 and tensor.shape[0] in self.media_rows:
+            raise ValueError(
+                f"Can't scope an activation with {tensor.shape[0]} rows to one "
+                f"invoke: they count the batch's images (or other media), not its "
+                f"{self.total} prompts; give each prompt one image, or trace these "
+                "invokes separately."
+            )
+        return super()._narrow_tensor(tensor, group)
 
 
 class TransformersModel(HuggingFaceModel):
@@ -813,6 +861,8 @@ class TransformersModel(HuggingFaceModel):
     #
     # The two hooks a trace batches through. What they do with an input — the
     # processor, tokenization, padding, positions — is in `processing`.
+
+    _batcher_class = TransformersBatcher
 
     def _batch_size(self, *inputs: Any, **kwargs: Any) -> int:
         """Number of batch rows an invoke's input contributes (see `processing.batch_size`)."""

@@ -129,15 +129,13 @@ class TestGenerate:
         assert base[0]["generated_text"] != zeroed[0]["generated_text"]
 
 
-def _chat():
-    """Chat messages with the image inline, as the pipeline takes them."""
+def _chat(images=1):
+    """Chat messages with ``images`` images inline, as the pipeline takes them."""
     return [
         {
             "role": "user",
-            "content": [
-                {"type": "image", "image": _image()},
-                {"type": "text", "text": QUESTION},
-            ],
+            "content": [{"type": "image", "image": _image()} for _ in range(images)]
+            + [{"type": "text", "text": QUESTION}],
         }
     ]
 
@@ -215,6 +213,35 @@ class TestModelGenerate:
             edited = tracer.result.save()
         assert torch.equal(clean[:, :-2], edited[:, :-2])
         assert not torch.equal(clean, edited)
+
+
+class TestImageBatching:
+    """The vision tower and projector have one row per image, not per prompt, so
+    an invoke's rows of them line up with its prompt rows only when every invoke
+    has one image."""
+
+    @torch.no_grad()
+    def test_one_image_per_invoke_edit_stays_in_its_invoke(self, llava):
+        with llava.trace(_chat()):
+            alone = llava.output.logits[0, -1].save()
+        with llava.trace() as tracer:
+            with tracer.invoke(_chat()):
+                llava.model.multi_modal_projector.output[:] = 0
+            with tracer.invoke(_chat()):
+                batched = llava.output.logits[0, -1].save()
+        assert torch.allclose(batched, alone, atol=1e-5)
+
+    @torch.no_grad()
+    def test_uneven_image_counts_refuse_a_vision_side_edit(self, llava):
+        # Two images in one invoke and one in the other give the projector three
+        # rows against two prompt rows: it can't be narrowed, so the edit would
+        # land on every invoke's images.
+        with pytest.raises(ValueError, match="image"):
+            with llava.trace() as tracer:
+                with tracer.invoke(_chat(images=2)):
+                    llava.model.multi_modal_projector.output[:] = 0
+                with tracer.invoke(_chat()):
+                    llava.output.logits.save()
 
 
 class TestScan:

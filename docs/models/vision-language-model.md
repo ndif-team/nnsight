@@ -36,7 +36,7 @@ with model.generate(text=prompt, images=[img], max_new_tokens=3, do_sample=False
 print(model.tokenizer.batch_decode(ids))
 ```
 
-Input forms (chat messages with inline images, a processor encoding), generation keywords, the image-token span and why VLM inputs don't batch across invokes are covered in [transformers-model.md](transformers-model.md#vision-language-models).
+Input forms (chat messages with inline images, a processor encoding), generation keywords, the image-token span and which VLM inputs batch across invokes are covered in [transformers-model.md](transformers-model.md#vision-language-models).
 
 ## Related
 

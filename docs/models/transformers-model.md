@@ -313,6 +313,18 @@ with model.trace(enc):
 
 **Only processor-built ids carry that span.** The same text through `model.tokenizer` alone leaves the placeholder as a single token, and pairing those ids with processor-built `pixel_values` raises `ValueError: Image features and image tokens do not match, tokens: 1, features: ...`. Passing the processor's encoding whole is equivalent to passing the prompt and `images=`. Either way the input is opaque and must be a lone invoke (see [Input forms](#input-forms)).
 
+### Batching chats with images
+
+Chat messages with inline images do batch across invokes. The vision tower and projector have a row per image, not per prompt, so an invoke's rows of them are its own only when every prompt has one image. With uneven counts, reading or editing a vision-side activation raises `ValueError: Can't scope an activation with N rows to one invoke …` instead of handing each invoke every invoke's images. Language-side activations are unaffected. Trace those prompts separately:
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke(chat_with_two_images):
+        model.model.multi_modal_projector.output[:] = 0   # raises: 3 images, 2 prompts
+    with tracer.invoke(chat_with_one_image):
+        logits = model.output.logits.save()
+```
+
 ## Generation internals: `generator` / streamer
 
 Generated ids are passed through `model.generator`, a standalone module:
