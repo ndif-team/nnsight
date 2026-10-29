@@ -38,8 +38,7 @@ dependencies = [
     # holding every other user to it.
     "transformers",
     "huggingface-hub",
-    # Remote execution on NDIF. httpx 1.0 is a rewrite without the API used
-    # here (Timeout, AsyncClient, the exception classes).
+    # Remote execution on NDIF.
     "websocket-client",
     "zstandard",
     "httpx<1",
