@@ -136,7 +136,7 @@ Served values on the model (`eproperty` descriptors), meaningful only inside a t
 
 | Property | Description |
 |----------|-------------|
-| `model.logits` | The pre-sampling logit tensor for this step. Read or assign (`model.logits = ...`). |
+| `model.logits` | The pre-sampling logit tensor for this step. Read or assign (`model.logits = ...`). On a request with `structured_outputs`, vLLM has already applied its grammar mask: disallowed tokens read `-inf`. |
 | `model.samples` | The token ids the sampler drew from `logits` this step. Assigning it forces the token the engine continues from. |
 
 Under `tracer.iter`, each pass sees the next decoded step.

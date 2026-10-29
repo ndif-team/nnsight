@@ -86,12 +86,12 @@ startup is not patched. The runner enters the interleaver at three points:
    `super().execute_model(...)` inside `with interleaver:`, so the module
    controllers serve parked workers. Afterward `Requests.unflatten` switches each worker's batch
    group from per-token to per-row.
-2. **Logits** — `sample_tokens`: offers the logits via
-   `type(model).logits.provide(model, original)`; if edited, rebuilds the state with
-   the new tensor. Then captures all workers' saves in one pass (`record_saves`)
-   while still on the workers' own thread.
-3. **Sampling** — `_sample`: after `super()._sample(...)`, offers
-   `sampler_output.sampled_token_ids = type(model).samples.provide(model, ...)`.
+2. **Logits and sampling** — `_sample`, which vLLM's `sample_tokens` calls with the
+   step's logits (after a structured-output request's grammar mask): offers them via
+   `type(model).logits.provide(model, logits)`, samples from what comes back, then
+   offers `sampler_output.sampled_token_ids = type(model).samples.provide(model, ...)`.
+   Then captures all workers' saves in one pass (`record_saves`) while still on the
+   workers' own thread.
 
 `logits`/`samples` are `eproperty` descriptors on `VLLM`, and these `.provide` calls
 are their produce side — the worked example in
@@ -308,7 +308,7 @@ defaults `enable_prefix_caching=False`; `_warn_if_prefix_caching` warns when an
 edit is installed on an engine built with it on.
 
 **Logits and saves.** The sampler scales its logits in place, so when a block is
-in the step `sample_tokens` hands it a copy, and a saved `model.logits` stays
+in the step `_sample` hands it a copy, and a saved `model.logits` stays
 what the block read. Pickling a tensor writes its whole storage, and a block's
 reads are rows narrowed out of the step's buffers, so `collect_nnsight` ships
 each saved view as a copy of itself (`collect.dumps_compact`, a pickler whose
@@ -352,8 +352,7 @@ the meta model, and a server holds one dispatched async `VLLM`.
    (deserialize mediators) + `scope` (token spans).
 4. `execute_model` runs the forward under the interleaver (the controllers serve
    parked workers); `unflatten` switches to per-row spans.
-5. `sample_tokens` serves `logits`; `_sample` serves `samples`; `record_saves`
-   captures saves.
+5. `_sample` serves `logits`, then `samples`; `record_saves` captures saves.
 6. `NNsightLLMEngine.step` detects finished requests, `collect_nnsight` pulls saves,
    attaches `RequestOutput.saves`.
 7. `VLLM._collect` marks saves into the user's variables and re-raises deferred errors.

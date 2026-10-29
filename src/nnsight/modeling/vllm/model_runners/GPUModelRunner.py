@@ -11,8 +11,8 @@ Three points on vLLM's own path carry it:
   requests hand over their workers and every worker's token span is recomputed.
 * ``execute_model`` — the forward, run with the interleaver open so hooks serve
   the parked workers.
-* ``sample_tokens`` / ``_sample`` — logits and sampled ids never pass through a
-  module, so they are offered to workers directly by location.
+* ``_sample`` — logits and sampled ids never pass through a module, so they are
+  offered to workers directly by location.
 
 Workers run as greenlets on this thread. ``_update_states`` is called from
 ``execute_model``, and hooks fire on whichever thread runs the forward, so the
@@ -638,52 +638,37 @@ class NNsightGPUModelRunner(GPUModelRunner):
             self.nnsight_requests.unflatten(self.nnsight_model)
         return output
 
-    def sample_tokens(self, *args: Any, **kwargs: Any) -> Any:
-        if self.execute_model_state is not None:
-            original = self.execute_model_state.logits
-            # Stays `original` if a tracer.stop() unwinds the handle before it
-            # returns — the interleaver swallows the stop — so the step's own logits
-            # are sampled unchanged.
-            logits = original
-            model = self.nnsight_model
-            # Re-entered for the per-request values (logits, samples); a worker
-            # that finished in the forward is parked nowhere and so is not served.
-            with model.interleaver:
-                # Serve this step's logits through the same `logits` eproperty the
-                # client reads (VLLM.logits) — its `provide` hands the value to this
-                # model's interleaver at the eproperty's own location, so the two
-                # sides can't drift out of sync.
-                logits = type(model).logits.provide(model, original)
-            # The sampler scales its logits in place (temperature, top-k, top-p),
-            # so with a block in the step it gets a copy: a block's read is a view
-            # of these, and would otherwise be scaled after the block saved it.
-            if self.nnsight_requests.requests:
-                logits = logits.clone()
-            # The state is a namedtuple, so new logits mean a new one.
-            if logits is not original:
-                state = self.execute_model_state
-                self.execute_model_state = type(state)(
-                    **{**state._asdict(), "logits": logits}
-                )
-
-        output = super().sample_tokens(*args, **kwargs)
-        # Sampling closes the step: every block that was going to finish this step has,
-        # whether it read activations, logits, or samples. Capture all their saves now,
-        # in one pass, still on the workers' own thread (see Requests.record_saves).
-        self.nnsight_requests.record_saves()
-        return output
-
-    def _sample(self, *args: Any, **kwargs: Any) -> Any:
-        sampler_output = super()._sample(*args, **kwargs)
-
+    def _sample(self, logits: Any, *args: Any, **kwargs: Any) -> Any:
         model = self.nnsight_model
-        with model.interleaver:
-            # Serve through the client's `samples` eproperty (see sample_tokens).
+        interleaver = model.interleaver
+        # Re-entered for the per-request values; a worker that finished in the
+        # forward is parked nowhere and so is not served. Both are served through
+        # the eproperties the client reads (VLLM.logits, VLLM.samples), whose
+        # `provide` hands the value over at the eproperty's own location, so the
+        # two sides can't drift out of sync. A tracer.stop() that unwinds a handle
+        # is swallowed by the interleaver, and the value stays as it was. vLLM has
+        # applied a structured-output request's grammar mask by now, so a block
+        # reads, and edits, the masked logits.
+        with interleaver:
+            logits = type(model).logits.provide(model, logits)
+        # The sampler scales its logits in place (temperature, top-k, top-p), so
+        # with a block in the step it gets a copy: a block's read is a view of
+        # these, and would otherwise be scaled after the block saved it.
+        if interleaver.mediators:
+            logits = logits.clone()
+        sampler_output = super()._sample(logits, *args, **kwargs)
+
+        with interleaver:
             sampler_output.sampled_token_ids = type(model).samples.provide(
                 model, sampler_output.sampled_token_ids
             )
 
         self._finish_erred(sampler_output)
+        # Sampling closes the step: every block that was going to finish this step
+        # has, whether it read activations, logits, or samples. Capture all their
+        # saves now, in one pass, still on the workers' own thread (see
+        # Requests.record_saves).
+        self.nnsight_requests.record_saves()
         return sampler_output
 
     def _finish_erred(self, sampler_output: Any) -> None:
