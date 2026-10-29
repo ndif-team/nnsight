@@ -41,7 +41,7 @@ dependencies = [
     # Remote execution on NDIF.
     "websocket-client",
     "zstandard",
-    "httpx",
+    "httpx<1",
     "tqdm",
 ]
 

@@ -84,7 +84,7 @@ complete.
 | Row-parallel output | no — all-reduced | `o_proj.output`, `down_proj.output` |
 | Whole modules | no | `model.layers[i].output`, `mlp.output`, `norm.output` |
 | The LM head | no — gathered by transformers | `lm_head.output` |
-| Embeddings | whole, unless the plan shards them — see below | `embed_tokens.output` |
+| Embeddings | yes, by vocabulary — reduced for you | `embed_tokens.output` |
 | **Parameters** | **yes — not gathered** | `q_proj.weight`, `down_proj.weight` |
 | `.source` inside a sharded module | yes — a `DTensor`, see [below](#reading-a-value-between-two-sharded-modules) | `q_proj.source.F_linear_0` |
 | `.source` in a parent that calls one | no — gather it yourself | `mlp.source.self_gate_proj_0` |
@@ -97,23 +97,8 @@ returns the full-width result it would on one GPU. The gather only fires when an
 intervention is parked on that location, and `tracer.cache()` gathers only the
 modules it selects.
 
-**A vocab-parallel embedding's own output cannot be read.** Plans that shard the
-embedding (`embedding_rowwise`, in practice the tied-embedding checkpoints such as
-Llama-3.2-1B and -3B) make its layout single-use, so parking on
-`embed_tokens.output` raises a bare `AssertionError` from torch's embedding op —
-and so does `tracer.cache()` with *no* arguments, which selects every module.
-Check the config, and read `model.model.layers[0].input` instead, which is the
-same tensor and arrives whole on any plan:
-
-```python
-"embed_tokens" in (model.config.base_model_tp_plan or {})
-# True  — Llama-3.2-1B, Llama-3.2-3B     embed_tokens.output raises
-# False — Llama-3.3-70B, Qwen3-8B        embed_tokens.output reads whole
-
-with model.trace(prompt) as tracer:
-    embeddings = model.model.layers[0].input.save()   # whole, on any plan
-    cache = tracer.cache(modules=[...]).save()        # name them, don't select all
-```
+A vocabulary `tp_size` does not divide leaves the last ranks shorter slices of
+the embedding and of `lm_head`'s output; both still read whole.
 
 ### Parameters are DTensors
 
@@ -175,9 +160,9 @@ obligations on the code:
    ```
 
    Many checkpoints ship `do_sample: true` in `generation_config.json`, so this
-   bites without you asking for sampling. On a vocab-parallel tied embedding it
-   can look healthy on rank 0 while ranks 1..N return sequences the model never
-   ran on, so eyeballing rank 0 does not answer whether seeding matters.
+   bites without you asking for sampling. On a vocab-parallel embedding it can
+   look healthy on rank 0 while ranks 1..N return sequences the model never ran
+   on, so eyeballing rank 0 does not answer whether seeding matters.
 
 3. **Editing takes a clone — on any value a sharded module produced.** Whether
    nnsight gathered it or transformers all-reduced it, the whole value is a
@@ -299,11 +284,12 @@ TransformersModel(
 # tp_size=2 would load a whole copy of it onto every rank rather than a shard.
 ```
 
-The same error covers a degree that does not divide evenly (`tp_size=3` on a
-model that splits 8 ways), since the gather assumes equal pieces; the message
-lists the degrees that would work. To check in advance — config only, no weights,
-GPUs or `torchrun` — ask `max_tp_size` (`src/nnsight/modeling/tp/plan.py`) for the
-largest degree; every workable degree divides it, and `None` means TP is out:
+The same error covers a degree that does not divide the head counts and the MLP
+width (`tp_size=3` on a model that splits 8 ways), on which transformers' own
+attention reshape fails; the message lists the degrees that would work. To check
+in advance — config only, no weights, GPUs or `torchrun` — ask `max_tp_size`
+(`src/nnsight/modeling/tp/plan.py`) for the largest degree; every workable degree
+divides it, and `None` means TP is out:
 
 ```python
 from transformers import AutoConfig

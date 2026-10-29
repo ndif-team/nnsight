@@ -852,7 +852,13 @@ class Interleaver:
             value = undo(value)
         # The visit is complete; now let the stop unwind the model's forward.
         if stopped is not None:
-            raise stopped
+            try:
+                raise stopped
+            finally:
+                # The stop's traceback keeps this frame, so a frame that still
+                # held the stop would form a cycle keeping every model frame it
+                # unwound, and their activations, alive until a gc collection.
+                del stopped
         return value
 
     def check_dangling_mediators(self) -> None:

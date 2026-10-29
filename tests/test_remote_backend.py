@@ -283,3 +283,19 @@ class TestBackendMeta:
         )
         monkeypatch.setattr(backend, "send", lambda _request, _blob: None)
         assert backend(object()) is backend
+
+
+class TestHttpClient:
+    """httpx is held below 1.0, a rewrite without the API nnsight calls.
+
+    Every other test here stubs above the HTTP layer, so this is the one that
+    checks the installed httpx carries every name the remote backend,
+    `nnsight.ndif` and vLLM serving call.
+    """
+
+    def test_httpx_has_what_nnsight_calls(self):
+        import httpx
+
+        for name in ("Client", "AsyncClient", "Timeout", "HTTPError", "HTTPStatusError", "get"):
+            assert hasattr(httpx, name), f"httpx {httpx.__version__} has no {name}"
+        httpx.Timeout(10.0, read=60.0)
