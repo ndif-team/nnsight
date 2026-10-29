@@ -70,8 +70,8 @@ from nnsight import LanguageModel  # or TransformersModel, the primary wrapper
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 with model.trace("The Eiffel Tower is in"):
-    hidden = model.transformer.h[5].output[0]      # read layer 5's output
-    model.transformer.h[8].output[0][:] = hidden   # write it into layer 8
+    hidden = model.transformer.h[5].output         # read layer 5's output
+    model.transformer.h[8].output[:] = hidden      # write it into layer 8
     logits = model.output.logits.save()            # keep the final logits
 
 print(logits.argmax(-1))
@@ -85,6 +85,10 @@ into the forward pass. `.save()` marks a value to survive past the block. When t
 `with` exits, nnsight runs the model and your code **interleaved**, so each read
 blocks until the model produces that value and each write lands before the model
 reads it.
+
+`.output` is whatever the module returns: a plain tensor for a GPT-2 block, so
+`h[5].output[0]` would be the first prompt's rows rather than the hidden state, and a
+tuple for an attention submodule, where `[0]` is the attention output.
 
 This is the whole idea: **you write against the values; nnsight arranges for them to
 be there.** Three things fall out of it:
@@ -1198,10 +1202,10 @@ An intervention written inside a trace applies once, to that trace. An *edit* ma
 
 ```python
 with model.edit() as (tracer, edited):
-    edited.transformer.h[0].output[0][:] = 0
+    edited.transformer.h[0].output[:] = 0
 
 with edited.trace("Hello world"):
-    out = edited.transformer.h[0].output[0].save()   # zeros — edit applied
+    out = edited.transformer.h[0].output.save()      # zeros — edit applied
 with model.trace("Hello world"):
     orig = model.output.save()                        # original model, untouched
 ```

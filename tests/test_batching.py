@@ -72,9 +72,9 @@ class TestTraceBatching:
     def test_each_invoke_sees_its_own_rows(self, gpt2):
         with gpt2.trace() as tracer:
             with tracer.invoke(P1):
-                a = gpt2.transformer.h[0].output[0].save()
+                a = gpt2.transformer.h[0].output.save()
             with tracer.invoke(P2):
-                b = gpt2.transformer.h[0].output[0].save()
+                b = gpt2.transformer.h[0].output.save()
         # One row each (the invoke's slice of the batch), padded to the batch seq.
         assert a.shape[0] == b.shape[0]  # common padded length
         assert isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)
@@ -83,10 +83,10 @@ class TestTraceBatching:
     def test_edit_is_isolated_to_its_invoke(self, gpt2):
         with gpt2.trace() as tracer:
             with tracer.invoke(P1):
-                gpt2.transformer.h[0].output[0][:] = 0
-                edited = gpt2.transformer.h[0].output[0].save()
+                gpt2.transformer.h[0].output[:] = 0
+                edited = gpt2.transformer.h[0].output.save()
             with tracer.invoke(P1):
-                other = gpt2.transformer.h[0].output[0].save()
+                other = gpt2.transformer.h[0].output.save()
         assert torch.all(edited == 0)
         assert torch.any(other != 0)
 
@@ -109,7 +109,7 @@ class TestTraceBatching:
             outs = nnsight.save([])
             for prompt in ("one two", "three four five", "six"):
                 with tracer.invoke(prompt):
-                    outs.append(gpt2.transformer.h[0].output[0])
+                    outs.append(gpt2.transformer.h[0].output)
         assert len(outs) == 3
 
     @torch.no_grad()
@@ -129,10 +129,10 @@ class TestGenerateBatching:
     def test_batched_generate_returns_per_prompt_results(self, gpt2):
         with gpt2.pipe(max_new_tokens=3, do_sample=False) as tracer:
             with tracer.invoke("The Eiffel Tower is in"):
-                a = gpt2.transformer.h[0].output[0].save()
+                a = gpt2.transformer.h[0].output.save()
                 result = tracer.result.save()
             with tracer.invoke("The capital of France is"):
-                b = gpt2.transformer.h[0].output[0].save()
+                b = gpt2.transformer.h[0].output.save()
         assert len(result) == 2
         assert isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)
         texts = [
@@ -693,9 +693,9 @@ class TestInvokerGrouping:
         # predicts MSG's continuation (" New").
         with gpt2.trace() as tracer:
             with tracer.invoke(MSG):
-                gpt2.transformer.h[-1].output[0][:] = 0
+                gpt2.transformer.h[-1].output[:] = 0
             with tracer.invoke(MSG):
-                hidden = gpt2.transformer.h[-1].output[0].save()
+                hidden = gpt2.transformer.h[-1].output.save()
                 token = gpt2.lm_head.output[0][-1].argmax(dim=-1).save()
         assert torch.all(hidden != 0)
         assert gpt2.tokenizer.decode(token) == " New"
@@ -744,8 +744,8 @@ class TestInvokerInputFormats:
         # tokenization rather than forwarded to the model, so the sequence is cut.
         with gpt2.trace() as tracer:
             with tracer.invoke("word " * 50, truncation=True, max_length=4):
-                short = gpt2.transformer.h[0].output[0].save()
-        assert short.shape[0] == 4  # tokenized to 4 tokens, not the full ~100
+                short = gpt2.transformer.h[0].output.save()
+        assert short.shape[1] == 4  # tokenized to 4 tokens, not the full ~100
 
 
 class TestBatchedGenerationParity:

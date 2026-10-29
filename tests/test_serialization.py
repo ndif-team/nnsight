@@ -603,27 +603,27 @@ class TestLocalSimulation:
 
     def test_basic_trace_round_trips(self, gpt2):
         with gpt2.trace("The Eiffel Tower is in", remote="local"):
-            hidden = gpt2.transformer.h[0].output[0].save()
-        assert isinstance(hidden, torch.Tensor) and hidden.ndim == 2
+            hidden = gpt2.transformer.h[0].output.save()
+        assert isinstance(hidden, torch.Tensor) and hidden.ndim == 3
 
     def test_intervention_round_trips(self, gpt2):
         with gpt2.trace("The Eiffel Tower is in", remote="local"):
-            gpt2.transformer.h[0].output[0][:] = 0
-            zeroed = gpt2.transformer.h[0].output[0].save()
+            gpt2.transformer.h[0].output[:] = 0
+            zeroed = gpt2.transformer.h[0].output.save()
         assert torch.all(zeroed == 0)
 
     def test_local_module_function_ships_by_value(self, gpt2):
         # `normalize` lives in this (local, non-installed) test module; the local
         # backend hides it during deserialize, so it must have shipped by value.
         with gpt2.trace("The Eiffel Tower is in", remote="local"):
-            h = gpt2.transformer.h[0].output[0]
+            h = gpt2.transformer.h[0].output
             normed = normalize(h).save()
         norms = normed.norm(dim=-1)
         assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
 
     def test_generate_round_trips(self, gpt2):
         with gpt2.generate("The Eiffel Tower is in", max_new_tokens=3, remote="local"):
-            out = gpt2.transformer.h[0].output[0].save()
+            out = gpt2.transformer.h[0].output.save()
         assert isinstance(out, torch.Tensor)
 
 
@@ -658,7 +658,7 @@ class TestServerExecution:
     def test_deserialized_tracer_executes(self, gpt2):
         backend = _ServerRoundTrip(gpt2)
         with gpt2.trace("The Eiffel Tower is in the city of", backend=backend):
-            gpt2.transformer.h[0].output[0].save()
+            gpt2.transformer.h[0].output.save()
         assert backend.ran
         assert backend.node_after is None  # dropped in transit, falls back to None
 
@@ -668,7 +668,7 @@ class TestServerExecution:
         with gpt2.generate(
             "The Eiffel Tower is in", max_new_tokens=3, backend=backend
         ):
-            gpt2.transformer.h[0].output[0].save()
+            gpt2.transformer.h[0].output.save()
         assert backend.ran
 
     def test_push_into_a_serialized_frame(self):

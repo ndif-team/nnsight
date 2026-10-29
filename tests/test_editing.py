@@ -356,10 +356,10 @@ class TestEditSerialization:
     @torch.no_grad()
     def test_edit_survives_serialization(self, gpt2):
         with gpt2.edit() as (tracer, edited):  # non-inplace copy; gpt2 stays clean
-            edited.transformer.h[0].output[0][:] = 0
+            edited.transformer.h[0].output[:] = 0
 
         with edited.trace("The Eiffel Tower is in", remote="local"):
-            out = edited.transformer.h[0].output[0].save()
+            out = edited.transformer.h[0].output.save()
         assert torch.all(out == 0)
 
     @torch.no_grad()
@@ -367,5 +367,5 @@ class TestEditSerialization:
         with gpt2.edit():  # a copy is edited; the original keeps no edits
             pass
         with gpt2.trace("The Eiffel Tower is in", remote="local"):
-            out = gpt2.transformer.h[0].output[0].save()
+            out = gpt2.transformer.h[0].output.save()
         assert torch.any(out != 0)

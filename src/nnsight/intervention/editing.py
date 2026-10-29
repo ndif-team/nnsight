@@ -102,8 +102,8 @@ class EditingTracer(InterleavingTracer):
 
             with model.edit(inplace=True) as tracer:
                 for _ in tracer.iter[:]:
-                    model.h[0].output[0][:] = model.h[0].adapter(
-                        model.h[0].output[0], hook=True
+                    model.h[0].output[:] = model.h[0].adapter(
+                        model.h[0].output, hook=True
                     )
 
         With ``inplace=False`` (the default) the edit is stored on a copy, so the
@@ -111,7 +111,7 @@ class EditingTracer(InterleavingTracer):
         interventions against the copy::
 
             with model.edit() as (tracer, edited):
-                edited.h[0].output[0][:] = 0
+                edited.h[0].output[:] = 0
         """
         # Mirror Tracer.__enter__ (capture + arm skip) *directly* — not via super()
         # — so capture/skip see the user's frame at the same depth.

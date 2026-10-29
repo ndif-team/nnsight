@@ -208,7 +208,7 @@ class Meta(Loadable):
 
             >>> model = TransformersModel("openai-community/gpt2")  # not dispatched
             >>> with model.scan("Hello World"):
-            ...     hidden = model.transformer.h[0].output[0].shape
+            ...     hidden = model.transformer.h[0].output.shape
             >>> print(hidden)  # torch.Size([...])
 
         The values read inside the block are fake tensors valid only within it;
