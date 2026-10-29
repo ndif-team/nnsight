@@ -2,7 +2,8 @@
 
 - `register` — ship a local module with a remote request (serialize by value).
 - `status` / [`is_model_running`][nnsight.ndif.is_model_running] — query the NDIF service and its models.
-- [`compare`][nnsight.ndif.compare] — diff the local Python environment against the remote one.
+- [`compare`][nnsight.ndif.compare] / [`get_remote_env`][nnsight.ndif.get_remote_env] — diff the local Python environment
+  against a server's; each server's environment is cached per host.
 
 Tables render as plain text with optional ANSI color (matching
 [`nnsight.intervention.backends.display`][nnsight.intervention.backends.display]); no ``rich`` dependency. Network
@@ -114,16 +115,28 @@ _DEPLOYED_LEVELS = {"HOT", "WARM"}
 _STATE_COLOR = {"RUNNING": "green", "DEPLOYING": "yellow", "UNHEALTHY": "red"}
 
 
+def resolve_host(host: Optional[str] = None) -> str:
+    """``host``, or the configured one, without a trailing slash: the one spelling
+    request URLs and the per-host environment cache use."""
+    host = (host or CONFIG.API.HOST).rstrip("/")
+    if not host.startswith(("http://", "https://")):
+        raise ValueError(
+            f"Invalid host URL: {host!r}; must start with http:// or https://"
+        )
+    return host
+
+
 def _get(
     path: str,
     timeout: tuple[float, float] = (5.0, 30.0),
     headers: Optional[dict] = None,
+    host: Optional[str] = None,
 ) -> dict:
     import httpx  # lazy: only for actual NDIF calls
 
     connect, read = timeout
     response = httpx.get(
-        f"{CONFIG.API.HOST}{path}",
+        f"{resolve_host(host)}{path}",
         timeout=httpx.Timeout(connect, read=read),
         headers=headers,
     )
@@ -450,7 +463,9 @@ def main() -> None:
 
 # --- local vs remote environment comparison --------------------------------
 
-_REMOTE_ENV: Optional[dict] = None
+# Server environments by resolved host: a per-call `remote="http://host:port"`
+# runs on that server's packages, not the configured one's.
+_REMOTE_ENVS: dict[str, dict] = {}
 
 
 def get_local_env() -> dict:
@@ -485,12 +500,20 @@ def get_local_env() -> dict:
     return {"python_version": sys.version, "packages": packages}
 
 
-def get_remote_env(force_refresh: bool = False) -> dict:
-    """The NDIF server's Python version and installed packages (cached)."""
-    global _REMOTE_ENV
-    if _REMOTE_ENV is None or force_refresh:
-        _REMOTE_ENV = _get("/env", timeout=(5, 60))
-    return _REMOTE_ENV
+def get_remote_env(host: Optional[str] = None, *, force_refresh: bool = False) -> dict:
+    """An NDIF server's Python version and installed packages (default: the
+    configured host), fetched once per host."""
+    import httpx  # lazy: only for actual NDIF calls
+
+    host = resolve_host(host)
+    if force_refresh or host not in _REMOTE_ENVS:
+        try:
+            _REMOTE_ENVS[host] = _get("/env", timeout=(5, 60), host=host)
+        except httpx.HTTPError as error:
+            raise RuntimeError(
+                f"Could not read the environment of the NDIF server at {host}: {error}"
+            ) from error
+    return _REMOTE_ENVS[host]
 
 
 _PULLED_ENV = False
@@ -602,8 +625,8 @@ class EnvComparison:
         return self.__str__()
 
 
-def compare() -> EnvComparison:
-    """Compare the local and remote NDIF Python environments.
+def compare(host: Optional[str] = None) -> EnvComparison:
+    """Compare the local Python environment with an NDIF server's.
 
     Package or Python-version drift between client and server can make
     interventions behave differently remotely than locally; this surfaces it.
@@ -611,9 +634,13 @@ def compare() -> EnvComparison:
     Returns an [`EnvComparison`][nnsight.ndif.EnvComparison] — ``print`` it for the table, or inspect
     ``.mismatches`` / ``.critical_mismatches`` / ``.python_matches``.
 
+    Args:
+        host: The server to compare against; defaults to the configured host.
+
     Examples:
         >>> import nnsight
         >>> print(nnsight.compare())         # local vs remote package table
         >>> nnsight.compare().critical_mismatches
+        >>> nnsight.compare("http://localhost:5001").packages["nnterp"]
     """
-    return EnvComparison(get_local_env(), get_remote_env())
+    return EnvComparison(get_local_env(), get_remote_env(host))

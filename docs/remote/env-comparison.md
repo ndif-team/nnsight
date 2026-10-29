@@ -49,6 +49,21 @@ numpy         <local>        <remote>        ≠
 
 Fix critical mismatches before continuing — pin your local install to the server's version, or wait for the server to update.
 
+## Comparing against a specific server
+
+`compare()` reads the configured host (`CONFIG.API.HOST`). A job sent with a per-call host runs on that server's packages, so compare against the same host:
+
+```python
+HOST = "http://localhost:5001"
+
+print(nnsight.compare(HOST))
+
+with model.trace("The Eiffel Tower is in", remote=HOST):
+    ...
+```
+
+Each server's environment is fetched once per process and cached under its URL; `"http://localhost:5001/"` is the same server.
+
 ## Inspecting the result programmatically
 
 `EnvComparison` exposes structured fields:
@@ -73,7 +88,8 @@ For the underlying data (e.g. for CI):
 from nnsight import ndif
 
 local = ndif.get_local_env()          # {'python_version': ..., 'packages': {...}}
-remote = ndif.get_remote_env()        # GET {CONFIG.API.HOST}/env, cached per process
+remote = ndif.get_remote_env()        # GET {CONFIG.API.HOST}/env, cached per host
+remote = ndif.get_remote_env("http://localhost:5001")   # another server
 remote = ndif.get_remote_env(force_refresh=True)   # re-fetch after the server updates
 ```
 

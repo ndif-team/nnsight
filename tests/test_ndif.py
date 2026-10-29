@@ -96,6 +96,73 @@ class TestEnvComparison:
         assert "torch" in text and "CRITICAL" in text
 
 
+class TestRemoteEnv:
+    """`get_remote_env` caches one environment per host. `_get` is replaced by a
+    counting fake, so nothing reaches the network."""
+
+    DEFAULT = "http://default.test"
+    OTHER = "http://other.test:5001"
+
+    @pytest.fixture(autouse=True)
+    def fetches(self, monkeypatch):
+        """The hosts fetched, in order; each reports itself as its nnterp version."""
+        monkeypatch.setattr(nnsight.CONFIG.API, "HOST", self.DEFAULT)
+        monkeypatch.setattr(ndif, "_REMOTE_ENVS", {})
+        calls = []
+
+        def fake_get(path, timeout=None, headers=None, host=None):
+            calls.append(ndif.resolve_host(host))
+            return {"python_version": "3.12.0", "packages": {"nnterp": calls[-1], "fetch": len(calls)}}
+
+        monkeypatch.setattr(ndif, "_get", fake_get)
+        return calls
+
+    def test_each_host_is_fetched_once(self, fetches):
+        default, other = ndif.get_remote_env(), ndif.get_remote_env(self.OTHER)
+        assert default["packages"]["nnterp"] == self.DEFAULT
+        assert other["packages"]["nnterp"] == self.OTHER
+        assert ndif.get_remote_env() is default and ndif.get_remote_env(self.OTHER) is other
+        assert fetches == [self.DEFAULT, self.OTHER]
+
+    def test_force_refresh_refetches_that_host_only(self, fetches):
+        ndif.get_remote_env()
+        ndif.get_remote_env(self.OTHER)
+        assert ndif.get_remote_env(self.OTHER, force_refresh=True)["packages"]["fetch"] == 3
+        assert fetches == [self.DEFAULT, self.OTHER, self.OTHER]
+
+    def test_the_default_host_is_read_at_call_time(self, fetches, monkeypatch):
+        ndif.get_remote_env()
+        monkeypatch.setattr(nnsight.CONFIG.API, "HOST", self.OTHER)
+        assert ndif.get_remote_env()["packages"]["nnterp"] == self.OTHER
+        assert fetches == [self.DEFAULT, self.OTHER]
+
+    def test_a_trailing_slash_is_the_same_host(self, fetches):
+        from nnsight.intervention.backends.remote import RemoteBackend
+
+        ndif.get_remote_env(self.OTHER + "/")
+        ndif.get_remote_env(self.OTHER)
+        assert fetches == [self.OTHER]
+        backend = RemoteBackend("k", host=self.OTHER + "/")
+        assert backend.host == self.OTHER and backend.ws_host == "ws://other.test:5001"
+        with pytest.raises(ValueError, match="Invalid host URL"):
+            ndif.resolve_host("api.ndif.us")
+
+    def test_a_failed_fetch_names_the_host_and_is_not_cached(self, monkeypatch):
+        import httpx
+
+        def down(path, timeout=None, headers=None, host=None):
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(ndif, "_get", down)
+        with pytest.raises(RuntimeError, match="other.test:5001"):
+            ndif.get_remote_env(self.OTHER)
+        assert ndif._REMOTE_ENVS == {}
+
+    def test_compare_uses_the_named_host(self, fetches):
+        assert nnsight.compare(self.OTHER).packages["nnterp"]["remote"] == self.OTHER
+        assert fetches == [self.OTHER]
+
+
 class TestPullEnv:
     def test_registers_only_local_modules_and_caches(self, monkeypatch):
         from nnsight import ndif
