@@ -154,9 +154,15 @@ def _get(
 class NdifStatus:
     """A view of NDIF's deployed models, with a formatted table on ``print``.
 
-    ``deployments`` maps repo id -> ``{model_class, repo_id, revision, level,
-    state}`` for each HOT/WARM model; ``status`` is the derived service state.
-    Indexing/iteration delegate to ``deployments`` for convenience.
+    ``deployments`` maps repo id -> ``{model_class, repo_id, task,
+    trust_remote_code, revision, level, state, hot_replicas}`` for each HOT/WARM
+    model; ``status`` is the derived service
+    state. Indexing/iteration delegate to ``deployments`` for convenience.
+    Replicas of one deployment fold into one entry (healthiest state wins;
+    ``hot_replicas`` counts the HOT ones). A
+    checkpoint deployed under several tasks appears once per task, keyed
+    ``"repo_id (task)"`` — with the revision joining the key when the tasks
+    tie, and ``trust_remote_code`` when those tie too.
     """
 
     class Status(str, Enum):
@@ -206,13 +212,18 @@ class NdifStatus:
             rows.append([
                 value["model_class"],
                 value["repo_id"],
+                value.get("task") or "-",
+                "yes" if value.get("trust_remote_code") else "-",
                 value["revision"],
                 value["level"],
                 value["state"],
+                value.get("hot_replicas", 0),
             ])
             colors.append(_STATE_COLOR.get(value["state"]))
         table = _render_table(
-            ["Model Class", "Repo ID", "Revision", "Level", "State"], rows, colors
+            ["Model Class", "Repo ID", "Task", "Remote Code", "Revision", "Level", "State", "HOT Replicas"],
+            rows,
+            colors,
         )
         return f"{self._MESSAGE[self.status]}\n\n{table}"
 
@@ -248,20 +259,71 @@ def status(raw: bool = False) -> Union[dict, NdifStatus]:
     if raw:
         return response
 
-    deployments = {}
+    # /status has one entry per *replica*. Fold replicas of one model_key into
+    # one deployment first, keeping the healthiest level/state — otherwise a
+    # second replica of a model looks like a second deployment, and a spare
+    # replica still DEPLOYING masks a RUNNING one.
+    level_rank = {"HOT": 0, "WARM": 1}
+    state_rank = {"RUNNING": 0, "DEPLOYING": 1, "NOT_STARTED": 2, "UNHEALTHY": 3}
+    groups: dict = {}
+    hot_replicas: dict = {}
     for name, value in response.get("deployments", {}).items():
         if value.get("deployment_level") not in _DEPLOYED_LEVELS:
             continue  # deployed models only (skip COLD downloaded)
-        model_key = value.get("model_key", "")
-        model_class = model_key.split(":", 1)[0].split(".")[-1] if model_key else "-"
-        repo_id = value.get("repo_id", name)
-        deployments[repo_id] = {
+        model_key = value.get("model_key") or name
+        model_class = (
+            model_key.split(":", 1)[0].split(".")[-1] if ":" in model_key else "-"
+        )
+        entry = {
             "model_class": model_class,
-            "repo_id": repo_id,
+            "repo_id": value.get("repo_id", name),
+            "task": value.get("task"),
+            # In the model key: a client reaches this deployment only when it
+            # builds the model with the same value.
+            "trust_remote_code": bool(value.get("trust_remote_code")),
             "revision": value.get("revision") or "main",
             "level": value.get("deployment_level"),
             "state": value.get("application_state", "UNHEALTHY"),
         }
+        hot_replicas[model_key] = hot_replicas.get(model_key, 0) + (entry["level"] == "HOT")
+        held = groups.get(model_key)
+        if held is None:
+            groups[model_key] = entry
+        elif (
+            level_rank.get(entry["level"], 9),
+            state_rank.get(entry["state"], 9),
+        ) < (
+            level_rank.get(held["level"], 9),
+            state_rank.get(held["state"], 9),
+        ):
+            groups[model_key] = entry
+    for model_key, entry in groups.items():
+        entry["hot_replicas"] = hot_replicas[model_key]
+
+    # Keyed by repo id for the common case (`"gpt2" in nnsight.status()`). Only
+    # when several *distinct deployments* share a repo does the task join the
+    # dict key, then the revision when the tasks tie, then trust_remote_code
+    # when those tie too, so every entry stays visible.
+    by_repo: dict = {}
+    for entry in groups.values():
+        by_repo.setdefault(entry["repo_id"], []).append(entry)
+
+    deployments = {}
+    for repo_id, repo_entries in by_repo.items():
+        if len(repo_entries) == 1:
+            deployments[repo_id] = repo_entries[0]
+            continue
+        tasks = [entry["task"] for entry in repo_entries]
+        pairs = [(entry["task"], entry["revision"]) for entry in repo_entries]
+        for entry in repo_entries:
+            parts = [entry["task"] or "?"]
+            if tasks.count(entry["task"]) > 1:
+                parts.append(entry["revision"])
+            if pairs.count((entry["task"], entry["revision"])) > 1:
+                parts.append(
+                    "trust_remote_code" if entry["trust_remote_code"] else "no trust_remote_code"
+                )
+            deployments[f"{repo_id} ({', '.join(parts)})"] = entry
     return NdifStatus(deployments)
 
 
@@ -279,15 +341,24 @@ def ndif_status(raw: bool = False) -> Union[dict, NdifStatus]:
     return status(raw)
 
 
-def is_model_running(repo_id: str, revision: str = "main") -> bool:
+def is_model_running(
+    repo_id: str,
+    revision: str = "main",
+    task: Optional[str] = None,
+    trust_remote_code: Optional[bool] = None,
+) -> bool:
     """Whether ``repo_id`` (at ``revision``) is currently RUNNING on NDIF.
 
     Returns ``False`` if the service is unreachable. The repo id is canonicalized
-    via the Hub so different spellings match the deployed key.
+    via the Hub so different spellings match the deployed key. ``task`` and
+    ``trust_remote_code`` narrow the check to one deployment, since both are
+    part of the model key; unset, any value counts.
 
     Examples:
         >>> import nnsight
         >>> nnsight.is_model_running("openai-community/gpt2")
+        >>> nnsight.is_model_running("openai-community/gpt2", task="text-generation")
+        >>> nnsight.is_model_running("x/custom", trust_remote_code=True)
     """
     try:
         response = _get("/status")
@@ -299,8 +370,17 @@ def is_model_running(repo_id: str, revision: str = "main") -> bool:
 
     repo_id = HfApi().model_info(repo_id).id
     for value in response.get("deployments", {}).values():
-        if value.get("repo_id") == repo_id and (value.get("revision") or "main") == revision:
-            return value.get("application_state") == "RUNNING"
+        if (
+            value.get("repo_id") == repo_id
+            and (value.get("revision") or "main") == revision
+            and (task is None or value.get("task") == task)
+            and (
+                trust_remote_code is None
+                or bool(value.get("trust_remote_code")) == trust_remote_code
+            )
+            and value.get("application_state") == "RUNNING"
+        ):
+            return True
     return False
 
 

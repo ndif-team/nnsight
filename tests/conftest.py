@@ -16,4 +16,7 @@ def gpt2():
     """A dispatched gpt2 for offline model tests."""
     from nnsight.modeling.transformers import TransformersModel
 
-    return TransformersModel("openai-community/gpt2", dispatch=True)
+    # The task is named, so building the fixture does not ask the Hub for it
+    # (`pipeline` infers a missing task from the repo's `pipeline_tag`, a live API
+    # call that fails offline and under the Hub's rate limit).
+    return TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)

@@ -84,6 +84,12 @@ def main() -> None:
     results: dict[str, torch.Tensor] = {}
 
     def record(name: str, tensor: torch.Tensor) -> None:
+        from torch.distributed.tensor import DTensor
+
+        # A sharded parameter's gradient is a DTensor; every rank records, so
+        # every rank reaches the gather.
+        if isinstance(tensor, DTensor):
+            tensor = tensor.full_tensor()
         results[name] = tensor.detach().float().cpu()
 
     # A column-parallel output and a row-parallel input are the two sides that
@@ -93,6 +99,12 @@ def main() -> None:
         record("down_proj_in", layer.mlp.down_proj.input.save())
         record("layer_out", layer.output[0].save())
         record("baseline_logits", model.lm_head.output.save())
+
+    # Under no_grad transformers hands a Linear's output over as this rank's
+    # plain tensor, so the gather has only the rule to go on, including the
+    # whole width an uneven vocabulary needs.
+    with torch.no_grad(), model.trace(PROMPT):
+        record("nograd_logits", model.lm_head.output.save())
 
     # An edit straddling rank boundaries: only correct if the gather assembled in
     # true rank order and the re-split put the edit back where it came from.
@@ -105,6 +117,18 @@ def main() -> None:
         edited[..., : width // 2 + 1] = 0
         layer.mlp.gate_proj.output = edited
         record("partial_edit_logits", model.lm_head.output.save())
+
+    # A vocab-parallel embedding: each rank looks up only its own ids, and the
+    # value at the handoff carries a mask its first reduction consumes. Read,
+    # and edited back.
+    with model.trace(PROMPT):
+        record("embed_out", model.model.embed_tokens.output.save())
+
+    with model.trace(PROMPT):
+        embedded = model.model.embed_tokens.output.clone()
+        embedded[:, 1] = 0
+        model.model.embed_tokens.output = embedded
+        record("embed_edited_logits", model.lm_head.output.save())
 
     # Ad-hoc calls run a sharded module on whole tensors, through its own
     # hooks: a column-parallel linear (never gathered by transformers), a
@@ -199,7 +223,8 @@ def main() -> None:
         layer.mlp.down_proj.output          # forces the gather and the re-fragment
         loss = model.lm_head.output.sum()
         with loss.backward():
-            record("partial_backward_grad", model.model.embed_tokens.weight.grad.save())
+            grad = model.model.embed_tokens.weight.grad.save()
+    record("partial_backward_grad", grad)
 
     # Greedy so the ranks cannot diverge on sampling; see the module docstring of
     # nnsight/modeling/tp/fragments.py for why that would be a correctness bug.

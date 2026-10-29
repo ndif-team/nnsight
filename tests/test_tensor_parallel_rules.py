@@ -29,8 +29,9 @@ from nnsight.modeling.tp import (
 
 def _upstream_styles() -> set:
     # The module `TPFragments._style_of` imports, so the table is checked against
-    # the registry the supported backend actually reads. On transformers below the
-    # 5.16 floor this import is what fails, which is the point.
+    # the registry the supported backend actually reads. On a transformers too
+    # old to have the DTensor backend this import is what fails, which is the
+    # point.
     from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
     return set(ALL_PARALLEL_STYLES._global_mapping)
@@ -92,8 +93,10 @@ def _sharded(style: str | None, path: str = "model.thing", size: int = 2, **attr
     root._device_mesh = _FakeMesh(size)
 
     # Stands in for the wrapper transformers installs when it shards a module:
-    # `instrument` records a rule only for a module it actually wrapped.
-    module = torch.nn.Identity()
+    # `instrument` records a rule only for a module it actually wrapped. A
+    # Linear, because colwise and rowwise refuse a module without
+    # `out_features`/`in_features`.
+    module = torch.nn.Linear(8, 6)
     module.__dict__["forward"] = _tp_wrapped_forward()
     for name, value in attrs.items():
         setattr(module, name, value)
@@ -117,8 +120,22 @@ class TestStyleCoverage:
             f"carry a shard) or to UNSUPPORTED."
         )
 
+    # Styles the tables carry ahead of the floor: CI installs the latest
+    # transformers while the floor trails it, so an entry for a style a newer
+    # release added is not stale on an install that predates it. Each names
+    # the release that introduced it; drop an entry here once the floor
+    # passes that release.
+    FORWARD_STYLES: set = {
+        "embedding_colwise",  # 5.21
+        "replicate",          # 5.21
+    }
+
     def test_no_rule_names_a_style_that_no_longer_exists(self):
-        stale = (set(SIDES) | set(UNSUPPORTED)) - _upstream_styles()
+        stale = (
+            (set(SIDES) | set(UNSUPPORTED))
+            - _upstream_styles()
+            - self.FORWARD_STYLES
+        )
         assert not stale, (
             f"rules name parallel styles transformers no longer has: "
             f"{sorted(stale)} — probably renamed upstream."
@@ -157,6 +174,17 @@ class TestInstrument:
         assert interleaver.tp_rules["model.o_proj.input"][1] == Shard(-1)
         assert isinstance(interleaver.tp_rules["model.o_proj.output"][1], Partial)
 
+    def test_a_shard_records_its_whole_width(self):
+        # A shard's width need not divide by the TP size, so a rank's piece does
+        # not say how wide the whole is; the rule carries it. A partial is
+        # whole-width on every rank and needs none.
+        colwise = _sharded("colwise", path="model.q_proj")
+        rowwise = _sharded("rowwise", path="model.o_proj")
+
+        assert colwise.tp_rules["model.q_proj.output"][2] == 6    # out_features
+        assert rowwise.tp_rules["model.o_proj.input"][2] == 8     # in_features
+        assert rowwise.tp_rules["model.o_proj.output"][2] is None
+
     @pytest.mark.parametrize("style", sorted(UNSUPPORTED))
     def test_a_refused_style_raises(self, style, monkeypatch):
         with pytest.raises(UnsupportedParallelStyle, match=style):
@@ -181,8 +209,8 @@ class TestMaxTpSize:
     """The largest degree a checkpoint's config says it splits into.
 
     Divisibility is the whole constraint: transformers shards attention by head
-    and the MLP by its intermediate dimension, and its all-gather assumes equal
-    pieces — an uneven degree does not run slower, it does not run.
+    and the MLP by its intermediate dimension, and an uneven degree does not run
+    slower, it fails on the first forward (see `nnsight.modeling.tp.plan`).
     """
 
     def _config(self, **fields):
@@ -289,18 +317,19 @@ class TestTransformersVersionFloor:
         monkeypatch.setattr(tp_fragments, "_version_checked", False)
         tp_fragments._check_transformers_version()
 
-    def test_an_older_transformers_is_refused(self, monkeypatch):
+    @pytest.mark.parametrize("version", ["5.15.1", "5.16.1", "5.18.0"])
+    def test_an_older_transformers_is_refused(self, monkeypatch, version):
         from nnsight.modeling.tp import UnsupportedTransformersVersion
 
-        with pytest.raises(UnsupportedTransformersVersion, match="5.16"):
-            self._check(monkeypatch, "5.15.1")
+        with pytest.raises(UnsupportedTransformersVersion, match="5.19"):
+            self._check(monkeypatch, version)
 
     @pytest.mark.parametrize(
-        "version", ["5.16.0", "5.16.1", "6.0.0", "5.16.0.dev0", "5.17.0rc1"]
+        "version", ["5.19.0", "5.19.1", "6.0.0", "5.19.0.dev0", "5.20.0rc1"]
     )
     def test_the_floor_and_above_are_allowed(self, monkeypatch, version):
         # Including pre-releases of the fixed series: an editable transformers
-        # checkout reports 5.16.0.dev0, which a plain >= would reject.
+        # checkout reports 5.19.0.dev0, which a plain >= would reject.
         self._check(monkeypatch, version)
 
     def test_it_only_runs_once(self, monkeypatch):
@@ -310,7 +339,7 @@ class TestTransformersVersionFloor:
 
         from nnsight.modeling.tp import fragments as tp_fragments
 
-        monkeypatch.setattr(transformers, "__version__", "5.16.0")
+        monkeypatch.setattr(transformers, "__version__", "5.19.0")
         monkeypatch.setattr(tp_fragments, "_version_checked", False)
         tp_fragments._check_transformers_version()
         monkeypatch.setattr(transformers, "__version__", "0.1.0")
@@ -584,9 +613,8 @@ class TestReshardGuard:
     def test_a_partial_is_reduced_whatever_its_width(self, monkeypatch):
         """A partial is a whole-width term of a sum, so divisibility is irrelevant.
 
-        Guarding it with the shard's ``% world_size`` test would silently skip the
-        re-fragment on any width that does not divide, and the model's own reduce
-        would then sum the whole tensor once per rank.
+        Skipping the re-fragment on a width that does not divide would leave the
+        model's own reduce to sum the whole tensor once per rank.
         """
         from nnsight.modeling.tp.fragments import _placement, _reshard
 
@@ -735,9 +763,9 @@ class TestConfigIsReadOnce:
         monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", counted)
 
         key = '{"repo_id": "x", "revision": null}'
-        hf._CONFIG_CACHE.pop((key, False), None)
-        first = hf.HuggingFaceModel._config(key, False)
-        second = hf.HuggingFaceModel._config(key, False)
+        hf._CONFIG_CACHE.pop(key, None)
+        first = hf.HuggingFaceModel._config(key)
+        second = hf.HuggingFaceModel._config(key)
 
         assert first is second
         assert len(calls) == 1, f"the config was fetched {len(calls)} times"
@@ -758,7 +786,7 @@ class TestConfigIsReadOnce:
             return Config()
 
         key = '{"repo_id": "shared", "revision": null}'
-        hf._CONFIG_CACHE.pop((key, False), None)
+        hf._CONFIG_CACHE.pop(key, None)
 
         import transformers
 
@@ -817,7 +845,7 @@ class TestDescribeCheckpoint:
         import nnsight.modeling.huggingface as hf
 
         key = '{"repo_id": "r", "revision": "abc123"}'
-        hf._CONFIG_CACHE[(key, False)] = None
+        hf._CONFIG_CACHE[key] = None
         monkeypatch.setattr(
             hf.HuggingFaceModel, "_hub_parameter_count", staticmethod(lambda *a: 1_000)
         )
@@ -834,7 +862,7 @@ class TestDescribeCheckpoint:
         import nnsight.modeling.huggingface as hf
 
         key = '{"repo_id": "r2", "revision": null}'
-        hf._CONFIG_CACHE[(key, False)] = None
+        hf._CONFIG_CACHE[key] = None
         monkeypatch.setattr(
             hf.HuggingFaceModel, "_hub_parameter_count", staticmethod(lambda *a: 7_777)
         )
@@ -900,8 +928,7 @@ class TestCheckTpRequest:
             check_tp_request(self._shardable(), degree)
 
     def test_a_degree_that_does_not_divide_is_refused(self):
-        # Not a slower option: the all-gather assumes equal pieces, so an uneven
-        # degree returns the wrong shape rather than failing outright.
+        # Not a slower option: the first forward fails.
         from nnsight.modeling.tp import UnshardableCheckpoint, check_tp_request
 
         with pytest.raises(UnshardableCheckpoint, match="splits at most 8 ways"):

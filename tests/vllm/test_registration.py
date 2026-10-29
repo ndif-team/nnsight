@@ -276,6 +276,25 @@ class TestResult:
         assert first.prompt != second.prompt
 
 
+class TestPrefixCaching:
+    @torch.no_grad()
+    def test_an_edit_sees_a_repeated_prefix_whole(self, vllm_gpt2):
+        # Off by default: B's first 48 tokens are A's, and still run.
+        prefix = "Once upon a time in a small village by the sea there lived " * 4
+        a, b = prefix + "an old fisherman", prefix + "a young baker"
+        vllm_gpt2.generate(a, max_tokens=1, temperature=0.0)
+
+        with vllm_gpt2.edit() as (tracer, registration):
+            rows = nnsight.save(vllm_gpt2.transformer.h[5].output.shape[0])
+        try:
+            output = vllm_gpt2.generate(b, max_tokens=1, temperature=0.0)[0]
+        finally:
+            registration.clear()
+
+        assert not vllm_gpt2.vllm_entrypoint.llm_engine.vllm_config.cache_config.enable_prefix_caching
+        assert output.saves["rows"] == len(output.prompt_token_ids)
+
+
 class TestNamedEdits:
     """``model.edit(name=...)`` and the ``edits=[...]`` request argument.
 

@@ -19,32 +19,13 @@ This page is the engine and what a block sees inside it. Three companions carry 
 serving](vllm-serving.md) for `mode="async"` and `nnsight-serve`, and [Parallelism and
 architectures](vllm-parallelism.md) for tensor parallelism, mixture-of-experts and hybrid trunks.
 
-> **Running this** needs `vllm` installed and a GPU. The examples below are drawn from the source and `tests/vllm/` (which skip without a GPU).
+Running this needs `vllm` installed and a GPU.
 
-## When to use / when not to use
-
-Use `VLLM` when:
-- You need **throughput** / continuous batching for many concurrent requests.
-- You need **tensor parallelism** across GPUs.
-- You want **async token-by-token streaming** with interventions.
-
-Do not use `VLLM` when:
-- You have a single prompt and don't need throughput — [`TransformersModel`](transformers-model.md) is simpler.
-- You need gradients/backward, `.scan()`, or source tracing on fused CUDA kernels — not supported on the vLLM path.
-- You're doing diffusion or VLM work — the NNsight vLLM integration is text-only.
+Use `VLLM` for throughput over many concurrent prompts, tensor parallelism, or streamed tokens
+with interventions. For a single prompt, gradients, `.scan()`, or image inputs, use
+[`TransformersModel`](transformers-model.md).
 
 ## Loading
-
-```python
-from nnsight.modeling.vllm import VLLM
-
-model = VLLM(
-    "gpt2",
-    tensor_parallel_size=1,
-    gpu_memory_utilization=0.1,
-    dispatch=True,
-)
-```
 
 ### Constructor
 
@@ -89,7 +70,7 @@ print(model.tokenizer.decode(logits.argmax(dim=-1)))
 
 ### What your block sees on vLLM
 
-Four things differ from the HuggingFace path, and every one of them changes what an index means:
+What differs from the HuggingFace path:
 
 - **No batch axis.** A served value is `[tokens, hidden]` for *your* request's rows: the prefill step
   serves every prompt token, each later decode step serves one row. The last position is `[-1]`,
@@ -106,68 +87,52 @@ Four things differ from the HuggingFace path, and every one of them changes what
   out[0][-1] += v                          # additive steering at the last position
   ```
 
-- **Clone what you keep.** A served value is the model's live buffer, and the next layer's fused
-  add+norm rewrites it in place — `layers[8].output[0].save()` comes back holding a later layer's
-  data. Reduce or `.clone()` before you save (`(out[0] + out[1]).mean(0).cpu().save()`). To have the
-  engine do it for you everywhere, set `NNSIGHT_VLLM_CLONE_READS=1` — at the cost of in-place edits;
-  see [Serving copies instead of views](#serving-copies-instead-of-views).
+  Scale a steering vector against the *median* per-token residual norm: the first
+  position is often an attention sink with a norm ~100× the rest, and on 8B-class
+  models a coefficient of ~1× that median already saturates.
+
+- **Clone what you keep.** A served value is the engine's live buffer and is overwritten a few ops
+  later; `.clone()` or reduce before you save. See [Serving copies instead of
+  views](#serving-copies-instead-of-views).
 - **Where tensors live.** A tensor your block references from outside (a steering vector) is
   serialized with the block and arrives in the worker as it was; move it onto the served value
   (`v.to(h.device, h.dtype)`). Saved tensors come back on the worker's device (`cuda:0`) unless
   you `.cpu()` them in the block. `model.device` on an undispatched client is `meta`.
-- **A request's numbers depend on the batch it was scheduled with.** Reduction order inside a
-  fused kernel follows the batch, and in bf16 that moves the last digit — so the same prompt,
-  greedy, run twice in different company can come back with a different token where the argmax
-  was nearly tied, and a sweep's figures reproduce to about a part in a hundred rather than
-  exactly. `temperature=0.0` pins the sampler, not the arithmetic. Compare effect sizes and
-  distributions, not exact tokens or exact floats, and read a paired difference (clean against
-  patched *in the same trace*) rather than differencing two separate runs.
+- **A request's numbers depend on the batch it was scheduled with.** Fused-kernel reduction order
+  follows the batch, so in bf16 the same greedy prompt can flip a nearly tied argmax and a sweep
+  reproduces to about a part in a hundred. `temperature=0.0` pins the sampler, not the arithmetic:
+  compare effect sizes, and read a paired difference (clean against patched *in the same trace*)
+  rather than differencing two runs.
 
 `model.logits` is `[1, vocab]` for the step and `model.samples` is `[1, 1]` (`.item()` for one
 sequence). Greedy decoding is `temperature=0.0`; vLLM's default is `1.0`.
 
 ### Replacing a value keeps its rows
 
-An in-place write (`out[0][-1] += v`, `mlp.output[:] = 0`) is the direct form and always fits.
-A *replacement* — `layer.output = t` — is spliced back into the batch the model is running, so it
-has to carry the same rows the block owns — and nothing checks that for you. A tensor with a
-different leading dimension is spliced in as given, the next kernels run on a slab of the wrong
-height, and the mismatch can land as a device-side assert — which poisons the CUDA context and
-takes the engine and every request in it, not just yours.
-
-This is what a patching sweep hits when a donor activation was captured at a different prompt
-length. Slice the donor to the rows you are writing (`served[POS] = donor[POS]`) rather than
-handing back a shorter tensor. Every other dimension is the model's to check the same way, and
-mismatches there surface from the next kernel.
+An in-place write (`out[0][-1] += v`, `mlp.output[:] = 0`) always fits. A *replacement* —
+`layer.output = t` — is spliced back into the running batch as given, so it must carry the same
+rows the block owns; nothing checks. A wrong leading dimension can surface as a device-side assert,
+which poisons the CUDA context and takes the engine and every request in it. In a patching sweep
+with a donor from a different prompt length, slice to the rows you write
+(`served[POS] = donor[POS]`) rather than handing back a shorter tensor.
 
 ### `.skip()` needs the whole step
 
-A skip has to cover **every row of the step**, and a step's rows are not yours: they hold other
-traces' requests, other tenants' requests, and decodes of requests whose own block has already
-finished. Your replacement tiles your rows only, so the moment anything else is scheduled beside
-you the skip cannot cover the step and
-`ValueError: A batched .skip() has to cover every row` is raised — outside the per-request
-deferral, so vLLM sees it as a fatal engine error rather than your request's:
-`EngineDeadError`, every in-flight request of every client lost, and the model object unusable
-afterwards. The message names your invokes; the row that did not skip is usually a stranger's.
+A skip has to cover **every row of the step**, and a step's rows include other traces', other
+clients', and finished requests' decodes. The moment anything is scheduled beside you,
+`ValueError: A batched .skip() has to cover every row` is raised outside the per-request deferral,
+so vLLM treats it as fatal: `EngineDeadError`, every in-flight request lost, the model object
+unusable. Whether a script survives is the scheduler's decision, so do not build on it — write the
+output instead (`model.model.layers[L].mlp.output[:] = 0`).
 
-Whether a given script survives is the scheduler's decision, not the code's — one invoke skipping
-alone is fine, two invokes that are not co-scheduled are fine, three with the middle one skipping
-takes the engine. Do not build on it. To remove a module's contribution, write its output instead
-(`model.model.layers[L].mlp.output[:] = 0`): you pay the compute you would have saved, and the
-mistake costs one request.
-
-A decoder layer's `.input` is not the hidden state either. vLLM calls
-`forward(positions, hidden_states, residual)`, so `layer.input` is the `[tokens]` positions vector
-and [skip.md](../usage/skip.md)'s `module.skip(module.input)` pass-through feeds positions in as a
-layer output — the next layer's `hidden_states, residual = layer(...)` then fails to unpack it,
-inside the model's forward, and that is fatal too. Read the arguments through `.inputs`
-(`args, kwargs = layer.inputs`; `args[1]` and `args[2]` are the hidden state and the residual)
-whenever you want the values a layer was called with.
+A decoder layer's `.input` is not the hidden state either: vLLM calls
+`forward(positions, hidden_states, residual)`, so `layer.input` is the positions vector and
+`module.skip(module.input)` is fatal too. Read the arguments through `.inputs`
+(`args, kwargs = layer.inputs`; `args[1]` is the hidden state, `args[2]` the residual).
 
 ### `logits` and `samples`
 
-These are vLLM-specific served values on the model — `eproperty` descriptors, the same mechanism behind a module's `.output`/`.input` — not on a vanilla `vllm.LLM`, and only meaningful inside a trace. Read them for the logits and sampled ids of each step; for the finished request as a whole, read `tracer.result`.
+Served values on the model (`eproperty` descriptors), meaningful only inside a trace. For the finished request as a whole, read `tracer.result`.
 
 | Property | Description |
 |----------|-------------|
@@ -206,12 +171,11 @@ with model.trace(PROMPT, max_tokens=10) as tracer:
 
 #### A loop that outruns the request
 
-`max_tokens` is a cap, not a promise. An EOS token, a `stop` string, `stop_token_ids`, or a
-`tracer.stop()` in another block all end a request early, and a `tracer.iter` loop that asked
-for more steps than the request made is cut short there — bounded and open alike. The values
-saved inside the loop come home; the statements after it never run; the only signal is a warning,
-and it is emitted in vLLM's EngineCore subprocess, not yours (see [Where an error comes
-from](#where-an-error-comes-from)):
+`max_tokens` is a cap, not a promise: EOS, a `stop` string, `stop_token_ids` or a `tracer.stop()`
+elsewhere end a request early, and a `tracer.iter` loop that asked for more steps is cut short
+there, as described in [iteration.md](../usage/iteration.md). On vLLM the warning is emitted in the
+EngineCore subprocess (see [Where an error comes from](#where-an-error-comes-from)), so nothing in
+your process says so:
 
 ```python
 with model.trace(PROMPT, temperature=0.0, max_tokens=20, stop=[","]) as tracer:
@@ -219,21 +183,12 @@ with model.trace(PROMPT, temperature=0.0, max_tokens=20, stop=[","]) as tracer:
     for _ in tracer.iter[:20]:
         samples.append(model.samples.item())
     result = tracer.result.save()          # never reached: `result` comes back unbound
-# (EngineCore pid=...) UserWarning: 'model.samples.i4' was never reached: the loop asked for
-#     a step the run did not make, so it was cut short — values saved inside the loop are kept,
-#     and the statements after it did not run. ...
-# len(samples) == 4 — shorter than the bound, and nothing in your process says so
+# len(samples) == 4
 ```
 
-The result looks complete, so check the `len()` of what you collected — or:
-
-- **Hold the run to the count you loop over.** On vLLM that is `ignore_eos=True`, or
-  `min_tokens=N`, which is how vLLM spells a floor on generated tokens. (The warning text names
-  `min_new_tokens=`, which is the `transformers` spelling; on this path it is refused as an
-  unknown sampling keyword.)
-- **Loop with `tracer.all()` and put the trailing statements in a separate `tracer.invoke()`.**
-  An open `tracer.iter[:]` / `tracer.all()` has no count of its own, so outrunning generation is
-  how it ends.
+Check the `len()` of what you collected, hold the run to the count with `ignore_eos=True` or
+`min_tokens=N` (vLLM's spelling; the warning's `min_new_tokens=` is refused here), or loop with
+`tracer.all()` and put trailing statements in a separate `tracer.invoke()`.
 
 ### `generate` traces, or just runs
 
@@ -261,13 +216,9 @@ with model.trace("The Eiffel Tower is in", temperature=0.0, max_tokens=3) as tra
 result.outputs[0].text        # ' Paris, France'
 ```
 
-It is served at collect time — after every module, `logits` and `samples` visit of the request,
-and the first moment both halves exist, since the block runs in the engine's worker and the
-output is assembled by the engine. So it must be the **last** read in the block; a read after it
-raises `OutOfOrderError` naming that later value. Two consequences: it carries the generation but
-**not** `.saves` (those are attached to the engine's own copy afterwards), and per-step values
-still come from `model.logits` / `model.samples` under `tracer.iter`, since `result` is the
-request's end state.
+It is served at collect time, after every other visit of the request, so it must be the **last**
+read in the block (a later read raises `OutOfOrderError`). It carries the generation but **not**
+`.saves`; per-step values come from `model.logits` / `model.samples` under `tracer.iter`.
 
 ### Sampling parameters
 
@@ -288,10 +239,7 @@ with model.trace(max_tokens=3) as tracer:
         ...
 ```
 
-Common kwargs: `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `stop`, `stop_token_ids`, `seed`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs`, `lora_request` — anything `vllm.SamplingParams` takes. `ignore_eos=True` and
-`min_tokens=N` are what hold a run to the step count a bounded `tracer.iter[:N]` asks for; a run
-that stops short of it cuts the loop short with a warning (see [A loop that outruns the
-request](#a-loop-that-outruns-the-request)).
+Anything `vllm.SamplingParams` takes is accepted (`temperature`, `top_p`, `top_k`, `max_tokens`, `stop`, `seed`, `logprobs`, `lora_request`, ...). Per-invoke kwargs override trace-level ones even when the value an invoke names is vLLM's own default (`temperature=1.0`); a typo'd kwarg raises `TypeError`.
 
 ### Input forms per invoke
 
@@ -313,31 +261,10 @@ hidden[0]        # the first invoke's, sized to its own prompt
 len(hidden)      # == len(prompts)
 ```
 
-A name saved by exactly one invoke is that value, not a list of one — so giving
-each invoke a distinct name works too, and reads as it always did:
+A name saved by exactly one invoke is that value, not a list of one, so a distinct name per invoke also works.
 
-```python
-with model.trace(max_tokens=3) as tracer:
-    with tracer.invoke("The Eiffel Tower is in"):
-        paris = list().save()                 # this invoke's own saved list
-        for _ in tracer.all():
-            paris.append(model.samples.item())
-    with tracer.invoke("The capital of Japan is"):
-        tokyo = list().save()                 # a distinct saved list
-        for _ in tracer.all():
-            tokyo.append(model.samples.item())
-
-print(model.tokenizer.decode(paris), model.tokenizer.decode(tokyo))
-```
-
-For a **dynamic** number of prompts, save one name in every invoke and read the
-list — that is what the loop above does. Firing each prompt as its own async trace
-concurrently (`asyncio.gather`) also works, and each one's saves then arrive on its
-own finished `output`.
-
-A container bound *and saved* **above** the invokes is one object locally, and
-each request gets its own copy. Assigning into pre-sized slots merges back;
-`append` does not — a list appended in every invoke comes back with one element.
+A container bound *and saved* **above** the invokes is one object locally, and each request gets
+its own copy: assigning into pre-sized slots merges back, `append` does not.
 
 ```python
 with model.trace(temperature=0.0, max_tokens=1) as tracer:
@@ -384,27 +311,12 @@ hidden[1]                        # sequence 1's
 result.outputs[1].text           # what sequence 1 sampled
 ```
 
-`tracer.result` is **not** a list: a request has one `RequestOutput`, and the
-sequences are its `outputs[i]`. A saved container (`caps = nnsight.save([])`
-appended under `tracer.iter`) comes back as a list of `n` containers, `caps[i]`
-matching `result.outputs[i]`.
+`tracer.result` is **not** a list: the sequences are its `outputs[i]`. Where you hold outputs
+rather than variables (async, `serve=`, plain `generate` with an edit), sequence *i*'s values are
+`output.outputs[i].saves[...]`; `output.saves` is the primary sequence's. On an **async** engine
+each streamed output carries only the completions that ended that step — accumulate by
+`completion.index`, or read the finished output's `nnsight_sequences`.
 
-Where you hold outputs rather than variables — async, `serve=`, plain `generate`
-with an edit installed — the values ride the completion they belong to:
-
-```python
-output.outputs[i].saves["hidden"]   # sequence i's
-output.saves["hidden"]              # the primary sequence's, unchanged for n=1
-```
-
-Since the prompt is shared, each sequence's *prefill* agrees to kernel tolerance;
-they diverge over the tokens they go on to sample.
-
-On an **async** engine the sequences finish at different steps, and each streamed
-output carries only the completions that ended in that step — so the last one need
-not have all `n`. Accumulate across the stream by `completion.index`, or read the
-whole set off the finished output's `nnsight_sequences`, which is one dict of the
-trace's own saves per sequence, in order.
 ## Special properties
 
 | Attribute | Description |
@@ -450,9 +362,7 @@ with model.trace(prompt, max_tokens=20, temperature=0.0) as tracer:
         hiddens.append(model.model.layers[16].output[0].clone())     # clone: see below
 ```
 
-Outside the loop the edit would fire on the prefill only. Measured on Qwen3-8B, one request, 32
-greedy tokens with a per-step steering edit at one tap and a per-step capture at another: eager 60
-tok/s, graphs 86 tok/s; the same graph engine with no trace 89 tok/s.
+Outside the loop the edit would fire on the prefill only.
 
 What changes under graphs, and why:
 
@@ -463,46 +373,31 @@ What changes under graphs, and why:
 - **Only taps are reachable.** A location you didn't declare is never visited by a replayed step, so a block that reads one parks until the request ends and the request's error says `'...' is not a tap on this engine`. Declare it, or drop `taps` for the eager engine. `model.taps` lists the resolved set after dispatch. Keep the set small: each tap splits the graph, and a break at every module would cost what replay bought.
 - **Edits land in place.** The next kernel reads the tap's tensor from a fixed address, so an in-place edit (`output[0][:] += v`, `output[0][:, i] = 0`) is exactly right and a replacement (`output = t`) is copied back into that memory, so it has to keep the rows it
   replaces — see [Replacing a value](#replacing-a-value-keeps-its-rows).
-- **Clone what you keep.** The value served at a tap *is* the graph's memory, rewritten next step. A tensor you `.save()` or append under `tracer.iter` aliases it; call `.clone()` if you read it after the step. The un-cloned list still comes back as N separate tensors — each is copied at collect time — but the decode entries all hold the last step's values, and nothing warns. (The prefill entry is a different buffer, sized to the prompt, so it survives; every decode entry aliases the same one-row tensor.) The eager engine has the same rule: a served value is the model's live buffer, and the next layer's fused add+norm (or DeepSeek's MLA attention, which rotates the `q_proj` output in place) rewrites it after the module returns — `.clone()` makes a read a read. `NNSIGHT_VLLM_CLONE_READS=1` applies that clone to every read on either engine, and costs in-place edits — see [Serving copies instead of views](#serving-copies-instead-of-views).
+- **Clone what you keep — and nothing warns.** The value served at a tap *is* the graph's memory, rewritten next step. Un-cloned decode entries appended under `tracer.iter` all come back holding the last step's values (the prefill entry is a different buffer and survives). See [Serving copies instead of views](#serving-copies-instead-of-views).
 - **`torch.compile` is off.** Breakable graphs keep replay and drop the compiled path; that is most of the throughput, not all of it. The flag is process-wide, so one process holds either graph engines or compiled ones.
+
 ## Serving copies instead of views
 
-What a block reads is a view into the engine's own memory. That is what makes an in-place edit
-work — the block writes where the model will read next — and it is why a value kept past the point
-it was read is unreliable: fused kernels (`fused_add_rms_norm`, MLA's in-place rotation of the
-`q_proj` output) overwrite those buffers a few ops later. The per-site fix is `.clone()`, which is
+What a block reads is a view into the engine's own memory, on the eager engine and at a tap
+alike. That is what makes an in-place edit work — the block writes where the model will read next —
+and it is why a value kept past the point it was read is unreliable: fused kernels
+(`fused_add_rms_norm`, MLA's in-place rotation of the `q_proj` output) overwrite those buffers a few
+ops later, so `layers[8].output[0].save()` comes back holding a later layer's data. The per-site fix
+is `.clone()` or a reduction before `.save()` (`(out[0] + out[1]).mean(0).cpu().save()`), which is
 easy to forget and silent when forgotten.
 
 `NNSIGHT_VLLM_CLONE_READS=1` makes the trade once, for a whole engine: every value handed to a block
-is a private copy, so `.save()`, `tracer.cache()` and appends under `tracer.iter` all keep what was
-computed without a clone at each site.
-
-```bash
-NNSIGHT_VLLM_CLONE_READS=1 python sweep.py
-```
-
-Set it in the environment, not in `CONFIG` — the batcher that serves the copies lives in the
-engine's worker process, so it has to be set before `VLLM(...)` builds the engine and spawns the
-worker. Falsy spellings (`0`, `false`, `no`, `off`) leave it off, which is the default.
-
-**In-place edits do not survive it.** With a copy served there is nothing aliasing the engine's
-memory, so this writes to the copy and the model never sees it:
-
-```python
-model.model.layers[10].output[0][:] += v          # dropped under CLONE_READS
-```
-
-Assign the edited value back instead — a replacement is spliced in and lands either way:
+is a private copy of the request's own rows, so `.save()`, `tracer.cache()` and appends under
+`tracer.iter` keep what was computed. Set it in the environment before `VLLM(...)` builds the engine
+(the copies are made in the worker process), not in `CONFIG`. It costs one allocation per module
+read per step, and **in-place edits do not survive it** — they write to the copy. Assign the edited
+value back instead, which lands under either setting:
 
 ```python
 out = model.model.layers[10].output
-out[0][:] += v
+out[0][:] += v                                    # alone, dropped under CLONE_READS
 model.model.layers[10].output = out               # lands under either setting
 ```
-
-The copy is of the request's own token span, not the whole batch, but it is still one allocation per
-module read per step. Leave it off for a throughput run; turn it on for a sweep whose saves matter
-more than its speed.
 
 ## Where an error comes from
 
@@ -515,16 +410,9 @@ Because the type is carried in the message rather than in the class, catch `Runt
 on the text. The engine keeps serving afterwards, and requests from other clients in the same batch
 are unaffected.
 
-**Warnings do not.** A `warnings.warn` raised while the block runs is emitted by the EngineCore
-process, so it prints to that process's output prefixed `(EngineCore pid=...)` rather than to
-yours, and a `warnings.catch_warnings()` around the trace records nothing. This is the one place
-the vLLM path is not the local one: the same block warns catchably against a HuggingFace model and
-uncatchably here.
-
-The case you are most likely to meet is a `tracer.iter` loop — bounded or open — that outruns
-the request, which warns that the loop was cut short and the statements after it did not run.
-That warning stays on the engine; your process sees only a result with fewer steps than the
-bound named — see [A loop that outruns the request](#a-loop-that-outruns-the-request).
+**Warnings do not.** A warning raised while the block runs prints to the EngineCore process's
+output, prefixed `(EngineCore pid=...)`, and a `warnings.catch_warnings()` around the trace
+records nothing.
 
 ### When the engine builds, or does not
 
@@ -552,11 +440,8 @@ False ...}`.
 
 ## Limitations
 
-- **`enforce_eager=True` is forced unless you declare `taps`** — see [CUDA graphs with taps](#cuda-graphs-with-taps).
 - **One prompt per invoke** — no `tracer.invoke(["a", "b"])`.
-- **`.skip()` is effectively unsupported** — a skip has to cover every row of the step, which under
-  continuous batching are not all yours, and the failure takes the engine down rather than the
-  request. See [`.skip()` needs the whole step](#skip-needs-the-whole-step).
+- **`.skip()` is effectively unsupported** — see [`.skip()` needs the whole step](#skip-needs-the-whole-step).
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
 - **No backward / gradients, and no source tracing inside a fused CUDA kernel** — the kernel's
   inputs and outputs are locations; its interior is not Python.
@@ -571,15 +456,24 @@ False ...}`.
   Reads and writes are scoped to the right tokens either way. Declaring `taps` on such a model is
   not covered: the graph-replay path still trims padding on dim 0, so a tap can be served the
   step's padding rows.
-- **Version sensitivity** — nnsight targets vLLM's V1 engine and imports its internals directly
-  (`vllm.tokenizers`, `vllm.v1.worker.gpu_model_runner`, `vllm.v1.engine.async_llm`). The `vllm`
-  extra carries no upper bound, so `pip install "nnsight[vllm]"` takes the current release; a
-  release that moves one of those names fails at `import nnsight.modeling.vllm` with a
-  `ModuleNotFoundError` rather than a version message. Everything on this page was run on 0.27.1.
+
+## vLLM versions
+
+Everything on these vLLM pages was run on **0.27.1**. nnsight targets vLLM's V1 engine and imports
+its internals directly (`vllm.tokenizers`, `vllm.v1.worker.gpu_model_runner`,
+`vllm.v1.engine.async_llm`). The `vllm` extra carries no upper bound, so
+`pip install "nnsight[vllm]"` takes the current release, and one that moves one of those names fails
+at `import nnsight.modeling.vllm` with a `ModuleNotFoundError` rather than a version message. Check
+the version you have.
+
+vLLM 0.27 ships a second GPU model runner and defaults to it for non-MoE models. nnsight's
+interventions subclass the original one, so nnsight builds the engine with
+`VLLM_USE_V2_MODEL_RUNNER=0`; setting it to `1` yourself is refused, since the engine would come up
+with no interventions installed. The V2 runner is not instrumented.
 
 ## Gotchas
 
-- **Scripts need an `if __name__ == "__main__":` guard.** vLLM uses `spawn` for its EngineCore subprocess; without the guard the child re-runs your top-level `VLLM(...)` / `.trace(...)` and raises a bootstrapping `RuntimeError`. Notebooks are fine. This is a vLLM/multiprocessing requirement, not nnsight-specific.
+- **Scripts need an `if __name__ == "__main__":` guard.** Dispatching an engine initializes CUDA in your process, so vLLM forces the `spawn` start method for its workers (logging `We must use the spawn multiprocessing start method ... Reasons: CUDA is initialized`). Spawning re-imports the main module; without the guard the child re-runs your top-level `VLLM(...)` / `.trace(...)` and the engine core dies with `An attempt has been made to start a new process before the current process has finished its bootstrapping phase`. This holds on one card and `mode="sync"` as much as under tensor parallelism. Notebooks are fine. It is a vLLM/multiprocessing requirement, not nnsight-specific.
 
   ```python
   from nnsight.modeling.vllm import VLLM
@@ -595,20 +489,7 @@ False ...}`.
   ```
 
 - **A saved value comes back by its variable *name* — bind it.** `logits = model.logits.save()` works; a bare `model.logits.save()` marks the value but has no name to return it under, so `output.saves["logits"]` (async/serve) or the pushed-back local is silently missing. This is the most common "saves don't come back" bug on vLLM.
-- **One name saved by several runs comes back as a list** — one entry per invoke, and per sampled sequence when `n > 1`, in submission order. A name saved once stays that value. A container saved *above* the invokes is one object and merges instead (see [Continuous batching](#continuous-batching-multiple-invokes)).
-- **`tracer.result` is the finished `RequestOutput`, not per-step.** Use `model.logits` / `model.samples` under `tracer.iter` for per-step values. It is one object however many sequences `n` asked for, and it carries an installed edit's values but not the trace's own — those come back as your variables.
 - **An empty `tracer.invoke()` with interventions raises** (its work would vanish); a do-nothing empty invoke is a harmless no-op.
-- **A typo'd sampling kwarg raises** (`trace(temperatur=0.0)` → `TypeError`), rather than being silently ignored.
-- **A replacement keeps the rows it replaces** — `layer.output = t` with a different leading
-  dimension reaches the model as given, and a shape mismatch downstream can take the engine, not
-  just the request; nothing checks it for you (see [Replacing a
-  value](#replacing-a-value-keeps-its-rows)).
-- **Mode is fixed at construction.** Build with `mode="async"` if you want streaming.
-- **`tracer.backend` is iterable only in async mode.** In sync mode, results land in your local variables when the block exits.
-- **`logits` / `samples` don't exist on a vanilla `vllm.LLM`** — use them only inside a trace.
-- **Per-invoke kwargs override trace-level ones**, including when the value an invoke names happens to be vLLM's own default (`temperature=1.0`, `max_tokens=16`). Trace-level settings only fill in what an invoke did not name.
-- **`gpu_memory_utilization` defaults to 0.9** — lower it for small/shared GPUs (tests use 0.1).
-- **Async saves are finished-only** — for per-step saves, accumulate inside `tracer.iter[:]`.
 
 ## Related
 
@@ -617,10 +498,6 @@ False ...}`.
 - [docs/models/vllm-parallelism.md](vllm-parallelism.md) — tensor parallelism, MoE, hybrid trunks
 - [docs/models/index.md](index.md) — decision tree
 - [docs/models/transformers-model.md](transformers-model.md) — the text-only HF alternative
-- `src/nnsight/modeling/vllm/vllm.py` — `VLLM`
-- `src/nnsight/modeling/vllm/tracer.py` — `VLLMTracer`, the per-request block
-- `src/nnsight/modeling/vllm/interleaver.py` — `VLLMInterleaver`, the worker-side handoff
-- `src/nnsight/modeling/vllm/batching.py` — `VLLMBatcher`, one request's rows out of the slab
-- `src/nnsight/modeling/vllm/fragments.py` — `VLLMFragments`, the tensor-parallel gather/scatter
-- `src/nnsight/modeling/vllm/collect.py` — `merge_shared_saves`, values home from the worker
+- [docs/developing/vllm-integration.md](../developing/vllm-integration.md) — how the worker, batcher and collect path work
+- `src/nnsight/modeling/vllm/` — source
 - `tests/vllm/` — runnable examples (tracing, async, tensor parallelism, mixture-of-experts, requests, serve)

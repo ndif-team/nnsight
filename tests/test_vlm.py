@@ -16,6 +16,7 @@ pytest.importorskip("PIL")
 
 from PIL import Image
 
+from nnsight.modeling import processing
 from nnsight.modeling.transformers import TransformersModel
 
 REPO = "trl-internal-testing/tiny-LlavaForConditionalGeneration"
@@ -128,6 +129,94 @@ class TestGenerate:
         assert base[0]["generated_text"] != zeroed[0]["generated_text"]
 
 
+def _chat():
+    """Chat messages with the image inline, as the pipeline takes them."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": _image()},
+                {"type": "text", "text": QUESTION},
+            ],
+        }
+    ]
+
+
+class TestModelGenerate:
+    """``generate`` on the model (not ``pipe``) for inputs the task's pipeline
+    preprocesses: chat messages, plain text, a task-input dict. The
+    ``image-text-to-text`` pipeline nests generate arguments as
+    ``generate_kwargs`` and takes any other keyword for the processor; both
+    have to reach the model's ``generate`` flat."""
+
+    @torch.no_grad()
+    @pytest.mark.parametrize(
+        "make_input",
+        [
+            _chat,
+            lambda: "Hello there",
+            lambda: {"images": _image(), "text": "<image>Describe"},
+        ],
+        ids=["chat-with-image", "text-only", "task-dict"],
+    )
+    def test_max_new_tokens_reaches_generate(self, llava, make_input):
+        with llava.generate(make_input(), max_new_tokens=3) as tracer:
+            prompt = llava.model.language_model.layers[0].output.shape[1].save()
+            ids = tracer.result.save()
+        assert ids.shape == (1, prompt + 3)
+
+    @torch.no_grad()
+    def test_matches_processor_keyword_input(self, llava):
+        with llava.generate(_chat(), max_new_tokens=3, do_sample=False) as tracer:
+            from_chat = tracer.result.save()
+        with llava.generate(
+            _prompt(llava), images=_image(), max_new_tokens=3, do_sample=False
+        ) as tracer:
+            from_keywords = tracer.result.save()
+        assert torch.equal(from_chat, from_keywords)
+
+    @torch.no_grad()
+    def test_sampling_arguments_reach_generate(self, llava):
+        # The pipeline would hand do_sample/temperature to the processor, which
+        # ignores them, and every run would come out greedy and identical.
+        kwargs = dict(max_new_tokens=8, do_sample=True, temperature=50.0, top_k=0)
+        runs = set()
+        for _ in range(4):
+            with llava.generate("Hello there", **kwargs) as tracer:
+                ids = tracer.result.save()
+            runs.add(tuple(ids[0].tolist()))
+        assert len(runs) > 1
+
+    @torch.no_grad()
+    def test_generate_kwargs_dict_is_unpacked(self, llava):
+        # The pipeline's own spelling of generate arguments is accepted too.
+        with llava.generate("Hello there", generate_kwargs={"max_new_tokens": 4}) as tracer:
+            prompt = llava.model.language_model.layers[0].output.shape[1].save()
+            ids = tracer.result.save()
+        assert ids.shape == (1, prompt + 4)
+
+    @torch.no_grad()
+    def test_iter_visits_every_step(self, llava):
+        with llava.generate(_chat(), max_new_tokens=3) as tracer:
+            lengths = list().save()
+            for step in tracer.iter[:3]:
+                lengths.append(llava.model.language_model.layers[0].output.shape[1])
+        # The prefill sees the whole prompt, each decode step one new token.
+        assert len(lengths) == 3
+        assert lengths[0] > 1 and lengths[1:] == [1, 1]
+
+    @torch.no_grad()
+    def test_intervention_on_a_step_changes_generation(self, llava):
+        with llava.generate(_chat(), max_new_tokens=3, do_sample=False) as tracer:
+            clean = tracer.result.save()
+        with llava.generate(_chat(), max_new_tokens=3, do_sample=False) as tracer:
+            for step in tracer.iter[1]:
+                llava.model.language_model.layers[0].output[:] = 0
+            edited = tracer.result.save()
+        assert torch.equal(clean[:, :-2], edited[:, :-2])
+        assert not torch.equal(clean, edited)
+
+
 class TestScan:
     @torch.no_grad()
     def test_scan_reads_shapes_without_dispatch(self, llava_meta):
@@ -145,19 +234,23 @@ class TestInputRouting:
     """A multimodal encoding must pass straight to the model, not be re-tokenized
     and left-pad batched as if it were plain text (which corrupts image tokens)."""
 
-    def test_multimodal_encoding_is_opaque(self, llava):
+    def test_multimodal_encoding_passes_through_whole(self, llava):
         enc = _encoding(llava)
         assert "pixel_values" in enc
         # A multimodal encoding is passed to the model as-is (every field), rather
         # than re-batched as text — which would drop pixel_values / corrupt ids.
-        assert llava._is_opaque(None, dict(enc)) is True
+        rows, (args, kwargs) = processing.preprocess_invoke(llava, None, dict(enc))
+        assert rows is None and args == ()
+        assert set(kwargs) == set(enc)
+        assert kwargs["pixel_values"] is enc["pixel_values"]
 
-    def test_text_only_encoding_is_pretokenized(self, llava):
+    def test_text_only_encoding_is_split_into_rows(self, llava):
         text_only = {
             "input_ids": torch.tensor([[1, 2, 3]]),
             "attention_mask": torch.tensor([[1, 1, 1]]),
         }
-        assert llava._is_pretokenized(None, text_only) is True
+        rows, _ = processing.preprocess_invoke(llava, None, text_only)
+        assert len(rows) == 1 and set(rows[0]) == {"input_ids", "attention_mask"}
 
     def test_encoding_counts_one_row(self, llava):
         enc = _encoding(llava)
@@ -171,10 +264,12 @@ class TestInputRouting:
     def test_params_only_still_zero_rows(self, llava):
         assert llava._batch_size(max_new_tokens=5) == 0
 
-    def test_float_tensor_is_opaque(self, llava):
-        # A float feature tensor passes straight through; integer token ids don't.
-        assert llava._is_opaque(torch.randn(1, 3, 8, 8), {}) is True
-        assert llava._is_pretokenized(torch.tensor([[1, 2, 3]]), {}) is True
+    def test_float_tensor_passes_through_and_token_ids_do_not(self, llava):
+        features = torch.randn(1, 3, 8, 8)
+        rows, (args, _) = processing.preprocess_invoke(llava, features, {})
+        assert rows is None and args[0] is features
+        rows, _ = processing.preprocess_invoke(llava, torch.tensor([[1, 2, 3]]), {})
+        assert len(rows) == 1
 
 
 @pytest.fixture(scope="module")

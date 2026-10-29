@@ -6,11 +6,9 @@ tags: [reference, api]
 
 # API Quick Reference
 
-Signatures use `model` for an `NNsight` / `TransformersModel` / `DiffusionModel` / `VLLM` instance, and `tracer` for the value bound by `as tracer:` on the trace context. Prefer `TransformersModel` over the deprecated `LanguageModel` / `VisionLanguageModel` names.
+`model` is an `NNsight` / `TransformersModel` / `DiffusionModel` / `VLLM` instance; `tracer` is the value bound by `as tracer:`.
 
 ## Model classes
-
-All are subclasses of `Envoy` (the tree node type). `NNsight` is the thin, named base; the rest add loading/tokenization.
 
 | Class | Import | One-liner |
 |-------|--------|-----------|
@@ -18,16 +16,15 @@ All are subclasses of `Envoy` (the tree node type). `NNsight` is the thin, named
 | `TransformersModel` | `from nnsight import TransformersModel` | **Primary** HuggingFace class, backed by a `transformers.pipeline`. Any task via `task=...` (inferred if unset). |
 | `DiffusionModel` | `from nnsight import DiffusionModel` | Wraps any `diffusers.DiffusionPipeline`; components (`unet`, `vae`, ...) are envoys. |
 | `VLLM` | `from nnsight.modeling.vllm import VLLM` | vLLM-backed model; interventions run inside the engine's worker. `mode="sync"` (default) or `mode="async"`. |
-| `LanguageModel` | `from nnsight import LanguageModel` | **Deprecated** — warns on construction. Use `TransformersModel(repo_id, task="text-generation")`. |
-| `VisionLanguageModel` | `from nnsight import VisionLanguageModel` | **Deprecated** — warns on construction. Use `TransformersModel(repo_id, task="image-text-to-text")`. |
+| `LanguageModel` / `VisionLanguageModel` | `from nnsight import ...` | **Deprecated** — use `TransformersModel(repo_id, task="text-generation" / "image-text-to-text")`. |
 
-Common constructor kwargs (via `HuggingFaceModel` / `Meta`): `dispatch=False` (load real weights now vs lazily on first run), `device_map=`, `revision=`, `rename=`. `TransformersModel` also takes `task=`, `tokenizer=`, `processor=`, `image_processor=`, `feature_extractor=`, `peft=<adapter repo_id>`.
+Common constructor kwargs (via `HuggingFaceModel` / `Meta`): `dispatch=False` (load real weights now vs lazily on first run), `device=` (the one device to load onto: `"cpu"`, `"cuda:1"`, `0`; default the first accelerator), `device_map=` (spread across devices: `"auto"`, a dict; `device_map="cpu"` still lands on the GPU, see [Choosing a device](../models/transformers-model.md#choosing-a-device)), `revision=`, `rename=`. `TransformersModel` also takes `task=`, `tokenizer=`, `processor=`, `image_processor=`, `feature_extractor=`, `peft=<adapter repo_id>`.
 
 ## Run methods
 
 Each returns a tracer usable as `with model.<method>(...) as tracer:`. Give a run method input directly and the whole block is one implicit invoke; give it no input and define the batch with `tracer.invoke(...)` blocks.
 
-`generate` and `pipe` called without a `with` run and return their result. **`trace` and `scan` without a `with` run nothing** — they return the tracer, and the `with` statement is what captures a body and starts the model. For a plain forward with no intervention, pass `trace=False`.
+`generate` and `pipe` called without a `with` run and return their result. **`trace` and `scan` without a `with` run nothing** — they return the tracer, and the `with` statement is what captures a body and starts the model. For a plain forward with no intervention, pass `trace=False` (only edits apply).
 
 | Method | On | Runs | Returns (`tracer.result`) |
 |--------|-----|------|--------------------------|
@@ -40,13 +37,8 @@ Each returns a tracer usable as `with model.<method>(...) as tracer:`. Give a ru
 | `with tensor.backward(...):` | any captured tensor | A backward pass; read `.grad` on tensors captured earlier in the forward. | — |
 
 Notes:
-- **Kwargs the tracer does not consume are forwarded to the underlying call**, and
-  its return value is what `tracer.result` carries. `model.generate(...,
-  return_dict_in_generate=True, output_scores=True)` therefore puts HF's full
-  generation output (with `.sequences` and per-step `.scores`) on `tracer.result`
-  instead of a bare id tensor; `model.trace(**kw)` forwards to the forward, and
-  `model.pipe(**kw)` to the pipeline's parameters.
-- `model.trace(...)` accepts a `trace=False` kwarg to bypass tracing (one-shot forward; only edits apply).
+- **Kwargs the tracer does not consume go to the underlying call** (the forward, `generate`, or the pipeline), and its return value is `tracer.result` —
+  e.g. `generate(..., return_dict_in_generate=True, output_scores=True)` puts HF's full generation output there.
 - `VLLM` sampling params (`temperature`, `max_tokens`, `top_p`, ...) go to `trace`/`invoke`, not the constructor.
 
 ## Tracer methods and attributes
@@ -75,7 +67,7 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `.inputs` | `(args, kwargs)` | All inputs to the module's forward. |
 | `.source` | `Source` | Operation-level access to the module's forward internals (see below). |
 | `.device` / `.devices` | `torch.device` / `set` | Device(s) of the module's parameters. |
-| `._module` | `torch.nn.Module` | The wrapped module itself. Reach for it when you need the real object rather than the envoy — reading `config`, registering your own PyTorch hooks, `named_parameters()`, `requires_grad_(False)`. Not a copy: edits to it are edits to the model the tracer runs. |
+| `._module` | `torch.nn.Module` | The wrapped module itself (not a copy) — for `config`, your own PyTorch hooks, `named_parameters()`, `requires_grad_(False)`. |
 
 ## Envoy / module methods
 
@@ -89,10 +81,9 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `envoy.to` / `.cpu` / `.cuda` | `envoy.to(device)` | Move the underlying module; returns the envoy. |
 | `envoy.clear_edits` | `envoy.clear_edits()` | Drop all edits accumulated by `edit(inplace=True)`. |
 | `envoy[i]` / `for c in envoy` / `len(envoy)` | — | Index / iterate direct children (e.g. a `ModuleList`'s blocks). |
-| `envoy.source.<op>_<n>` | e.g. `.source.relu_0` | A `SourceEnvoy` for the n-th call of `<op>` in the forward; same `.input`/`.output`/`.skip`/`.source` interface. `print(envoy.source)` lists them. |
-| `envoy.source.<name>_<n>` | e.g. `.source.h_0` | A `SourceEnvoy` for the n-th assignment to `<name>` in the forward; `.output` is the assigned value (read or replace it). One counter per name, shared with calls: `f = pick(); f(x)` is `f_0` then `f_1`. Fires once per loop iteration for an assignment inside a loop. |
+| `envoy.source.<op>_<n>` | e.g. `.source.relu_0`, `.source.h_0` | A `SourceEnvoy` for the n-th call of `<op>` (or assignment to `<name>`, whose `.output` is the assigned value); same `.input`/`.output`/`.skip`/`.source` interface. `print(envoy.source)` lists them; naming in [source.md](../usage/source.md#operation-naming). |
 
-Deprecated aliases (warn under `NNsightDeprecationWarning`; use the `tracer.*` forms): `model.iter`, `model.all()`. The full inventory of deprecated names is in [version-history.md](./version-history.md).
+`model.iter` / `model.all()` are deprecated for `tracer.iter` / `tracer.all()`; every deprecated and removed name is in [migrating-to-0.8.md](./migrating-to-0.8.md).
 
 ## Model-specific handles
 
@@ -105,7 +96,7 @@ Deprecated aliases (warn under `NNsightDeprecationWarning`; use the `tracer.*` f
 | `model.logits` | `VLLM` | This request's pre-sampling logits for the step. |
 | `model.samples` | `VLLM` | The token ids the sampler drew for the step, `[1, 1]` for one sequence. |
 | `model.logits_processor(model.lm_head, h)` | `VLLM` | The unembed on vLLM (a logit lens); `model.lm_head(h)` raises. |
-| `model.edit` | `VLLM` | `with model.edit(name=None) as (tracer, edit):` — install a block on the engine, run for *every* request it handles; values arrive on `output.saves`. `edit.clear()` / `model.clear_edits()` stop it. Needs `enable_prefix_caching=False`. |
+| `model.edit` | `VLLM` | `with model.edit(name=None) as (tracer, edit):` — install a block on the engine, run for *every* request it handles; values arrive on `output.saves`. `edit.clear()` / `model.clear_edits()` stop it. Needs prefix caching off (nnsight's default). |
 | `edits=[...]` | `VLLM` | On `trace`/`invoke`/plain `generate`: run only the edits installed under these names, plus every unnamed edit. Omitted = all. |
 
 ## Top-level functions
@@ -118,13 +109,13 @@ Imported from the top-level `nnsight` package.
 | `nnsight.register` | `nnsight.register(module \| "name")` | Ship a local module's source with remote requests (cloudpickle by value). |
 | `nnsight.status` | `nnsight.status(raw=False)` | Query NDIF; `print()` shows deployed models and state. |
 | `nnsight.ndif_status` | `nnsight.ndif_status(raw=False)` | **Deprecated** alias for `status()`. |
-| `nnsight.is_model_running` | `nnsight.is_model_running(repo_id, revision="main") -> bool` | Whether a model is currently RUNNING on NDIF. |
-| `nnsight.compare` | `nnsight.compare(host=None) -> EnvComparison` | Diff local vs NDIF Python/package versions; `print()` for the table. `host` names the server (default `CONFIG.API.HOST`). |
+| `nnsight.is_model_running` | `nnsight.is_model_running(repo_id, revision="main", task=None, trust_remote_code=None) -> bool` | Whether a model is currently RUNNING on NDIF. |
+| `nnsight.compare` | `nnsight.compare() -> EnvComparison` | Diff local vs NDIF Python/package versions; `print()` for the table. |
 | `nnsight.CONFIG` | `Config` | The config singleton (see [config.md](./config.md)). |
 | `nnsight.Object` | type | Tensor-like static type for values read inside a trace (typing hints). |
-| `nnsight.NNsightDeprecationWarning` | `FutureWarning` subclass | The category every nnsight deprecation is raised under. `warnings.filterwarnings("ignore", category=...)` silences nnsight's and nothing else. |
+| `nnsight.NNsightDeprecationWarning` | `FutureWarning` subclass | The category every nnsight deprecation is raised under ([migrating-to-0.8.md](./migrating-to-0.8.md#deprecated--warn-under-nnsightdeprecationwarning)). |
 
-(`get_local_env()` / `get_remote_env(host=None, *, force_refresh=False)` live on `nnsight.ndif`, not the top level; the remote environment is cached per host, and `ndif.set_remote_env(env, host=None)` / `ndif.clear_remote_env(host=None)` seed or empty that cache — see [env-comparison.md](../remote/env-comparison.md). `nnsight.session`, `nnsight.apply`, `nnsight.cond`, `nnsight.log`, `nnsight.local`, and the `nnsight.list/dict/int/...` wrappers are **removed** — use plain Python and `model.session()`.)
+(`get_local_env` / `get_remote_env` live on `nnsight.ndif`. Removed top-level names: [migrating-to-0.8.md](./migrating-to-0.8.md).)
 
 ## Remote execution
 
@@ -138,4 +129,4 @@ Pass `remote=` to `model.trace(...)` / `model.generate(...)` / `model.session(..
 
 `RemoteBackend` extra kwargs: `blocking`, `job_id`, `verbose`. `AsyncRemoteBackend` (built by `VLLM` async traces and available directly) supports `await backend` → the saves dict, and `async for update in backend` → status updates then the saves dict last.
 
-Model identity for remote: `model.to_model_key()` → `"import.path.Class:model_key"`; `Class.from_model_key(key)` reconstructs it. Deprecated aliases (`LanguageModel`, `VisionLanguageModel`) share `TransformersModel`'s key.
+Model identity for remote: `model.to_model_key()` → `"import.path.Class:model_key"`, reversed by `Class.from_model_key(key)`. A `TransformersModel` key carries repo id, revision, resolved task and `trust_remote_code` (only when set), so each task of a checkpoint is a distinct remote model.

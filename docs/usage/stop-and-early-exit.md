@@ -2,28 +2,17 @@
 title: Stop and Early Exit
 one_liner: Cut a forward pass short with `tracer.stop()`; raises EarlyStopException, swallowed by the interleaver.
 tags: [usage, control-flow, early-stop]
-related: [docs/usage/trace.md, docs/usage/iter-all-next.md, docs/usage/skip.md]
+related: [docs/usage/trace.md, docs/usage/iteration.md, docs/usage/skip.md, docs/usage/save.md]
 sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/envoy.py]
 ---
 
 # Stop and Early Exit
 
-## What this is for
-
-`tracer.stop()` aborts the current run at the point the worker is currently
-parked. Any module that hasn't executed yet is **never executed** — the block
-raises `EarlyStopException`, which the interleaver treats as a clean early exit
-(not an error) and swallows.
-
-This is how you "save what you need and bail" without running the rest of the
-forward pass.
-
-## When to use / when not to use
-
-- Use to short-circuit once you've collected the activations you need.
-- Use to end generation mid-run when a condition is met.
-- Don't use as an error path — `stop()` is a successful early exit.
-- Don't use to skip a single module — that's `module.skip(value)` ([skip.md](skip.md)).
+`tracer.stop()` ends the run at the location the worker is parked on: modules
+after it **never execute**. It raises `EarlyStopException`, which the interleaver
+treats as a clean exit and swallows — don't wrap the trace in `try/except` for it.
+Use it to "save what you need and bail", or to end generation when a condition is
+met. To bypass one module without aborting, use [`module.skip(...)`](skip.md).
 
 ## Canonical pattern
 
@@ -36,9 +25,11 @@ with model.trace("Hello world") as tracer:
     h0 = model.transformer.h[0].output.save()   # save BEFORE stopping
     tracer.stop()
 
-# Layers 1..N never ran. h0 is populated.
-print(h0.shape)   # torch.Size([1, 2, 768])
+print(h0.shape)   # torch.Size([1, 2, 768]); layers 1..N never ran
 ```
+
+Code after `stop()` in the same block does not run, so save first. Requesting a
+module the run never reached raises `OutOfOrderError`.
 
 ## Stop in generation
 
@@ -54,19 +45,14 @@ with model.generate("Hello", max_new_tokens=20, do_sample=False) as tracer:
 # len(picks) == 3 — the run ended after the third step, not the twentieth
 ```
 
-Any condition works, since `picks[-1]` is a real tensor: an EOS id, a probability
-threshold, a token you were waiting for.
-
-`stop()` ends the whole run, not just one step. It also ends the loop, so the
-loop's own bound never has to hold — an open `tracer.all()` is the natural form
-here.
+Any condition works, since `picks[-1]` is a real tensor (an EOS id, a probability
+threshold). `stop()` ends the whole run and the loop with it, so the loop's bound
+never has to hold; an open `tracer.all()` is the natural form.
 
 ## The location you stop at still happens
 
-A stop ends what comes *after* the location the worker is parked on, not that
-location itself. That module has already run by the time the stop is raised, so
-the visit is finished before the forward unwinds: the value is served, any edit
-you made to it lands, and a cache observing it records it.
+The module the worker is parked on has already run when the stop is raised: its
+value is served, an edit to it lands, and a cache records it.
 
 ```python
 with model.trace("Hello world") as tracer:
@@ -77,14 +63,11 @@ with model.trace("Hello world") as tracer:
 print(list(cache.keys()))   # ['model.transformer.h.5']
 ```
 
-Layer 5 is there; layers 6 and up never ran, so they are not.
-
 ## A stop in one invoke ends the whole batch
 
-Invokes are rows of one shared forward pass, so a `stop()` in any one of them
-ends the run for all of them — there is no way to keep going for the other rows.
-The step it fires on does finish, though: an invoke parked on the same visit is
-served in it, so every invoke records that step.
+Invokes are rows of one forward, so a `stop()` in any of them ends the run for
+all. The step it fires on finishes — an invoke parked on the same visit is served
+in it — so every invoke records that step:
 
 ```python
 with model.generate(max_new_tokens=8, do_sample=False) as tracer:
@@ -101,17 +84,15 @@ with model.generate(max_new_tokens=8, do_sample=False) as tracer:
 # len(picks) == len(others) == 3
 ```
 
-The second invoke's loop was cut short by the first invoke's stop rather than by
-a bound of its own, so it warns that it asked for a step the run did not make,
-like any loop the run outruns ([iter-all-next.md](iter-all-next.md)). If the
-invokes need to stop independently, run them as separate traces.
+The second loop warns that it asked for a step the run did not make
+([iteration](iteration.md)). A sibling parked on a later location dies with
+`OutOfOrderError`. To stop invokes independently, run separate traces.
 
-## The run's result is gone after a stop
+## A stop and `tracer.result` don't mix
 
-A stop cuts the run off before it returns anything, so there is no result to
-read. A `tracer.result.save()` after the `stop()` is unreachable like any other
-trailing statement, and moving it into a separate empty invoke does not rescue
-it:
+A stop cuts the run off before it returns, so there is no result: a
+`tracer.result.save()` after the `stop()` never runs, and one in a separate empty
+invoke raises:
 
 ```python
 with model.trace() as tracer:
@@ -123,59 +104,17 @@ with model.trace() as tracer:
 # OutOfOrderError: 'result.i0' was requested but the model already ran past it
 ```
 
-Save the activations you need before stopping; if you also need the model's
-output, do not stop.
-
-## Saving `tracer.result` before `stop()` runs the whole pass
-
-`tracer.result` is served when the call returns, so a worker that asks for it
-parks until the run is over — and the `stop()` written below it is only reached
-once everything has already run:
+Placed *before* the `stop()`, it defeats the stop: `tracer.result` is served when
+the call returns, so the worker parks there until the whole pass has run, and the
+`stop()` fires after the fact. The tell is a result holding logits for every
+position:
 
 ```python
 with model.trace("Hello world") as tracer:
     h = model.transformer.h[0].output.save()
     r = tracer.result.save()      # parks here until the run finishes
     tracer.stop()                 # fires after the fact
-# r is a full CausalLMOutputWithCrossAttentions: r.logits.shape == (1, 2, 50257)
+# r.logits.shape == (1, 2, 50257)
 ```
 
-The code looks like an early exit and reads back like one. The tell is `r`: it
-holds logits for every position, which a stopped run could not have produced.
-
-## Save before you stop
-
-Code after `tracer.stop()` in the same block does not run — Python raises at the
-call. So `.save()` (or `nnsight.save(...)`) anything you want to keep **before**
-calling `stop()`:
-
-```python
-with model.trace("Hello world") as tracer:
-    h = model.transformer.h[0].output.save()   # <-- save first
-    tracer.stop()
-```
-
-## Gotchas
-
-- **`stop()` only works inside an active trace.**
-- **Code after `stop()` in the same block never runs** — don't rely on trailing
-  side effects.
-- **Anything depending on a later module won't be populated.** Requesting a module
-  the run never reached (because you stopped before it) raises `OutOfOrderError`.
-  The module you stopped *at* is not one of those — it ran, and is cached.
-- **A stop in one invoke ends the batch.** One forward pass serves every invoke, so
-  the others stop where it did; their `tracer.all()` loops warn about the steps the
-  run did not make.
-- **`EarlyStopException` is not an error.** Don't wrap the trace in
-  `try/except EarlyStopException` expecting to catch user errors — the interleaver
-  already swallows it.
-- **The run's result is unreachable after a stop** — from after the `stop()`, and from a separate empty invoke, which raises `OutOfOrderError: 'result.i0'`.
-- **A `tracer.result.save()` placed *before* `stop()` defeats the stop** — the worker parks on the result until the run finishes.
-- **For per-module bypass without aborting the whole forward, use `module.skip(...)`.**
-
-## Related
-
-- [trace.md](trace.md)
-- [iter-all-next.md](iter-all-next.md)
-- [skip.md](skip.md)
-- [save.md](save.md)
+If you need the model's output, do not stop.

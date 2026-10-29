@@ -11,6 +11,11 @@ trace frame.
 
 from __future__ import annotations
 
+import io
+import pickle
+
+import torch
+
 
 def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
     """Merge same-name saves across a multi-invoke trace's requests, in place.
@@ -60,3 +65,30 @@ def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
         for name, value in shared.items():
             mediator.lcls[name] = value
     return shared
+
+
+class _CompactPickler(pickle.Pickler):
+    """Writes each tensor that views a larger storage as a copy of itself (see `dumps_compact`)."""
+
+    def reducer_override(self, obj):
+        if isinstance(obj, torch.Tensor) and (
+            obj.untyped_storage().nbytes() > obj.numel() * obj.element_size()
+        ):
+            return obj.clone().__reduce_ex__(pickle.HIGHEST_PROTOCOL)
+        return NotImplemented
+
+
+def dumps_compact(value) -> bytes:
+    """Pickle ``value``, writing each tensor that views a larger storage as a copy of itself.
+
+    A block's reads are rows narrowed out of the whole step's buffers, and
+    pickling a tensor writes its entire storage: a save from one request would
+    otherwise carry every request's rows home, which across a few hundred
+    invokes runs to gigabytes. Hooked into the pickler rather than walking the
+    payload, so a tensor is found wherever it sits (in a dataclass, a
+    namedtuple, an output object), and an object saved under two names is
+    still one object when it arrives. The bytes load with plain ``pickle.loads``.
+    """
+    buffer = io.BytesIO()
+    _CompactPickler(buffer, pickle.HIGHEST_PROTOCOL).dump(value)
+    return buffer.getvalue()

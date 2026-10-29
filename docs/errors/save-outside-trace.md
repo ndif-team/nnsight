@@ -14,67 +14,40 @@ sources: [src/nnsight/tracing/tracer.py]
 ValueError: save() was called outside a trace. `.save()` / nnsight.save(x) marks a value to return from the enclosing `with model.trace(...):` block, so it only works inside one — move the save into the trace block.
 ```
 
-Both `nnsight.save(x)` and the mounted `x.save()` form raise this when no trace is
-running.
-
 ## Cause
 
-`save` (`src/nnsight/tracing/tracer.py`) marks a value by identity to be returned
-once the outermost trace exits. That only means something inside a trace — a saved
-value is what the `with model.trace(...):` block hands back. Calling it with no
-trace running would mark into a saved set that is cleared before anything reads
-it, so the guard (on the per-thread trace depth being 0) raises instead.
+`save` marks a value to be handed back when the trace block exits, so it only means
+something inside one. Both `nnsight.save(x)` and `x.save()` raise this when no trace
+is running.
 
 ## Fix
 
 ```python
-import nnsight
-
-# WRONG — saved before the block; nothing is tracing yet
-acts = nnsight.save([])          # ValueError: save() was called outside a trace
+# WRONG — saved before the block
+acts = nnsight.save([])                        # ValueError
 with model.trace("Hello"):
     acts.append(model.transformer.h[0].output)
-```
 
-```python
 # FIXED — save the value you bind, inside the trace
 with model.trace("Hello"):
     acts = model.transformer.h[0].output.save()
-print(acts.shape)
-```
-
-Save the concrete object you want back — `save` returns its argument unchanged, so
-save the value you bind:
-
-```python
-with model.trace("Hello"):
-    doubled = (model.transformer.h[0].output * 2).save()   # save the product...
-    # NOT:  x.save() * 2  — that returns x, and only x is saved
+    doubled = (model.transformer.h[0].output * 2).save()   # not x.save() * 2 — that saves x
 ```
 
 ## Marking is by identity, not by name
 
-`save` records `id(value)` and the block returns every local bound to a marked
-object. For distinct tensors that is exactly what you want. For a value Python
-interns — a small int, `True`, `None`, a short string — any *other* local in that
-block holding the same object comes back too:
+`save` records the object, and the block returns every local bound to a marked
+object. For a value Python interns — a small int, `True`, `None`, a short string —
+any *other* local in the block holding the same object comes back too:
 
 ```python
 with model.trace("Hello"):
     kept = nnsight.save(1)
-    unrelated = 1          # the same interned object; also bound after the block
+    unrelated = 1          # same interned object; also bound after the block
 ```
 
-Harmless, but worth recognizing when a name you never saved is defined after the
-block. It also means a `.save()` whose result you never bind has no local to come
-back under, so it does not appear in the results at all.
-
-## Note for internal callers
-
-`nnsight.tracing.tracer.mark(value)` is the same mechanism without the guard, for
-code that must mark values to return *outside* a running trace (e.g. a remote
-backend recording a finished request's returned values). User code should use
-`save`.
+Harmless, but it explains a name you never saved being defined after the block.
+Conversely, a `.save()` whose result is never bound to a name does not come back.
 
 ## Related
 

@@ -8,16 +8,15 @@ worker sees them and re-split before the model's own forward carries on.
 
 Two facts make this cheap to arrange.
 
-**transformers labels the shards for us**, in one of two ways, because it has
-used both. Up to 5.15 ``apply_tensor_parallelism`` stamped every module it
-sharded with ``_hf_tp_plan`` (the style name) and ``_hf_device_mesh``. 5.16
-rebuilt tensor parallelism on DTensor and stamps nothing: the plan stays on the
-*model* as ``_tp_plan`` — glob patterns over module paths — with the mesh at
-``_device_mesh``, and each module is resolved against it by transformers' own
-matcher. Either way which side of which module carries a shard is read off the
-model, not guessed. These rules are handed every envoy through ``instrument`` as
-the tree is built, so they record themselves — and learn whether there is
-anything to do at all — right there.
+**transformers labels the shards for us.** The plan lives on the *model* — glob
+patterns over module paths in ``tp_plan``/``ep_plan``, with the mesh at
+``_device_mesh`` — and each module is resolved against it by transformers' own
+matcher, so which side of which module carries a shard is read off the model,
+not guessed. These rules are handed every envoy through ``instrument`` as the
+tree is built, so they record themselves — and learn whether there is anything
+to do at all — right there. (A transformers old enough to stamp each module
+with ``_hf_tp_plan`` instead, or newer than the floor's shapes in other ways,
+is refused — see `MINIMUM_TRANSFORMERS` below.)
 
 **nnsight sees the pre-collective value.** The interleaver's handoff runs inside
 a module's forward — after the style's input transform, before its output one —
@@ -30,9 +29,8 @@ module's own output transform completes the picture: a shard's slice, or — for
 partial — the whole on rank 0 and zeros elsewhere, which its reduce turns into
 exactly the (possibly edited) whole on every rank.
 
-Keeping the handoff *inside* those transforms is arranged differently per
-backend. 5.15 registered them as torch pre/post hooks, which bracket a forward on
-their own. 5.16 applies a style by replacing ``module.forward`` with a wrapper —
+Keeping the handoff *inside* those transforms takes one arrangement:
+transformers applies a style by replacing ``module.forward`` with a wrapper —
 the same slot nnsight's controller uses — so `_keep_tp_forward` installs the
 controller first and re-wraps it, restoring that order. Without it the module
 keeps its sharded weights but loses the code that makes its inputs match them,
@@ -40,7 +38,7 @@ and the first matmul dies with ``got mixed torch.Tensor and DTensor``.
 
 The rules describe module *boundaries*. A ``.source`` value between two ops
 inside a forward can be a shard split on an axis that moves through the forward,
-so a boundary rule cannot say what it is. On the DTensor backend such a value
+so a boundary rule cannot say what it is. Such a value
 often carries its own placement — ``full_tensor`` then reassembles it correctly
 whatever axis holds the shard, which is why the gather believes a value's own
 placement over the rule whenever it has one. When it does not (transformers takes
@@ -69,6 +67,7 @@ from typing import Any, Dict
 import torch
 
 from ...intervention.fragments import Fragments
+from ...intervention.source import BODY_FORWARD, install_controller
 from ...util import apply
 
 # What each side of a module is at the interleaver's handoff, per transformers
@@ -97,15 +96,19 @@ SIDES: Dict[str, Dict[str, str]] = {
     "rowwise_split_input": {"input": "shard", "output": "partial"},  # its input transform splits the input
     "rowwise_rep": {"input": "shard", "output": "partial"},          # = rowwise_split_input
     "packed_rowwise": {"input": "shard", "output": "partial"},
-    "embedding_rowwise": {"output": "partial"},           # ! vocab-parallel; see the note below
+    "embedding_rowwise": {"output": "partial"},           # * vocab-parallel: each rank looks up its own ids
+    "embedding_colwise": {"output": "shard"},             #   hidden dim split; gathered by its output transform
     "sequence_parallel": {"output": "partial"},           # + output transform reduce-scatters, on the LAST dim
     "all_reduce": {"output": "partial"},
     "replicated_with_grad_allreduce": {},                 #   params replicated; activations whole
+    "replicate": {},                                      #   params replicated, transforms are the identity
     "ep_router": {},                                      # * router is replicated; its post-transform
                                                           #   masks non-local experts, after us
     "grouped_gemm": {},                                   # * shards expert parameters only; the
                                                           #   wrapper it installs is the identity
     "moe_tp_experts": {"output": "partial"},              # + output transform all-reduces (see below)
+    "ep_dispatch_experts": {},                            # * 5.19's token-dispatching expert parallelism;
+                                                          #   see the note below
 }
 
 # Entries marked + follow from reading transformers' style classes rather than
@@ -113,15 +116,19 @@ SIDES: Dict[str, Dict[str, str]] = {
 # a partial, not the shard its name suggests), and ``sequence_parallel``
 # reduce-scatters on the last dim (a whole-width partial at the handoff).
 #
-# ``embedding_rowwise`` is marked ! because the rule above is right and unreachable
-# in practice: a vocab-parallel embedding's value carries a ``_MaskPartial``
-# placement, which is stateful and single-use — its mask buffer is consumed by the
-# first reassembly, and ``_fragment_tensor`` then rebuilds a DTensor around the
-# spent one, so the module's own reduce asserts. Parking on ``embed_tokens.output``
-# raises a bare ``AssertionError`` from torch's embedding op on any plan that names
-# ``embed_tokens`` (Llama-3.2-1B/3B and other tied-embedding checkpoints); plans
-# that leave the embedding replicated (Llama-3.3-70B, Qwen3-8B) never reach this.
-# ``layers[0].input`` is the same tensor and is whole either way.
+# ``ep_dispatch_experts`` (transformers 5.19) replaces the ``ep_router`` +
+# ``moe_tp_experts`` pair in expert-parallel plans: its wrapper all-to-alls each
+# token to its expert's owner rank and combines the answers before returning.
+# Uniquely, that wrapper is *kept as the controller's body* rather than stripped
+# and rebuilt around it (`TPFragments.instrument` flags it with ``BODY_FORWARD``
+# from ``nnsight.intervention.source``), because the tap must sit where the
+# values mean something. Outside the wrapper they are whole — hence the empty
+# entry. Inside it, after the all-to-all, each rank holds only the tokens routed
+# to its own experts: different shapes on every rank, neither a shard nor a
+# partial, so no rule could reassemble a tap placed there. Verified by the
+# expert-parallel suite (tests/tp/test_cpu_expert_parallel.py), which compares
+# rank values — including an edit of ``experts.output`` — against a
+# single-process run.
 
 # Styles refused rather than guessed at, with the reason a user is shown: these
 # slice something other than the last dim — by expert, or into a fused kv
@@ -136,15 +143,14 @@ UNSUPPORTED: Dict[str, str] = {
     "mla_kv_a_proj": "MLA split kv projection",
 }
 
-# The oldest transformers this supports. 5.16 rebuilt tensor parallelism on
-# DTensor: the plan moved from a per-module ``_hf_tp_plan`` stamp to the model's
-# ``_tp_plan``, the style's transforms moved from forward hooks into a wrapper
-# that replaces ``module.forward``, and the ``all_gather``/``split`` helpers were
-# removed. Supporting both shapes at once meant two detection paths and two
-# descriptions of one handoff; 5.15's own TP had a separate defect anyway (5.14.1
-# sharded a tied LM head's hook but not its weight, returning logits ``tp_size``
-# times too wide). One backend, described once.
-MINIMUM_TRANSFORMERS = "5.16.0"
+# The oldest transformers this supports. This module reads exactly the shapes
+# 5.19's distributed rework produces — named (pp, fsdp, tp) hybrid meshes, the
+# EP plan on its own ``model.ep_plan``, ``ep_dispatch_experts``,
+# ``_get_parameter_plan`` — and earlier releases differ in every one of them.
+# Tracking those differences meant per-version branches in the mesh handling,
+# the plan merge and the test workers; one backend, described once, and the
+# rest refused here rather than half-supported.
+MINIMUM_TRANSFORMERS = "5.19.0"
 
 
 class UnsupportedTransformersVersion(RuntimeError):
@@ -166,8 +172,8 @@ def _check_transformers_version() -> None:
     from packaging.version import Version
 
     installed = transformers.__version__
-    # Compared on the release numbers alone, so a `5.15.0.dev0` — which a plain
-    # `>=` sorts *below* 5.15.0, pre-releases coming first — counts as 5.15. A
+    # Compared on the release numbers alone, so a `5.19.0.dev0` — which a plain
+    # `>=` sorts *below* 5.19.0, pre-releases coming first — counts as 5.19. A
     # dev build of the fixed series is the normal way to be running it early;
     # refusing those would make an editable transformers checkout unusable.
     if Version(installed).release >= Version(MINIMUM_TRANSFORMERS).release:
@@ -193,7 +199,35 @@ def _placement(kind: str) -> Any:
     return Partial() if kind == "partial" else Shard(-1)
 
 
-def _whole_tensor(tensor: torch.Tensor, mesh: Any, placement: Any) -> torch.Tensor:
+def _width(module: Any, side: str) -> "int | None":
+    """The whole size of a sharded ``side``'s last dim, read as the style reads it.
+
+    ``in_features`` for an input (only row-parallel styles shard one),
+    ``out_features`` for a column-parallel output and ``embedding_dim`` for an
+    embedding's. ``None`` when the module has neither, which assumes even pieces.
+    """
+    if side == "input":
+        return getattr(module, "in_features", None)
+    return getattr(module, "out_features", getattr(module, "embedding_dim", None))
+
+
+def _from_local(local: torch.Tensor, mesh: Any, placement: Any, shape: Any = None) -> Any:
+    """``local`` as the DTensor it is this rank's piece of.
+
+    ``shape`` is the whole's, needed whenever the pieces may differ in size;
+    without it every rank is assumed to hold an equal one.
+    """
+    from torch.distributed.tensor import DTensor
+
+    stride = None if shape is None else torch.empty(shape, device="meta").stride()
+    return DTensor.from_local(
+        local, mesh, [placement], run_check=False, shape=shape, stride=stride
+    )
+
+
+def _whole_tensor(
+    tensor: torch.Tensor, mesh: Any, placement: Any, width: "int | None" = None
+) -> torch.Tensor:
     """One rank's piece of ``tensor``, assembled into the real thing.
 
     Reads the placement off the value when it carries one and asserts the rule's
@@ -201,11 +235,10 @@ def _whole_tensor(tensor: torch.Tensor, mesh: Any, placement: Any) -> torch.Tens
     shard, which a rule cannot know once a ``view`` or ``transpose`` has moved it —
     so it is always believed over the rule.
 
-    Written on DTensor rather than on ``transformers``' ``all_gather``/``split``,
-    which is where this used to go: 5.16 rebuilt tensor parallelism on DTensor and
-    removed both, and depending on a neighbour's private helpers is what made a
-    routine upstream release silently disable the whole path. These are equivalent
-    — an all-gather concatenating on the last dim, an all-reduce summing — and
+    Written on DTensor rather than on transformers' private collective helpers:
+    depending on a neighbour's internals is what once let a routine upstream
+    release silently disable the whole path. These are equivalent — an
+    all-gather concatenating on the last dim, an all-reduce summing — and
     depend on nothing but ``torch``.
     """
     from torch.distributed.tensor import DTensor
@@ -213,9 +246,8 @@ def _whole_tensor(tensor: torch.Tensor, mesh: Any, placement: Any) -> torch.Tens
     if isinstance(tensor, DTensor):
         whole = tensor.full_tensor()
     else:
-        whole = DTensor.from_local(
-            tensor, mesh, [placement], run_check=False
-        ).full_tensor()
+        shape = None if width is None else torch.Size((*tensor.shape[:-1], width))
+        whole = _from_local(tensor, mesh, placement, shape).full_tensor()
 
     # Returned as it comes. `full_tensor` is a custom autograd Function, so with
     # the graph live torch forbids editing its output in place and a
@@ -271,6 +303,9 @@ def _fragment_tensor(
 
     if isinstance(placement, Partial):
         local = _OnRankZero.apply(whole, mesh.get_local_rank() == 0)
+        # A vocab-parallel embedding arrives as a `_MaskPartial`, whose mask the
+        # gather's reduce consumed; a second reduce with it asserts.
+        placement = Partial()
     else:
         local = (
             DTensor.from_local(whole, mesh, [Replicate()], run_check=False)
@@ -278,7 +313,7 @@ def _fragment_tensor(
             .to_local()
         )
     if as_dtensor:
-        return DTensor.from_local(local, mesh, [placement], run_check=False)
+        return _from_local(local, mesh, placement, whole.shape)
     return local
 
 
@@ -296,28 +331,14 @@ def _gatherable(tensor: torch.Tensor) -> bool:
     )
 
 
-def _divisible(tensor: torch.Tensor, placement: Any, world_size: int) -> bool:
-    """Whether ``tensor`` can be cut back into equal pieces along the sharded axis.
-
-    Asked on the way back only: the whole has to chunk evenly, while a shard's own
-    width never has to. A partial is whole-width on every rank and is not cut at
-    all, so nothing constrains it. The axis comes from the placement rather than
-    being assumed to be the last one — a value that carried its own placement can
-    be sharded on any axis, wherever a ``view`` or ``transpose`` moved it.
-    """
-    from torch.distributed.tensor import Shard
-
-    if not isinstance(placement, Shard):
-        return True
-    return tensor.shape[placement.dim] % world_size == 0
-
-
-def _gather(value: Any, mesh: Any, placement: Any) -> Any:
+def _gather(value: Any, mesh: Any, placement: Any, width: "int | None" = None) -> Any:
     """Every rank's piece of ``value``, assembled into the whole tensor."""
     return apply(
         value,
         lambda tensor: (
-            _whole_tensor(tensor, mesh, placement) if _gatherable(tensor) else tensor
+            _whole_tensor(tensor, mesh, placement, width)
+            if _gatherable(tensor)
+            else tensor
         ),
         torch.Tensor,
     )
@@ -329,13 +350,11 @@ def _reshard(value: Any, mesh: Any, placement: Any, as_dtensor: bool) -> Any:
     The exact inverse of `_gather`, and guarded the same way: a tensor that was
     never a piece must not be cut down here.
     """
-    world_size = mesh.size()
-
     return apply(
         value,
         lambda tensor: (
             _fragment_tensor(tensor, mesh, placement, as_dtensor)
-            if _gatherable(tensor) and _divisible(tensor, placement, world_size)
+            if _gatherable(tensor)
             else tensor
         ),
         torch.Tensor,
@@ -425,8 +444,6 @@ def _keep_tp_forward(envoy: Any, style: Any, mesh: Any) -> None:
     if module.__dict__.get(_TP_WRAPPED):
         return
 
-    from ...intervention.source import install_controller
-
     # Assigns `forward` only the first time; a later call from
     # `Interleaver.instrument` finds the state already there and just registers
     # its route, so the wrapper installed below survives.
@@ -443,6 +460,11 @@ def device_mesh(model: Any) -> Any:
     """
     module = getattr(model, "_module", model)
     mesh = getattr(module, "_device_mesh", None)
+    # 5.19 keeps the model-level mesh as a named (pp, fsdp, tp) hybrid; a
+    # collective placed on it with one placement lands on the wrong dim. The
+    # tp submesh is the one gather/shard mean.
+    if mesh is not None and getattr(mesh, "mesh_dim_names", None) and "tp" in mesh.mesh_dim_names:
+        mesh = mesh["tp"]
     return mesh if mesh is not None and mesh.size() > 1 else None
 
 
@@ -455,14 +477,19 @@ def gather(model: Any, value: Any, dim: int = -1) -> Any:
     forward did, so you say:
 
     ```python
+    from nnsight.modeling.tp import gather
+
     with model.trace(prompt):
         q = layer.self_attn.source.query_states_0.output   # (1, heads/N, seq, dim)
-        whole = tp.gather(model, q, dim=1)                 # (1, heads, seq, dim)
+        whole = gather(model, q, dim=1)                    # (1, heads, seq, dim)
     ```
 
     A collective, so **every rank must reach it**: call it unconditionally, never
     inside a branch that could go differently on different ranks. Returns the
-    value unchanged on an unsharded model, so the same block runs either way.
+    value unchanged on an unsharded model, so the same block runs either way —
+    which also means a one-GPU run never checks ``dim``: a wrong axis only
+    shows itself at ``tp_size > 1``. The pieces must be equal along ``dim``, as
+    they are for heads and the MLP width.
     """
     from torch.distributed.tensor import Shard
 
@@ -484,11 +511,15 @@ def shard(model: Any, value: Any, dim: int = -1) -> Any:
     left there is as wrong as a piece read out.
 
     ```python
+    from nnsight.modeling.tp import gather, shard
+
     with model.trace(prompt):
         q = layer.self_attn.source.query_states_0.output
-        whole = tp.gather(model, q, dim=1)
-        whole[:, 3] = 0                                    # ablate head 3
-        layer.self_attn.source.query_states_0.output = tp.shard(model, whole, dim=1)
+        whole = gather(model, q, dim=1).clone()            # clone before editing:
+        whole[:, 3] = 0                                    # a gathered value is a
+        layer.self_attn.source.query_states_0.output = (   # collective's output,
+            shard(model, whole, dim=1)                     # in-place writes raise
+        )
     ```
 
     Same rule: a collective, so every rank must reach it.
@@ -513,8 +544,9 @@ class TPFragments(Fragments):
 
     Attributes:
         enabled: Whether anything in this tree is sharded.
-        tp_rules: Location -> ``(mesh, kind)``, ``kind`` being ``"shard"`` or
-            ``"partial"`` (see `SIDES`). A location absent from it is already whole.
+        tp_rules: Location -> ``(mesh, placement, width)``: the placement
+            `SIDES` names for it, and for a shard the whole size of its last dim
+            (see `_width`). A location absent from it is already whole.
     """
 
     def __init__(self) -> None:
@@ -522,11 +554,15 @@ class TPFragments(Fragments):
         self.tp_rules: Dict[str, Any] = {}
         #: Module path -> (style name, mesh), for the ad-hoc-call bracket in
         #: `nnsight.modeling.tp.envoys`. Recorded here because this is where the
-        #: style is resolved: 5.16 stamps nothing on the module, so an envoy
-        #: cannot read it back off one.
+        #: style is resolved: transformers stamps nothing on the module, so
+        #: an envoy cannot read it back off one.
         self.tp_styles: Dict[str, Any] = {}
-        #: (root envoy path, the model's tp_plan, its mesh) on a DTensor-backend
-        #: transformers, recorded when the root envoy comes past. The root is
+        #: (root envoy path, the applied plan, the tp submesh collectives run
+        #: on) on a DTensor-backend transformers, recorded when the root envoy
+        #: comes past — `device_mesh` slices the model-level mesh, which on
+        #: 5.19 is a named (pp, fsdp, tp) hybrid, down to its tp dim. The
+        #: style wrappers, FSDP2's unsharded weights, and nnsight's gathers
+        #: all live on that submesh. The root is
         #: instrumented before its children — `Envoy.__init__` instruments, then
         #: walks `named_children` — so every module that needs it has it by then.
         self._plan: tuple[str, dict, Any] | None = None
@@ -551,20 +587,37 @@ class TPFragments(Fragments):
         # one whether or not it was loaded across ranks; `_device_mesh` is what
         # says it actually was.
         if self._plan is None:
-            mesh = getattr(module, "_device_mesh", None)
+            mesh = device_mesh(module)
             plan = getattr(module, "tp_plan", None)
+            # Expert-parallel entries live in their own ``ep_plan`` (empty on
+            # a dense model, where ``tp_plan`` is the whole story). Both are
+            # the *raw* plans, set at init whether or not expert parallelism
+            # is on,
+            # and they can name the same module with different styles —
+            # Qwen3-MoE's experts are ``moe_tp_experts`` in one and
+            # ``ep_dispatch_experts`` in the other. transformers applies
+            # ``ep_plan`` only when ``ep_size > 1``, so merge it only then;
+            # merged unconditionally, a TP-only run resolves the experts to a
+            # style transformers never installed, the real wrapper is stripped,
+            # and the forward dies on mixed tensors. On a collision the EP
+            # entry wins, which is what upstream's resolved plans do too.
+            distributed = getattr(getattr(module, "config", None), "distributed_config", None)
+            ep_plan = getattr(module, "ep_plan", None)
+            if ep_plan and getattr(distributed, "ep_size", 1) > 1:
+                plan = {**(plan or {}), **ep_plan}
             if mesh is not None and plan:
+                # The first sharded model seen is the moment to refuse a
+                # transformers below the floor: 5.16-5.18 carry a plan and a
+                # mesh too, but in shapes this module no longer reads.
+                # (On <= 5.15 there is no model-level plan at all; those are
+                # caught off the per-module stamp in `_style_of`.)
+                _check_transformers_version()
                 self._plan = (envoy.path, plan, mesh)
 
         found = self._style_of(envoy)
         if found is None:
             return
         style, mesh, style_object = found
-
-        if mesh is None or mesh.size() == 1:
-            # Planned but not actually split (a degenerate 1-rank mesh) — nothing
-            # to gather, and a collective over a 1-rank group is pure overhead.
-            return
 
         # Only a module transformers actually wrapped has transforms around its
         # forward, and so a boundary worth describing. A plan can name one it did
@@ -581,12 +634,20 @@ class TPFragments(Fragments):
                 "can't be shown whole, so this model can't be traced tensor-parallel."
             )
 
-        _keep_tp_forward(envoy, style_object, mesh)
+        # ``ep_dispatch_experts`` keeps its wrapper as the controller's *body*
+        # rather than having it rebuilt around the controller like every other
+        # style — see the note under `SIDES` for why. This runs before
+        # `install_controller` (and again on dispatch, harmlessly).
+        if style == "ep_dispatch_experts":
+            envoy._module.__dict__[BODY_FORWARD] = True
+        else:
+            _keep_tp_forward(envoy, style_object, mesh)
 
         self.enabled = True
         self.tp_styles[envoy.path] = (style, mesh)
         for side, kind in SIDES[style].items():
-            self.tp_rules[f"{envoy.path}.{side}"] = (mesh, _placement(kind))
+            width = _width(envoy._module, side) if kind == "shard" else None
+            self.tp_rules[f"{envoy.path}.{side}"] = (mesh, _placement(kind), width)
 
     def _style_of(self, envoy: Any) -> "tuple[str, Any, Any] | None":
         """``(style name, mesh, style object)`` for this envoy's module, or None.
@@ -611,17 +672,17 @@ class TPFragments(Fragments):
         # envoy's own prefix. Both spell a module the way `named_modules` does.
         name = envoy.path[len(root) + 1 :]
 
-        from transformers.distributed.tensor_parallel import (
-            ALL_PARALLEL_STYLES,
-            _get_parameter_tp_plan,
-        )
+        from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
         # transformers' own matcher, not a reimplementation of its globbing: the
         # plan's keys wildcard layer numbers, and a private copy of that rule is
         # exactly the kind of drift this module keeps being broken by.
-        style = _get_parameter_tp_plan(parameter_name=name, tp_plan=plan, is_weight=False)
+        from transformers.distributed.tensor_parallel import _get_parameter_plan
+
+        style = _get_parameter_plan(name, plan, is_weight=False)
         if style is None:
             return None
+
         return style, mesh, ALL_PARALLEL_STYLES._global_mapping.get(style)
 
     def style_at(self, path: str) -> "tuple[str | None, Any]":
@@ -665,17 +726,17 @@ class TPFragments(Fragments):
         made while this visit is still open.
         """
         described = _described(value)
-        layout = described or self.tp_rules.get(location)
+        layout = (*described, None) if described else self.tp_rules.get(location)
         if layout is None:
             return value, None
 
-        mesh, placement = layout
+        mesh, placement, width = layout
         # A value that came in carrying its placement has to leave carrying it:
         # the transform downstream will redistribute it, and can only do that to a
         # DTensor.
         as_dtensor = described is not None
         return (
-            _gather(value, mesh, placement),
+            _gather(value, mesh, placement, width),
             lambda edited: _reshard(edited, mesh, placement, as_dtensor),
         )
 
@@ -689,5 +750,5 @@ class TPFragments(Fragments):
         rule = self.tp_rules.get(location)
         if rule is None:
             return whole
-        mesh, placement = rule
+        mesh, placement, _ = rule
         return _reshard(whole, mesh, placement, False)

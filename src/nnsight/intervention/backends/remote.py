@@ -96,6 +96,7 @@ class RemoteBackend(Backend):
         self.blocking = blocking
         self.job_id = job_id
         self.status: Optional[Status] = None
+        self.meta: Optional[dict] = None
         # The per-call host (`remote="http://host:port"`) or the configured one, in
         # the spelling `nnsight.ndif` keys its per-host caches on.
         self.host = resolve_host(host)
@@ -119,6 +120,7 @@ class RemoteBackend(Backend):
             print(f"[remote] {message}")
 
     def __call__(self, tracer: Optional[Tracer] = None) -> Optional[RESULT]:
+        self.meta = None
         # Non-blocking: submit on the first call (no job_id yet), poll thereafter.
         # A poll returns the saved values on COMPLETED, else None (still running);
         # call again to re-poll. See submit()/poll().
@@ -168,8 +170,19 @@ class RemoteBackend(Backend):
         The shared status handling for every update, however it arrived (websocket,
         poll): update the display, raise [`RemoteError`][nnsight.intervention.backends.remote.RemoteError] on ERROR, and return
         whether the status is COMPLETED (so the caller knows to fetch the result).
+
+        Also where [`meta`][nnsight.intervention.backends.remote.RemoteBackend.meta]
+        is taken off the response, since every waiting mode but
+        [`stream`][nnsight.intervention.backends.remote.AsyncRemoteBackend.stream]
+        reaches its result through here.
         """
         self.display.update(response)
+        # Recorded before the raise: a failed job reports its cost too, and on an
+        # OOM that report is the most useful thing it has to say. `tracer` is
+        # bound by the time the backend runs, so an `except RemoteError` can read
+        # `tracer.backend.meta`.
+        if response.meta is not None:
+            self.meta = response.meta
         if response.status == Status.ERROR:
             raise RemoteError(response.description)
         return response.status == Status.COMPLETED
@@ -317,6 +330,7 @@ class RemoteBackend(Backend):
         each status response to the object store for [`poll`][nnsight.intervention.backends.remote.RemoteBackend.poll] to read. Returns
         None — call [`poll`][nnsight.intervention.backends.remote.RemoteBackend.poll] (or the backend again) to fetch the result.
         """
+        self.meta = None
         blob = self._serialize(tracer)
         request = RequestModel(
             model_key=self.model_key, compress=self.compress, env=self.env
@@ -429,6 +443,7 @@ class AsyncRemoteBackend(RemoteBackend):
 
         # Fire the request synchronously, then return without waiting: subscribe,
         # take the session id, POST the payload. Only the status stream is awaited.
+        self.meta = None
         blob = self._serialize(tracer)
         self.connection = websocket.create_connection(
             f"{self.ws_host}/subscribe",
@@ -475,6 +490,8 @@ class AsyncRemoteBackend(RemoteBackend):
         try:
             while True:
                 response = await self.receive()
+                if response.meta is not None:
+                    self.meta = response.meta
                 yield response
                 if response.status == Status.COMPLETED:
                     yield await self.download(response.data)

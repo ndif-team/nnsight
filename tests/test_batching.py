@@ -478,6 +478,75 @@ class TestInvokeScope:
         assert isinstance(inside, torch.Tensor) and inside.shape[0] == 1
 
     @torch.no_grad()
+    def test_rebind_in_an_earlier_invoke_survives_the_later_ones_in_a_session(self):
+        # Each invoke's scope starts from the frame as the trace found it, so an
+        # invoke that leaves a name alone still holds its old value.
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            value = "before"
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(1, 8)):
+                    value = envoy.fc1.output
+                with tracer.invoke(torch.randn(1, 8)):
+                    envoy.fc2.output
+            kind = nnsight.save(type(value))
+        assert kind is torch.Tensor
+
+    @torch.no_grad()
+    def test_rebind_in_a_session_loop_reaches_each_iteration(self):
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            kinds = nnsight.save([])
+            value = None
+            for _ in range(2):
+                with envoy.trace() as tracer:
+                    with tracer.invoke(torch.randn(1, 8)):
+                        value = envoy.fc1.output
+                    with tracer.invoke(torch.randn(1, 8)):
+                        envoy.fc2.output
+                kinds.append(type(value))
+        assert kinds == [torch.Tensor, torch.Tensor]
+
+    @torch.no_grad()
+    def test_name_bound_beside_the_invokes_reaches_the_session(self):
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            with envoy.trace() as tracer:
+                rows = []
+                with tracer.invoke(torch.randn(1, 8)):
+                    rows.append(envoy.fc1.output)
+                with tracer.invoke(torch.randn(2, 8)):
+                    rows.append(envoy.fc1.output)
+            shapes = nnsight.save([row.shape[0] for row in rows])
+        assert shapes == [1, 2]
+
+    @torch.no_grad()
+    def test_rebind_back_to_the_captured_value_in_a_later_invoke_wins(self):
+        # Only what a block binds is pushed, so a later invoke that resets a
+        # name to the value the frame started with still has the last word.
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            flag = 0
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(1, 8)):
+                    flag = 1
+                with tracer.invoke(torch.randn(1, 8)):
+                    flag = 0
+            final = nnsight.save(flag)
+        assert final == 0
+
+    @torch.no_grad()
+    def test_name_bound_after_the_last_invoke_reaches_the_session(self):
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.session():
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(1, 8)):
+                    envoy.fc1.output
+                after = "bound after the invokes"
+            value = nnsight.save(after)
+        assert value == "bound after the invokes"
+
+    @torch.no_grad()
     def test_read_before_the_bind_raises(self, gpt2):
         # Reading a name an earlier invoke binds, before parking past where it binds
         # it: the reader runs first, up to its first park, so the name isn't there.
@@ -952,3 +1021,52 @@ class TestVLLMBatcherCloneReads:
         stats.mul_(1000)
         assert served is not stats
         assert torch.all(served == 1)
+
+
+class _FlatMLP(nn.Module):
+    """``fc1`` runs on the rows reshaped two per input, so its output's leading dim is not the batch."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(4, 4)
+        self.fc2 = nn.Linear(8, 8)
+
+    def forward(self, x):
+        flat = self.fc1(x.reshape(-1, 4))  # [2 * batch, 4]
+        return self.fc2(torch.relu(flat.reshape(x.shape[0], 8)))
+
+
+class TestUnbatchedTensorWrites:
+    """A tensor whose leading dim is not the batch is served whole to every invoke, so an
+    invoke's assignment to it is the whole tensor and lands, as an in-place edit does."""
+
+    @torch.no_grad()
+    def test_assignment_under_two_invokes_lands(self):
+        torch.manual_seed(0)
+        envoy = _BatchEnvoy(_FlatMLP())
+        a_in, b_in = torch.randn(2, 8), torch.randn(3, 8)
+        with envoy.trace() as tracer:
+            with tracer.invoke(a_in):
+                clean_a = envoy.output.save()
+            with tracer.invoke(b_in):
+                clean_b = envoy.output.save()
+        with envoy.trace() as tracer:
+            with tracer.invoke(a_in):
+                envoy.fc1.output = torch.zeros_like(envoy.fc1.output)
+                edited_a = envoy.output.save()
+            with tracer.invoke(b_in):
+                edited_b = envoy.output.save()
+        assert not torch.equal(edited_a, clean_a)
+        assert not torch.equal(edited_b, clean_b)  # the whole tensor: the other invoke's rows too
+        assert torch.equal(edited_a, envoy._module.fc2.bias.expand(2, 8))
+
+
+class TestSanitizeOncePerPipeline:
+    def test_generate_names_are_read_once_per_pipeline(self, gpt2):
+        from nnsight.modeling import processing
+
+        processing.generation_names.cache_clear()
+        for _ in range(2):
+            pre, forward, _ = processing.sanitize(gpt2, {"max_new_tokens": 3, "truncation": True})
+        assert processing.generation_names.cache_info().misses == 1
+        assert forward["max_new_tokens"] == 3 and pre["truncation"] is True

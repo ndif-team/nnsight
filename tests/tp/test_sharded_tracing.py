@@ -132,7 +132,10 @@ VALUES = [
     "down_proj_in",
     "layer_out",
     "baseline_logits",
+    "nograd_logits",           # a plain local tensor: the rule's width decides
     "partial_edit_logits",
+    "embed_out",              # a vocab-parallel embedding's single-use mask
+    "embed_edited_logits",     # ... edited and handed back
     "cached_gate_out",
     "partial_backward_grad",   # backward through a row-parallel output
     "source_colwise_gathered",   # tp.gather on an op inside a sharded module

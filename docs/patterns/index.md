@@ -8,59 +8,34 @@ sources: [src/nnsight/intervention/envoy.py, src/nnsight/intervention/tracer.py]
 
 # Patterns Index
 
-Recipe-style pages, one technique per file. Each opens with the smallest working
-example, then variations, then interpretation tips and gotchas. All examples use a
-small open-weights model — `TransformersModel("openai-community/gpt2", dispatch=True)`
-— so they run on a laptop.
+Up: [docs/index.md](../index.md) — all sections.
 
-For the underlying API (`tracer.invoke`, `tensor.backward`, `edit`, `skip`,
-`source`), see `docs/usage/index.md`. If something is breaking, start at
-`docs/errors/`.
+One technique per page. Examples use `openai-community/gpt2` so they run on a
+laptop. API reference: [usage/index.md](../usage/index.md); something breaking:
+[errors/symptom-index.md](../errors/symptom-index.md).
 
-## Look at activations
+## Read what the model computes
 
-What is happening inside the model on a given prompt?
+- [logit-lens](logit-lens.md) — Decode each layer's residual through the final norm and unembedding to see where in depth an answer emerges.
+- [attention-patterns](attention-patterns.md) — Read attention probabilities (`attn.output[1]`, or `.source` for the raw softmax) to see what each head attends to.
+- [probing](probing.md) — Train a linear classifier on activations to test what is decodable, where in depth it appears, and whether the model uses it.
+- [sae-and-auxiliary-modules](sae-and-auxiliary-modules.md) — Run an SAE, transcoder, adapter or probe on a layer: read its features, splice in its reconstruction, or make a parameter-only SAE observable with `WrapperModule`.
 
-- [logit-lens](logit-lens.md) — Apply the final norm + unembedding to every layer's residual to "decode" what each layer is thinking.
-- [attention-patterns](attention-patterns.md) — Extract the attention probability matrix from a block via `.source`.
-- [sae-and-auxiliary-modules](sae-and-auxiliary-modules.md) — Attach an SAE (or any auxiliary module) via assignment + `edit()`, route through it with `hook=True`, and read its internals.
+## Test what is causal
 
-## Modify activations
+- [activation-patching](activation-patching.md) — Copy activations from a clean run into a corrupt one to localize where a fact or behavior lives (IOI-style, layer × position maps).
+- [attribution-patching](attribution-patching.md) — Approximate a whole patching map from one clean forward and one corrupt forward+backward.
+- [ablation](ablation.md) — Zero, mean or resample a layer, head, neuron or MoE expert and measure what breaks.
+- [per-head-attention](per-head-attention.md) — Read, ablate or patch a single attention head.
+- [gradient-based-attribution](gradient-based-attribution.md) — Saliency, input × gradient and integrated gradients on any activation.
 
-Change the model's internal state and observe the effect on output.
+## Change behavior
 
-- [activation-patching](activation-patching.md) — Replace activations from one run into another. Causal mediation, IOI-style patching.
-- [ablation](ablation.md) — Zero / mean / noise ablate specific components, positions, or features and measure the change.
-- [steering](steering.md) — Add a precomputed direction to the residual stream to push behavior in a target direction.
+- [steering](steering.md) — Add a direction to the residual stream to push behavior, including during generation, and choose the coefficient.
 
-## Compare runs
+## Run at scale on NDIF
 
-Multiple prompts, multiple invokes, attribution in one batch.
+- [remote-dataset-sweep](remote-dataset-sweep.md) — Run a model over a dataset remotely: load the data on the server, loop in one session, bring back only the reduction.
+- [remote-training](remote-training.md) — Train a LoRA, steering vector or probe remotely, with the whole optimizer loop server-side.
 
-- [multi-prompt-comparison](multi-prompt-comparison.md) — Multiple `tracer.invoke(...)` in one trace, empty invokes for batch-wide ops, and `tracer.barrier(n)` for cross-invoke sharing.
-- [attribution-patching](attribution-patching.md) — Linear approximation of activation patching from corrupt-run gradients times clean-vs-corrupt activation differences.
-
-## Gradients
-
-Backprop-based interpretability.
-
-- [gradient-based-attribution](gradient-based-attribution.md) — `with metric.backward():` to read `.grad` for saliency, integrated gradients, and per-component attribution.
-
-## Heads
-
-Per-attention-head access.
-
-- [per-head-attention](per-head-attention.md) — Slice attention output into heads for per-head reading and editing.
-
-## Working at scale on NDIF
-
-One session per experiment, and as few bytes as possible in each direction.
-
-- [remote-dataset-sweep](remote-dataset-sweep.md) — Load the data on the server rather than shipping it, loop inside one session, bring back the reduction.
-- [remote-training](remote-training.md) — Fit a LoRA / steering vector / probe with the whole optimizer loop server-side.
-
-## Other resources
-
-- [nnsight.net tutorials](https://nnsight.net/tutorials.html) — Notebook mirror of these patterns.
-- `docs/usage/index.md` — Reference for every API surface used in these recipes.
-- `docs/concepts/index.md` — Internal architecture (interleaver, envoy, greenlets/mediators).
+Notebook versions of these recipes: [nnsight.net tutorials](https://nnsight.net/tutorials.html).

@@ -7,10 +7,26 @@ that they land here proves the whole round trip — serialized onto the request,
 run in the worker, saved values shipped home.
 """
 
+from collections import namedtuple
+
 import pytest
 import torch
 
 pytest.importorskip("vllm")
+
+# Module level, so pickle can find it by name.
+Pair = namedtuple("Pair", "row whole")
+
+
+@pytest.fixture(scope="module")
+def vllm_gpt2_float32():
+    """gpt2 in float32. In half precision the sampler takes a float32 copy of the
+    logits before it scales them, which hides whether a saved read is its own."""
+    from nnsight.modeling.vllm import VLLM
+
+    if torch.cuda.device_count() < 1:
+        pytest.skip("vLLM tests need a GPU")
+    return VLLM("gpt2", gpu_memory_utilization=0.1, dtype="float32", dispatch=True)
 
 
 class TestLogits:
@@ -29,6 +45,59 @@ class TestLogits:
             logits = vllm_gpt2.logits.save()
 
         assert torch.all(logits == 0)
+
+    @torch.no_grad()
+    def test_saved_logits_are_not_scaled_by_the_sampler(self, vllm_gpt2_float32, ET_prompt):
+        # The sampler divides its logits by the temperature in place.
+        model = vllm_gpt2_float32
+        with model.trace(ET_prompt, temperature=0.5, max_tokens=1, seed=0):
+            logits = model.logits.save()
+            copy = model.logits.clone().save()
+
+        assert torch.equal(logits, copy)
+
+    @torch.no_grad()
+    def test_an_inplace_logits_edit_reaches_the_sampler(self, vllm_gpt2, ET_prompt):
+        token = 1234
+        with vllm_gpt2.trace(ET_prompt, temperature=0.5, max_tokens=1, seed=0) as tracer:
+            vllm_gpt2.logits[:, token] = 1e4
+            result = tracer.result.save()
+
+        assert result.outputs[0].token_ids[0] == token
+
+    @torch.no_grad()
+    def test_a_save_ships_only_its_own_rows(self, vllm_gpt2):
+        # A block's reads are views into the whole step's buffers; a save from
+        # one invoke must not carry the others' rows home with it.
+        with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+            for i in range(4):
+                with tracer.invoke(f"Prompt number {i} is about"):
+                    hidden = vllm_gpt2.transformer.h[3].output.save()
+                    logits = vllm_gpt2.logits.save()
+
+        for value in (*hidden, *logits):
+            assert value.untyped_storage().nbytes() == value.numel() * value.element_size()
+
+
+class TestCompactPickle:
+    def test_views_ship_their_own_size_wherever_they_sit(self):
+        import pickle
+
+        from nnsight.modeling.vllm.collect import dumps_compact
+
+        buffer = torch.randn(64, 32)
+        row = buffer[3]
+        shared = [row]
+        payload = {"a": shared, "b": shared, "pair": Pair(buffer[5:7], buffer)}
+
+        loaded = pickle.loads(dumps_compact(payload))
+
+        assert torch.equal(loaded["a"][0], row)
+        assert loaded["a"][0].untyped_storage().nbytes() == row.nbytes
+        assert loaded["a"] is loaded["b"]
+        assert type(loaded["pair"]) is Pair
+        assert loaded["pair"].row.untyped_storage().nbytes() == loaded["pair"].row.nbytes
+        assert torch.equal(loaded["pair"].whole, buffer)
 
 
 class TestGeneration:
@@ -732,6 +801,23 @@ class TestLazyDispatch:
 
         assert model.dispatched
         assert hidden.shape[0] == len(model.tokenizer.encode(ET_prompt))
+        assert model.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_model_that_reads_a_table_back_builds_on_meta(self, ET_prompt):
+        # BLOOM computes its ALiBi slopes while constructing and reads them back
+        # with `.tolist()`, which a meta tensor cannot serve. The tree has to
+        # build anyway, and the engine, which builds for real, has to have the
+        # real slopes: zeros would make every head ignore distance.
+        from nnsight.modeling.vllm import VLLM
+
+        model = VLLM("bigscience/bloom-560m", gpu_memory_utilization=0.1)
+        assert not model.dispatched
+        assert model.transformer.h[3].self_attention.attn is not None
+
+        with model.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = model.logits.save()
+
         assert model.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()

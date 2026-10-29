@@ -2,37 +2,25 @@
 title: Invoke and Batching
 one_liner: Multiple inputs in one trace via `tracer.invoke(...)`, including empty invokes that operate on the full batch.
 tags: [usage, batching, invoker]
-related: [docs/usage/trace.md, docs/usage/barrier.md, docs/usage/access-and-modify.md, docs/usage/session.md]
+related: [docs/usage/trace.md, docs/usage/barrier.md, docs/usage/access-and-modify.md, docs/usage/session.md, docs/usage/skip.md]
 sources: [src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/envoy.py]
 ---
 
 # Invoke and Batching
 
-## What this is for
-
 `with model.trace() as tracer:` may contain several `with tracer.invoke(x):`
 blocks. Their inputs are combined into a **single batched forward**, and each
-block's interventions see only *its* rows of every activation.
+block's interventions see only *its* rows of every activation. Each block runs as
+its own worker, resumed in the order the model reaches what it asked for, not the
+order the blocks were written.
 
-Each invoke's block runs as its own **worker** (a greenlet `Mediator`). Workers
-resume in the order the model reaches what each asked for, not the order they were
-written — that is what makes them a batch rather than a sequence.
+- **Input invoke**: `tracer.invoke(prompt)` contributes rows to the batch; its
+  reads and edits are narrowed to those rows.
+- **Empty invoke**: `tracer.invoke()` contributes no input and sees the **entire**
+  combined batch.
 
-Two kinds of invoke:
-
-- **Input invoke**: `tracer.invoke(prompt)` — contributes rows to the batch. Its
-  reads/edits are scoped (narrowed) to those rows.
-- **Empty invoke**: `tracer.invoke()` — no input, no row scoping. Sees the
-  **entire** combined batch.
-
-## When to use / when not to use
-
-- Use multiple input invokes to run several prompts in one forward pass. Requires
-  a model that implements `_batch_size` / `_batch` (`TransformersModel` does;
-  base `NNsight` does not — see below).
-- Use an empty invoke to run logic over the whole combined batch.
-- Use a single positional arg on `.trace(x)` when you only have one input — it is
-  an implicit single invoke over the whole batch.
+With a single input, pass it to `.trace(x)` directly; that is an implicit single
+invoke.
 
 ## Canonical pattern
 
@@ -49,26 +37,30 @@ with model.trace() as tracer:
         out_rome = model.lm_head.output[:, -1].save()
 ```
 
-Each invoke's `.output` carries only that invoke's row(s). A batched last-token
-logit from an invoke matches the same prompt run on its own **up to floating-point
-kernel selection** — not bit-for-bit. Measured drift on fp32 CUDA is ~2e-4 (GPT-2)
-and ~2e-5 (Llama-3.2-1B); it is a property of torch, not nnsight (nnsight's logits
-are `torch.equal` to raw HuggingFace at every batch size), it does not grow with
-batch size, and reruns are bit-identical. It is driven by the *shape* the kernel
-sees, so lengthening a sequence perturbs earlier positions by the same magnitude.
-In fp32 this is far below any real effect size; in **bf16** it is comparable to the
-metric quantum and can reorder a head ranking, so read a ranking metric through an
-fp32 head.
+Each invoke's `.output` carries only that invoke's rows. A batched result matches
+the same prompt run alone up to floating-point kernel selection, not bit-for-bit;
+negligible in fp32, but in **bf16** it can reorder a head ranking, so read a
+ranking metric through an fp32 head.
 
-## Batched input (single invoke, list of strings)
+## Comparing prompts: one trace, not a loop of traces
+
+Clean vs corrupt, baseline vs ablated, a sweep over a prompt set: write it as N
+invokes in one trace rather than `for p in prompts: with model.trace(p): ...`.
+Setup is paid once, an empty invoke applies one intervention to every prompt,
+invokes can share values, and with `remote=True` it is one job instead of N.
 
 ```python
-with model.trace(["Hello", "World"]):
-    logits = model.lm_head.output.save()   # shape: [2, seq, vocab]
+with model.trace() as tracer:
+    with tracer.invoke(prompt):
+        baseline = model.lm_head.output[:, -1, :].save()
+    with tracer.invoke(prompt):
+        model.transformer.h[9].mlp.output[:] = 0
+        ablated = model.lm_head.output[:, -1, :].save()
+# baseline -> ' Paris', ablated -> ' London' for "The Eiffel Tower is in the city of"
 ```
 
-`TransformersModel._batch_size` tokenizes the list with left-padding and
-reports one row per prompt.
+Key a sweep's results by what the loop varies (a dict), not by list position —
+see [Save by identity](#save-by-identity-not-by-position).
 
 ## Empty invokes — operate on the full batch
 
@@ -88,16 +80,16 @@ The batch is assembled from every invoke before any worker starts, so where the
 empty invoke is written makes no difference: put it first and it still sees the
 rows the invokes below it contribute.
 
-An empty invoke does **not** call `_batch`, so it works even on a base `NNsight`.
+An empty invoke works even on a base `NNsight`, which cannot batch input invokes.
 It is a fresh worker, which lets it reach a module an earlier invoke already
 passed — but within its own block it still reads in forward order, and going back
 raises `OutOfOrderError` like anywhere else.
 
-## Mixed input formats
+## Input formats
 
-Every input format a forward accepts is batchable, and formats can be mixed
-across invokes — string, list of strings, token-id list, 1-D tensor, pre-tokenized
-encoding:
+Every input format a forward accepts is batchable and can be mixed across invokes
+— string, list of strings (one row each), token-id list, 1-D tensor,
+pre-tokenized encoding:
 
 ```python
 ids = model.tokenizer("Madison Square Garden is in").input_ids
@@ -117,31 +109,20 @@ model): `tracer.invoke("word " * 50, truncation=True, max_length=4)`.
 
 Invokes of one trace share the scope they were written in, so a name one invoke
 binds is readable in another (on the local runtimes; on `VLLM` each invoke is its
-own request and its own scope, see
+own scope, see
 [Passing values between invokes](../models/vllm.md#passing-values-between-invokes)).
-What decides whether the name is bound *yet* is not which module each invoke
-touches. It is where each worker has parked.
-
-A worker starts at the top of its block and runs until it asks for a value the
-model has not produced yet; that request parks it at a **location**. The model
-then runs, and a parked worker resumes when the model reaches its location. So:
+Whether the name is bound *yet* depends on where each worker has parked: a worker
+runs until it asks for a value the model has not produced, parks at that
+**location**, and resumes when the model reaches it.
 
 > A name bound in invoke A is readable in invoke B once B has parked at a
 > location the model reaches **after** A's binding location — or at the same
-> location, if A's block is written above B's, since workers parked on one
-> location resume in block order.
+> location, if A's block is written above B's.
 
-A worker that has not parked at all is still where it was before the model
-started, which is before every binding any other worker makes. Two consequences
-account for most cross-invoke `NameError`s:
-
-- **An assignment evaluates its right-hand side before it parks.**
-  `module.output[...] = donor` reads `donor` first, then performs the attribute
-  access that parks the worker. A block whose first statement is a write has
-  parked zero times at the moment it reads `donor`, whichever module it writes
-  to.
-- **Source order of the invoke blocks is irrelevant.** A binder written below the
-  reader works fine, as long as the model reaches the binder's location first.
+The source order of the blocks is otherwise irrelevant. A worker that has not
+parked yet is before every binding, and **an assignment evaluates its right-hand
+side before it parks**: `module.output[...] = donor` reads `donor` first, so a
+block whose first statement is a write has never parked when it reads `donor`.
 
 ### Reading a value: park past the binder
 
@@ -163,34 +144,47 @@ Drop the `h[6].output` line and the read raises
 
 ### Writing a value: use a barrier
 
-Park-past does not help a consumer that writes, because the write reads the
-donor before it parks. Order those with [`tracer.barrier(n)`](barrier.md), which
-is also the only option when the consumer has to act at or before the producer's
-location — the embedding-transfer case, where there is no earlier module to park
-on:
+Park-past does not help a consumer that writes, or one that must act at or before
+the producer's location. Order those with [`tracer.barrier(n)`](barrier.md), and
+make a barrier the default for anything that writes: park-past depends on the
+relative position of two lines, and inserting one above the read turns it into a
+`NameError`.
+
+**Use a name that exists nowhere outside the invokes.** Each block starts from a
+copy of the surrounding scope and checks that copy first; a sibling's bind reaches
+it only when the name is not already in the copy. So a name left over from an
+earlier notebook cell or the enclosing function shadows the one the producer binds,
+and nothing raises — the write lands the wrong tensor:
+
+```python
+donor = torch.zeros(768)                 # left over from an earlier cell
+
+with model.trace() as tracer:
+    barrier = tracer.barrier(2)
+    with tracer.invoke("The Eiffel Tower is in"):
+        donor = model.transformer.h[5].output[:, -1].clone()
+        barrier()
+    with tracer.invoke("The Colosseum is in"):
+        barrier()
+        model.transformer.h[5].output[:, -1] = donor    # the zeros, not the clone
+```
+
+Rename it (`eiffel_h5`) and the patch takes. A cross-invoke handoff with no error
+*and* no effect is this, not a barrier problem — a missing barrier raises.
+
+## Code between invokes runs first
+
+Statements in the trace body outside every invoke run **before** any invoke worker
+starts, so they cannot read a name an invoke binds — they raise
+`NameError: name 'x' is not defined` inside the trace. Create the accumulator
+before the invokes with `nnsight.save({})` and write into it inside them:
 
 ```python
 with model.trace() as tracer:
-    barrier = tracer.barrier(2)
-
+    res = nnsight.save({})                    # not: x = ... in the invoke, y = x * 2 out here
     with tracer.invoke("The Eiffel Tower is in"):
-        clean = model.transformer.h[5].output.clone()
-        barrier()                       # clean is bound
-
-    with tracer.invoke("The Colosseum is in"):
-        barrier()                       # wait for it
-        model.transformer.h[5].output[:] = clean
-        logits = model.lm_head.output.save()
+        res["eiffel"] = model.transformer.h[0].output.sum()
 ```
-
-Make a barrier the default for anything that writes. Park-past is real and it is
-cheaper, but it depends on the relative position of two locations in a file that
-someone will edit: insert one line above the read and it turns into a `NameError`
-with no other warning.
-
-**Use a name that exists nowhere outside the invokes.** Each block starts from a
-copy of the surrounding scope and checks that copy first, so if `clean` is already
-bound out there, the consumer reads the *old* value. Nothing raises.
 
 ## Rows, padding, and getting values back
 
@@ -221,19 +215,32 @@ the same length.
 
 Indexing from the right (`[:, -1]`) is stable, because the padding is on the left.
 For any other position, work out the offset from that invoke's own token count, or
-from the attention mask.
+from the [attention mask](#reducing-over-real-tokens-the-attention-mask).
 
 Pad positions are not blank. The attention mask keeps them from affecting the real
-positions — the last-token activation of a batched invoke matches the same prompt
-run alone — but the model still computes something at each one, and at GPT-2's
-layer 6 those values carry a *larger* norm than the real token beside them (3118.5
-against 3029.8 for the batch above). A max, mean, or top-k over the sequence axis
-that does not mask them out will find them.
+positions, but the model still computes values there, often with a *larger* norm
+than the real tokens. A max, mean or top-k over the sequence axis that does not
+mask them out will find them.
 
 A batched `generate` returns the padding too. With `max_new_tokens=5` and inputs
 of 5 and 18 tokens, `tracer.result` is `[2, 23]`, and decoding the short row prints
 thirteen `<|endoftext|>` ahead of its prompt. Slice a row by its own token count
 rather than by one offset shared across the batch.
+
+### Reducing over real tokens: the attention mask
+
+To reduce over a padded batch's real tokens only, read the mask from the root
+model's inputs inside the trace:
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke(["Hello", "The Eiffel Tower is located in the city of"]):
+        args, kwargs = model.inputs
+        mask = kwargs["attention_mask"]
+        hidden = model.transformer.h[6].output
+        m = mask.to(hidden.device, hidden.dtype).unsqueeze(-1)
+        means = ((hidden * m).sum(1) / m.sum(1)).save()   # matches each prompt run alone
+```
 
 ### Save by identity, not by position
 
@@ -248,13 +255,10 @@ for i, layer in enumerate([9, 2, 6, 0]):
 # outs comes back keyed [3, 1, 2, 0] — layers 0, 2, 6, 9, in model order
 ```
 
-Pairing that list back up with the prompt list by position misattributes every
-result, silently. A sweep where every invoke appends at the *same* module happens
-to preserve order — the workers all park on one location and resume in block
-order — which is why the pattern looks safe until someone varies the module.
-
-Carry the identity in the value instead. A dict keyed by whatever the loop varies
-is order-proof:
+Pairing that list with the prompt list by position silently misattributes every
+result. (Appending at the *same* module in every invoke happens to preserve order,
+which is why the pattern looks safe until someone varies the module.) Key the
+results by whatever the loop varies:
 
 ```python
 with model.trace() as tracer:
@@ -262,7 +266,6 @@ with model.trace() as tracer:
     for layer in [9, 2, 6, 0]:
         with tracer.invoke("The Eiffel Tower is in"):
             norms[layer] = model.transformer.h[layer].output.norm()
-# {0: 189.7, 2: 2568.2, 6: 3054.4, 9: 3135.5}
 ```
 
 For the same reason, give each invoke its own saved name. Three invokes that each
@@ -290,65 +293,32 @@ Everything an invoke reads is narrowed the same way: `.input`, `.output`,
 invoke's rows alone. In a 1 + 2 row batch the two input invokes see
 `[1, seq, 768]` and `[2, seq, 768]`, and an empty invoke sees `[3, seq, 768]`.
 
-## Implementing batching for a custom model
+## Batching a custom model
 
-Base `NNsight` runs a single invoke fine, but batching two or more raises
-`NotImplementedError`. To support it, override `_batch_size` (row count) and
-`_batch` (combine the invokes):
-
-```python
-import torch
-from nnsight import Envoy
-
-class BatchEnvoy(Envoy):
-    def _batch_size(self, *inputs, **kwargs):
-        # rows this invoke contributes (0 if it has no data)
-        return inputs[0].shape[0] if inputs else 0
-
-    def _batch(self, invokes, fn):
-        # invokes: list of (inputs, kwargs); return (args, kwargs) for fn
-        return (torch.cat([inputs[0] for inputs, _ in invokes]),), {}
-```
+Base `NNsight` runs a single invoke, but two or more input invokes raise
+`NotImplementedError: ... does not support batching multiple invokes`. Implement
+`_batch_size` / `_batch` as in
+[developing/extending.md](../developing/extending.md#1-batching-_batch_size--_batch).
+Empty invokes always work.
 
 ## Gotchas
 
-- **Base `NNsight` cannot batch multiple input invokes** — two input invokes raise
-  `NotImplementedError: ... does not support batching multiple invokes`. Empty
-  invokes always work.
-- **A trace with no direct input needs at least one invoke.** `with model.trace():`
-  with an empty body raises `ValueError` ("trace() needs an input, or at least one
-  `with tracer.invoke(...)` block"). A trace whose *only* invoke is an empty one
-  contributes no rows and there is nothing to run: on `TransformersModel` that
-  surfaces as `IndexError: list index out of range` from the tokenizer.
+- **A trace whose only invoke is empty has nothing to run**: it contributes no
+  rows, and on `TransformersModel` surfaces as `IndexError: list index out of
+  range` from the tokenizer; on a bare `NNsight` the module is called with no
+  input, a `TypeError` (`forward() missing 1 required positional argument`).
 - **Direct input and invokes are alternatives, not a combination.** Opening
   `tracer.invoke(y)` inside `with model.trace(x)` raises `ValueError: Cannot invoke
   while the model is already running.`, because the direct input already started
   the run. The same error covers nesting two invokes.
-- **Reading a cross-invoke name before the binder ran raises `NameError`.** Park
-  the reader past the binder's location, or use a barrier — see above.
-- **A batched write has to keep its rows.** A block owns its invoke's rows of the
-  combined batch, and a whole-tensor write is spliced back in as given — nothing
-  checks the height. A block that owns rows `0:1` of 2 and assigns a two-row
-  tensor builds a 3-row batch: downstream modules see a batch that is no longer
-  the model's, rows shift under the other invokes, and the mismatch surfaces in
-  some later module or not at all.
+- **A batched write has to keep its rows.** A whole-tensor write is spliced back
+  into the invoke's rows as given, and nothing checks the height: a block owning
+  one row of two that assigns a two-row tensor builds a 3-row batch, rows shift
+  under the other invokes, and the mismatch surfaces later or not at all.
 - **Batching only narrows with two or more input invokes.** A lone invoke *is* the
   whole batch, so it sees every row untouched — and, since nothing is spliced back,
   a write from a lone invoke (or from an empty invoke) may change the leading dim
   and widen the run.
-- **`tracer.stop()` halts the shared forward, not one invoke.** A sibling parked on
-  a later location dies with `OutOfOrderError: 'model.lm_head.output.i0' was
-  requested but the model already ran past it`. Stop from a batch only when every
-  invoke is finished by that point.
-- **A batched `.skip()` must cover every row** — skip the module in every invoke or
-  none; a shared forward can't run for only the unskipped rows (`ValueError: ...
-  cover every row`). See [skip.md](skip.md).
-
-## Related
-
-- [trace.md](trace.md)
-- [barrier.md](barrier.md) — cross-invoke synchronization.
-- [access-and-modify.md](access-and-modify.md)
-- [skip.md](skip.md)
-- [session.md](session.md) — sharing values across whole traces.
-- [gotchas/cross-invoke.md](../gotchas/cross-invoke.md)
+- **`tracer.stop()` in one invoke ends the whole batch** — see
+  [stop-and-early-exit](stop-and-early-exit.md). **A batched `.skip()` must cover
+  every row** — see [skip](skip.md).

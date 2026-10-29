@@ -1,40 +1,44 @@
 ---
 title: Errors Index
-one_liner: Map of the exceptions nnsight raises to their cause-and-fix docs.
+one_liner: Every exception and warning nnsight users hit, keyed by its message text, with the page that explains cause and fix.
 tags: [error, index]
-related: [docs/concepts/threading-and-mediators.md, docs/concepts/interleaver-and-controller.md, docs/usage/trace.md]
-sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/envoy.py, src/nnsight/tracing/util.py]
+related: [docs/index.md, docs/errors/symptom-index.md, docs/errors/debug-mode.md]
+sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/source.py]
 ---
 
 # Errors Index
 
-The exceptions nnsight raises, with the real class, the real message text, and the
-page that explains the cause and fix.
+Up: [docs/index.md](../index.md) — all sections.
 
-When code inside a `with model.trace(...):` block raises, nnsight cleans the
-traceback (`clean_traceback`, `src/nnsight/tracing/util.py:139`) so the top frames
-point at your own source rather than nnsight's plumbing. The exception type is
-preserved — `except ValueError:` / `except IndexError:` still work. See
-[debug-mode.md](debug-mode.md) for what `CONFIG.APP.DEBUG` does.
+Find the message you saw. If nothing raised and the result is wrong or missing, or
+the error is plain Python rather than an nnsight type and is not listed below, use
+[symptom-index.md](symptom-index.md) instead.
 
-## Execution-order errors
+Tracebacks from a trace block are cleaned so the top frames are your own code; the
+exception type is preserved, so `except ValueError:` still works.
+[debug-mode.md](debug-mode.md) covers what `CONFIG.APP.DEBUG` puts back.
 
-Raised when an intervention asks for a value the model never delivered, or asks in
-the wrong order. There is one class for both: `OutOfOrderError`
-(`src/nnsight/intervention/interleaver.py:83`).
+## Execution order
 
 | Exception | Message | Doc |
 |---|---|---|
-| `OutOfOrderError` | ``'<location>.i0' was requested but the model already ran past it`` | [out-of-order-error.md](out-of-order-error.md) |
-| `OutOfOrderError` (dangling worker) | ``'<location>.i0' was requested but the model already ran past it`` — raised at the end of the run for a worker still waiting on a location that never fired | [value-was-not-provided.md](value-was-not-provided.md) |
-| `UserWarning` (not an exception) | ``'<location>' was never reached: the loop asked for a step the run did not make, so it was cut short — values saved inside the loop are kept, and the statements after it did not run. …`` — an `iter` loop, bounded or open, that outran the model | [value-was-not-provided.md](value-was-not-provided.md) |
+| `OutOfOrderError` | ``'<location>.i0' was requested but the model already ran past it`` — asked in the wrong order | [out-of-order-error.md](out-of-order-error.md) |
+| `OutOfOrderError` | the same message, for a location the model never reached (module didn't fire, skipped parent) | [module-never-fired.md](module-never-fired.md) |
+| `OutOfOrderError` | ``'<id>.grad.i0' was requested …`` — a numeric location is a `.grad` | [backward-and-grad.md](../usage/backward-and-grad.md) |
+| `UserWarning` | ``'<location>' was never reached: the loop asked for a step the run did not make, so it was cut short …`` | [iteration.md](../usage/iteration.md#the-one-rule) |
 
+The first two rows share one message. If the same invoke read a later location
+before this one, it was asked in the wrong order; if nothing later was read, the
+module never fired.
 
-## Setup / context errors
+## Plain Python errors
 
-Raised when an Envoy value is accessed outside a live trace, `save()` is called
-outside a trace, a trace has nothing to run, invokes are nested, or batching is
-unsupported.
+| Exception | Message | Doc |
+|---|---|---|
+| `NameError` / `UnboundLocalError` | ``name 'X' is not defined`` (or ``cannot access local variable 'X' …``) on a name used **after** the trace block — it was not saved, so it never bound back | [save.md](../usage/save.md) |
+| `NameError` | the same, **inside** the trace body, on a name an invoke saved — code between invokes runs before the invokes do | [invoke-and-batching.md](../usage/invoke-and-batching.md#code-between-invokes-runs-first) |
+
+## Context and setup
 
 | Exception | Message | Doc |
 |---|---|---|
@@ -43,38 +47,35 @@ unsupported.
 | `ValueError` | ``trace() needs an input, or at least one `with tracer.invoke(...)` block`` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
 | `ValueError` | ``Cannot invoke while the model is already running.`` | [invoke-during-execution.md](invoke-during-execution.md) |
 | `NotImplementedError` | ``<ModelClass> does not support batching multiple invokes`` | [batching-not-implemented.md](batching-not-implemented.md) |
-| `WithBlockNotFoundError` | ``nnsight found no `with` statement at <file>:<line>, the line the trace was entered from. …`` | [with-block-not-found.md](with-block-not-found.md) |
 
-## Tracing / capture errors
+## Capturing the block
 
-Raised while capturing the `with` block's source.
-
-| Exception | Message | Source / fix |
+| Exception | Message | Doc |
 |---|---|---|
-| `ValueError` | ``The body of a traced `with` must start on its own line; nnsight runs the body itself, and can only intercept it at the start of a line.`` | `src/nnsight/tracing/tracer.py:76`. Move the body off the `with` line: never write `with model.trace(x): out = ...`; put `out = ...` on the next, indented line. |
-| `WithBlockNotFoundError` | ``nnsight has no source for <file>, so it cannot read the body of the `with` block at line <line>. …`` | `src/nnsight/tracing/tracer.py`. There is no source to read the block from: a script piped in on stdin, or an `exec`'d string not registered in `linecache`. Run the file by name. See [with-block-not-found.md](with-block-not-found.md). |
-| `WithBlockNotFoundError` | ``nnsight found no `with` statement at <file>:<line>, the line the trace was entered from … Either the tracer wasn't used as a `with` block … or the source nnsight read for this file is stale`` | `src/nnsight/tracing/tracer.py`. The file is on disk but has no `with` at that line: the source was read before an edit moved it (restart the process), or the tracer was entered without a `with` block. |
-| `WithBlockNotFoundError` | ``nnsight found no `with` statement at <file>:<line>, the line the trace was entered from … nnsight compiles the block's own body to run it`` | `src/nnsight/tracing/tracer.py`. Source was recovered but its line numbers don't match the running code — a cell magic that rewrites the cell (`%%time`), or generated source out of step with its `linecache` entry. |
+| `WithBlockNotFoundError` | ``nnsight found no `with` statement at <file>:<line> …`` / ``nnsight has no source for <file> …`` | [with-block-not-found.md](with-block-not-found.md) |
+| `ValueError` | ``A traced `with` block cannot start with `try:` …`` | [with-block-not-found.md](with-block-not-found.md#a-trace-body-that-starts-with-try) |
+| `ValueError` | ``The body of a traced `with` must start on its own line …`` | [with-block-not-found.md](with-block-not-found.md#a-body-on-the-with-line) |
+| `SyntaxError` | ``'return' outside function`` | [with-block-not-found.md](with-block-not-found.md#return-inside-a-trace-body) |
 
-## Coordination errors
+## Values and features
 
-Raised when trace blocks are wired together incorrectly (see
-[docs/usage/](../usage/) for `barrier` / `skip`).
-
-| Exception | Message | Source / fix |
+| Exception | Message | Doc |
 |---|---|---|
-| `ValueError` | ``A barrier was never reached by every block it waits for; check the count it was created with`` | `src/nnsight/intervention/interleaver.py:631`. `tracer.barrier(n)` was created for more blocks than actually call it. Pass the real number of blocks that hold the barrier. |
-| `ValueError` | ``A batched `.skip()` has to cover every row: skip the module in every invoke, or none — a shared forward can't run for only the rows an invoke left unskipped.`` | `src/nnsight/intervention/batching.py:164`. When batching multiple invokes, either `.skip()` a module in *every* invoke or in none. |
+| `TypeError` | ``'tuple' object does not support item assignment`` — writing `module.output[0] = x` on a tuple output | [access-and-modify.md](../usage/access-and-modify.md#tuple-outputs) |
+| `NotImplementedError` | ``This tensor does not require grad, so a backward session cannot produce gradients …`` — inside `generate`, or a frozen model | [backward-and-grad.md](../usage/backward-and-grad.md#limits) |
+| `RuntimeError` | ``cannot register a hook on a tensor that doesn't require gradient`` | [backward-and-grad.md](../usage/backward-and-grad.md#limits) |
+| `SourceNotAvailable` | ``'<op>' calls a submodule; call `.source` on that submodule directly …``, ``recursive `.source` is only available inside a trace``, or no Python source | [source.md](../usage/source.md#when-source-isnt-available) |
+| `GuardOnDataDependentSymNode` | ``Could not guard on data-dependent expression …`` — branching on, or converting, a fake value under `scan` | [scan.md](../usage/scan.md#what-a-scan-cannot-tell-you) |
+| `ValueError` | ``A barrier was never reached by every block it waits for; check the count it was created with`` | [barrier.md](../usage/barrier.md) |
+| `ValueError` | ``A batched `.skip()` has to cover every row …`` | [skip.md](../usage/skip.md) |
+| `AttributeError` | ``module 'nnsight' has no attribute 'list'`` (or `apply`, `session`, …); ``'Tensor' object has no attribute 'value'`` | [migrating-to-0.8.md](../reference/migrating-to-0.8.md) |
+| `NNsightDeprecationWarning` | ``<name> is deprecated; use <replacement> instead.`` | [migrating-to-0.8.md](../reference/migrating-to-0.8.md#deprecated--warn-under-nnsightdeprecationwarning) |
 
-## Remote execution
+## Remote
 
-`RemoteBackend` (`src/nnsight/intervention/backends/remote.py`) raises `RemoteError`
-on a failed submission or a server-side `ERROR` status. A deferred worker error from
-a driver like vLLM is re-raised at the client as a `RuntimeError` carrying the
-original type/message/traceback (`src/nnsight/intervention/errors.py:45`).
-
-## Debugging
-
-| Topic | Doc |
-|---|---|
-| What `CONFIG.APP.DEBUG` does, and how tracebacks are cleaned | [debug-mode.md](debug-mode.md) |
+`RemoteBackend` raises `RemoteError` on a failed submission or a server-side `ERROR`
+status. A worker error from a deferring driver (vLLM) is re-raised at the client as
+a `RuntimeError` carrying the original type, message and traceback — see
+[debug-mode.md](debug-mode.md#errors-from-a-deferring-driver). For failures that
+only happen remotely, see [remote-trace.md](../remote/remote-trace.md#gotchas) and
+[env-comparison.md](../remote/env-comparison.md).

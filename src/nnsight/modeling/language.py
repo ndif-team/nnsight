@@ -50,7 +50,10 @@ class LanguageModel(TransformersModel):
             setattr(self.tokenizer, key, value)
 
     def _remoteable_class(self) -> type:
-        # A deprecated alias for TransformersModel: share its remote key (and so
-        # VisionLanguageModel's, which inherits this) so a model deployed as a
-        # TransformersModel is reachable when wrapped as either of them.
+        # A deprecated alias for TransformersModel: share its remote key (and
+        # so VisionLanguageModel's, which inherits this). Since the task is part
+        # of the key and this class pins one, the shared key reaches the same
+        # deployment only when the tasks agree — LanguageModel around a
+        # checkpoint whose inferred task isn't text-generation names a
+        # different deployment than a bare TransformersModel would.
         return TransformersModel

@@ -1,24 +1,23 @@
 ---
 title: Remote Trace
-one_liner: Run a single forward-pass trace on NDIF by passing remote=True.
+one_liner: Run a single forward-pass trace on NDIF by passing remote=True; the canonical first remote run and the request lifecycle.
 tags: [remote, ndif, trace]
 related: [docs/remote/index.md, docs/remote/remote-session.md, docs/remote/non-blocking-jobs.md, docs/usage/trace.md]
-sources: [src/nnsight/modeling/mixins/remotable.py:19, src/nnsight/intervention/backends/remote.py:39, src/nnsight/intervention/backends/remote.py:304]
+sources: [src/nnsight/modeling/mixins/remotable.py, src/nnsight/intervention/backends/remote.py]
 ---
 
 # Remote Trace
 
 ## What this is for
 
-`model.trace(input, remote=True)` is the simplest way to execute an intervention on NDIF. It's the same `trace` you call locally — you just add `remote=True`, and the backend serializes the traced block, ships it over HTTP, and waits on a websocket for completion.
+`model.trace(input, remote=True)` runs an intervention on NDIF. It is the same `trace` you call locally; `remote=True` makes the backend serialize the traced block, send it to the server, and wait for the saved values.
 
 ## When to use / when not to use
 
-- Use for one-off remote runs.
-- Use when working with a model too large to load locally.
-- For multiple traces in a row, prefer `model.session(remote=True)` to share one queue wait — see [remote-session.md](./remote-session.md).
-- For long-running jobs you don't want to block on, use `blocking=False` — see [non-blocking-jobs.md](./non-blocking-jobs.md).
-- To await a job from an event loop, use `AsyncRemoteBackend` — see [remote-async.md](./remote-async.md).
+- Use for one-off remote runs, or any model too large to load locally.
+- For several traces in a row, use `model.session(remote=True)` to share one queue wait — see [remote-session.md](./remote-session.md).
+- To submit and poll later, use `blocking=False` — see [non-blocking-jobs.md](./non-blocking-jobs.md). To await from an event loop, see [remote-async.md](./remote-async.md).
+- To check the block serializes and ships before submitting, dry-run it with `remote="local"` — see [ndif-overview.md](./ndif-overview.md#dry-run-the-remote-path-with-remotelocal).
 
 ## Canonical pattern
 
@@ -27,7 +26,7 @@ from nnsight import TransformersModel, CONFIG
 
 CONFIG.set_default_api_key("YOUR_KEY")
 
-model = TransformersModel("meta-llama/Llama-3.1-70B")   # builds on meta device
+model = TransformersModel("meta-llama/Llama-3.1-70B")   # builds on the meta device
 
 with model.trace("The Eiffel Tower is in the city of", remote=True):
     logit = model.lm_head.output[0][-1].argmax(dim=-1).save()
@@ -35,69 +34,44 @@ with model.trace("The Eiffel Tower is in the city of", remote=True):
 print(model.tokenizer.decode(logit))   # ' Paris'
 ```
 
-What happens under the hood (`src/nnsight/modeling/mixins/remotable.py:31` and `src/nnsight/intervention/backends/remote.py:304`):
+## Request lifecycle
 
-1. `trace(remote=True)` builds `RemoteBackend(self.to_model_key(), env=…, blocking=True)`.
-2. On `__exit__`, the traced block is serialized to (optionally compressed) bytes.
-3. A websocket connects to `{HOST}/subscribe` and receives a session id.
+The blocking path (`RemoteBackend.request`):
+
+1. `trace(remote=True)` builds `RemoteBackend(model.to_model_key(), ...)`; the block is captured on `__exit__`.
+2. Local (non-installed) modules are registered for by-value pickling (`pull_env`), then the block is serialized, optionally compressed (`RequestModel.serialize`).
+3. A websocket connects to `{HOST}/subscribe` and receives a session id — subscribing first means no update is missed.
 4. The payload is POSTed to `{HOST}/request`; the initial `RECEIVED` response returns over HTTP.
-5. The client reads status updates off the websocket until `COMPLETED` or `ERROR`.
-6. On `COMPLETED`, the result is downloaded from a presigned URL, decompressed, `torch.load`ed, and pushed back into your frame.
+5. The client reads status updates off the websocket until `COMPLETED` or `ERROR` (status values: [ndif-overview.md](./ndif-overview.md#job-status-values)).
+6. On `COMPLETED`, the result arrives either inline on the websocket or, depending on its size, as a presigned URL the client downloads. Either way it is decompressed, loaded with `torch.load(..., map_location="cpu")`, and pushed back into your frame, so your saved variables populate.
 
-## Try it offline first with remote="local"
+## .save() is what comes back
 
-`remote="local"` runs the exact serialize/deserialize/execute path in-process against your local (dispatched) model — no server, no key. It's the fastest way to catch a serialization or missing-module problem before submitting for real:
-
-```python
-from nnsight import TransformersModel
-
-model = TransformersModel("openai-community/gpt2", dispatch=True)
-
-with model.trace("The Eiffel Tower is in the city of", remote="local"):
-    logit = model.lm_head.output[0][-1].argmax(dim=-1).save()
-
-print(model.tokenizer.decode(logit))   # ' Paris'
-```
-
-## .save() is the transmission mechanism
-
-Only values touched by `.save()` (or `nnsight.save(...)`) are returned. Everything else is local to the server run and discarded after the job finishes.
+Only values marked with `.save()` (or `nnsight.save(...)`) are returned; everything else stays on the server and is discarded. Your local variable name is matched to the saved value when the result is pushed back.
 
 ```python
 with model.trace("Hello", remote=True):
-    hidden = model.transformer.h[5].output          # not saved -> not returned
-    answer = model.lm_head.output[0][-1].argmax(dim=-1).save()   # returned
-
-# 'hidden' is undefined here; 'answer' is a real tensor.
+    hidden = model.model.layers[5].output                          # not returned
+    answer = model.lm_head.output[0][-1].argmax(dim=-1).save()     # returned
 ```
 
-Your local variable name is matched to the saved value when the result is pushed back into your frame.
-
-## Move tensors to CPU before saving
-
-Saved values are pickled and shipped over HTTPS. The deserializer always uses `torch.load(..., map_location="cpu")` (`src/nnsight/intervention/backends/remote.py:196`), so tensors land on CPU locally regardless. Calling `.detach().cpu()` inside the block still helps for large activations — it drops the autograd graph and does the conversion server-side, where the tensor already lives, instead of shipping an autograd-attached payload:
-
-```python
-with model.trace("Hello", remote=True):
-    hidden = model.transformer.h[0].output.detach().cpu().save()
-```
+Saved tensors always land on CPU. Calling `.detach().cpu()` before `.save()` on a large activation still helps: it drops the autograd graph and converts server-side, where the tensor lives.
 
 ## Print statements appear as LOG status
 
-Anything you `print(...)` inside the block runs on the server and is forwarded as a `LOG` response, rendered inline by the status display:
+`print(...)` inside the block runs on the server and is forwarded as a `LOG` update, rendered inline by the status display:
 
 ```python
 with model.trace("Hello", remote=True):
-    h = model.transformer.h[0].output
-    print(f"hidden mean: {h.mean()}")     # rendered as: ℹ [job-id] LOG  hidden mean: ...
+    print(f"hidden mean: {model.model.layers[0].output.mean()}")   # ℹ [job-id] LOG  hidden mean: ...
     out = model.lm_head.output.save()
 ```
 
-To silence remote logging (and the spinner), set `CONFIG.APP.REMOTE_LOGGING = False`.
+Set `CONFIG.APP.REMOTE_LOGGING = False` to silence remote logging and the spinner.
 
 ## Generation
 
-`model.generate(input, max_new_tokens=N, remote=True)` runs the model and returns **token ids**. Read them off `tracer.result`:
+`model.generate(..., remote=True)` returns **token ids** (prompt plus new tokens); read them off `tracer.result`:
 
 ```python
 with model.generate("Hello", max_new_tokens=5, do_sample=False, remote=True) as tracer:
@@ -106,46 +80,34 @@ with model.generate("Hello", max_new_tokens=5, do_sample=False, remote=True) as 
 print(model.tokenizer.decode(output[0]))
 ```
 
-`tracer.result` is the generation output (prompt ids plus the new tokens). Use `for _ in tracer.iter[:N]:` for per-step interventions inside generation; see [docs/usage/generate.md](../usage/generate.md). (`model.generate` returns ids; `model.pipe` runs the whole task pipeline and returns its decoded records.)
+For per-step interventions use `tracer.iter[:N]` — see [docs/usage/generate.md](../usage/generate.md).
 
 ## Custom host or pre-built backend
 
-```python
-# Hit a custom server URL (string form of `remote`)
-with model.trace("...", remote="https://self-hosted.example.com"):
-    out = model.lm_head.output.save()
+Pointing at another server (`remote="https://..."`, `CONFIG.API.HOST`, `NDIF_HOST`) is covered in [api-key-and-config.md](./api-key-and-config.md#pointing-at-a-different-host). To override host, key or verbosity for one call, build the backend yourself:
 
-# Construct RemoteBackend manually for advanced cases
+```python
 from nnsight.intervention.backends.remote import RemoteBackend
 
-backend = RemoteBackend(
-    model.to_model_key(),
-    host="https://api.ndif.us",
-    api_key="...",          # overrides CONFIG.API.APIKEY
-    blocking=True,
-    verbose=True,
-)
+backend = RemoteBackend(model.to_model_key(), host="https://ndif.example.com", api_key="...")
 
 with model.trace("...", backend=backend):
     out = model.lm_head.output.save()
 ```
 
-`RemoteBackend.__init__` is at `src/nnsight/intervention/backends/remote.py:47`; its parameters are `model_key, host, api_key, env, blocking, job_id, verbose`. (There is no `callback`/webhook parameter.)
-
 ## Gotchas
 
-- Variables created **outside** the trace and mutated inside it won't be transmitted back. Create and `.save()` the value *inside* the block — see [remote-session.md](./remote-session.md).
-- The model identifier passed to `TransformersModel` must match an NDIF deployment. Run `nnsight.is_model_running("...")` before submitting.
-- A GPT-2 block's `.output` is a plain tensor `(batch, seq, hidden)` in current transformers — `model.transformer.h[i].output` selects the first batch row. Attention submodules still return a tuple; don't assume — check `model.transformer.h[i].source`.
-- A `LOG` line that prints a multi-megabyte tensor floods the websocket. Print summaries, not raw tensors.
-- Local helper modules (anything not installed on the server) ship automatically via `pull_env`, or register them with `nnsight.register(...)`. See [register-local-modules.md](./register-local-modules.md).
-- Define helpers at module scope. Dynamically created functions (lambdas built in loops, `exec`-ed code) can confuse the source-based serializer.
+- **Mutating a variable created outside the block changes only the server's copy.** Create and `.save()` the value inside the block, or call `nnsight.save(outer)` inside it, which rebinds the client's name to the server's version — see [remote-session.md](./remote-session.md#saving-collections-built-across-traces).
+- **Tensors from the client arrive as they were locally: CPU, usually float32.** The server's model is half-precision and may be sharded, and an undispatched client model reports `meta` as its device, so nothing can be hard-coded. Derive device and dtype from an activation, per use: `hidden[:, -1] += direction.to(hidden.device, hidden.dtype)`. Tensors built inside the block (`torch.randn(...)`) default to CPU float32 too.
+- **A class you ship must call `super(MyClass, self).__init__()`.** Bare `super()` needs a `__class__` cell that only a class body creates; the server rebuilds the class from source outside one and raises `RuntimeError: super(): __class__ cell not found`.
+- Local helper modules ship automatically or via `nnsight.register(...)` — see [register-local-modules.md](./register-local-modules.md). Define helpers at module scope; dynamically created functions (lambdas built in loops, `exec`-ed code) can confuse the source-based serializer.
+- "Works locally, fails remotely": run `print(nnsight.compare())` — it returns an object, so without `print` you see nothing. See [env-comparison.md](./env-comparison.md).
+- The model identifier must match an NDIF deployment; check with `nnsight.is_model_running("...")`.
+- A `LOG` line that prints a multi-megabyte tensor floods the websocket. Print summaries.
 
 ## Related
 
-- [ndif-overview.md](./ndif-overview.md) — full request lifecycle.
+- [ndif-overview.md](./ndif-overview.md) — status values, job cost, `remote="local"`.
 - [remote-session.md](./remote-session.md) — multiple traces in one queue wait.
-- [non-blocking-jobs.md](./non-blocking-jobs.md) — submit and poll later.
-- [remote-async.md](./remote-async.md) — await a job from an event loop.
-- [register-local-modules.md](./register-local-modules.md) — when the server can't import your code.
+- [non-blocking-jobs.md](./non-blocking-jobs.md), [remote-async.md](./remote-async.md) — submit and poll, or await.
 - [docs/usage/trace.md](../usage/trace.md) — local tracing.

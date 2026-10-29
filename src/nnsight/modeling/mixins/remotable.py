@@ -253,9 +253,7 @@ class Remotable(Meta):
         raise NotImplementedError()
 
     @classmethod
-    def _remoteable_estimate_bytes(
-        cls, model_key: str, dtype: str, trust_remote_code: bool = False
-    ) -> int:
+    def _remoteable_estimate_bytes(cls, model_key: str, dtype: str) -> int:
         """Size this checkpoint's weights, given the key suffix.
 
         Base default: build the architecture on the meta device and count what
@@ -268,9 +266,7 @@ class Remotable(Meta):
         cannot use (a 4-bit quantization has no torch dtype to build with).
         """
         model = cls.from_model_key(
-            f"{to_import_path(cls)}:{model_key}",
-            dispatch=False,
-            trust_remote_code=trust_remote_code,
+            f"{to_import_path(cls)}:{model_key}", dispatch=False
         )
         module = model._module
         elements = sum(p.nelement() for p in module.parameters())
@@ -279,7 +275,7 @@ class Remotable(Meta):
 
     @classmethod
     def _remoteable_describe_checkpoint(
-        cls, model_key: str, dtype: str, trust_remote_code: bool = False
+        cls, model_key: str, dtype: str
     ) -> "CheckpointInfo":
         """Everything a placement decision needs, from one look at the checkpoint.
 
@@ -289,15 +285,11 @@ class Remotable(Meta):
         config can answer every field from the *same* read.
         """
         return CheckpointInfo(
-            size_bytes=cls._remoteable_estimate_bytes(
-                model_key, dtype, trust_remote_code=trust_remote_code
-            )
+            size_bytes=cls._remoteable_estimate_bytes(model_key, dtype)
         )
 
     @classmethod
-    def _remoteable_max_tp_size(
-        cls, model_key: str, trust_remote_code: bool = False
-    ) -> Optional[int]:
+    def _remoteable_max_tp_size(cls, model_key: str) -> Optional[int]:
         """The largest tensor-parallel degree this checkpoint supports.
 
         Base default: ``None`` — a wrapper says nothing about tensor parallelism
@@ -350,7 +342,7 @@ class Remotable(Meta):
         return model_cls._remoteable_from_model_key(model_key, **kwargs)
 
     @classmethod
-    def estimate_bytes(cls, model_key: str, dtype: str, **kwargs: Any) -> int:
+    def estimate_bytes(cls, model_key: str, dtype: str) -> int:
         """How much memory this checkpoint's weights need, without loading them.
 
         Resolves the wrapper class from the key the same way
@@ -367,12 +359,10 @@ class Remotable(Meta):
         """
         import_path, suffix = model_key.split(":", 1)
         model_cls: type[Remotable] = from_import_path(import_path)
-        return model_cls._remoteable_estimate_bytes(suffix, dtype, **kwargs)
+        return model_cls._remoteable_estimate_bytes(suffix, dtype)
 
     @classmethod
-    def describe_checkpoint(
-        cls, model_key: str, dtype: str, **kwargs: Any
-    ) -> "CheckpointInfo":
+    def describe_checkpoint(cls, model_key: str, dtype: str) -> "CheckpointInfo":
         """What this checkpoint is, without loading it.
 
         One call rather than one per question, because the questions a server
@@ -388,10 +378,10 @@ class Remotable(Meta):
         """
         import_path, suffix = model_key.split(":", 1)
         model_cls: type[Remotable] = from_import_path(import_path)
-        return model_cls._remoteable_describe_checkpoint(suffix, dtype, **kwargs)
+        return model_cls._remoteable_describe_checkpoint(suffix, dtype)
 
     @classmethod
-    def max_tp_size(cls, model_key: str, **kwargs: Any) -> Optional[int]:
+    def max_tp_size(cls, model_key: str) -> Optional[int]:
         """The largest number of ranks this checkpoint's weights split into.
 
         ``None`` when the model cannot be tensor-parallel at all. Otherwise the
@@ -402,4 +392,4 @@ class Remotable(Meta):
         """
         import_path, suffix = model_key.split(":", 1)
         model_cls: type[Remotable] = from_import_path(import_path)
-        return model_cls._remoteable_max_tp_size(suffix, **kwargs)
+        return model_cls._remoteable_max_tp_size(suffix)

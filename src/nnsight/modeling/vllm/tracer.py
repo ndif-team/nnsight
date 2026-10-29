@@ -104,7 +104,7 @@ class VLLMTracer(InterleavingTracer):
                 # on success would hand back a frame with none of the values that
                 # did arrive — including the ones from the invokes that finished.
                 for mediator in mediators:
-                    push_result(self.info.frame, mediator.lcls)
+                    push_result(self.info.frame, mediator.lcls.writes())
         finally:
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before it doesn't leave workers/batcher behind.

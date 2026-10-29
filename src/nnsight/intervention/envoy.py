@@ -47,6 +47,7 @@ from __future__ import annotations
 import functools
 import inspect
 import warnings
+import weakref
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 import torch
@@ -61,6 +62,7 @@ from .interleaver import (
     Interleaver,
     Mediator,
 )
+from . import aliasing
 from .batching import Batcher
 from .editing import EditingTracer
 from .eproperty import eproperty
@@ -124,6 +126,8 @@ class Envoy:
         _module: The wrapped `torch.nn.Module`.
         _edits: Default interventions registered by [`edit`][nnsight.intervention.envoy.Envoy.edit], replayed on every
             trace (a list of [`Mediator`][nnsight.intervention.interleaver.Mediator]).
+        _parent: A weak reference to the envoy whose `_children` holds this one,
+            or ``None`` on the root. Read it through [`parent`][nnsight.intervention.envoy.Envoy.parent].
         _children: The child envoys this envoy owns, in module order — one per
             module, so a module the tree already wraps elsewhere is not in it.
         _child_map: Every entry of the wrapped module's ``_modules``, by name and
@@ -136,9 +140,15 @@ class Envoy:
         module: torch.nn.Module,
         path: str = "model",
         interleaver: Interleaver | None = None,
-        rename: dict[str, str | list[str]] | None = None,
+        rename: dict[str | type, str | list[str]] | None = None,
         envoys: dict | None = None,
+        parent: Envoy | None = None,
     ) -> None:
+        # Weak, so no envoy keeps its ancestors (and the model) alive: the tree is
+        # owned top-down through `_children`, and `del model` frees it by
+        # refcounting. Set before the children are built, so it is in place
+        # while they are.
+        self._parent = weakref.ref(parent) if parent is not None else None
         self._module = module
         self.path = path
         self.interleaver = interleaver if interleaver is not None else Interleaver()
@@ -152,7 +162,7 @@ class Envoy:
         # Default interventions registered via .edit(), replayed on every trace.
         self._edits: list[Mediator] = []
 
-        # Module-name aliases (see `rename` / `_bind_aliases`). `_rename` is
+        # Module-name aliases (see `rename` / `aliasing.bind`). `_rename` is
         # the raw spec, inherited by children; `_aliases` maps each alias bound on
         # *this* envoy to the real path it resolved from (used by `__repr__`).
         self._rename = rename
@@ -174,7 +184,7 @@ class Envoy:
                 self._add_envoy(name, child)
 
         # Children exist now, so multi-component alias paths (e.g. "h.0") resolve.
-        self._bind_aliases()
+        aliasing.bind(self)
 
     #: Prefix for a submodule mounted under a name nnsight already serves.
     OVERLOAD_PREFIX = "E_"
@@ -227,6 +237,7 @@ class Envoy:
                 interleaver=self.interleaver,
                 rename=self._rename,
                 envoys=self._envoys,
+                parent=self,
             )
             if index is None:
                 self._children.append(envoy)
@@ -261,86 +272,6 @@ class Envoy:
         )
         return named
 
-    def _bind_aliases(self) -> None:
-        """Bind each ``rename`` alias as an attribute pointing at the same Envoy.
-
-        For every ``path -> alias(es)`` entry, resolve ``path`` *relative to this
-        envoy*; if it names a descendant envoy, bind each alias as an attribute on
-        this envoy pointing at that same descendant object. Because every envoy in
-        the tree runs this, a single-component path like ``"mlp"`` binds wherever
-        it resolves (each block that has one), while a multi-component path like
-        ``"transformer.h.3.mlp"`` binds only on the envoy it resolves from. A
-        leading dot is a no-op — path components are matched by name (an empty
-        first component is skipped, mirroring `nnsight.util.fetch_attr`).
-
-        A key that does not resolve here is skipped, not an error: one ``rename``
-        is meant to be reusable across architectures that spell the same module
-        differently (``{"attn": "att", "self_attn": "att"}``), and on any given
-        envoy only one of those spellings exists.
-
-        An alias that would *displace* something is an error, because there is
-        no spelling of it that works. Three things can be underneath: another
-        alias from an earlier key, a name on the envoy (a child, its own state,
-        or an `Envoy` attribute like ``output`` or ``trace``), or a name on the
-        wrapped module — an alias lands in ``__dict__`` and so wins over the
-        ``__getattr__`` fallthrough, silently shadowing the model's own
-        ``config``, ``weight``, ``eval`` and the rest.
-
-        Aliases are ordinary attributes referencing the *same* child object (not
-        copies, and not added to `_children`), so ``__getattr__`` needs no
-        alias branch, iteration doesn't double-count, and re-pointing the tree on
-        dispatch (`_update`, in place) keeps them valid with no rebuild.
-        """
-        if not self._rename:
-            return
-        for path, aliases in self._rename.items():
-            path = path.lstrip(".")
-            try:
-                target = self.get(path)
-            except AttributeError:
-                continue
-            if not isinstance(target, Envoy):
-                continue
-            for alias in [aliases] if isinstance(aliases, str) else aliases:
-                # Already pointing at this very envoy: nothing is displaced.
-                # Covers a key aliased to its own name (``{"attn": "attn"}``,
-                # which a cross-architecture dict pairs with
-                # ``{"self_attn": "attn"}``) and two keys reaching one module
-                # through tied weights.
-                if self.__dict__.get(alias) is target:
-                    continue
-
-                # What the name would displace, in the order lookup would find
-                # it. `hasattr` is right for the module and wrong for the envoy:
-                # an eproperty's `__get__` raises outside interleaving, so the
-                # envoy's own classes are scanned by namespace instead.
-                bound = self._aliases.get(alias)
-                if bound is not None:
-                    displaced = f"the alias already bound here from {bound!r}"
-                elif alias in self.__dict__:
-                    displaced = "a child module or attribute of that name"
-                elif any(alias in vars(klass) for klass in type(self).__mro__):
-                    displaced = f"the `{type(self).__name__}.{alias}` attribute"
-                elif hasattr(self._module, alias):
-                    # The same test `__getattr__` gates its fallthrough on, so
-                    # this is the shadowing surface exactly: every name it finds
-                    # is one `envoy.<name>` answers to today.
-                    displaced = "an attribute of the wrapped module"
-                else:
-                    displaced = None
-
-                if displaced is not None:
-                    raise ValueError(
-                        f"`rename` alias {alias!r} for {path!r} would shadow "
-                        f"{displaced} on `{self.path}`. Aliases are bound as plain "
-                        f"attributes, so this would make the original unreachable "
-                        f"by name while leaving it in the tree. Pick a different "
-                        f"alias."
-                    )
-
-                object.__setattr__(self, alias, target)
-                self._aliases[alias] = path
-
     def _add_envoy(self, name: str, module: torch.nn.Module) -> Envoy:
         # Register a (possibly new) module on self._module, then mirror it.
         self._module.add_module(name, module)
@@ -349,50 +280,73 @@ class Envoy:
     def _resolve_envoy_class(self, module: torch.nn.Module, path: str) -> type["Envoy"]:
         """The [`Envoy`][nnsight.intervention.envoy.Envoy] class to wrap ``module`` (at ``path``) with.
 
-        Consults the `_envoys` map (``None`` -> the base [`Envoy`][nnsight.intervention.envoy.Envoy]): a
-        single class wraps every child with it; a dict's keys are either a
-        ``torch.nn.Module`` subclass (matched against the module's MRO, tried
-        first) or a string dotted path-suffix (``"attn"``, ``"transformer.h"``).
-        Falls back to the base [`Envoy`][nnsight.intervention.envoy.Envoy] when nothing matches — so a model can
-        give, e.g., its attention modules a subclass exposing a ``.heads`` eproperty.
+        `_envoys` is ``None`` (the base `Envoy`), a single class for every module,
+        or a dict tried in this order: a ``torch.nn.Module`` subclass key on the
+        module's MRO; a dotted path-suffix key (``"attn"``, ``"transformer.h"``,
+        ``"layers.*"``) on the native path; the same on each other spelling of the
+        path under the ``rename`` aliases (see `aliasing.spellings`), so one map written
+        in aliased names (``{"layers.0.self_attn": Attn}``) serves every
+        architecture the rename covers. Nothing matching gives the base `Envoy`.
+        The class is chosen once, here, as the envoy is built.
         """
         mapping = self._envoys
-        if mapping is None:
-            return Envoy
-        if isinstance(mapping, type):
-            return mapping
+        if mapping is None or isinstance(mapping, type):
+            return mapping or Envoy
         for cls in type(module).__mro__:
             if cls in mapping:
                 return mapping[cls]
-        for key, envoy_cls in mapping.items():
-            if isinstance(key, str) and self._path_ends_with(path, key):
-                return envoy_cls
+        for candidate in aliasing.spellings(self._rename, path, module):
+            for key, envoy_cls in mapping.items():
+                if isinstance(key, str) and aliasing.path_ends_with(candidate, key):
+                    return envoy_cls
         return Envoy
 
-    @staticmethod
-    def _path_ends_with(path: str, key: str) -> bool:
-        """Whether ``path`` ends with dotted ``key`` component-wise (not substring)."""
-        parts = path.split(".")
-        key_parts = key.removeprefix(".").split(".")
-        return len(key_parts) <= len(parts) and parts[-len(key_parts):] == key_parts
+    @property
+    def parent(self) -> Envoy | None:
+        """The envoy whose children include this one, or ``None`` on the root.
+
+        A module the tree reaches by two paths has one envoy, and its parent is
+        the envoy at the first path; an alias (``rename=``) is not a child, so it
+        leaves the parent alone.
+        """
+        return self._parent() if self._parent is not None else None
+
+    @property
+    def root(self) -> Envoy:
+        """The top of the tree: the model envoy, reached by following [`parent`][nnsight.intervention.envoy.Envoy.parent]."""
+        envoy = self
+        while (parent := envoy.parent) is not None:
+            envoy = parent
+        return envoy
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        # The parent link is not pickled (a weakref does not pickle). A parent in
+        # the same payload re-links its children here, which also covers a child
+        # whose parent was rebuilt first; the payload's top envoy has none.
+        self.__dict__.setdefault("_parent", None)
+        for child in self._children:
+            child._parent = weakref.ref(self)
 
     def __getstate__(self) -> dict:
         # For serialization: tag the heavy/server-side objects as persistent so
         # they're referenced by id rather than serialized. The server resolves
         # them from its own model (Module:<path>) and interleaver (Interleaver).
         state = self.__dict__.copy()
+        state.pop("_parent", None)
         state["interleaver"]._persistent_id = "Interleaver"
         state["_module"]._persistent_id = f"Module:{self.path}"
         return state
 
     def _update(self, module: torch.nn.Module) -> None:
-        # Re-point an existing envoy tree at a new module of the same structure
-        # (e.g. swapping meta weights for real ones). instrument() removes this
-        # path's old controller before re-adding, and we recurse over children by
-        # name (as in __init__), so modules shared across paths line up.
+        # Re-point an existing envoy tree at a new module (swapping meta weights
+        # for real ones, or an adapter attached to or taken out of the module in
+        # place). instrument() removes this path's old controller before
+        # re-adding, and we recurse over children by name (as in __init__), so
+        # modules shared across paths line up. Entries the new module lacks are
+        # dropped and entries it gained are mirrored, so the tree is the module's
+        # again; what persists is every envoy of a module that is still there,
+        # with its edits, class and aliases.
         self.interleaver.envoys.pop(id(self._module), None)
         self._module = module
         self.interleaver.envoys[id(module)] = self
@@ -407,6 +361,37 @@ class Envoy:
             # to re-point at, so leave it as-is (it keeps its own module and controller).
             if children.get(name) is not None:
                 child._update(children[name])
+        for name in list(self._child_map):
+            if children.get(name) is None:
+                self._drop_envoy(name)
+        for name, child in children.items():
+            if child is not None and name not in self._child_map:
+                # TODO: a gained entry gets its envoy class from `envoys=` but no
+                # `rename=` alias: aliases bind in `__init__` (`_bind_aliases`)
+                # only, as for any child wrapped after construction.
+                self._wrap_envoy(name, child)
+        # Back in module order, as `__init__` builds them.
+        self._child_map = {name: self._child_map[name] for name in children if name in self._child_map}
+        entries = list(dict.fromkeys(self._child_map.values()))
+        kept = {id(entry) for entry in entries}
+        self._children = entries + [child for child in self._children if id(child) not in kept]
+
+    def _drop_envoy(self, name: str) -> None:
+        # Forget the entry `name` of the wrapped module, which it no longer has:
+        # the attribute it was mounted on and the aliases that reached it. The
+        # envoy itself stays while another entry still shares its module.
+        child = self._child_map.pop(name)
+        attribute = name if self.__dict__.get(name) is child else f"{self.OVERLOAD_PREFIX}{name}"
+        self.__dict__.pop(attribute, None)
+        for alias, path in list(self._aliases.items()):
+            if path == name or path.startswith(f"{name}."):
+                del self._aliases[alias]
+                self.__dict__.pop(alias, None)
+        if any(entry is child for entry in self._child_map.values()):
+            return
+        self._children = [entry for entry in self._children if entry is not child]
+        if self.interleaver.envoys.get(id(child._module)) is child:
+            del self.interleaver.envoys[id(child._module)]
 
     def trace(
         self,
@@ -951,6 +936,15 @@ class Envoy:
         """The number of entries in the wrapped module (e.g. a ``ModuleList``'s length)."""
         return len(self._module)
 
+    def __bool__(self) -> bool:
+        """Truthy exactly when the wrapped module is.
+
+        Defined so truthiness does not fall back to `__len__`, which only a
+        container module answers. An empty `ModuleList` is falsy here as it is
+        in torch, and a plain module is truthy, the way `nn.Module` is.
+        """
+        return bool(self._module)
+
     def get(self, path: str) -> Any:
         """Resolve a dotted ``path`` from this envoy, e.g. ``"transformer.h.0.mlp"``.
 
@@ -1009,6 +1003,10 @@ class Envoy:
                 result.append((envoy.path, envoy) if names else envoy)
 
         walk(self)
+        # `walk` reaches itself through its closure cell, a cycle that holds
+        # `result` (and so every envoy and the model) until a GC pass. Clearing
+        # the cell frees it by refcounting.
+        del walk
         return result
 
     def named_modules(
@@ -1092,7 +1090,7 @@ class Envoy:
                     and attr.name not in seen
                 ):
                     seen.add(attr.name)
-                    eproperty_lines.append(f"({attr.name}): {attr.description}")
+                    eproperty_lines.append(str(attr))
 
         lines = extra_lines + child_lines + eproperty_lines
 

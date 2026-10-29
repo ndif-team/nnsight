@@ -20,9 +20,6 @@ block. Two classes, both in `src/nnsight/intervention/interleaver.py`:
   or a registered edit); runs the block in a greenlet and drives the park/switch
   interaction with the model side.
 
-A worker and the model take strict turns **on one thread**: there are no locks, no
-queues and no worker threads — only greenlet switches.
-
 ## Architecture
 
 ### Park / switch
@@ -51,6 +48,13 @@ value and returns whatever the worker parks on next, or `None` when the worker
 finishes (a greenlet is falsy once it has run to completion, which is what
 `Mediator.alive` tests).
 
+If the worker raises, `Mediator.switch` stashes its traceback on the exception as
+`__intervention_tb__` before the model's frames unwind on top; `Tracer.traceback`
+and `errors.capture_exception` prefer it, so the user sees their own line. Code
+running inside a worker reaches its own mediator with `getcurrent().mediator()`
+(a weakref set on the greenlet); `Mediator.current` wraps it, raising `Cannot
+access ... outside of interleaving` when no worker is running.
+
 ### The event protocol
 
 `Event` has four members:
@@ -76,9 +80,7 @@ form worth reading in an error.
 A provider is a plain string. The controller emits `"{path}.input"`,
 `"{path}.skip"` and `"{path}.output"` for a module; `"result"` is the model's
 return value; operation-level ones are `"{path}.source.relu_0.output"` and so on
-([source-internals.md](source-internals.md)). Envoy properties are thin wrappers:
-`envoy.output` is `Mediator.value("{path}.output")`, `envoy.output = x` is
-`Mediator.swap("{path}.output", x)`.
+([source-internals.md](source-internals.md)).
 
 ### Occurrences
 
@@ -105,20 +107,9 @@ steps.
 
 ## The Mediator class
 
-```python
-code, glbls, lcls   # the captured block, compiled, and its globals / Scope
-copy                # exec against a fresh copy of lcls each run (edits only)
-node                # AST node, kept so an edit can serialize; None server-side
-interleaver         # the run this worker belongs to (set in start)
-batch_group         # [start, size] row range in the combined batch, or None
-worker              # the greenlet, or None before start / falsy after finish
-pending             # the Pending the worker is parked on, or None
-iteration           # pinned step (int) or relaxed (None)
-counts_at_start     # the interleaver's counts when this worker started
-caches              # tracer.cache() caches registered on this worker
-exception           # set only under a deferring interleaver; see below
-presaved            # names marked saved before serialization (edits)
-```
+`Mediator`'s fields (the block and its `Scope`, `batch_group`, `worker`, `pending`,
+`iteration`, `counts_at_start`, `caches`, ...) are listed in the `Attributes:`
+section of its docstring in `src/nnsight/intervention/interleaver.py`.
 
 ### Mediator.handle — draining a visit
 
@@ -133,27 +124,11 @@ location and then assign it before parking elsewhere or finishing. See
 
 ## The Interleaver class
 
-```python
-mediators        # the workers this run serves (a plain list)
-batcher          # the run's Batcher, or None; owns row scoping
-interleaving     # True between __enter__ and __exit__
-busy             # the run has workers (or is recording graphs); the controller's gate
-parked           # locations some worker is parked on — the handoff's fast-path filter
-counts           # location -> visits so far, for the life of the tree
-observers        # location -> the caches that keep it, as (mediator, cache, selection)
-envoys           # module id -> the envoy wrapping it (weak); a second path aliases the first
-fragments        # the runtime's Fragments, or None — makes sharded values whole
-sourced          # op-location -> instrumented callable (per-run; source.py)
-defer_exceptions # record a worker's error on its mediator instead of raising
-```
-
-### instrument
-
-`Interleaver.instrument(envoy)` is called from `Envoy.__init__` for every module,
-and again from `Envoy._update` when weights are swapped in. It lets
-`fragments.instrument(envoy)` record what this module's values are at the handoff,
-then `install_controller(envoy)` installs the module's controller and registers this
-interleaver on it under the envoy's path. See [controller.md](controller.md).
+`Interleaver`'s fields — `mediators`, `batcher`, the `interleaving`/`busy` gate the
+controller reads, the `parked` and `observers` indexes, `counts`, `fragments`,
+`defer_exceptions` — are documented in its docstring in the same file.
+`Interleaver.instrument(envoy)` installs a module's controller; see
+[controller.md](controller.md).
 
 ### reindex
 
@@ -251,47 +226,50 @@ and recorded, and only what follows it is lost. `Interleaver.__exit__` swallows 
 If a worker stops before the model even starts (during `__enter__`'s `start`),
 `Envoy.interleave` catches it directly.
 
+## Caches
+
+`tracer.cache(...)` registers a `Cache` on the calling worker's mediator, and
+`reindex()` records it in `observers` under each location it keeps. `handle`'s
+observe step feeds each such location's post-intervention value to its caches,
+narrowed to the worker's batch rows. A cache sees exactly what the controllers
+surface; nothing extra is installed on the module, and an observed location leaves
+the fast path even when no worker is parked there.
+
 ## Key files / classes
 
-- `src/nnsight/intervention/interleaver.py` — `Event`, `Pending`, `Mediator`
-  (`event`, `value`/`swap`/`skip`/`barrier`, `occurrence`, `start`, `switch`,
-  `handle`), `Interleaver` (`instrument`, `reindex`, `handle`, `__enter__`/`__exit__`,
-  `check_dangling_mediators`, `cancel`).
-- `src/nnsight/intervention/envoy.py` — `Envoy.interleave`. Runs the model + workers.
-- `src/nnsight/intervention/barrier.py` — `Barrier`.
-- `src/nnsight/intervention/iterator.py` — `Iterations.__iter__`. Walks `iteration`.
+- `src/nnsight/intervention/envoy.py` — `Envoy.interleave`, which runs the model
+  and the workers.
+- `src/nnsight/intervention/barrier.py` — `Barrier`;
+  `src/nnsight/intervention/iterator.py` — `Iterations.__iter__`.
 
 ## Lifecycle / sequence
 
-For `with model.trace("hi"): hidden = model.layer.output.save()`:
+The interleaver's part of the [trace lifecycle](./architecture-overview.md#lifecycle--sequence)
+(its steps 6-8), for `with model.trace("hi"): hidden = model.layer.output.save()`:
 
-1. `Envoy.interleave` prepends any edits, then `with self.interleaver:` →
-   `__enter__` sets `interleaving=True`, `start()`s the one worker, reindexes.
-2. `start` switches into the greenlet; the block runs to `model.layer.output` →
-   `Mediator.value("model.layer.output")` → `event` parks it as
-   `Pending(VALUE, "model.layer.output", 0)` and switches back.
-3. The model runs. `model.layer`'s controller calls
+1. `with self.interleaver:` → `__enter__` `start()`s the one worker; the block runs
+   to `model.layer.output` and parks as `Pending(VALUE, "model.layer.output", 0)`.
+2. The model runs. `model.layer`'s controller calls
    `interleaver.handle("model.layer.output", output)`; the worker is parked here
    at occurrence 0, so `switch` hands the value in.
-4. The worker resumes, `.save()`s, and runs to the end of the block → `switch`
-   returns `None`; `pending` is cleared; `alive` is now `False`.
-5. The forward finishes; `interleave` serves the return at `"result"` (no one is
-   parked on it), `check_dangling_mediators()` is a no-op, and the interleaver
-   exits and `cancel`s.
+3. The worker `.save()`s and finishes → `switch` returns `None`; `alive` is `False`.
+4. `interleave` serves `"result"` (nobody parked), `check_dangling_mediators()` is
+   a no-op, and the interleaver exits and `cancel`s.
 
 ## Extension points
 
-- **Serving a value the model doesn't produce.** Call `interleaver.handle(location,
-  value)` from your driver after computing it, and expose it as an `Envoy` property
-  that reads `Mediator.value(location)`. This is how `tracer.result` and vLLM's
-  `.logits`/`.samples` work — no new `Event` type needed.
-- **A driver that keeps running past a worker's error.** Set
-  `interleaver.defer_exceptions = True` and read `mediator.exception` after each
-  step to end that worker's request without tearing down the run.
-- **A driver that reschedules workers per step.** Assign `interleaver.mediators`
-  and call `reindex()`; give each worker a `batch_group` for its rows.
-- **A runtime that shards values.** Supply a `Fragments` (`intervention/fragments.py`)
-  that says which locations are pieces and how to make them whole.
+New served values are in [extending-envoy.md](extending-envoy.md). For a custom
+driver:
+
+- **Keep running past a worker's error.** Set `interleaver.defer_exceptions = True`
+  and read `mediator.exception` after each step to end that worker's request
+  without tearing down the run.
+- **Reschedule workers per step.** Assign `interleaver.mediators` and call
+  `reindex()`; give each worker a `batch_group` for its rows.
+- **Shard values.** Supply a `Fragments` (`intervention/fragments.py`) that says
+  which locations are pieces and how to make them whole.
+- **A module the runtime calls without `forward`.** Its controller never runs;
+  have the driver call `interleaver.handle(location, value)` directly.
 
 ## Related
 
