@@ -402,8 +402,6 @@ class Requests:
             if not request.copies or not request.named(finished):
                 continue
             for registration_id, mediator in request.copies.items():
-                if registration_id not in self.templates:
-                    continue
                 self.finish_dangling(mediator, quiet=True)
                 names = getattr(mediator, "nnsight_saved", set()) | mediator.presaved
                 saved = {name: mediator.lcls[name] for name in names if name in mediator.lcls}
@@ -586,9 +584,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # Registered blocks are collected off the scheduler's own finished set:
         # a request nobody traced has no collect coming for it, and this is the
         # one place the runner is told it is over.
-        finished = getattr(scheduler_output, "finished_req_ids", None)
-        if finished:
-            requests.harvest(set(finished))
+        if scheduler_output.finished_req_ids:
+            requests.harvest(scheduler_output.finished_req_ids)
         requests.add(
             scheduler_output.scheduled_new_reqs, self.nnsight_persistent_objects
         )
@@ -596,7 +593,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # reordered after the scheduler counts tokens, and the forward's tensors
         # follow the batch.
         tokens = scheduler_output.num_scheduled_tokens
-        spans = [(rid, tokens[rid]) for rid in self.input_batch.req_ids if rid in tokens]
+        spans = [(rid, tokens[rid]) for rid in self.input_batch.req_ids]
         requests.refuse_chunked(spans, self.requests)
         requests.scope(self.nnsight_model, spans)
         return corrections
@@ -648,12 +645,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # returns — the interleaver swallows the stop — so the step's own logits
             # are sampled unchanged.
             logits = original
-            with self._still_running():
+            model = self.nnsight_model
+            # Re-entered for the per-request values (logits, samples); a worker
+            # that finished in the forward is parked nowhere and so is not served.
+            with model.interleaver:
                 # Serve this step's logits through the same `logits` eproperty the
                 # client reads (VLLM.logits) — its `provide` hands the value to this
                 # model's interleaver at the eproperty's own location, so the two
                 # sides can't drift out of sync.
-                model = self.nnsight_model
                 logits = type(model).logits.provide(model, original)
             # The sampler scales its logits in place (temperature, top-k, top-p),
             # so with a block in the step it gets a copy: a block's read is a view
@@ -677,9 +676,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
     def _sample(self, *args: Any, **kwargs: Any) -> Any:
         sampler_output = super()._sample(*args, **kwargs)
 
-        with self._still_running():
+        model = self.nnsight_model
+        with model.interleaver:
             # Serve through the client's `samples` eproperty (see sample_tokens).
-            model = self.nnsight_model
             sampler_output.sampled_token_ids = type(model).samples.provide(
                 model, sampler_output.sampled_token_ids
             )
@@ -694,9 +693,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         request is retired by forcing its sampled token to end-of-sequence: the
         scheduler's stop check then finishes it and schedules it no more. Whether the
         exception was an intentional stop or a real error only decides if it is
-        re-raised at the client (see [`nnsight.intervention.errors`][nnsight.intervention.errors]). A worker that
-        raised is no longer alive, so it is found on the tracked requests rather than
-        among the still-running interleaver mediators; its row in this step's output is
+        re-raised at the client (see [`nnsight.intervention.errors`][nnsight.intervention.errors]). Only a
+        request's traced worker ends it — a registered copy's error stays its own — so
+        they are found on the tracked requests; its row in this step's output is
         its ``batch_group`` (an erred worker is kept scheduled — see
         [`Requests.scope`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.scope] — so [`Requests.unflatten`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.unflatten] gives it one every step).
 
@@ -716,21 +715,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             mediator = request.mediator
             if mediator is not None and mediator.exception is not None and mediator.batch_group is not None:
                 sampler_output.sampled_token_ids[mediator.batch_group[0]] = eos
-
-    def _still_running(self) -> Any:
-        """The interleaver, carrying only the workers still parked mid-block.
-
-        The forward left a worker per scheduled request; for the per-request handles
-        that follow (logits, samples) keep only the ones still parked, which may want
-        those values. A finished block has nothing left to offer there. (A cache never
-        needs them: ``Cache.observe`` records only module inputs/outputs.)
-        """
-        interleaver = self.nnsight_model.interleaver
-        interleaver.mediators = [
-            mediator for mediator in interleaver.mediators if mediator.alive
-        ]
-        interleaver.reindex()
-        return interleaver
 
     def collect_nnsight(
         self,
@@ -850,8 +834,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 entry["saves"], entry["registered"] = primary["saves"], primary["registered"]
 
         # Saves may still be device work in flight; they are about to be pickled.
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
         return dumps_compact(collected)
 

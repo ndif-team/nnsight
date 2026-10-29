@@ -97,8 +97,9 @@ startup is not patched. The runner enters the interleaver at three points:
 are their produce side — the worked example in
 [extending-envoy.md](./extending-envoy.md#serving-a-value-that-isnt-a-module-output-vllm-logitssamples).
 
-`_still_running()` filters to `mediator.alive` workers so re-entering the
-interleaver after the forward doesn't restart completed blocks. Errors are deferred
+Re-entering the interleaver after the forward restarts nothing:
+`Interleaver.__enter__` skips any worker that already has a greenlet, and a finished
+one is parked nowhere, so only blocks still waiting are served. Errors are deferred
 per request (`interleaver.defer_exceptions = True`) and surfaced to the client via
 `raise_deferred`; a `tracer.stop()` is silent control flow. `_finish_erred`
 retires an erred/stopped request by forcing its next token to EOS.
