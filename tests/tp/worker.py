@@ -97,7 +97,7 @@ def main() -> None:
     with model.trace(PROMPT):
         record("gate_proj_out", layer.mlp.gate_proj.output.save())
         record("down_proj_in", layer.mlp.down_proj.input.save())
-        record("layer_out", layer.output[0].save())
+        record("layer_out", layer.output.save())
         record("baseline_logits", model.lm_head.output.save())
 
     # Under no_grad transformers hands a Linear's output over as this rank's
@@ -136,7 +136,7 @@ def main() -> None:
     with model.trace(PROMPT):
         mlp_in = layer.mlp.input
         down_in = layer.mlp.down_proj.input
-        hidden = layer.output[0]
+        hidden = layer.output
         record("adhoc_colwise", layer.mlp.gate_proj(mlp_in).save())
         record("adhoc_rowwise", layer.mlp.down_proj(down_in).save())
         record("adhoc_lens", model.lm_head(model.model.norm(hidden)).save())

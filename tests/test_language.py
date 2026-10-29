@@ -314,19 +314,19 @@ class TestCombinedWith:
 
     def test_no_grad_then_trace(self, gpt2):
         with torch.no_grad(), gpt2.trace(PROMPT):
-            hidden = gpt2.transformer.h[0].output[0].save()
+            hidden = gpt2.transformer.h[0].output.save()
         assert hidden.shape[-1] == 768
 
     def test_trace_then_no_grad(self, gpt2):
         with gpt2.trace(PROMPT), torch.no_grad():
-            hidden = gpt2.transformer.h[0].output[0].save()
+            hidden = gpt2.transformer.h[0].output.save()
         assert hidden.shape[-1] == 768
 
     def test_combined_with_edit_lands(self, gpt2):
         with torch.no_grad(), gpt2.trace(PROMPT):
             clean = gpt2.output.logits[0, -1].argmax().save()
         with torch.no_grad(), gpt2.trace(PROMPT):
-            gpt2.transformer.h[-1].output[0][:] = 0
+            gpt2.transformer.h[-1].output[:] = 0
             edited = gpt2.output.logits[0, -1].argmax().save()
         assert clean.item() != edited.item()
 
@@ -345,14 +345,14 @@ class TestCombinedWith:
             gpt2.trace(PROMPT) as tracer,
             torch.no_grad(),
         ):
-            hidden = gpt2.transformer.h[0].output[0].save()
+            hidden = gpt2.transformer.h[0].output.save()
         assert hidden.shape[-1] == 768
         assert tracer.info is not None
 
     def test_combined_with_invoke_inside(self, gpt2):
         with torch.no_grad(), gpt2.trace() as tracer:
             with tracer.invoke(PROMPT):
-                hidden = gpt2.transformer.h[0].output[0].save()
+                hidden = gpt2.transformer.h[0].output.save()
         assert hidden.shape[-1] == 768
 
 
@@ -360,9 +360,9 @@ class TestActivationModification:
     @torch.no_grad()
     def test_inplace_zeroing(self, gpt2):
         with gpt2.trace(PROMPT):
-            pre = gpt2.transformer.h[-1].output[0].clone().save()
-            gpt2.transformer.h[-1].output[0][:] = 0
-            post = gpt2.transformer.h[-1].output[0].save()
+            pre = gpt2.transformer.h[-1].output.clone().save()
+            gpt2.transformer.h[-1].output[:] = 0
+            post = gpt2.transformer.h[-1].output.save()
         assert not (pre == 0).all()
         assert (post == 0).all()
 
@@ -371,7 +371,7 @@ class TestActivationModification:
         with gpt2.trace(PROMPT):
             ref = gpt2.output.logits[0, -1].argmax().save()
         with gpt2.trace(PROMPT):
-            gpt2.transformer.h[-1].output[0][:] = 0
+            gpt2.transformer.h[-1].output[:] = 0
             modified = gpt2.output.logits[0, -1].argmax().save()
         assert ref.item() != modified.item()
 
@@ -519,11 +519,11 @@ class TestIteration:
         with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
             captured = nnsight.save([])
             for step in tracer.iter[:3]:
-                captured.append(gpt2.transformer.h[0].output[0])
+                captured.append(gpt2.transformer.h[0].output)
         assert len(captured) == 3
         # First step processes the full prompt; later (cached) steps process one token.
-        assert captured[0].shape[0] > 1
-        assert captured[1].shape[0] == 1
+        assert captured[0].shape[1] > 1
+        assert captured[1].shape[1] == 1
 
     @torch.no_grad()
     def test_with_form_matches_for_form(self, gpt2):
@@ -532,12 +532,12 @@ class TestIteration:
         with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
             via_for = nnsight.save([])
             for _ in tracer.iter[:3]:
-                via_for.append(gpt2.transformer.h[0].output[0])
+                via_for.append(gpt2.transformer.h[0].output)
         with pytest.warns(nnsight.NNsightDeprecationWarning):
             with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
                 via_with = nnsight.save([])
                 with tracer.iter[:3]:
-                    via_with.append(gpt2.transformer.h[0].output[0])
+                    via_with.append(gpt2.transformer.h[0].output)
         assert len(via_with) == len(via_for) == 3
         assert all(torch.equal(a, b) for a, b in zip(via_with, via_for))
 
@@ -549,7 +549,7 @@ class TestIteration:
             with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
                 captured = nnsight.save([])
                 with tracer.iter[:]:
-                    captured.append(gpt2.transformer.h[0].output[0])
+                    captured.append(gpt2.transformer.h[0].output)
         assert len(captured) == 3
 
     @torch.no_grad()
@@ -558,7 +558,7 @@ class TestIteration:
             with gpt2.generate(PROMPT, max_new_tokens=3, do_sample=False) as tracer:
                 box = nnsight.save({})
                 with tracer.iter[1]:
-                    box["x"] = gpt2.transformer.h[0].output[0]
+                    box["x"] = gpt2.transformer.h[0].output
         assert box["x"].shape[0] == 1  # a single cached decode step
 
     @torch.no_grad()
@@ -569,7 +569,7 @@ class TestIteration:
             warnings.simplefilter("error", nnsight.NNsightDeprecationWarning)
             with gpt2.generate(PROMPT, max_new_tokens=2, do_sample=False) as tracer:
                 for _ in tracer.iter[:2]:
-                    gpt2.transformer.h[0].output[0].save()
+                    gpt2.transformer.h[0].output.save()
 
 
 class TestSession:
@@ -802,7 +802,7 @@ class TestScan:
     def test_scan_reads_shapes_without_weights(self, gpt2_meta):
         assert gpt2_meta.dispatched is False
         with gpt2_meta.scan(PROMPT):
-            hs = gpt2_meta.transformer.h[-1].output[0].save()
+            hs = gpt2_meta.transformer.h[-1].output.save()
         assert hs.shape[-1] == 768
         # scanning only propagates shapes: the model is never loaded.
         assert gpt2_meta.dispatched is False
@@ -818,19 +818,19 @@ class TestScan:
     def test_scan_shapes_match_real_trace(self, gpt2):
         # Fidelity: shapes seen in a fake scan match a real forward pass.
         with gpt2.scan(PROMPT):
-            scanned = gpt2.transformer.h[-1].output[0].save()
+            scanned = gpt2.transformer.h[-1].output.save()
         with gpt2.trace(PROMPT):
-            traced = gpt2.transformer.h[-1].output[0].save()
+            traced = gpt2.transformer.h[-1].output.save()
         assert tuple(scanned.shape) == tuple(traced.shape)
 
     @torch.no_grad()
     def test_scan_does_not_dispatch_but_trace_does(self):
         model = TransformersModel("gpt2", task="text-generation")
         with model.scan(PROMPT):
-            model.transformer.h[0].output[0].save()
+            model.transformer.h[0].output.save()
         assert model.dispatched is False
         with model.trace(PROMPT):
-            real = model.transformer.h[0].output[0].save()
+            real = model.transformer.h[0].output.save()
         assert model.dispatched is True
         assert real.device.type != "meta"
         assert torch.isfinite(real).all()
@@ -1250,12 +1250,12 @@ class TestPeft:
         backend = Server()
         with client.trace(ids, backend=backend):
             lora = client.transformer.h[0].attn.c_attn.lora_A.default.output.save()
-            client.transformer.h[0].output[0][:, -1] = 0
+            client.transformer.h[0].output[:, -1] = 0
             logits = client.output.logits.save()
         assert server.peft == adapter_a
         assert backend.saves["lora"].shape[:2] == (1, 4)
         with server.trace(ids):
-            server.transformer.h[0].output[0][:, -1] = 0
+            server.transformer.h[0].output[:, -1] = 0
             direct = server.output.logits.save()
         torch.testing.assert_close(backend.saves["logits"], direct)
 

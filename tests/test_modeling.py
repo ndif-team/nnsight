@@ -950,7 +950,7 @@ class TestPreloadedModule:
         assert model.task == "text-generation"     # inferred from the module
         assert model.tokenizer is not None         # sourced from name_or_path
         with model.trace("The Eiffel Tower is in"):
-            out = model.transformer.h[0].output[0].save()
+            out = model.transformer.h[0].output.save()
         assert isinstance(out, torch.Tensor)
 
     @torch.no_grad()

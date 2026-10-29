@@ -79,11 +79,11 @@ class TestTrace:
         enc = _encoding(llava)
         with llava.trace(**enc):
             projected = llava.model.multi_modal_projector.output.save()
-            hidden = llava.model.language_model.layers[0].output[0].save()
+            hidden = llava.model.language_model.layers[0].output.save()
             logits = llava.output.logits.save()
         # The projector maps image patches into the language embedding width.
         assert projected.shape[0] == 1
-        assert hidden.ndim == 2
+        assert hidden.ndim == 3
         assert logits.shape[0] == 1
 
     @torch.no_grad()
