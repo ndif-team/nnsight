@@ -695,8 +695,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
         variable the same don't overwrite each other on the way home. Each entry is
         ``{"error": ..., "sequences": {index: {"saves": {...}, "registered": {...}}}}``,
         one sequence per sampled ``n`` (just ``0`` unless the request asked for
-        several); [`merge_collected`][nnsight.modeling.vllm.engines.engine.merge_collected]
-        derives the primary sequence's flat ``saves`` and ``registered`` client-side.
+        several), plus flat ``saves`` and ``registered``: the primary sequence's.
+
+        Every rank ran the block and so has workers to wind up, which is why every
+        rank is called; an early return on the others once left their workers in
+        place for the life of the engine. But only the first tensor-parallel rank
+        replies with values, and the rest return ``None``: every rank runs every
+        layer and its reads are gathered across the group, so each holds the same
+        values, and pickling them on every rank would only be thrown away.
 
         A registered block's values are kept apart from the trace's own because
         they are not the same kind of thing: a name a *trace* saved on several
@@ -733,14 +739,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
         if finished:
             requests.harvest(finished)
 
-        # Every rank ran the block and so has workers to wind up, but only one
-        # rank's values are wanted: the reads are gathered across the
-        # tensor-parallel group, so every rank holds the same ones. Only the
-        # *reporting* is gated — an early return here once left every other
-        # rank's workers in place for the life of the engine. Registered values
-        # are answered from every rank, since a registered block runs wherever
-        # the layers it reads live.
-        reporting = get_tp_group().is_first_rank
         taps = self.nnsight_model.interleaver.taps
         saved = _saves()
         for request in list(requests.requests.values()):
@@ -778,8 +776,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # location the model never reached — its deferred error.
                     requests.finish_dangling(mediator, taps)
                 values = request.saves()
-                if reporting:
-                    sequence["saves"] = values
+                sequence["saves"] = values
                 if done:
                     # Drop this request's saved values from the thread-local set
                     # as they leave: it is keyed by object id, so a finished
@@ -787,10 +784,20 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # request's values and mistaken for saved.
                     for value in values.values():
                         saved.discard(id(value))
-            if reporting and entry["error"] is None:
+            if entry["error"] is None:
                 entry["error"] = request.deferred()
             if done and not request.copies:
                 requests.requests.pop(request.id, None)
+
+        if not get_tp_group().is_first_rank:
+            return None
+        # The flat keys are the primary sequence, which is all there is unless the
+        # request asked for several; `attach` and the server read those. A request
+        # can lack sequence 0: under `n > 1`, a child nothing traced whose
+        # registered copies saved nothing is dropped at harvest.
+        for entry in collected.values():
+            primary = entry["sequences"].get(0, {"saves": {}, "registered": {}})
+            entry["saves"], entry["registered"] = primary["saves"], primary["registered"]
 
         # Saves may still be device work in flight; they are about to be pickled.
         torch.cuda.synchronize()

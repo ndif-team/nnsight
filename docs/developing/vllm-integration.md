@@ -181,15 +181,15 @@ however many workers read it. See [batching-internals.md](./batching-internals.m
 `super().step()`, for **every** finished request (not only traced ones) it calls
 `collective_rpc("collect_nnsight", args=(finished, finished, by_id))` — the third
 argument is the finished `RequestOutput`s, which the worker cannot build and needs
-in order to serve `tracer.result` — merges the ranks with `merge_collected`, and
+in order to serve `tracer.result` — unpickles the one reply that carries values, and
 `attach`es the result to each output. `VLLM._collect` then `mark`s each saved value
 and writes it into the mediator's locals, and `raise_deferred`s any error.
 
-Ranks are merged, **not** first-non-empty: a trace's values come from the reporting
-rank while a registered block's come from whichever rank ran the layers it read, and
-taking one payload would silently drop the other. Where two ranks report the same
-registered name — tensor parallelism, where each gathers the same whole value — the
-earliest rank's is kept, so the value lands on the device a traced one would.
+Every rank is called, but only the first tensor-parallel rank replies with values;
+the others reply `None`. Pipeline parallelism is refused, so every rank runs every
+layer, and its reads (a trace's and a registered block's alike) are gathered across
+the group: the first rank already holds everything, on the device a traced value
+lands on.
 
 `attach` sets `output.saves` (trace and registered values together) and
 `output.nnsight_saves` (the trace's own), plus `nnsight_error`. The separation is
@@ -211,14 +211,14 @@ per sequence (`"{index}_{parent}"`, vLLM's `ParentRequest`), each running its ow
 copy of the block. `Request.key` resolves a vLLM id to `(engine_id, index)` once, on
 arrival, taking the child reading only when the parent it names is one the engine
 asked about — so an id that merely starts with digits and an underscore is not
-mistaken for a second sequence. `merge_collected` adds flat `saves`/`registered`,
-the primary sequence's, once the ranks' payloads are combined; `attach` puts each sequence's on `output.outputs[i].saves` and the trace's own on
+mistaken for a second sequence. The flat `saves`/`registered` are the primary
+sequence's; `attach` puts each sequence's on `output.outputs[i].saves` and the trace's own on
 `output.nnsight_sequences`, which `VLLM._collect` pushes back as a list.
 
 **Every rank winds up its own workers; only one reports.** Each rank ran the block,
 so each holds a worker, a greenlet, and whatever that greenlet captured — all of it
-has to be released. Only the first tensor-parallel rank's values are reported, since the reads are gathered
-and every rank holds the same ones. Only the *reporting* is gated on rank; an early
+has to be released. Only the first tensor-parallel rank replies with values, since the reads are gathered
+and every rank holds the same ones. Only the *reply* is gated on rank; an early
 return on the other ranks would leave their workers in place for the life of the
 engine. `nnsight_request_count()` is the leak gauge — it returns to 0 **on every
 rank**, which is what `tests/vllm/test_tensor_parallel.py::TestEveryRankWindsUp` pins.

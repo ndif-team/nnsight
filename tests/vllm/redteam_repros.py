@@ -93,8 +93,9 @@ def tensor_parallel_parameter_probe() -> None:
 
 async def async_registration_and_foreign_leak() -> None:
     """Exercise untested async registration and inspect a foreign request's save."""
+    import pickle
+
     from nnsight.modeling.vllm import VLLM
-    from nnsight.modeling.vllm.engines.engine import merge_collected
     from vllm import SamplingParams
 
     model = VLLM("gpt2", mode="async", dispatch=True,
@@ -121,9 +122,10 @@ async def async_registration_and_foreign_leak() -> None:
         await asyncio.gather(*(foreign(request_id) for request_id in request_ids))
         print("ASYNC_FOREIGN request_count_before_collect=",
               await engine.collective_rpc("nnsight_request_count"))
-        collected = merge_collected(await engine.collective_rpc(
+        replies = await engine.collective_rpc(
             "collect_nnsight", args=(request_ids, request_ids)
-        ))
+        )
+        collected = pickle.loads(next(r for r in replies if r is not None))
         print("ASYNC_FOREIGN delayed_collect_count=", len(collected))
         print("ASYNC_FOREIGN delayed_collect_tags=",
               {key: value["registered"]["tag"] for key, value in collected.items()})
