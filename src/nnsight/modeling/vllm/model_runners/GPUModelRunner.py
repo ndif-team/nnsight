@@ -31,6 +31,7 @@ import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from vllm import envs
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -47,13 +48,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
     from ..vllm import VLLM
-
-
-def _ids_unrandomized() -> bool:
-    """Whether this vLLM was told not to suffix request ids."""
-    from vllm import envs
-
-    return bool(getattr(envs, "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", False))
 
 
 class Request:
@@ -74,7 +68,11 @@ class Request:
         # vLLM's suffix is eight hex digits after a dash, and is not added at all
         # under VLLM_DISABLE_REQUEST_ID_RANDOMIZATION; anything else after a dash
         # is the caller's own id.
-        suffix = None if _ids_unrandomized() else re.search(r"-[0-9a-f]{8}$", request_id)
+        suffix = (
+            None
+            if envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION
+            else re.search(r"-[0-9a-f]{8}$", request_id)
+        )
         self.stem = request_id[: suffix.start()] if suffix else request_id
         index, _, parent = self.stem.partition("_")
         self.engine_id, self.index = (parent, int(index)) if parent and index.isdigit() else (self.stem, 0)
