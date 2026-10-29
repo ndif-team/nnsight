@@ -119,6 +119,18 @@ class VLLM(Remotable):
         # cleared one drops out (see registration.Registration.clear).
         self._installed_edits: list = []
 
+        # A speculative step scores several draft tokens per request, so its logits
+        # carry several rows per request where the runner scopes each block to one.
+        # Refused before anything is built, since the meta build reads these kwargs too.
+        if kwargs.get("speculative_config") is not None:
+            raise NotImplementedError(
+                "speculative_config is not supported on an nnsight engine: a "
+                "speculative step scores several draft tokens per request, and "
+                "interventions are scoped to one logits row and one sampled token "
+                "per request. Drop speculative_config to trace, or use vLLM "
+                "directly for that run."
+            )
+
         # Model-parallel init has to happen before `Meta.__init__` opens its
         # meta-device context: vLLM builds real rank tensors here and later calls
         # `.tolist()` on them, which a meta tensor cannot serve.
