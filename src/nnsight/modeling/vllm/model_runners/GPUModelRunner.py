@@ -26,28 +26,29 @@ saves and errors are snapshotted onto the mediator on the worker thread
 from __future__ import annotations
 
 import re
-
 import warnings
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
+from greenlet import error as greenlet_error
 from vllm import envs
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from ....intervention.interleaver import Mediator
+from ....intervention.errors import capture_exception
+from ....intervention.interleaver import Mediator, OutOfOrderError, dangling_unwind
 from ....intervention.serialization import loads
 from ....tracing.tracer import _local, _saves, inc
 from ..batching import VLLMBatcher
 from ..collect import dumps_compact
 from ..fragments import VLLMFragments
 from ..interleaver import VLLMInterleaver
+from ..vllm import VLLM
 
 if TYPE_CHECKING:
     from vllm.sequence import IntermediateTensors
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-
-    from ..vllm import VLLM
 
 
 class Request:
@@ -79,7 +80,7 @@ class Request:
         self.mediator: Any = None
         self.copies: dict[str, Any] = {}
         self.harvested: dict[str, dict] = {}
-        self.error: Optional[dict] = None
+        self.error: dict | None = None
 
     def named(self, ids) -> bool:
         """Whether ``ids`` (the engine's, or the scheduler's) name this request."""
@@ -106,7 +107,7 @@ class Request:
         saved = getattr(mediator, "nnsight_saved", set())
         return {name: mediator.lcls[name] for name in saved if name in mediator.lcls}
 
-    def deferred(self) -> Optional[dict]:
+    def deferred(self) -> dict | None:
         """The request's deferred error, captured for the client, or None.
 
         The request's own error first — a block that failed to deserialize, or an
@@ -185,8 +186,6 @@ class Requests:
         saw inside one recompute step, so a fresh block would be short by exactly
         those steps — `scope` keeps the steps they sat out off their count).
         """
-        from ....intervention.errors import capture_exception
-
         for data in new_requests:
             if data.req_id in self.requests:
                 continue
@@ -232,8 +231,6 @@ class Requests:
         ``states`` is the runner's per-request state, which knows how much of the
         prompt is computed before this step.
         """
-        from ....intervention.errors import capture_exception
-
         for request_id, scheduled in spans:
             request = self.requests.get(request_id)
             state = states.get(request_id)
@@ -364,8 +361,6 @@ class Requests:
         `record_saves` of the run, and would otherwise be recorded as having
         saved nothing.
         """
-        from ....intervention.errors import capture_exception
-
         saved = _saves()
         # Saves marked in this process, plus names the sending process
         # marked before serialization (Mediator.presaved).
@@ -425,8 +420,6 @@ class Requests:
         collect) the switch is refused and the read is left unserved, exactly as
         it was before.
         """
-        from greenlet import error as greenlet_error
-
         if mediator is None or not mediator.alive:
             return
         pending = mediator.pending
@@ -465,11 +458,6 @@ class Requests:
         says so rather than reporting the model ran past it. ``quiet`` only
         unwinds (a registered copy has no request to report to).
         """
-        from greenlet import error as greenlet_error
-
-        from ....intervention.errors import capture_exception
-        from ....intervention.interleaver import OutOfOrderError, dangling_unwind
-
         if mediator is None or not mediator.alive:
             return
 
@@ -520,10 +508,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
     """A vLLM model runner that interleaves interventions with the forward."""
 
     def load_model(self, *args: Any, **kwargs: Any) -> None:
-        from vllm.tokenizers import cached_tokenizer_from_config
-
-        from ..vllm import VLLM
-
         super().load_model(*args, **kwargs)
 
         # An Envoy tree over the real module. Passing a loaded module builds it
@@ -599,7 +583,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-        intermediate_tensors: Optional["IntermediateTensors"] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> Any:
         # The worker runs each block directly as a mediator greenlet, with no Tracer
         # to open a trace scope, so a block's `.save()` would see no trace and raise.
@@ -702,9 +686,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
     def collect_nnsight(
         self,
         request_ids: list[str],
-        finished_request_ids: Optional[list[str]] = None,
-        outputs: Optional[dict] = None,
-    ) -> Optional[bytes]:
+        finished_request_ids: list[str] | None = None,
+        outputs: dict | None = None,
+    ) -> bytes | None:
         """Return the saved values and any deferred error of the named requests.
 
         Keyed per request rather than merged, so two traces that happen to name a
