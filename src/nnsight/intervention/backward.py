@@ -217,6 +217,11 @@ class BackwardTracer(Tracer):
             interleaver.check_dangling_mediators()
             push_result(frame, mediator.lcls)
         finally:
+            # A block still parked on a gradient that never arrived (the backward
+            # failed first: an OOM, another hook raising) holds the forward's
+            # tensors and graph. Unwind it now, on its own thread: once that
+            # thread exits, a suspended greenlet can never be freed.
+            interleaver.cancel()
             torch.Tensor.grad = original
             for handle in hooks:
                 handle.remove()
