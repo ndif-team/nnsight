@@ -38,22 +38,21 @@ def merge_collected(payloads: list) -> dict:
         if payload is None:
             continue
         for request_id, entry in pickle.loads(payload).items():
-            into = merged.setdefault(
-                request_id,
-                {"saves": {}, "error": None, "registered": {}, "sequences": {}},
-            )
-            into["saves"].update(entry.get("saves") or {})
-            for name, value in (entry.get("registered") or {}).items():
-                into["registered"].setdefault(name, value)
-            for index, sequence in (entry.get("sequences") or {}).items():
+            into = merged.setdefault(request_id, {"error": None, "sequences": {}})
+            for index, sequence in entry["sequences"].items():
                 target = into["sequences"].setdefault(
                     index, {"saves": {}, "registered": {}}
                 )
-                target["saves"].update(sequence.get("saves") or {})
-                for name, value in (sequence.get("registered") or {}).items():
+                target["saves"].update(sequence["saves"])
+                for name, value in sequence["registered"].items():
                     target["registered"].setdefault(name, value)
             if into["error"] is None:
-                into["error"] = entry.get("error")
+                into["error"] = entry["error"]
+    # The flat keys are the primary sequence, which is all there is unless the
+    # request asked for several; `attach` and the servers read those.
+    for entry in merged.values():
+        primary = entry["sequences"].get(0, {"saves": {}, "registered": {}})
+        entry["saves"], entry["registered"] = primary["saves"], primary["registered"]
     return merged
 
 

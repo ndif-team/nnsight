@@ -709,7 +709,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         Keyed per request rather than merged, so two traces that happen to name a
         variable the same don't overwrite each other on the way home. Each entry is
-        ``{"saves": {...}, "error": ..., "registered": {...}}``.
+        ``{"error": ..., "sequences": {index: {"saves": {...}, "registered": {...}}}}``,
+        one sequence per sampled ``n`` (just ``0`` unless the request asked for
+        several); [`merge_collected`][nnsight.modeling.vllm.engines.engine.merge_collected]
+        derives the primary sequence's flat ``saves`` and ``registered`` client-side.
 
         A registered block's values are kept apart from the trace's own because
         they are not the same kind of thing: a name a *trace* saved on several
@@ -735,15 +738,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
         collected: dict[str, dict] = {}
 
         def entry_for(request_id: str) -> dict:
-            return collected.setdefault(
-                request_id,
-                {"saves": {}, "error": None, "registered": {}, "sequences": {}},
-            )
+            return collected.setdefault(request_id, {"error": None, "sequences": {}})
 
         def sequence_of(entry: dict, index: int) -> dict:
-            """One sampled sequence's values; the flat keys are filled from
-            sequence 0 at the end, so a caller that never uses ``n`` reads exactly
-            what it always did."""
+            """One sampled sequence's values."""
             return entry["sequences"].setdefault(index, {"saves": {}, "registered": {}})
 
         # Harvest anything finished that the scheduler has not got to yet, so a
@@ -808,13 +806,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 entry["error"] = request.deferred()
             if done and not request.copies:
                 requests.requests.pop(request.id, None)
-
-        # The flat keys are the primary sequence, which is all there is unless the
-        # request asked for several.
-        for entry in collected.values():
-            primary = entry["sequences"].get(0)
-            if primary is not None:
-                entry["saves"], entry["registered"] = primary["saves"], primary["registered"]
 
         # Saves may still be device work in flight; they are about to be pickled.
         torch.cuda.synchronize()

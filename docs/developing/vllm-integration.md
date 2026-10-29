@@ -199,7 +199,7 @@ otherwise fold a sweep's per-request values into one.
 
 `collect_nnsight(request_ids, finished_request_ids, outputs=None)` runs on the
 worker and returns
-`pickle.dumps({engine_id: {"saves", "registered", "error", "sequences"}})`. In one
+`pickle.dumps({engine_id: {"error", "sequences": {index: {"saves", "registered"}}}})`. In one
 loop over one `Request` record per in-flight request (its traced worker, its
 registered copies, what they left behind, any deserialization error) it harvests
 what finished, takes the registered values, serves `tracer.result`, throws
@@ -211,8 +211,8 @@ per sequence (`"{index}_{parent}"`, vLLM's `ParentRequest`), each running its ow
 copy of the block. `Request.key` resolves a vLLM id to `(engine_id, index)` once, on
 arrival, taking the child reading only when the parent it names is one the engine
 asked about — so an id that merely starts with digits and an underscore is not
-mistaken for a second sequence. `saves`/`registered` stay the primary sequence's;
-`attach` puts each sequence's on `output.outputs[i].saves` and the trace's own on
+mistaken for a second sequence. `merge_collected` adds flat `saves`/`registered`,
+the primary sequence's, once the ranks' payloads are combined; `attach` puts each sequence's on `output.outputs[i].saves` and the trace's own on
 `output.nnsight_sequences`, which `VLLM._collect` pushes back as a list.
 
 **Every rank winds up its own workers; only one reports.** Each rank ran the block,
