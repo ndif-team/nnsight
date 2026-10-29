@@ -690,8 +690,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         """End any request whose worker raised — a ``tracer.stop()`` or a real error.
 
         vLLM decides a request is done from the token it just sampled, so such a
-        request is retired by forcing its sampled token to end-of-sequence: the
-        scheduler's stop check then finishes it and schedules it no more. Whether the
+        request is retired by forcing its sampled token to the end-of-sequence id the
+        scheduler's stop check compares against — the request's own
+        ``sampling_params.eos_token_id`` — which then finishes it. Whether the
         exception was an intentional stop or a real error only decides if it is
         re-raised at the client (see [`nnsight.intervention.errors`][nnsight.intervention.errors]). Only a
         request's traced worker ends it — a registered copy's error stays its own — so
@@ -702,18 +703,17 @@ class NNsightGPUModelRunner(GPUModelRunner):
         The forced token is re-applied every step the request survives, because the
         scheduler's stop check can defer it: ``min_tokens`` holds the request open
         until that many tokens are produced, at which point the forced EOS stops it.
-        ``ignore_eos`` is the one case EOS cannot end — such a request runs to
-        ``max_tokens``, where it finishes naturally and its error is surfaced then;
-        forcing a stop there would need vLLM's own abort, which does not surface a
-        finished output on the synchronous engine. A tokenizer with no EOS token at all
-        is the same story — nothing to force, so the request runs to ``max_tokens``.
+        A request with no eos id — ``ignore_eos`` clears it — has nothing to force: it
+        runs to ``max_tokens``, where it finishes naturally and its error is surfaced
+        then; forcing a stop there would need vLLM's own abort, which does not surface
+        a finished output on the synchronous engine.
         """
-        eos = getattr(self.nnsight_model.tokenizer, "eos_token_id", None)
-        if eos is None:
-            return
         for request in self.nnsight_requests.requests.values():
             mediator = request.mediator
-            if mediator is not None and mediator.exception is not None and mediator.batch_group is not None:
+            if mediator is None or mediator.exception is None or mediator.batch_group is None:
+                continue
+            eos = self.requests[request.id].sampling_params.eos_token_id
+            if eos is not None:
                 sampler_output.sampled_token_ids[mediator.batch_group[0]] = eos
 
     def collect_nnsight(
