@@ -1062,24 +1062,11 @@ class TestUnbatchedTensorWrites:
 
 
 class TestSanitizeOncePerPipeline:
-    """The generate-argument names ``sanitize`` lifts out of an invoke's kwargs
-    come from signatures that do not change within a process, so a batched trace
-    reads them once per pipeline class, not once per invoke."""
-
-    def test_signatures_read_once(self, gpt2, monkeypatch):
-        import inspect
-
+    def test_generate_names_are_read_once_per_pipeline(self, gpt2):
         from nnsight.modeling import processing
 
-        processing._GENERATION_NAMES.clear()
-        calls = []
-        real = inspect.signature
-        monkeypatch.setattr(inspect, "signature", lambda *a, **k: calls.append(a) or real(*a, **k))
-
-        first = processing.sanitize(gpt2, {"max_new_tokens": 3, "truncation": True})
-        read = len(calls)
-        second = processing.sanitize(gpt2, {"max_new_tokens": 3, "truncation": True})
-
-        assert read > 0 and len(calls) == read
-        assert first == second
-        assert first[1]["max_new_tokens"] == 3 and first[0]["truncation"] is True
+        processing.generation_names.cache_clear()
+        for _ in range(2):
+            pre, forward, _ = processing.sanitize(gpt2, {"max_new_tokens": 3, "truncation": True})
+        assert processing.generation_names.cache_info().misses == 1
+        assert forward["max_new_tokens"] == 3 and pre["truncation"] is True

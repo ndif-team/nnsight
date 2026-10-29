@@ -20,6 +20,7 @@ tokenizer, pipeline or task take the model first.
 
 from __future__ import annotations
 
+import functools
 import numbers
 import sys
 from collections.abc import Mapping
@@ -321,37 +322,23 @@ def preprocess_invoke(model, data: Any, kwargs: dict) -> tuple:
     return rows, forward_params
 
 
-# Per pipeline class, the generate arguments `sanitize` lifts out of an invoke's
-# kwargs, or None for a pipeline that takes none. Three signatures go into the
-# answer and none of them changes within a process, while `sanitize` runs once
-# per invoke: read there, they put two `inspect.signature` calls and a
-# `GenerationConfig` build in front of every prompt of a batched trace.
-_GENERATION_NAMES: dict[type, frozenset[str] | None] = {}
+@functools.cache
+def generation_names(pipeline: type) -> frozenset[str]:
+    """The generate arguments a pipeline class takes under ``generate_kwargs``,
+    read once per class since `sanitize` runs once per invoke."""
+    import inspect
 
+    from transformers import GenerationConfig, GenerationMixin
 
-def generation_names(pipeline) -> frozenset[str] | None:
-    """The generate arguments ``pipeline`` takes under ``generate_kwargs``, or ``None``."""
-    cls = type(pipeline)
-    if cls not in _GENERATION_NAMES:
-        import inspect
-
-        from transformers import GenerationConfig, GenerationMixin
-
-        named = inspect.signature(pipeline._sanitize_parameters).parameters
-        names = None
-        if "generate_kwargs" in named:
-            # max_length is also the processor's truncation length, and the
-            # pipeline sends it there; leave it to the pipeline.
-            names = frozenset(
-                (
-                    set(GenerationConfig().to_dict())
-                    | set(inspect.signature(GenerationMixin.generate).parameters)
-                )
-                - set(named)
-                - {"max_length", "self", "inputs", "kwargs"}
-            )
-        _GENERATION_NAMES[cls] = names
-    return _GENERATION_NAMES[cls]
+    named = inspect.signature(pipeline._sanitize_parameters).parameters
+    if "generate_kwargs" not in named:
+        return frozenset()
+    # max_length is also the processor's truncation length, and the
+    # pipeline sends it there; leave it to the pipeline.
+    return frozenset(
+        set(GenerationConfig().to_dict())
+        | set(inspect.signature(GenerationMixin.generate).parameters)
+    ) - set(named) - {"max_length", "self", "inputs", "kwargs"}
 
 
 def sanitize(model, kwargs: dict) -> tuple:
@@ -367,11 +354,9 @@ def sanitize(model, kwargs: dict) -> tuple:
     ``generate``, which rejects it. Here generate arguments go to the forward
     kwargs either way, flat, as ``text-generation``'s pipeline puts them.
     """
-    names = generation_names(model.pipeline)
-    generation = {}
-    if names is not None:
-        generation = {k: v for k, v in kwargs.items() if k in names}
-        kwargs = {k: v for k, v in kwargs.items() if k not in names}
+    names = generation_names(type(model.pipeline))
+    generation = {k: v for k, v in kwargs.items() if k in names}
+    kwargs = {k: v for k, v in kwargs.items() if k not in names}
     preprocess_params, forward_params, postprocess_params = (
         model.pipeline._sanitize_parameters(**kwargs)
     )
