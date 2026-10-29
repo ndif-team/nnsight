@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from greenlet import error as greenlet_error
 from vllm import envs
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -734,12 +734,13 @@ class NNsightGPUModelRunner(GPUModelRunner):
             requests.harvest(finished)
 
         # Every rank ran the block and so has workers to wind up, but only one
-        # rank's values are wanted: the reads are gathered, so every rank holds
-        # the same ones. Only the *reporting* is gated — an early return here
-        # once left every other rank's workers in place for the life of the
-        # engine. Registered values are answered from every rank, since a
-        # registered block runs wherever the layers it reads live.
-        reporting = get_pp_group().rank == 0
+        # rank's values are wanted: the reads are gathered across the
+        # tensor-parallel group, so every rank holds the same ones. Only the
+        # *reporting* is gated — an early return here once left every other
+        # rank's workers in place for the life of the engine. Registered values
+        # are answered from every rank, since a registered block runs wherever
+        # the layers it reads live.
+        reporting = get_tp_group().is_first_rank
         taps = self.nnsight_model.interleaver.taps
         saved = _saves()
         for request in list(requests.requests.values()):

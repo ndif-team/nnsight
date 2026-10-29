@@ -217,7 +217,7 @@ the primary sequence's, once the ranks' payloads are combined; `attach` puts eac
 
 **Every rank winds up its own workers; only one reports.** Each rank ran the block,
 so each holds a worker, a greenlet, and whatever that greenlet captured — all of it
-has to be released. Only rank 0's values are reported, since the reads are gathered
+has to be released. Only the first tensor-parallel rank's values are reported, since the reads are gathered
 and every rank holds the same ones. Only the *reporting* is gated on rank; an early
 return on the other ranks would leave their workers in place for the life of the
 engine. `nnsight_request_count()` is the leak gauge — it returns to 0 **on every
