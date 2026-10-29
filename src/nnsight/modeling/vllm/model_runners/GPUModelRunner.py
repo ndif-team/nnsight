@@ -577,8 +577,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
             interleaver.busy = True
             return super().capture_model()
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        super()._update_states(scheduler_output)
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Any:
+        # vLLM returns a correction to run once the forward is launched (speculative
+        # decoding's token counts); `execute_model` calls it, so it goes back as is.
+        corrections = super()._update_states(scheduler_output)
 
         requests = self.nnsight_requests
         # Registered blocks are collected off the scheduler's own finished set:
@@ -597,6 +599,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         spans = [(rid, tokens[rid]) for rid in self.input_batch.req_ids if rid in tokens]
         requests.refuse_chunked(spans, self.requests)
         requests.scope(self.nnsight_model, spans)
+        return corrections
 
     def execute_model(
         self,
