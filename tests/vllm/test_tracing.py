@@ -989,3 +989,12 @@ class TestScan:
         # returning a tracer nobody enters is a silent no-op.
         with pytest.raises(NotImplementedError, match="scan is unavailable on vLLM"):
             model.scan("The capital of France is")
+
+
+def test_speculative_decoding_is_refused_before_anything_is_built():
+    # A speculative step has several logits rows per request, where a block is
+    # scoped to one; refused before the meta build or a process group exists.
+    from nnsight.modeling.vllm import VLLM
+
+    with pytest.raises(NotImplementedError, match="speculative_config"):
+        VLLM("gpt2", speculative_config={"method": "ngram", "num_speculative_tokens": 2})

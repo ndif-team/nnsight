@@ -14,47 +14,9 @@ can be handed back on the output they belong to.
 from __future__ import annotations
 
 import pickle
-from typing import Any, Optional
+from typing import Any
 
 from vllm.v1.engine.llm_engine import LLMEngine
-
-
-def merge_collected(payloads: list) -> dict:
-    """Combine what each rank returned from ``collect_nnsight``.
-
-    Not "take the first non-empty": a trace's values come from the rank holding
-    the sampled output, while a registered block's come from whichever rank ran
-    the layers it read — under pipeline parallelism those are different ranks,
-    and taking one would silently drop the other.
-
-    Where two ranks did report the same name — tensor parallelism, where every
-    rank runs the block and each gathers the same whole value — the earliest
-    rank's wins. They are equal, but they are on different devices, and a value
-    whose device depended on which rank answered last would be a confusing thing
-    to hand back next to a traced one.
-    """
-    merged: dict[str, dict] = {}
-    for payload in payloads or ():
-        if payload is None:
-            continue
-        for request_id, entry in pickle.loads(payload).items():
-            into = merged.setdefault(
-                request_id,
-                {"saves": {}, "error": None, "registered": {}, "sequences": {}},
-            )
-            into["saves"].update(entry.get("saves") or {})
-            for name, value in (entry.get("registered") or {}).items():
-                into["registered"].setdefault(name, value)
-            for index, sequence in (entry.get("sequences") or {}).items():
-                target = into["sequences"].setdefault(
-                    index, {"saves": {}, "registered": {}}
-                )
-                target["saves"].update(sequence.get("saves") or {})
-                for name, value in (sequence.get("registered") or {}).items():
-                    target["registered"].setdefault(name, value)
-            if into["error"] is None:
-                into["error"] = entry.get("error")
-    return merged
 
 
 def attach(output: Any, entry: dict) -> None:
@@ -88,19 +50,20 @@ def attach(output: Any, entry: dict) -> None:
     ]
 
 
-async def acollect(engine: Any, request_id: str, output: Any = None) -> Optional[dict]:
-    """One finished request's collected values, merged across the ranks.
+async def acollect(engine: Any, request_id: str, output: Any = None) -> dict | None:
+    """One finished request's collected values.
 
     The awaitable form, for the engines whose ``collective_rpc`` is a coroutine.
     ``output`` is the finished ``RequestOutput``, which the worker cannot build
     and needs in order to serve ``tracer.result``; without one this is simply the
-    call that winds the request's workers up and frees what they held.
+    call that winds the request's workers up and frees what they held. Every rank
+    is called, since each has workers to wind up, but only the first
+    tensor-parallel rank replies with values; the rest reply ``None``.
     """
     ids = [request_id]
     args = (ids, ids) if output is None else (ids, ids, pickle.dumps({request_id: output}))
-    return merge_collected(await engine.collective_rpc("collect_nnsight", args=args)).get(
-        request_id
-    )
+    replies = await engine.collective_rpc("collect_nnsight", args=args)
+    return pickle.loads(next(reply for reply in replies if reply is not None)).get(request_id)
 
 
 class NNsightLLMEngine(LLMEngine):
@@ -119,11 +82,11 @@ class NNsightLLMEngine(LLMEngine):
         # engine core, which refuses a plain object like RequestOutput unless
         # VLLM_ALLOW_INSECURE_SERIALIZATION is set; bytes pass natively.
         finished = list(by_id)
-        collected = merge_collected(
-            self.engine_core.collective_rpc(
-                "collect_nnsight", args=(finished, finished, pickle.dumps(by_id))
-            )
+        replies = self.engine_core.collective_rpc(
+            "collect_nnsight", args=(finished, finished, pickle.dumps(by_id))
         )
+        # Only the first tensor-parallel rank replies with values (see `acollect`).
+        collected = pickle.loads(next(reply for reply in replies if reply is not None))
         for output in outputs:
             entry = collected.get(output.request_id)
             if entry is not None:
