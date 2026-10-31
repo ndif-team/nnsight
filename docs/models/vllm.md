@@ -136,7 +136,7 @@ Served values on the model (`eproperty` descriptors), meaningful only inside a t
 
 | Property | Description |
 |----------|-------------|
-| `model.logits` | The pre-sampling logit tensor for this step. Read or assign (`model.logits = ...`). |
+| `model.logits` | The pre-sampling logit tensor for this step. Read or assign (`model.logits = ...`). On a request with `structured_outputs`, vLLM has already applied its grammar mask: disallowed tokens read `-inf`. |
 | `model.samples` | The token ids the sampler drew from `logits` this step. Assigning it forces the token the engine continues from. |
 
 Under `tracer.iter`, each pass sees the next decoded step.
@@ -443,6 +443,7 @@ False ...}`.
 - **One prompt per invoke** — no `tracer.invoke(["a", "b"])`.
 - **`.skip()` is effectively unsupported** — see [`.skip()` needs the whole step](#skip-needs-the-whole-step).
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
+- **No speculative decoding** — a speculative step scores several draft tokens per request, and a block is scoped to one logits row and one sampled token per request. `VLLM(..., speculative_config=...)` raises `NotImplementedError` before anything is built.
 - **No backward / gradients, and no source tracing inside a fused CUDA kernel** — the kernel's
   inputs and outputs are locations; its interior is not Python.
 - **No `.scan()`.** It propagates shapes by running the model's own forward under a fake-tensor

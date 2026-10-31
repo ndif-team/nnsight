@@ -11,8 +11,8 @@ Three points on vLLM's own path carry it:
   requests hand over their workers and every worker's token span is recomputed.
 * ``execute_model`` — the forward, run with the interleaver open so hooks serve
   the parked workers.
-* ``sample_tokens`` / ``_sample`` — logits and sampled ids never pass through a
-  module, so they are offered to workers directly by location.
+* ``_sample`` — logits and sampled ids never pass through a module, so they are
+  offered to workers directly by location.
 
 Workers run as greenlets on this thread. ``_update_states`` is called from
 ``execute_model``, and hooks fire on whichever thread runs the forward, so the
@@ -26,34 +26,29 @@ saves and errors are snapshotted onto the mediator on the worker thread
 from __future__ import annotations
 
 import re
-
 import warnings
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
-from vllm.distributed.parallel_state import get_pp_group
+from greenlet import error as greenlet_error
+from vllm import envs
+from vllm.distributed.parallel_state import get_tp_group
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from ....intervention.interleaver import Mediator
+from ....intervention.errors import capture_exception
+from ....intervention.interleaver import Mediator, OutOfOrderError, dangling_unwind
 from ....intervention.serialization import loads
 from ....tracing.tracer import _local, _saves, inc
 from ..batching import VLLMBatcher
 from ..collect import dumps_compact
 from ..fragments import VLLMFragments
 from ..interleaver import VLLMInterleaver
+from ..vllm import VLLM
 
 if TYPE_CHECKING:
     from vllm.sequence import IntermediateTensors
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-
-    from ..vllm import VLLM
-
-
-def _ids_unrandomized() -> bool:
-    """Whether this vLLM was told not to suffix request ids."""
-    from vllm import envs
-
-    return bool(getattr(envs, "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", False))
 
 
 class Request:
@@ -74,14 +69,18 @@ class Request:
         # vLLM's suffix is eight hex digits after a dash, and is not added at all
         # under VLLM_DISABLE_REQUEST_ID_RANDOMIZATION; anything else after a dash
         # is the caller's own id.
-        suffix = None if _ids_unrandomized() else re.search(r"-[0-9a-f]{8}$", request_id)
+        suffix = (
+            None
+            if envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION
+            else re.search(r"-[0-9a-f]{8}$", request_id)
+        )
         self.stem = request_id[: suffix.start()] if suffix else request_id
         index, _, parent = self.stem.partition("_")
         self.engine_id, self.index = (parent, int(index)) if parent and index.isdigit() else (self.stem, 0)
         self.mediator: Any = None
         self.copies: dict[str, Any] = {}
         self.harvested: dict[str, dict] = {}
-        self.error: Optional[dict] = None
+        self.error: dict | None = None
 
     def named(self, ids) -> bool:
         """Whether ``ids`` (the engine's, or the scheduler's) name this request."""
@@ -108,7 +107,7 @@ class Request:
         saved = getattr(mediator, "nnsight_saved", set())
         return {name: mediator.lcls[name] for name in saved if name in mediator.lcls}
 
-    def deferred(self) -> Optional[dict]:
+    def deferred(self) -> dict | None:
         """The request's deferred error, captured for the client, or None.
 
         The request's own error first — a block that failed to deserialize, or an
@@ -187,8 +186,6 @@ class Requests:
         saw inside one recompute step, so a fresh block would be short by exactly
         those steps — `scope` keeps the steps they sat out off their count).
         """
-        from ....intervention.errors import capture_exception
-
         for data in new_requests:
             if data.req_id in self.requests:
                 continue
@@ -234,8 +231,6 @@ class Requests:
         ``states`` is the runner's per-request state, which knows how much of the
         prompt is computed before this step.
         """
-        from ....intervention.errors import capture_exception
-
         for request_id, scheduled in spans:
             request = self.requests.get(request_id)
             state = states.get(request_id)
@@ -366,8 +361,6 @@ class Requests:
         `record_saves` of the run, and would otherwise be recorded as having
         saved nothing.
         """
-        from ....intervention.errors import capture_exception
-
         saved = _saves()
         # Saves marked in this process, plus names the sending process
         # marked before serialization (Mediator.presaved).
@@ -402,8 +395,6 @@ class Requests:
             if not request.copies or not request.named(finished):
                 continue
             for registration_id, mediator in request.copies.items():
-                if registration_id not in self.templates:
-                    continue
                 self.finish_dangling(mediator, quiet=True)
                 names = getattr(mediator, "nnsight_saved", set()) | mediator.presaved
                 saved = {name: mediator.lcls[name] for name in names if name in mediator.lcls}
@@ -429,8 +420,6 @@ class Requests:
         collect) the switch is refused and the read is left unserved, exactly as
         it was before.
         """
-        from greenlet import error as greenlet_error
-
         if mediator is None or not mediator.alive:
             return
         pending = mediator.pending
@@ -469,11 +458,6 @@ class Requests:
         says so rather than reporting the model ran past it. ``quiet`` only
         unwinds (a registered copy has no request to report to).
         """
-        from greenlet import error as greenlet_error
-
-        from ....intervention.errors import capture_exception
-        from ....intervention.interleaver import OutOfOrderError, dangling_unwind
-
         if mediator is None or not mediator.alive:
             return
 
@@ -524,10 +508,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
     """A vLLM model runner that interleaves interventions with the forward."""
 
     def load_model(self, *args: Any, **kwargs: Any) -> None:
-        from vllm.tokenizers import cached_tokenizer_from_config
-
-        from ..vllm import VLLM
-
         super().load_model(*args, **kwargs)
 
         # An Envoy tree over the real module. Passing a loaded module builds it
@@ -577,16 +557,17 @@ class NNsightGPUModelRunner(GPUModelRunner):
             interleaver.busy = True
             return super().capture_model()
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        super()._update_states(scheduler_output)
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Any:
+        # vLLM returns a correction to run once the forward is launched (speculative
+        # decoding's token counts); `execute_model` calls it, so it goes back as is.
+        corrections = super()._update_states(scheduler_output)
 
         requests = self.nnsight_requests
         # Registered blocks are collected off the scheduler's own finished set:
         # a request nobody traced has no collect coming for it, and this is the
         # one place the runner is told it is over.
-        finished = getattr(scheduler_output, "finished_req_ids", None)
-        if finished:
-            requests.harvest(set(finished))
+        if scheduler_output.finished_req_ids:
+            requests.harvest(scheduler_output.finished_req_ids)
         requests.add(
             scheduler_output.scheduled_new_reqs, self.nnsight_persistent_objects
         )
@@ -594,14 +575,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # reordered after the scheduler counts tokens, and the forward's tensors
         # follow the batch.
         tokens = scheduler_output.num_scheduled_tokens
-        spans = [(rid, tokens[rid]) for rid in self.input_batch.req_ids if rid in tokens]
+        spans = [(rid, tokens[rid]) for rid in self.input_batch.req_ids]
         requests.refuse_chunked(spans, self.requests)
         requests.scope(self.nnsight_model, spans)
+        return corrections
 
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-        intermediate_tensors: Optional["IntermediateTensors"] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> Any:
         # The worker runs each block directly as a mediator greenlet, with no Tracer
         # to open a trace scope, so a block's `.save()` would see no trace and raise.
@@ -638,108 +620,89 @@ class NNsightGPUModelRunner(GPUModelRunner):
             self.nnsight_requests.unflatten(self.nnsight_model)
         return output
 
-    def sample_tokens(self, *args: Any, **kwargs: Any) -> Any:
-        if self.execute_model_state is not None:
-            original = self.execute_model_state.logits
-            # Stays `original` if a tracer.stop() unwinds the handle before it
-            # returns — the interleaver swallows the stop — so the step's own logits
-            # are sampled unchanged.
-            logits = original
-            with self._still_running():
-                # Serve this step's logits through the same `logits` eproperty the
-                # client reads (VLLM.logits) — its `provide` hands the value to this
-                # model's interleaver at the eproperty's own location, so the two
-                # sides can't drift out of sync.
-                model = self.nnsight_model
-                logits = type(model).logits.provide(model, original)
-            # The sampler scales its logits in place (temperature, top-k, top-p),
-            # so with a block in the step it gets a copy: a block's read is a view
-            # of these, and would otherwise be scaled after the block saved it.
-            if self.nnsight_requests.requests:
-                logits = logits.clone()
-            # The state is a namedtuple, so new logits mean a new one.
-            if logits is not original:
-                state = self.execute_model_state
-                self.execute_model_state = type(state)(
-                    **{**state._asdict(), "logits": logits}
-                )
+    def _sample(self, logits: Any, *args: Any, **kwargs: Any) -> Any:
+        model = self.nnsight_model
+        interleaver = model.interleaver
+        # Re-entered for the per-request values; a worker that finished in the
+        # forward is parked nowhere and so is not served. Both are served through
+        # the eproperties the client reads (VLLM.logits, VLLM.samples), whose
+        # `provide` hands the value over at the eproperty's own location, so the
+        # two sides can't drift out of sync. A tracer.stop() that unwinds a handle
+        # is swallowed by the interleaver, and the value stays as it was. vLLM has
+        # applied a structured-output request's grammar mask by now, so a block
+        # reads, and edits, the masked logits.
+        with interleaver:
+            logits = type(model).logits.provide(model, logits)
+        # The sampler scales its logits in place (temperature, top-k, top-p), so
+        # with a block in the step it gets a copy: a block's read is a view of
+        # these, and would otherwise be scaled after the block saved it.
+        if interleaver.mediators:
+            logits = logits.clone()
+        sampler_output = super()._sample(logits, *args, **kwargs)
 
-        output = super().sample_tokens(*args, **kwargs)
-        # Sampling closes the step: every block that was going to finish this step has,
-        # whether it read activations, logits, or samples. Capture all their saves now,
-        # in one pass, still on the workers' own thread (see Requests.record_saves).
-        self.nnsight_requests.record_saves()
-        return output
-
-    def _sample(self, *args: Any, **kwargs: Any) -> Any:
-        sampler_output = super()._sample(*args, **kwargs)
-
-        with self._still_running():
-            # Serve through the client's `samples` eproperty (see sample_tokens).
-            model = self.nnsight_model
+        with interleaver:
             sampler_output.sampled_token_ids = type(model).samples.provide(
                 model, sampler_output.sampled_token_ids
             )
 
         self._finish_erred(sampler_output)
+        # Sampling closes the step: every block that was going to finish this step
+        # has, whether it read activations, logits, or samples. Capture all their
+        # saves now, in one pass, still on the workers' own thread (see
+        # Requests.record_saves).
+        self.nnsight_requests.record_saves()
         return sampler_output
 
     def _finish_erred(self, sampler_output: Any) -> None:
         """End any request whose worker raised — a ``tracer.stop()`` or a real error.
 
         vLLM decides a request is done from the token it just sampled, so such a
-        request is retired by forcing its sampled token to end-of-sequence: the
-        scheduler's stop check then finishes it and schedules it no more. Whether the
+        request is retired by forcing its sampled token to the end-of-sequence id the
+        scheduler's stop check compares against — the request's own
+        ``sampling_params.eos_token_id`` — which then finishes it. Whether the
         exception was an intentional stop or a real error only decides if it is
-        re-raised at the client (see [`nnsight.intervention.errors`][nnsight.intervention.errors]). A worker that
-        raised is no longer alive, so it is found on the tracked requests rather than
-        among the still-running interleaver mediators; its row in this step's output is
+        re-raised at the client (see [`nnsight.intervention.errors`][nnsight.intervention.errors]). Only a
+        request's traced worker ends it — a registered copy's error stays its own — so
+        they are found on the tracked requests; its row in this step's output is
         its ``batch_group`` (an erred worker is kept scheduled — see
         [`Requests.scope`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.scope] — so [`Requests.unflatten`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.unflatten] gives it one every step).
 
         The forced token is re-applied every step the request survives, because the
         scheduler's stop check can defer it: ``min_tokens`` holds the request open
         until that many tokens are produced, at which point the forced EOS stops it.
-        ``ignore_eos`` is the one case EOS cannot end — such a request runs to
-        ``max_tokens``, where it finishes naturally and its error is surfaced then;
-        forcing a stop there would need vLLM's own abort, which does not surface a
-        finished output on the synchronous engine. A tokenizer with no EOS token at all
-        is the same story — nothing to force, so the request runs to ``max_tokens``.
+        A request with no eos id — ``ignore_eos`` clears it — has nothing to force: it
+        runs to ``max_tokens``, where it finishes naturally and its error is surfaced
+        then; forcing a stop there would need vLLM's own abort, which does not surface
+        a finished output on the synchronous engine.
         """
-        eos = getattr(self.nnsight_model.tokenizer, "eos_token_id", None)
-        if eos is None:
-            return
         for request in self.nnsight_requests.requests.values():
             mediator = request.mediator
-            if mediator is not None and mediator.exception is not None and mediator.batch_group is not None:
+            if mediator is None or mediator.exception is None or mediator.batch_group is None:
+                continue
+            eos = self.requests[request.id].sampling_params.eos_token_id
+            if eos is not None:
                 sampler_output.sampled_token_ids[mediator.batch_group[0]] = eos
-
-    def _still_running(self) -> Any:
-        """The interleaver, carrying only the workers still parked mid-block.
-
-        The forward left a worker per scheduled request; for the per-request handles
-        that follow (logits, samples) keep only the ones still parked, which may want
-        those values. A finished block has nothing left to offer there. (A cache never
-        needs them: ``Cache.observe`` records only module inputs/outputs.)
-        """
-        interleaver = self.nnsight_model.interleaver
-        interleaver.mediators = [
-            mediator for mediator in interleaver.mediators if mediator.alive
-        ]
-        interleaver.reindex()
-        return interleaver
 
     def collect_nnsight(
         self,
         request_ids: list[str],
-        finished_request_ids: Optional[list[str]] = None,
-        outputs: Optional[dict] = None,
-    ) -> Optional[bytes]:
+        finished_request_ids: list[str] | None = None,
+        outputs: dict | None = None,
+    ) -> bytes | None:
         """Return the saved values and any deferred error of the named requests.
 
         Keyed per request rather than merged, so two traces that happen to name a
         variable the same don't overwrite each other on the way home. Each entry is
-        ``{"saves": {...}, "error": ..., "registered": {...}}``.
+        ``{"error": ..., "sequences": {index: {"saves": {...}, "registered": {...}}}}``,
+        one sequence per sampled ``n`` (just ``0`` unless the request asked for
+        several), plus flat ``saves`` and ``registered``: the primary sequence's.
+
+        Every rank ran the block and so has workers to wind up, which is why every
+        rank is called; an early return on the others once left their workers in
+        place for the life of the engine. But only the first tensor-parallel rank
+        replies with values, and the rest return ``None``: every rank runs every
+        layer and its reads are gathered across the group, so each holds the same
+        values, and pickling them on every rank would only be thrown away.
 
         A registered block's values are kept apart from the trace's own because
         they are not the same kind of thing: a name a *trace* saved on several
@@ -765,15 +728,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
         collected: dict[str, dict] = {}
 
         def entry_for(request_id: str) -> dict:
-            return collected.setdefault(
-                request_id,
-                {"saves": {}, "error": None, "registered": {}, "sequences": {}},
-            )
+            return collected.setdefault(request_id, {"error": None, "sequences": {}})
 
         def sequence_of(entry: dict, index: int) -> dict:
-            """One sampled sequence's values; the flat keys are filled from
-            sequence 0 at the end, so a caller that never uses ``n`` reads exactly
-            what it always did."""
+            """One sampled sequence's values."""
             return entry["sequences"].setdefault(index, {"saves": {}, "registered": {}})
 
         # Harvest anything finished that the scheduler has not got to yet, so a
@@ -781,13 +739,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
         if finished:
             requests.harvest(finished)
 
-        # Every rank ran the block and so has workers to wind up, but only one
-        # rank's values are wanted: the reads are gathered, so every rank holds
-        # the same ones. Only the *reporting* is gated — an early return here
-        # once left every other rank's workers in place for the life of the
-        # engine. Registered values are answered from every rank, since a
-        # registered block runs wherever the layers it reads live.
-        reporting = get_pp_group().rank == 0
         taps = self.nnsight_model.interleaver.taps
         saved = _saves()
         for request in list(requests.requests.values()):
@@ -825,8 +776,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # location the model never reached — its deferred error.
                     requests.finish_dangling(mediator, taps)
                 values = request.saves()
-                if reporting:
-                    sequence["saves"] = values
+                sequence["saves"] = values
                 if done:
                     # Drop this request's saved values from the thread-local set
                     # as they leave: it is keyed by object id, so a finished
@@ -834,21 +784,23 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # request's values and mistaken for saved.
                     for value in values.values():
                         saved.discard(id(value))
-            if reporting and entry["error"] is None:
+            if entry["error"] is None:
                 entry["error"] = request.deferred()
             if done and not request.copies:
                 requests.requests.pop(request.id, None)
 
+        if not get_tp_group().is_first_rank:
+            return None
         # The flat keys are the primary sequence, which is all there is unless the
-        # request asked for several.
+        # request asked for several; `attach` and the server read those. A request
+        # can lack sequence 0: under `n > 1`, a child nothing traced whose
+        # registered copies saved nothing is dropped at harvest.
         for entry in collected.values():
-            primary = entry["sequences"].get(0)
-            if primary is not None:
-                entry["saves"], entry["registered"] = primary["saves"], primary["registered"]
+            primary = entry["sequences"].get(0, {"saves": {}, "registered": {}})
+            entry["saves"], entry["registered"] = primary["saves"], primary["registered"]
 
         # Saves may still be device work in flight; they are about to be pickled.
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
         return dumps_compact(collected)
 
