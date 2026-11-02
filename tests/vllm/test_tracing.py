@@ -1060,3 +1060,12 @@ def test_speculative_decoding_is_refused_before_anything_is_built():
 
     with pytest.raises(NotImplementedError, match="speculative_config"):
         VLLM("gpt2", speculative_config={"method": "ngram", "num_speculative_tokens": 2})
+
+
+def test_data_parallelism_is_refused_before_anything_is_built():
+    # vLLM answers the collect from the first engine only, so every other
+    # engine's requests came back without their values, and without an error.
+    from nnsight.modeling.vllm import VLLM
+
+    with pytest.raises(NotImplementedError, match="data_parallel_size"):
+        VLLM("gpt2", data_parallel_size=2)
