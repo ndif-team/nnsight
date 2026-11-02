@@ -343,3 +343,22 @@ class TestEveryRankWindsUp:
             assert counts == [0] * len(counts), f"workers left behind: {counts}"
         finally:
             edit.clear()
+
+    @torch.no_grad()
+    def test_a_save_that_will_not_pickle_spares_the_next_trace(self, vllm_qwen_tp,
+                                                              ET_prompt):
+        # Only the first rank pickles, so a collect that raised there left the
+        # other ranks' replies queued for the next call to read as its own.
+        import nnsight
+
+        model = vllm_qwen_tp
+        with model.trace(ET_prompt, temperature=0.0, top_p=1):
+            expected = model.logits.save()
+
+        with pytest.raises(RuntimeError, match="pickle"):
+            with model.trace(ET_prompt, temperature=0.0, max_tokens=1):
+                unpicklable = nnsight.save(x for x in ())
+
+        with model.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = model.logits.save()
+        assert torch.equal(logits.argmax(dim=-1), expected.argmax(dim=-1))

@@ -84,8 +84,9 @@ startup is not patched. The runner enters the interleaver at three points:
 
 1. **Forward** — `execute_model` (`GPUModelRunner.py`): runs
    `super().execute_model(...)` inside `with interleaver:`, so the module
-   controllers serve parked workers. Afterward `Requests.unflatten` switches each worker's batch
-   group from per-token to per-row.
+   controllers serve parked workers. `_model_forward` calls `Requests.unflatten` as the
+   forward returns, switching each worker's batch group from per-token to per-row before
+   `compute_logits` runs the model's `logits_processor` on one row per request.
 2. **Logits and sampling** — `_sample`, which vLLM's `sample_tokens` calls with the
    step's logits (after a structured-output request's grammar mask): offers them via
    `type(model).logits.provide(model, logits)`, samples from what comes back, then
@@ -127,8 +128,9 @@ recomputed every step:
 - `match(request_ids)` reconciles engine ids with worker ids — vLLM appends
   a content hash, so engine `"0"` maps to worker `"0-<hash>"`.
 - `record_saves()` / `saves` / `error` capture and read back
-  each worker's saved names and any error, on the workers' thread (required because
-  final collection may run on a different thread under Ray).
+  each worker's saved names and any error, on the workers' thread. Collection runs on
+  that thread too; Ray's compiled-graph executor, where it would not, is refused in
+  `NNsightGPUWorker.init_device`.
 - `finish_dangling(worker_id)` throws a still-parked worker at request end
   into a `ValueError` (barrier) or `OutOfOrderError` (the run already ran past its
   location); an over-iterated `tracer.iter` only warns.
@@ -351,7 +353,7 @@ the meta model, and a server holds one dispatched async `VLLM`.
 3. The scheduler forwards to the worker; `_update_states` → `Requests.add`
    (deserialize mediators) + `scope` (token spans).
 4. `execute_model` runs the forward under the interleaver (the controllers serve
-   parked workers); `unflatten` switches to per-row spans.
+   parked workers); `unflatten` switches to per-row spans as `_model_forward` returns.
 5. `_sample` serves `logits`, then `samples`; `record_saves` captures saves.
 6. `NNsightLLMEngine.step` detects finished requests, `collect_nnsight` pulls saves,
    attaches `RequestOutput.saves`.

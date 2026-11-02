@@ -190,6 +190,14 @@ Check the `len()` of what you collected, hold the run to the count with `ignore_
 `min_tokens=N` (vLLM's spelling; the warning's `min_new_tokens=` is refused here), or loop with
 `tracer.all()` and put trailing statements in a separate `tracer.invoke()`.
 
+A request that ends on a stop token or a `stop` string can also give a block one step more than
+its output holds. vLLM schedules a request's next step before the last step's token is known
+(`async_scheduling`, on by default), so the forward after the stop still runs, and a block under
+`tracer.iter` or `tracer.all()` sees it. A request that ends at `max_tokens` is exact. Where the
+two counts must agree, count against `len(result.outputs[0].token_ids)`, or build the engine with
+`VLLM(..., async_scheduling=False)`, which makes a stop token exact at a cost in throughput; a
+`stop` string can still overrun, since it is matched on the decoded text after the step.
+
 ### `generate` traces, or just runs
 
 vLLM generation is driven by `max_tokens`, so there is no forward/generate split. Used as a `with` block, `model.generate(...)` is `trace` (and rewrites `max_new_tokens` → `max_tokens`; `trace` accepts either).
@@ -444,6 +452,7 @@ False ...}`.
 - **`.skip()` is effectively unsupported** — see [`.skip()` needs the whole step](#skip-needs-the-whole-step).
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
 - **No speculative decoding** — a speculative step scores several draft tokens per request, and a block is scoped to one logits row and one sampled token per request. `VLLM(..., speculative_config=...)` raises `NotImplementedError` before anything is built.
+- **No data parallelism** — vLLM answers the call that brings a request's saved values back from its first engine only, so `VLLM(..., data_parallel_size=N)` with `N > 1` raises `NotImplementedError` before anything is built. Use `tensor_parallel_size`, or one `VLLM` per GPU.
 - **No backward / gradients, and no source tracing inside a fused CUDA kernel** — the kernel's
   inputs and outputs are locations; its interior is not Python.
 - **No `.scan()`.** It propagates shapes by running the model's own forward under a fake-tensor
@@ -457,6 +466,9 @@ False ...}`.
   Reads and writes are scoped to the right tokens either way. Declaring `taps` on such a model is
   not covered: the graph-replay path still trims padding on dim 0, so a tap can be served the
   step's padding rows.
+- **Not Ray's compiled-graph executor** — with `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0`, Ray runs the
+  forward on a thread of its own, where a block cannot be resumed to finish or report its
+  error, so the engine refuses to start. vLLM's default Ray executor works.
 
 ## vLLM versions
 

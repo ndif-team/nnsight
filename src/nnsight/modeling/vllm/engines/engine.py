@@ -69,6 +69,13 @@ async def acollect(engine: Any, request_id: str, output: Any = None) -> dict | N
 class NNsightLLMEngine(LLMEngine):
     """An engine that attaches each finished request's saved values to its output."""
 
+    def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
+        super().abort_request(request_ids, internal)
+        # An aborted request never finishes, so `step` never collects it; collect
+        # now, which unwinds its workers and frees what they held.
+        ids = list(request_ids)
+        self.engine_core.collective_rpc("collect_nnsight", args=(ids, ids))
+
     def step(self) -> Any:
         outputs = super().step()
 
