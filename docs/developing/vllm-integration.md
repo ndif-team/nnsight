@@ -159,13 +159,15 @@ them; the `Interleaver` brackets the gather (see the module docstring of
   dropped. The graph-replay path is not covered: `VLLMInterleaver.replay`
   (`interleaver.py`) trims a padded tap tensor with `t[:total]`, which is still
   dim-0-only.
-- `VLLMBatcher.narrow` also honours `NNSIGHT_VLLM_CLONE_READS`, which serves each
-  worker a copy of its span instead of a view. Read from the environment, not
-  `CONFIG`, and once per batcher: the one that narrows is built in the worker
-  (`GPUModelRunner.load_model`), so a client-side `CONFIG` field would never reach
-  it. Taps go through the same handoff and are covered. Nothing then aliases
-  engine memory, so `_copy_into` writes back the unchanged value and only a swap
-  (through `widen`) lands; the user-facing trade is in
+- `VLLMInterleaver.handle` honours `NNSIGHT_VLLM_CLONE_READS`: a visit some
+  worker or cache reads is served from one clone of the value, and unless a
+  worker swapped it, `_copy_into` writes the clone back over the live value so
+  in-place edits land. Read from the environment, not `CONFIG`, when the worker
+  builds the interleaver (`GPUModelRunner.load_model`), so a client-side `CONFIG`
+  field would never reach it. Taps go through the same `handle` and are covered.
+  A fragment is not cloned: `whole` already returns a fresh tensor (vLLM's
+  collectives are out-of-place), and `split` returns a new one, which `handle`
+  passes on like a swap. The user-facing trade is in
   [models/vllm.md](../models/vllm.md#serving-copies-instead-of-views).
 
 The gather lives on the interleaver, not the batcher, because `Batcher.narrow` runs

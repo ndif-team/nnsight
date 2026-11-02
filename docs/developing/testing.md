@@ -168,6 +168,7 @@ in `SamplingParams.extra_args`. TP tests use Qwen2.5-0.5B; single-rank tests use
 | `test_tensor_parallel.py` / `test_deepseek.py` | sharded read/edit; a second sharded architecture (MLA + expert parallelism) |
 | `test_moe_batching.py` | deferred-reduce partials gather on read |
 | `test_taps.py` | tracing an engine replaying CUDA graphs, at declared taps |
+| `test_clone_reads.py` | `NNSIGHT_VLLM_CLONE_READS`: kept reads hold what was computed, in-place edits land, one rank and two |
 | `test_registration.py` | blocks installed on the engine, applying to every request |
 | `test_chunked_prefill.py` / `test_preemption.py` | a traced prompt is prefilled whole; a preempted request comes back whole |
 | `test_lora.py` | interventions on a request carrying an adapter |
