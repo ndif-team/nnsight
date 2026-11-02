@@ -130,6 +130,16 @@ class VLLM(Remotable):
                 "per request. Drop speculative_config to trace, or use vLLM "
                 "directly for that run."
             )
+        # vLLM's data-parallel client sends a utility call to every engine but
+        # returns only the first engine's reply, and the collect is one.
+        if kwargs.get("data_parallel_size", 1) > 1:
+            raise NotImplementedError(
+                "data_parallel_size > 1 is not supported on an nnsight engine: vLLM "
+                "returns only the first engine's reply to the call that brings a "
+                "request's saved values back, so a request on any other engine "
+                "would come back without them. Use tensor_parallel_size, or one "
+                "VLLM per GPU."
+            )
 
         # Model-parallel init has to happen before `Meta.__init__` opens its
         # meta-device context: vLLM builds real rank tensors here and later calls
