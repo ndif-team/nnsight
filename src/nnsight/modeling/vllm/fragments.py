@@ -85,7 +85,14 @@ class VLLMFragments(Fragments):
         if _tp_world_size() < 2:
             return
 
+        from vllm.lora.layers import BaseLayerWithLoRA
+
         module = envoy._module
+        # With LoRA on, vLLM wraps each layer rather than subclassing it, and the
+        # wrapper runs the layer's math itself, so its values are laid out as the
+        # layer's: judge, and keep, the layer.
+        if isinstance(module, BaseLayerWithLoRA):
+            module = module.base_layer
         for side in ("input", "output"):
             if _is_piece(module, side):
                 self.rules[f"{envoy.path}.{side}"] = (module, side)
@@ -114,11 +121,19 @@ class VLLMFragments(Fragments):
             # input already split by feature. Either way the whole is the ranks'
             # concatenation.
             collective = tensor_model_parallel_all_gather
+            # A fused layer's piece is `[q_r | k_r | v_r]`, so the concatenation
+            # interleaves its projections; per-head slices and `chunk(2, -1)` need
+            # the `[q | k | v]` a single rank produces.
+            parts = _fused_parts(module)
+            if parts is not None:
+                collective = lambda tensor: _unfuse(
+                    tensor_model_parallel_all_gather(tensor), parts, module.tp_size
+                )
             # A layer sharded across decode-context-parallel *groups* (vLLM's
             # DCPGroupColumnParallelLinear) is replicated within each group, so
             # the ranks' concatenation carries every shard `group_size` times.
-            groups = getattr(module, "group_size", 1)
-            if groups > 1:
+            elif getattr(module, "group_size", 1) > 1:
+                groups = module.group_size
                 world = groups * module.tp_size
                 collective = lambda tensor: _one_per_group(tensor_model_parallel_all_gather(tensor), world, groups)
         else:
@@ -155,6 +170,13 @@ class VLLMFragments(Fragments):
             return apply(whole, lambda tensor: tensor / group_size, torch.Tensor)
 
         if isinstance(module, ColumnParallelLinear) or side == "input":
+            parts = _fused_parts(module)
+            if parts is not None:
+                return apply(
+                    whole,
+                    lambda tensor: _fuse(tensor, parts, module.tp_size, module.tp_rank),
+                    torch.Tensor,
+                )
             return apply(
                 whole,
                 lambda tensor: split_tensor_along_last_dim(
@@ -176,6 +198,60 @@ def _one_per_group(gathered: torch.Tensor, world: int, group_size: int) -> torch
     """
     chunks = gathered.chunk(world, dim=-1)
     return torch.cat(chunks[::group_size], dim=-1)
+
+
+def _fused_parts(module: Any) -> list[tuple[int, int]] | None:
+    """The projections a fused layer packs, or ``None`` for any other layer.
+
+    Each is its width on one rank and how many adjacent ranks hold that same
+    slice. Only the two exact classes: a subclass can pack or replicate
+    differently (MiniMax-M3's QKV adds an indexer held whole on every rank), and
+    rank order is a safer answer for it than a wrong reordering.
+    """
+    from vllm.model_executor.layers.linear import (
+        MergedColumnParallelLinear,
+        QKVParallelLinear,
+    )
+
+    if type(module) is MergedColumnParallelLinear:
+        return [(width, 1) for width in module.output_partition_sizes]
+    if type(module) is QKVParallelLinear:
+        # With fewer KV heads than ranks, vLLM loads K/V shard
+        # `tp_rank // num_kv_head_replicas`, so that many adjacent ranks share it.
+        q, k, v = module.output_partition_sizes
+        shared = module.num_kv_head_replicas
+        return [(q, 1), (k, shared), (v, shared)]
+    return None
+
+
+def _unfuse(
+    gathered: torch.Tensor, parts: list[tuple[int, int]], tp_size: int
+) -> torch.Tensor:
+    """``[q0 k0 v0 | q1 k1 v1]`` -> ``[q0 q1 | k0 k1 | v0 v1]``, a shared slice once."""
+    ranks = gathered.unflatten(-1, (tp_size, -1))
+    per_part = ranks.split([width for width, _ in parts], dim=-1)
+    return torch.cat(
+        [
+            part[..., ::shared, :].flatten(-2)
+            for part, (_, shared) in zip(per_part, parts)
+        ],
+        dim=-1,
+    )
+
+
+def _fuse(
+    whole: torch.Tensor, parts: list[tuple[int, int]], tp_size: int, tp_rank: int
+) -> torch.Tensor:
+    """This rank's ``[q_r | k_r | v_r]`` out of ``[q | k | v]``; `_unfuse` inverted."""
+    sizes = [width * tp_size // shared for width, shared in parts]
+    per_part = whole.split(sizes, dim=-1)
+    return torch.cat(
+        [
+            part.unflatten(-1, (-1, width))[..., tp_rank // shared, :]
+            for part, (width, shared) in zip(per_part, parts)
+        ],
+        dim=-1,
+    )
 
 
 def _moe_layer() -> Any:

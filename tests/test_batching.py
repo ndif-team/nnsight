@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from collections import OrderedDict, namedtuple
 
 import pytest
 import torch
@@ -28,6 +29,16 @@ ET = "The Eiffel Tower is in the city of"
 @pytest.fixture(scope="module")
 def gpt2():
     return TransformersModel("gpt2", task="text-generation", dispatch=True)
+
+
+class _AttrOutput(OrderedDict):
+    """A stand-in for a HF ModelOutput: an OrderedDict also read by attribute."""
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(key) from None
 
 
 class _MLP(nn.Module):
@@ -233,6 +244,48 @@ class TestMultiInvokeSkip:
         assert tensor.shape == (5, 4)
         assert bool((tensor[:2] == 1).all()) and bool((tensor[2:] == 5).all())
         assert mapping["k"].shape == (5, 3)
+
+    def test_concat_rebuilds_a_namedtuple(self):
+        # A namedtuple takes positional fields, so one rebuilt from a single
+        # iterable raises TypeError before it reaches the module downstream.
+        from nnsight.intervention.batching import concat
+
+        Out = namedtuple("Out", ["hidden", "cache"])
+        a = Out(torch.ones(2, 4), torch.ones(2, 3))
+        b = Out(torch.full((3, 4), 5.0), torch.full((3, 3), 5.0))
+
+        out = concat([a, b])
+
+        assert isinstance(out, Out)
+        assert out.hidden.shape == (5, 4) and out.cache.shape == (5, 3)
+        assert bool((out.hidden[:2] == 1).all()) and bool((out.hidden[2:] == 5).all())
+
+    def test_concat_keeps_a_dict_subclass(self):
+        # The module downstream of the skip reads its predecessor's output by
+        # attribute, which a HF ModelOutput answers and a plain dict does not,
+        # so the exact type has to survive the rebuild.
+        from nnsight.intervention.batching import concat
+
+        a = _AttrOutput(last_hidden_state=torch.ones(2, 4))
+        b = _AttrOutput(last_hidden_state=torch.full((3, 4), 5.0))
+
+        out = concat([a, b])
+
+        assert isinstance(out, _AttrOutput)
+        assert out.last_hidden_state.shape == (5, 4)
+        assert bool((out.last_hidden_state[:2] == 1).all())
+        assert bool((out.last_hidden_state[2:] == 5).all())
+
+    def test_concat_keeps_an_ordereddict(self):
+        from nnsight.intervention.batching import concat
+
+        a = OrderedDict(k=torch.ones(2, 4))
+        b = OrderedDict(k=torch.full((3, 4), 5.0))
+
+        out = concat([a, b])
+
+        assert isinstance(out, OrderedDict)
+        assert out["k"].shape == (5, 4)
 
 
 class TestWholeTensorWrites:

@@ -472,12 +472,11 @@ False ...}`.
 
 ## vLLM versions
 
-Everything on these vLLM pages was run on **0.27.1**. nnsight targets vLLM's V1 engine and imports
-its internals directly (`vllm.tokenizers`, `vllm.v1.worker.gpu_model_runner`,
-`vllm.v1.engine.async_llm`). The `vllm` extra carries no upper bound, so
-`pip install "nnsight[vllm]"` takes the current release, and one that moves one of those names fails
-at `import nnsight.modeling.vllm` with a `ModuleNotFoundError` rather than a version message. Check
-the version you have.
+Everything on these vLLM pages was run on **0.27.1**, and the `vllm` extra pins
+`vllm>=0.27.1,<0.28`. nnsight targets vLLM's V1 engine and imports its internals directly
+(`vllm.tokenizers`, `vllm.v1.worker.gpu_model_runner`, `vllm.v1.engine.async_llm`), which move between
+minor releases. A later vLLM installed over the pin is untested and can be wrong without an error: on
+0.32, CUDA-graph taps stop firing after the prefill.
 
 vLLM 0.27 ships a second GPU model runner and defaults to it for non-MoE models. nnsight's
 interventions subclass the original one, so nnsight builds the engine with

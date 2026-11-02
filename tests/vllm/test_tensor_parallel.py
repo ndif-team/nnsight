@@ -4,19 +4,15 @@ Under TP a linear layer's value at any one rank is only that rank's shard. The
 port gathers those shards before a worker sees the value and re-shards whatever
 the worker leaves before vLLM's own forward carries on. These tests pin that down
 by running the identical trace on an unsharded reference (``vllm_qwen_ref``, one
-rank) and on the sharded engine (``vllm_qwen_tp``) and comparing.
-
-Two sharding styles behave differently and are tested accordingly:
+rank) and on the sharded engine (``vllm_qwen_tp``) and comparing element-wise;
+gemma-3-270m, with one KV head, covers K/V replicated across ranks.
 
 * Row-parallel layers (``o_proj``, ``down_proj``) split the contraction and
-  all-reduce their output, so the whole a worker sees is laid out exactly as the
-  single-rank run's — values compare element-wise and a positional edit is the
-  same logical edit on both.
+  all-reduce their output, so the whole is laid out as the single-rank run's.
 * Column-parallel layers here are *fused* (``qkv_proj`` packs Q/K/V,
   ``gate_up_proj`` packs gate/up), and each rank holds a slice of every packed
-  part. Gathering concatenates the slices in rank order, so the whole holds all
-  the same values as the single-rank run but grouped differently. It is checked
-  as a per-row multiset rather than element-wise.
+  part. The gather reorders the slices into the single-rank layout, so a
+  positional edit is the same logical edit too.
 
 The whole module is skipped unless the machine has >=2 GPUs.
 """
@@ -41,7 +37,9 @@ def _submodule(model, path):
 
 def _read(model, path, prompt):
     with model.trace(prompt, temperature=0.0, top_p=1):
-        hs = _submodule(model, path).output[0].save()
+        # Cloned: at one rank this is the engine's live buffer, which the forward
+        # goes on writing to after the read.
+        hs = _submodule(model, path).output[0].clone().save()
         logits = model.logits.save()
     return hs, logits
 
@@ -81,9 +79,9 @@ def _min_row_cosine(a, b):
 class TestShardedRead:
     """A gathered value carries the whole layer's data, not a rank's shard."""
 
-    @pytest.mark.parametrize("path", ROW_PARALLEL)
+    @pytest.mark.parametrize("path", ALL_PARALLEL)
     @torch.no_grad()
-    def test_row_parallel_matches_reference(
+    def test_matches_reference(
         self, vllm_qwen_ref, vllm_qwen_tp, path, ET_prompt
     ):
         ref_hs, ref_logits = _read(vllm_qwen_ref, path, ET_prompt)
@@ -92,23 +90,6 @@ class TestShardedRead:
         assert tp_hs.shape == ref_hs.shape
         assert tp_logits.argmax(dim=-1).item() == ref_logits.argmax(dim=-1).item()
         assert _min_row_cosine(tp_hs, ref_hs) > 0.99
-
-    @pytest.mark.parametrize("path", COLUMN_PARALLEL)
-    @torch.no_grad()
-    def test_column_parallel_gathers_every_value(
-        self, vllm_qwen_ref, vllm_qwen_tp, path, ET_prompt
-    ):
-        ref_hs, ref_logits = _read(vllm_qwen_ref, path, ET_prompt)
-        tp_hs, tp_logits = _read(vllm_qwen_tp, path, ET_prompt)
-
-        # Full width, and every value present — the fused packing means the
-        # columns are grouped by rank, so compare the per-row sorted values.
-        assert tp_hs.shape == ref_hs.shape
-        assert tp_logits.argmax(dim=-1).item() == ref_logits.argmax(dim=-1).item()
-
-        ref_sorted = ref_hs.sort(dim=-1).values
-        tp_sorted = tp_hs.sort(dim=-1).values
-        assert _min_row_cosine(tp_sorted, ref_sorted) > 0.99
 
     @pytest.mark.parametrize("path", ROW_PARALLEL)
     @torch.no_grad()
@@ -222,6 +203,22 @@ class TestShardedEdit:
 
         assert tp_logits.argmax(dim=-1).item() == ref_logits.argmax(dim=-1).item()
 
+    @torch.no_grad()
+    def test_half_edit_means_the_same_half(
+        self, vllm_qwen_ref, vllm_qwen_tp, ET_prompt
+    ):
+        # The MLP computes `silu(gate) * up` from `[gate | up]`, so zeroing the
+        # upper half zeroes its output only if that half is `up` at every tp size.
+        for name, model in (("reference", vllm_qwen_ref), ("sharded", vllm_qwen_tp)):
+            with model.trace(ET_prompt, temperature=0.0, top_p=1):
+                out = _submodule(model, "mlp.gate_up_proj").output
+                value = out[0].clone()
+                value[:, value.shape[-1] // 2 :] = 0
+                _submodule(model, "mlp.gate_up_proj").output = (value, *out[1:])
+                mlp_out = _submodule(model, "mlp").output.clone().save()
+
+            assert mlp_out.abs().max().item() == 0.0, name
+
 
 class TestAdHocCall:
     """An ad-hoc call on a sharded module takes and returns whole tensors.
@@ -264,8 +261,6 @@ class TestAdHocCall:
             module = _submodule(vllm_qwen_ref, path)
             ref = module(module.input)[0].save()
 
-        # A row-parallel output is all-reduced, so its layout matches the
-        # single-rank run's and the values compare directly.
         assert adhoc.shape == ref.shape
         assert _min_row_cosine(adhoc, ref) > 0.99
 
@@ -296,12 +291,8 @@ class TestAdHocCall:
             module = _submodule(vllm_qwen_ref, path)
             ref = module(module.input)[0].save()
 
-        # Full width and every value present; the fused packing groups columns
-        # by rank, so compare per-row sorted values (as TestShardedRead does).
         assert adhoc.shape == ref.shape
-        assert _min_row_cosine(
-            adhoc.sort(dim=-1).values, ref.sort(dim=-1).values
-        ) > 0.99
+        assert _min_row_cosine(adhoc, ref) > 0.99
 
 
 class TestEveryRankWindsUp:
@@ -362,3 +353,39 @@ class TestEveryRankWindsUp:
         with model.trace(ET_prompt, temperature=0.0, top_p=1):
             logits = model.logits.save()
         assert torch.equal(logits.argmax(dim=-1), expected.argmax(dim=-1))
+
+
+@pytest.fixture(scope="module")
+def vllm_gemma_ref():
+    """A single-rank gemma-3-270m: one KV head, so any tp > 1 replicates it."""
+    from nnsight.modeling.vllm import VLLM
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs 2 GPUs")
+    return VLLM("unsloth/gemma-3-270m", gpu_memory_utilization=0.1, dispatch=True)
+
+
+@pytest.fixture(scope="module")
+def vllm_gemma_tp(vllm_gemma_ref):
+    from nnsight.modeling.vllm import VLLM
+
+    return VLLM(
+        "unsloth/gemma-3-270m",
+        tensor_parallel_size=2,
+        gpu_memory_utilization=0.1,
+        dispatch=True,
+    )
+
+
+class TestReplicatedKV:
+    """With fewer KV heads than ranks, vLLM gives adjacent ranks the same K and V."""
+
+    @torch.no_grad()
+    def test_qkv_matches_reference(self, vllm_gemma_ref, vllm_gemma_tp, ET_prompt):
+        # Both ranks hold the one KV head; the gather keeps one copy of it, or K
+        # and V come back twice as wide as at one rank.
+        ref, _ = _read(vllm_gemma_ref, "self_attn.qkv_proj", ET_prompt)
+        tp, _ = _read(vllm_gemma_tp, "self_attn.qkv_proj", ET_prompt)
+
+        assert tp.shape == ref.shape
+        assert _min_row_cosine(tp, ref) > 0.99
