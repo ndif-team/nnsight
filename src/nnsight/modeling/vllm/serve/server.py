@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 from fastapi import FastAPI, HTTPException, Request, Response
 
+from ....tracing.globals import block_scope
 from ..engines.engine import acollect
 
 if TYPE_CHECKING:
@@ -72,26 +73,19 @@ def _build_tracer(body: bytes, compress: bool) -> Any:
 
     Note that deserialize registers the source in ``linecache`` under the client's
     filename (e.g. ``"<stdin>"``), so requests from different clients collide on
-    that process-global cache. Safe only because the whole build runs without an
-    await (see the module docstring): no two builds interleave, so the source a
-    traceback resolves — and the source read back here — is always the one just
-    written. An await added to the build path would break that.
+    that process-global cache. The caller runs the whole build under
+    [`block_scope`][nnsight.tracing.globals.block_scope], which undoes that
+    afterwards, and without an await (see the module docstring): no two builds
+    interleave, so the source read back here is always the one just written. An
+    await added to the build path would break both.
     """
     import linecache
 
     from ....schema.request import RequestModel
-    from ....tracing.globals import BLOCKS, SOURCES
 
     tracer = RequestModel.deserialize(body, _persistent_objects, compress=compress)
-    filename = tracer.info.frame.f_code.co_filename
-    source = "".join(linecache.cache[filename][2])
+    source = "".join(linecache.cache[tracer.info.frame.f_code.co_filename][2])
     tracer.node = ast.parse(source)
-    # The block's invokes are parsed from that source and memoized by filename,
-    # so what an earlier request from the same file left there is stale. Safe to
-    # drop here and not in deserialize, which also runs in a client's own process.
-    SOURCES.pop(filename, None)
-    for key in [key for key in BLOCKS if key[0] == filename]:
-        del BLOCKS[key]
     return tracer
 
 
@@ -177,12 +171,14 @@ async def generate(request: Request) -> Response:
 
     try:
         # The rebuilt tracer is a VLLMTracer whose interleaver resolves to this
-        # server's — so building its workers puts them on this model.
-        tracer = _build_tracer(body, compress)
-        _, (prompts, params, lora_requests), forward_kwargs = tracer.prepare(
-            tracer.info.code
-        )
-        model._attach_mediators(params, **forward_kwargs)
+        # server's — so building its workers puts them on this model. What the
+        # build registers of the client's source goes when it is done.
+        with block_scope():
+            tracer = _build_tracer(body, compress)
+            _, (prompts, params, lora_requests), forward_kwargs = tracer.prepare(
+                tracer.info.code
+            )
+            model._attach_mediators(params, **forward_kwargs)
     except Exception as exception:
         logger.exception("Failed to build trace")
         return _payload({}, capture_exception(exception))
