@@ -429,6 +429,10 @@ class Requests:
             mediator.handle("result", output)
         except greenlet_error:
             return
+        except Exception as exception:
+            # Raised by the block after its read: this request's error, deferred
+            # like any other, not the collect's, which every request in it shares.
+            mediator.exception = exception
         # The block ran on past its read and bound whatever it saved there, after
         # the run's last `record_saves` — so take the snapshot again or those
         # names go home missing.
