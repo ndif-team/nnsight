@@ -33,9 +33,11 @@ def parallel_envoys() -> dict:
 
     Keys are matched against a module's MRO, so the merged subclasses
     (``QKVParallelLinear``, ``MergedColumnParallelLinear``, ``ParallelLMHead``)
-    are covered by their bases. Built on demand rather than at import so the
+    are covered by their bases. A LoRA wrapper is not a subclass of the layer it
+    wraps, so it has its own key. Built on demand rather than at import so the
     module stays importable without vLLM.
     """
+    from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
     from vllm.model_executor.layers.linear import (
         ColumnParallelLinear,
         RowParallelLinear,
@@ -48,6 +50,7 @@ def parallel_envoys() -> dict:
         ColumnParallelLinear: ParallelEnvoy,
         RowParallelLinear: ParallelEnvoy,
         VocabParallelEmbedding: ParallelEnvoy,
+        BaseLinearLayerWithLoRA: ParallelEnvoy,
     }
 
 
