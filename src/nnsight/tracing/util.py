@@ -93,8 +93,8 @@ class Scope(dict):
         return {k: self[k] for k in self.written if k in self}
 
     def copy(self) -> "Scope":
-        """A scope with this one's names, sharing the same frame and globals."""
-        return Scope(dict(self), self.shared, self.glbls)
+        """A scope with this one's names and globals, and a store of its own."""
+        return Scope(dict(self), {}, self.glbls)
 
 
 class SerializedFrame:

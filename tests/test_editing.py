@@ -1,4 +1,6 @@
 
+import weakref
+
 import pytest
 import torch
 import torch.nn as nn
@@ -188,6 +190,16 @@ class TestEditing:
             captured["fc1"] = envoy.fc1.output
         assert torch.allclose(captured["fc1"], torch.zeros(2, 8))
 
+    def test_values_an_edit_binds_are_freed_after_the_trace(self, x):
+        envoy = Envoy(MLP())
+        refs = []
+        with envoy.edit(inplace=True):
+            acts = envoy.fc1.output
+            refs.append(weakref.ref(acts))
+        with envoy.trace(x):
+            pass
+        assert refs[0]() is None
+
 
 class TestEditingWithAttachment:
     """An edit can attach a module to the tree and route activations through it with
@@ -344,10 +356,10 @@ class TestEditSerialization:
     @torch.no_grad()
     def test_edit_survives_serialization(self, gpt2):
         with gpt2.edit() as (tracer, edited):  # non-inplace copy; gpt2 stays clean
-            edited.transformer.h[0].output[0][:] = 0
+            edited.transformer.h[0].output[:] = 0
 
         with edited.trace("The Eiffel Tower is in", remote="local"):
-            out = edited.transformer.h[0].output[0].save()
+            out = edited.transformer.h[0].output.save()
         assert torch.all(out == 0)
 
     @torch.no_grad()
@@ -355,5 +367,5 @@ class TestEditSerialization:
         with gpt2.edit():  # a copy is edited; the original keeps no edits
             pass
         with gpt2.trace("The Eiffel Tower is in", remote="local"):
-            out = gpt2.transformer.h[0].output[0].save()
+            out = gpt2.transformer.h[0].output.save()
         assert torch.any(out != 0)

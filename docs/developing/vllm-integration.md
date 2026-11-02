@@ -84,21 +84,21 @@ startup is not patched. The runner enters the interleaver at three points:
 
 1. **Forward** — `execute_model` (`GPUModelRunner.py`): runs
    `super().execute_model(...)` inside `with interleaver:`, so the module
-   controllers serve parked workers. Afterward `Requests.unflatten` switches each worker's batch
-   group from per-token to per-row.
-2. **Logits** — `sample_tokens`: offers the logits via
-   `type(model).logits.provide(model, original)`; if edited, rebuilds the state with
-   the new tensor. Then captures all workers' saves in one pass (`record_saves`)
-   while still on the workers' own thread.
-3. **Sampling** — `_sample`: after `super()._sample(...)`, offers
-   `sampler_output.sampled_token_ids = type(model).samples.provide(model, ...)`.
+   controllers serve parked workers. `_model_forward` calls `Requests.unflatten` as the
+   forward returns, switching each worker's batch group from per-token to per-row before
+   `compute_logits` runs the model's `logits_processor` on one row per request.
+2. **Logits and sampling** — `_sample`, which vLLM's `sample_tokens` calls with the
+   step's logits (after a structured-output request's grammar mask): offers them via
+   `type(model).logits.provide(model, logits)`, samples from what comes back, then
+   offers `sampler_output.sampled_token_ids = type(model).samples.provide(model, ...)`.
 
 `logits`/`samples` are `eproperty` descriptors on `VLLM`, and these `.provide` calls
 are their produce side — the worked example in
 [extending-envoy.md](./extending-envoy.md#serving-a-value-that-isnt-a-module-output-vllm-logitssamples).
 
-`_still_running()` filters to `mediator.alive` workers so re-entering the
-interleaver after the forward doesn't restart completed blocks. Errors are deferred
+Re-entering the interleaver after the forward restarts nothing:
+`Interleaver.__enter__` skips any worker that already has a greenlet, and a finished
+one is parked nowhere, so only blocks still waiting are served. Errors are deferred
 per request (`interleaver.defer_exceptions = True`) and surfaced to the client via
 `raise_deferred`; a `tracer.stop()` is silent control flow. `_finish_erred`
 retires an erred/stopped request by forcing its next token to EOS.
@@ -125,9 +125,12 @@ recomputed every step:
   per-request logits/samples tensors.
 - `match(request_ids)` reconciles engine ids with worker ids — vLLM appends
   a content hash, so engine `"0"` maps to worker `"0-<hash>"`.
-- `record_saves()` / `saves` / `error` capture and read back
-  each worker's saved names and any error, on the workers' thread (required because
-  final collection may run on a different thread under Ray).
+- Each worker marks its `.save()`s in a set of its own (`Mediator.saves`, given it
+  in `scope` as it starts), not the thread's: the engine never closes the trace
+  scope a local run clears that set on, so the thread's would be shared by every
+  request. `saves()` / `deferred()` read a worker's saved values and error at
+  collect, on the workers' thread; Ray's compiled-graph executor, where collect
+  would run on another thread, is refused in `NNsightGPUWorker.init_device`.
 - `finish_dangling(worker_id)` throws a still-parked worker at request end
   into a `ValueError` (barrier) or `OutOfOrderError` (the run already ran past its
   location); an over-iterated `tracer.iter` only warns.
@@ -180,15 +183,15 @@ however many workers read it. See [batching-internals.md](./batching-internals.m
 `super().step()`, for **every** finished request (not only traced ones) it calls
 `collective_rpc("collect_nnsight", args=(finished, finished, by_id))` — the third
 argument is the finished `RequestOutput`s, which the worker cannot build and needs
-in order to serve `tracer.result` — merges the ranks with `merge_collected`, and
+in order to serve `tracer.result` — unpickles the one reply that carries values, and
 `attach`es the result to each output. `VLLM._collect` then `mark`s each saved value
 and writes it into the mediator's locals, and `raise_deferred`s any error.
 
-Ranks are merged, **not** first-non-empty: a trace's values come from the reporting
-rank while a registered block's come from whichever rank ran the layers it read, and
-taking one payload would silently drop the other. Where two ranks report the same
-registered name — tensor parallelism, where each gathers the same whole value — the
-earliest rank's is kept, so the value lands on the device a traced one would.
+Every rank is called, but only the first tensor-parallel rank replies with values;
+the others reply `None`. Pipeline parallelism is refused, so every rank runs every
+layer, and its reads (a trace's and a registered block's alike) are gathered across
+the group: the first rank already holds everything, on the device a traced value
+lands on.
 
 `attach` sets `output.saves` (trace and registered values together) and
 `output.nnsight_saves` (the trace's own), plus `nnsight_error`. The separation is
@@ -198,7 +201,7 @@ otherwise fold a sweep's per-request values into one.
 
 `collect_nnsight(request_ids, finished_request_ids, outputs=None)` runs on the
 worker and returns
-`pickle.dumps({engine_id: {"saves", "registered", "error", "sequences"}})`. In one
+`pickle.dumps({engine_id: {"error", "sequences": {index: {"saves", "registered"}}}})`. In one
 loop over one `Request` record per in-flight request (its traced worker, its
 registered copies, what they left behind, any deserialization error) it harvests
 what finished, takes the registered values, serves `tracer.result`, throws
@@ -210,14 +213,14 @@ per sequence (`"{index}_{parent}"`, vLLM's `ParentRequest`), each running its ow
 copy of the block. `Request.key` resolves a vLLM id to `(engine_id, index)` once, on
 arrival, taking the child reading only when the parent it names is one the engine
 asked about — so an id that merely starts with digits and an underscore is not
-mistaken for a second sequence. `saves`/`registered` stay the primary sequence's;
-`attach` puts each sequence's on `output.outputs[i].saves` and the trace's own on
+mistaken for a second sequence. The flat `saves`/`registered` are the primary
+sequence's; `attach` puts each sequence's on `output.outputs[i].saves` and the trace's own on
 `output.nnsight_sequences`, which `VLLM._collect` pushes back as a list.
 
 **Every rank winds up its own workers; only one reports.** Each rank ran the block,
 so each holds a worker, a greenlet, and whatever that greenlet captured — all of it
-has to be released. Only rank 0's values are reported, since the reads are gathered
-and every rank holds the same ones. Only the *reporting* is gated on rank; an early
+has to be released. Only the first tensor-parallel rank replies with values, since the reads are gathered
+and every rank holds the same ones. Only the *reply* is gated on rank; an early
 return on the other ranks would leave their workers in place for the life of the
 engine. `nnsight_request_count()` is the leak gauge — it returns to 0 **on every
 rank**, which is what `tests/vllm/test_tensor_parallel.py::TestEveryRankWindsUp` pins.
@@ -264,8 +267,7 @@ every rank via `collective_rpc("nnsight_register", ...)` and kept there.
   presaved)`; `Requests.add` builds a fresh `Mediator` per arriving request from
   those pieces, so the source is compiled once rather than per request — the
   performance argument for registering.
-- Registered copies are scoped, started, unflattened and `record_saves`-ed
-  alongside traced ones (`Requests.scope` runs them *first*, so a trace on the
+- Registered copies are scoped, started and unflattened alongside traced ones (`Requests.scope` runs them *first*, so a trace on the
   same request sees what they left).
 - `Requests.harvest` moves a finished request's saves into `harvested`, driven by
   `scheduler_output.finished_req_ids` in `_update_states` — **not** by
@@ -307,7 +309,7 @@ defaults `enable_prefix_caching=False`; `_warn_if_prefix_caching` warns when an
 edit is installed on an engine built with it on.
 
 **Logits and saves.** The sampler scales its logits in place, so when a block is
-in the step `sample_tokens` hands it a copy, and a saved `model.logits` stays
+in the step `_sample` hands it a copy, and a saved `model.logits` stays
 what the block read. Pickling a tensor writes its whole storage, and a block's
 reads are rows narrowed out of the step's buffers, so `collect_nnsight` ships
 each saved view as a copy of itself (`collect.dumps_compact`, a pickler whose
@@ -350,9 +352,8 @@ the meta model, and a server holds one dispatched async `VLLM`.
 3. The scheduler forwards to the worker; `_update_states` → `Requests.add`
    (deserialize mediators) + `scope` (token spans).
 4. `execute_model` runs the forward under the interleaver (the controllers serve
-   parked workers); `unflatten` switches to per-row spans.
-5. `sample_tokens` serves `logits`; `_sample` serves `samples`; `record_saves`
-   captures saves.
+   parked workers); `unflatten` switches to per-row spans as `_model_forward` returns.
+5. `_sample` serves `logits`, then `samples`.
 6. `NNsightLLMEngine.step` detects finished requests, `collect_nnsight` pulls saves,
    attaches `RequestOutput.saves`.
 7. `VLLM._collect` marks saves into the user's variables and re-raises deferred errors.
@@ -363,7 +364,7 @@ Async replaces steps 2 and 6-7 with `AsyncVLLMBackend` streaming.
 
 Preserve these when changing the integration; each has a test guarding it:
 
-- **A saved value returns by name; bind it.** `record_saves` maps a `.save()`d value
+- **A saved value returns by name; bind it.** Collect maps a `.save()`d value
   back to a variable by scanning the block's locals, so a bare `model.logits.save()`
   with no assignment produces no named save and `output.saves["logits"]` is empty.
   Write `logits = model.logits.save()`.
@@ -387,9 +388,8 @@ Preserve these when changing the integration; each has a test guarding it:
   runs in the worker and the `RequestOutput` is assembled by the engine, so the
   collect is the first moment both exist — the engine passes `{request_id: output}`
   alongside the ids and `Requests.serve_result` hands it to a worker parked on
-  `"result"`, before `finish_dangling` would throw into it. The worker binds its
-  name *after* the run's last `record_saves`, so `serve_result` re-takes that
-  snapshot (`Requests.record`) or the value comes home unbound.
+  `"result"`, before `finish_dangling` would throw into it. Saves are read after
+  that, so a name the block binds past its `tracer.result` read comes home too.
 
 ## Testing
 

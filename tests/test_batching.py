@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from collections import OrderedDict, namedtuple
 
 import pytest
 import torch
@@ -28,6 +29,16 @@ ET = "The Eiffel Tower is in the city of"
 @pytest.fixture(scope="module")
 def gpt2():
     return TransformersModel("gpt2", task="text-generation", dispatch=True)
+
+
+class _AttrOutput(OrderedDict):
+    """A stand-in for a HF ModelOutput: an OrderedDict also read by attribute."""
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(key) from None
 
 
 class _MLP(nn.Module):
@@ -72,9 +83,9 @@ class TestTraceBatching:
     def test_each_invoke_sees_its_own_rows(self, gpt2):
         with gpt2.trace() as tracer:
             with tracer.invoke(P1):
-                a = gpt2.transformer.h[0].output[0].save()
+                a = gpt2.transformer.h[0].output.save()
             with tracer.invoke(P2):
-                b = gpt2.transformer.h[0].output[0].save()
+                b = gpt2.transformer.h[0].output.save()
         # One row each (the invoke's slice of the batch), padded to the batch seq.
         assert a.shape[0] == b.shape[0]  # common padded length
         assert isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)
@@ -83,10 +94,10 @@ class TestTraceBatching:
     def test_edit_is_isolated_to_its_invoke(self, gpt2):
         with gpt2.trace() as tracer:
             with tracer.invoke(P1):
-                gpt2.transformer.h[0].output[0][:] = 0
-                edited = gpt2.transformer.h[0].output[0].save()
+                gpt2.transformer.h[0].output[:] = 0
+                edited = gpt2.transformer.h[0].output.save()
             with tracer.invoke(P1):
-                other = gpt2.transformer.h[0].output[0].save()
+                other = gpt2.transformer.h[0].output.save()
         assert torch.all(edited == 0)
         assert torch.any(other != 0)
 
@@ -109,7 +120,7 @@ class TestTraceBatching:
             outs = nnsight.save([])
             for prompt in ("one two", "three four five", "six"):
                 with tracer.invoke(prompt):
-                    outs.append(gpt2.transformer.h[0].output[0])
+                    outs.append(gpt2.transformer.h[0].output)
         assert len(outs) == 3
 
     @torch.no_grad()
@@ -129,10 +140,10 @@ class TestGenerateBatching:
     def test_batched_generate_returns_per_prompt_results(self, gpt2):
         with gpt2.pipe(max_new_tokens=3, do_sample=False) as tracer:
             with tracer.invoke("The Eiffel Tower is in"):
-                a = gpt2.transformer.h[0].output[0].save()
+                a = gpt2.transformer.h[0].output.save()
                 result = tracer.result.save()
             with tracer.invoke("The capital of France is"):
-                b = gpt2.transformer.h[0].output[0].save()
+                b = gpt2.transformer.h[0].output.save()
         assert len(result) == 2
         assert isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)
         texts = [
@@ -233,6 +244,48 @@ class TestMultiInvokeSkip:
         assert tensor.shape == (5, 4)
         assert bool((tensor[:2] == 1).all()) and bool((tensor[2:] == 5).all())
         assert mapping["k"].shape == (5, 3)
+
+    def test_concat_rebuilds_a_namedtuple(self):
+        # A namedtuple takes positional fields, so one rebuilt from a single
+        # iterable raises TypeError before it reaches the module downstream.
+        from nnsight.intervention.batching import concat
+
+        Out = namedtuple("Out", ["hidden", "cache"])
+        a = Out(torch.ones(2, 4), torch.ones(2, 3))
+        b = Out(torch.full((3, 4), 5.0), torch.full((3, 3), 5.0))
+
+        out = concat([a, b])
+
+        assert isinstance(out, Out)
+        assert out.hidden.shape == (5, 4) and out.cache.shape == (5, 3)
+        assert bool((out.hidden[:2] == 1).all()) and bool((out.hidden[2:] == 5).all())
+
+    def test_concat_keeps_a_dict_subclass(self):
+        # The module downstream of the skip reads its predecessor's output by
+        # attribute, which a HF ModelOutput answers and a plain dict does not,
+        # so the exact type has to survive the rebuild.
+        from nnsight.intervention.batching import concat
+
+        a = _AttrOutput(last_hidden_state=torch.ones(2, 4))
+        b = _AttrOutput(last_hidden_state=torch.full((3, 4), 5.0))
+
+        out = concat([a, b])
+
+        assert isinstance(out, _AttrOutput)
+        assert out.last_hidden_state.shape == (5, 4)
+        assert bool((out.last_hidden_state[:2] == 1).all())
+        assert bool((out.last_hidden_state[2:] == 5).all())
+
+    def test_concat_keeps_an_ordereddict(self):
+        from nnsight.intervention.batching import concat
+
+        a = OrderedDict(k=torch.ones(2, 4))
+        b = OrderedDict(k=torch.full((3, 4), 5.0))
+
+        out = concat([a, b])
+
+        assert isinstance(out, OrderedDict)
+        assert out["k"].shape == (5, 4)
 
 
 class TestWholeTensorWrites:
@@ -693,9 +746,9 @@ class TestInvokerGrouping:
         # predicts MSG's continuation (" New").
         with gpt2.trace() as tracer:
             with tracer.invoke(MSG):
-                gpt2.transformer.h[-1].output[0][:] = 0
+                gpt2.transformer.h[-1].output[:] = 0
             with tracer.invoke(MSG):
-                hidden = gpt2.transformer.h[-1].output[0].save()
+                hidden = gpt2.transformer.h[-1].output.save()
                 token = gpt2.lm_head.output[0][-1].argmax(dim=-1).save()
         assert torch.all(hidden != 0)
         assert gpt2.tokenizer.decode(token) == " New"
@@ -744,8 +797,8 @@ class TestInvokerInputFormats:
         # tokenization rather than forwarded to the model, so the sequence is cut.
         with gpt2.trace() as tracer:
             with tracer.invoke("word " * 50, truncation=True, max_length=4):
-                short = gpt2.transformer.h[0].output[0].save()
-        assert short.shape[0] == 4  # tokenized to 4 tokens, not the full ~100
+                short = gpt2.transformer.h[0].output.save()
+        assert short.shape[1] == 4  # tokenized to 4 tokens, not the full ~100
 
 
 class TestBatchedGenerationParity:
@@ -1059,3 +1112,14 @@ class TestUnbatchedTensorWrites:
         assert not torch.equal(edited_a, clean_a)
         assert not torch.equal(edited_b, clean_b)  # the whole tensor: the other invoke's rows too
         assert torch.equal(edited_a, envoy._module.fc2.bias.expand(2, 8))
+
+
+class TestSanitizeOncePerPipeline:
+    def test_generate_names_are_read_once_per_pipeline(self, gpt2):
+        from nnsight.modeling import processing
+
+        processing.generation_names.cache_clear()
+        for _ in range(2):
+            pre, forward, _ = processing.sanitize(gpt2, {"max_new_tokens": 3, "truncation": True})
+        assert processing.generation_names.cache_info().misses == 1
+        assert forward["max_new_tokens"] == 3 and pre["truncation"] is True

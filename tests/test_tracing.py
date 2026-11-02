@@ -656,6 +656,22 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 
 
 class TestBlockCache:
+    def test_block_scope_undoes_a_received_blocks_source(self):
+        # A server registers each request's block under the client's filename,
+        # and parses its invokes from there; a later request from the same file
+        # must not be served the earlier one's source, parse or code.
+        from nnsight.tracing import globals as g
+
+        filename = "/client/script.py"
+        with g.block_scope():
+            linecache.cache[filename] = (1, None, ["x = 1\n"], filename)
+            g.SOURCES[filename] = "x = 1\n"
+            g.BLOCKS[(filename, 1, "<module>", 1)] = (None, None)
+
+        assert filename not in linecache.cache
+        assert filename not in g.SOURCES
+        assert not any(key[0] == filename for key in g.BLOCKS)
+
     def test_repeated_site_reuses_compiled_code(self):
         codes = []
         for _ in range(3):

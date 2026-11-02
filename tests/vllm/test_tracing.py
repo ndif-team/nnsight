@@ -8,6 +8,7 @@ run in the worker, saved values shipped home.
 """
 
 from collections import namedtuple
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -16,6 +17,18 @@ pytest.importorskip("vllm")
 
 # Module level, so pickle can find it by name.
 Pair = namedtuple("Pair", "row whole")
+
+
+def _suspended_blocks(worker) -> int:
+    """How many intervention blocks are suspended in a worker, run there via ``collective_rpc``."""
+    import gc
+
+    from greenlet import greenlet
+
+    return sum(
+        1 for obj in gc.get_objects()
+        if isinstance(obj, greenlet) and obj and hasattr(obj, "mediator")
+    )
 
 
 @pytest.fixture(scope="module")
@@ -77,6 +90,24 @@ class TestLogits:
 
         for value in (*hidden, *logits):
             assert value.untyped_storage().nbytes() == value.numel() * value.element_size()
+
+    @torch.no_grad()
+    def test_the_logits_processor_is_scoped_to_its_request(self, vllm_gpt2, ET_prompt,
+                                                           MSG_prompt):
+        # It runs after the forward, on one row per request, and was served with
+        # the forward's token spans; on a step where those did not narrow it, the
+        # block got every request's rows, and could write them.
+        with vllm_gpt2.trace(temperature=0.0, ignore_eos=True) as tracer:
+            with tracer.invoke("Hi", max_tokens=3):
+                rows = list().save()
+                for _ in tracer.iter[:3]:
+                    rows.append(vllm_gpt2.logits_processor.output.shape[0])
+            with tracer.invoke(ET_prompt, max_tokens=3):
+                pass
+            with tracer.invoke(MSG_prompt, max_tokens=3):
+                pass
+
+        assert rows == [1, 1, 1]
 
 
 class TestCompactPickle:
@@ -654,6 +685,23 @@ class TestDeferredErrors:
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
+    def test_a_raise_after_the_result_is_the_requests_own(self, vllm_gpt2,
+                                                          ET_prompt, MSG_prompt):
+        # `tracer.result` is served inside the collect, so a raise after it once
+        # escaped the collect and took the other invoke's values with it.
+        with pytest.raises(RuntimeError, match="ValueError"):
+            with vllm_gpt2.trace(temperature=0.0, max_tokens=2) as tracer:
+                with tracer.invoke(ET_prompt):
+                    result = tracer.result
+                    raise ValueError("after the result")
+                with tracer.invoke(MSG_prompt):
+                    logits = vllm_gpt2.logits.save()
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
     def test_out_of_order_read_surfaces(self, vllm_gpt2, ET_prompt):
         # Reading a layer the forward already ran past leaves the worker parked with
         # nowhere to be served. When the request finishes it is surfaced as an
@@ -679,6 +727,21 @@ class TestDeferredErrors:
         with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
             logits = vllm_gpt2.logits.save()
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_swap_that_does_not_fit_leaves_no_block_suspended(self, vllm_gpt2,
+                                                               ET_prompt):
+        # The swap fails in the handoff, outside the block, so the block is still
+        # suspended when its request ends; nothing counts it, and it held its
+        # scope for the life of the engine.
+        engine = vllm_gpt2.vllm_entrypoint.llm_engine
+        before = engine.collective_rpc(_suspended_blocks)
+        for _ in range(3):
+            with pytest.raises(RuntimeError):
+                with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=2):
+                    vllm_gpt2.transformer.h[5].output = torch.zeros(1, 1)
+
+        assert engine.collective_rpc(_suspended_blocks) == before
 
     @torch.no_grad()
     def test_error_in_one_invoke_isolated(self, vllm_gpt2, ET_prompt, MSG_prompt):
@@ -946,6 +1009,9 @@ class TestModelRunnerSelection:
 
         monkeypatch.setattr(Worker, "init_device", lambda self: None)
         worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend="mp")
+        )
 
         worker.model_runner = object()
         with pytest.raises(NotImplementedError, match="instruments vLLM's GPUModelRunner"):
@@ -954,6 +1020,24 @@ class TestModelRunnerSelection:
         worker.model_runner = GPUModelRunner.__new__(GPUModelRunner)
         worker.init_device()
         assert type(worker.model_runner) is NNsightGPUModelRunner
+
+    def test_rays_compiled_graph_executor_is_refused(self, monkeypatch):
+        # It runs the forward on a thread of its own, and a suspended block can
+        # only be resumed from its own thread, so a collect could not finish it.
+        from vllm import envs
+        from vllm.v1.worker.gpu_worker import Worker
+
+        from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
+
+        monkeypatch.setattr(Worker, "init_device", lambda self: None)
+        monkeypatch.setattr(envs, "VLLM_USE_RAY_V2_EXECUTOR_BACKEND", False, raising=False)
+        worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend="ray")
+        )
+
+        with pytest.raises(NotImplementedError, match="compiled-graph Ray executor"):
+            worker.init_device()
 
     def test_asking_for_the_other_one_is_refused(self):
         # Overriding it silently would be worse: the engine comes up with no
@@ -989,3 +1073,21 @@ class TestScan:
         # returning a tracer nobody enters is a silent no-op.
         with pytest.raises(NotImplementedError, match="scan is unavailable on vLLM"):
             model.scan("The capital of France is")
+
+
+def test_speculative_decoding_is_refused_before_anything_is_built():
+    # A speculative step has several logits rows per request, where a block is
+    # scoped to one; refused before the meta build or a process group exists.
+    from nnsight.modeling.vllm import VLLM
+
+    with pytest.raises(NotImplementedError, match="speculative_config"):
+        VLLM("gpt2", speculative_config={"method": "ngram", "num_speculative_tokens": 2})
+
+
+def test_data_parallelism_is_refused_before_anything_is_built():
+    # vLLM answers the collect from the first engine only, so every other
+    # engine's requests came back without their values, and without an error.
+    from nnsight.modeling.vllm import VLLM
+
+    with pytest.raises(NotImplementedError, match="data_parallel_size"):
+        VLLM("gpt2", data_parallel_size=2)

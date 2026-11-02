@@ -118,6 +118,9 @@ class AsyncVLLMBackend(Backend):
             # request from one that has finished but whose saves the client has not
             # collected yet, and would drop the latter's saves.
             if not finished:
+                # Closing vLLM's own stream is what aborts the request; left to
+                # garbage collection, it would run on to its max_tokens.
+                await self._generator.aclose()
                 await self._free_worker()
 
     async def _free_worker(self) -> None:

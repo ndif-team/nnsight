@@ -1,4 +1,8 @@
 
+import gc
+import threading
+import weakref
+
 import pytest
 import torch
 import nnsight
@@ -112,6 +116,54 @@ class TestBackward:
             with loss.backward():
                 g = nnsight.save(a1.grad.clone())
         assert torch.allclose(g, reference_grad(model, x))
+
+
+class _RaiseInBackward(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        return x.clone()
+
+    @staticmethod
+    def backward(ctx, grad):
+        raise RuntimeError("boom in backward")
+
+
+class RaisesInBackward(MLP):
+    """An MLP whose backward fails between fc2 and fc1, before fc1's gradient."""
+
+    def forward(self, x):
+        return self.fc2(_RaiseInBackward.apply(torch.relu(self.fc1(x))))
+
+
+class TestFailedBackward:
+    def test_parked_block_is_unwound(self, x):
+        # The block waits for fc1's gradient and the backward fails first. A block
+        # left parked keeps its frame, and with it the forward's tensors and graph;
+        # once the thread that ran it has exited, nothing can free them. So the
+        # trace runs on a thread of its own, as a server runs each request.
+        envoy = Envoy(RaisesInBackward())
+        refs = []
+        errors = []
+
+        def run():
+            try:
+                with envoy.trace(x):
+                    a1 = envoy.fc1.output
+                    loss = envoy.output.sum()
+                    with loss.backward():
+                        refs.append(weakref.ref(a1))
+                        a1.grad
+            except RuntimeError as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+
+        assert [str(e) for e in errors] == ["boom in backward"]
+        errors.clear()
+        gc.collect()
+        assert refs and refs[0]() is None
 
 
 class TestBareBackward:

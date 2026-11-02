@@ -3,8 +3,9 @@
 Answered before anything is loaded, because a server placing a model has to
 decide how many cards to give it *first*. The whole question is divisibility:
 transformers shards attention by head and the MLP by its intermediate
-dimension, and its all-gather assumes every rank holds an equal piece, so a
-degree that doesn't divide those evenly is not a slower option — it fails.
+dimension. Attention reshapes each rank's piece into whole heads, and before 5.21
+the MLP's pieces have to be equal, so a degree that doesn't divide those evenly
+is not a slower option — it fails.
 
 The answer is a single number, the largest degree that works. Every degree that
 works is a divisor of it, so a caller wanting *n* ranks takes the smallest
@@ -180,7 +181,6 @@ def check_tp_request(
         raise UnshardableCheckpoint(
             f"this checkpoint splits at most {limit} ways and not into {tp_size} "
             f"pieces: a degree has to divide the dimensions evenly, so the ones "
-            f"that work are {workable}. transformers would shard what it could and "
-            "gather as though every rank held an equal piece, which does not fail "
-            "so much as return the wrong shape."
+            f"that work are {workable}. transformers would shard what it could, "
+            "and the first forward would fail."
         )

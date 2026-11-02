@@ -56,6 +56,11 @@ def _nnsight_path() -> str:
 REPO = "hf-internal-testing/tiny-random-LlamaForCausalLM"
 TP_SIZE = 2
 
+# REPO with a vocabulary TP_SIZE does not divide, so the last rank holds the
+# shorter slice of the embedding and of `lm_head`'s output. Tied as well, as on
+# Llama-3.2, so the two share one vocab-parallel weight; REPO is untied.
+UNEVEN_VOCAB = 32001
+
 # float32 on a 2-rank CPU mesh drifts far less than bf16 on 4 GPUs, so this is
 # tighter than the GPU suite's 1e-3.
 DRIFT = 1e-4
@@ -67,7 +72,7 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _run(tp: int, out: str) -> None:
+def _run(tp: int, out: str, repo: str) -> None:
     """Run the worker at ``tp`` CPU ranks, writing one file per rank into ``out``."""
     env = {
         **os.environ,
@@ -90,7 +95,7 @@ def _run(tp: int, out: str) -> None:
             f"--nproc_per_node={tp}",
             f"--master_port={_free_port()}",
         ]
-    command += [WORKER, "--tp", str(tp), "--repo", REPO, "--out", out, "--device", "cpu"]
+    command += [WORKER, "--tp", str(tp), "--repo", repo, "--out", out, "--device", "cpu"]
 
     completed = subprocess.run(command, env=env, capture_output=True, text=True)
     if completed.returncode != 0:
@@ -109,14 +114,39 @@ def _rel(actual: torch.Tensor, expected: torch.Tensor) -> float:
     return (actual - expected).abs().max().item() / (scale if scale else 1.0)
 
 
-@pytest.fixture(scope="module")
-def runs(tmp_path_factory) -> tuple[dict, list[dict]]:
+def _uneven_vocab_repo(tmp_path_factory) -> str:
+    """REPO's shape with `UNEVEN_VOCAB` and tied embeddings, saved by the running
+    transformers."""
+    from transformers import AutoConfig, AutoTokenizer, LlamaForCausalLM
+
+    config = AutoConfig.from_pretrained(REPO)
+    config.vocab_size = UNEVEN_VOCAB
+    config.tie_word_embeddings = True
+    config.pad_token_id = None  # REPO's -1 fails the generation config check on save
+    torch.manual_seed(0)
+    path = tmp_path_factory.mktemp("llama_uneven_vocab")
+    LlamaForCausalLM(config).save_pretrained(path)
+    AutoTokenizer.from_pretrained(REPO).save_pretrained(path)
+    return str(path)
+
+
+@pytest.fixture(scope="module", params=["hub", "uneven_vocab"])
+def runs(request, tmp_path_factory) -> tuple[dict, list[dict]]:
     """``(reference, [per-rank sharded results])`` from two subprocess runs."""
+    repo = REPO
+    if request.param == "uneven_vocab":
+        import transformers
+        from packaging.version import Version
+
+        if Version(transformers.__version__).release < (5, 21):
+            pytest.skip("transformers < 5.21 refuses a vocabulary tp_size does not divide")
+        repo = _uneven_vocab_repo(tmp_path_factory)
+
     reference_dir = tmp_path_factory.mktemp("cpu_tp1")
     sharded_dir = tmp_path_factory.mktemp(f"cpu_tp{TP_SIZE}")
 
-    _run(1, str(reference_dir))
-    _run(TP_SIZE, str(sharded_dir))
+    _run(1, str(reference_dir), repo)
+    _run(TP_SIZE, str(sharded_dir), repo)
 
     reference = torch.load(os.path.join(reference_dir, "rank0.pt"), weights_only=False)
     sharded = [
@@ -153,7 +183,10 @@ def test_the_ranks_agree(runs) -> None:
         "down_proj_in",       # a row-parallel input: pre-split
         "layer_out",
         "baseline_logits",
+        "nograd_logits",        # a plain local tensor: the rule's width decides
         "partial_edit_logits",  # an edit straddling the rank boundary
+        "embed_out",            # a vocab-parallel embedding's single-use mask
+        "embed_edited_logits",  # ... edited and handed back
         "adhoc_colwise",
         "adhoc_rowwise",
         "adhoc_hooked",   # hook=True must not skip the bracket

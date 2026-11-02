@@ -119,6 +119,28 @@ class VLLM(Remotable):
         # cleared one drops out (see registration.Registration.clear).
         self._installed_edits: list = []
 
+        # A speculative step scores several draft tokens per request, so its logits
+        # carry several rows per request where the runner scopes each block to one.
+        # Refused before anything is built, since the meta build reads these kwargs too.
+        if kwargs.get("speculative_config") is not None:
+            raise NotImplementedError(
+                "speculative_config is not supported on an nnsight engine: a "
+                "speculative step scores several draft tokens per request, and "
+                "interventions are scoped to one logits row and one sampled token "
+                "per request. Drop speculative_config to trace, or use vLLM "
+                "directly for that run."
+            )
+        # vLLM's data-parallel client sends a utility call to every engine but
+        # returns only the first engine's reply, and the collect is one.
+        if kwargs.get("data_parallel_size", 1) > 1:
+            raise NotImplementedError(
+                "data_parallel_size > 1 is not supported on an nnsight engine: vLLM "
+                "returns only the first engine's reply to the call that brings a "
+                "request's saved values back, so a request on any other engine "
+                "would come back without them. Use tensor_parallel_size, or one "
+                "VLLM per GPU."
+            )
+
         # Model-parallel init has to happen before `Meta.__init__` opens its
         # meta-device context: vLLM builds real rank tensors here and later calls
         # `.tolist()` on them, which a meta tensor cannot serve.
@@ -891,9 +913,13 @@ class VLLM(Remotable):
             # either way: `outputs = model.generate(...)` on a sync engine,
             # `outputs = await model.generate(...)` on an async one.
             return self._generate_async(prompts, params, lora_request)
-        return self.vllm_entrypoint.generate(
-            prompts, params, lora_request=lora_request
-        )
+        try:
+            return self.vllm_entrypoint.generate(
+                prompts, params, lora_request=lora_request
+            )
+        except BaseException:
+            self._abort_unfinished()
+            raise
 
     async def _generate_async(self, prompts: Any, params: Any, lora_request: Any) -> list:
         """Drive the async engine to completion and collect, as the sync path does.
@@ -934,11 +960,28 @@ class VLLM(Remotable):
     ) -> Any:
         """Run the engine with this trace's workers attached to its requests."""
         mediators = self._attach_mediators(params, **kwargs)
-        outputs = self.vllm_entrypoint.generate(
-            prompts, sampling_params=params, lora_request=lora_requests
-        )
+        try:
+            outputs = self.vllm_entrypoint.generate(
+                prompts, sampling_params=params, lora_request=lora_requests
+            )
+        except BaseException:
+            self._abort_unfinished()
+            raise
         self._collect(mediators, outputs)
         return outputs
+
+    def _abort_unfinished(self) -> None:
+        """Abort what a run that raised part-way left in the synchronous engine.
+
+        `LLM.generate` returns every output its engine finishes, so a request left
+        behind by an interrupted run (a ``KeyboardInterrupt`` in a notebook) would
+        come back as part of the next run's, and its values would land in the next
+        trace's variables. Nothing else runs on a synchronous engine, so all of it
+        is the interrupted run's.
+        """
+        engine = self.vllm_entrypoint.llm_engine
+        with contextlib.suppress(Exception):  # an engine that died is its own error
+            engine.abort_request(list(engine.output_processor.request_states), internal=True)
 
     @staticmethod
     def _collect(mediators: list, outputs: list) -> None:
