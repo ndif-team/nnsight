@@ -90,6 +90,24 @@ class TestLogits:
         for value in (*hidden, *logits):
             assert value.untyped_storage().nbytes() == value.numel() * value.element_size()
 
+    @torch.no_grad()
+    def test_the_logits_processor_is_scoped_to_its_request(self, vllm_gpt2, ET_prompt,
+                                                           MSG_prompt):
+        # It runs after the forward, on one row per request, and was served with
+        # the forward's token spans; on a step where those did not narrow it, the
+        # block got every request's rows, and could write them.
+        with vllm_gpt2.trace(temperature=0.0, ignore_eos=True) as tracer:
+            with tracer.invoke("Hi", max_tokens=3):
+                rows = list().save()
+                for _ in tracer.iter[:3]:
+                    rows.append(vllm_gpt2.logits_processor.output.shape[0])
+            with tracer.invoke(ET_prompt, max_tokens=3):
+                pass
+            with tracer.invoke(MSG_prompt, max_tokens=3):
+                pass
+
+        assert rows == [1, 1, 1]
+
 
 class TestCompactPickle:
     def test_views_ship_their_own_size_wherever_they_sit(self):
