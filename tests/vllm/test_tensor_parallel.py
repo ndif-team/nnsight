@@ -4,7 +4,8 @@ Under TP a linear layer's value at any one rank is only that rank's shard. The
 port gathers those shards before a worker sees the value and re-shards whatever
 the worker leaves before vLLM's own forward carries on. These tests pin that down
 by running the identical trace on an unsharded reference (``vllm_qwen_ref``, one
-rank) and on the sharded engine (``vllm_qwen_tp``) and comparing element-wise.
+rank) and on the sharded engine (``vllm_qwen_tp``) and comparing element-wise;
+gemma-3-270m, with one KV head, covers K/V replicated across ranks.
 
 * Row-parallel layers (``o_proj``, ``down_proj``) split the contraction and
   all-reduce their output, so the whole is laid out as the single-rank run's.
@@ -333,3 +334,39 @@ class TestEveryRankWindsUp:
             assert counts == [0] * len(counts), f"workers left behind: {counts}"
         finally:
             edit.clear()
+
+
+@pytest.fixture(scope="module")
+def vllm_gemma_ref():
+    """A single-rank gemma-3-270m: one KV head, so any tp > 1 replicates it."""
+    from nnsight.modeling.vllm import VLLM
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs 2 GPUs")
+    return VLLM("unsloth/gemma-3-270m", gpu_memory_utilization=0.1, dispatch=True)
+
+
+@pytest.fixture(scope="module")
+def vllm_gemma_tp(vllm_gemma_ref):
+    from nnsight.modeling.vllm import VLLM
+
+    return VLLM(
+        "unsloth/gemma-3-270m",
+        tensor_parallel_size=2,
+        gpu_memory_utilization=0.1,
+        dispatch=True,
+    )
+
+
+class TestReplicatedKV:
+    """With fewer KV heads than ranks, vLLM gives adjacent ranks the same K and V."""
+
+    @torch.no_grad()
+    def test_qkv_matches_reference(self, vllm_gemma_ref, vllm_gemma_tp, ET_prompt):
+        # Both ranks hold the one KV head; the gather keeps one copy of it, or K
+        # and V come back twice as wide as at one rank.
+        ref, _ = _read(vllm_gemma_ref, "self_attn.qkv_proj", ET_prompt)
+        tp, _ = _read(vllm_gemma_tp, "self_attn.qkv_proj", ET_prompt)
+
+        assert tp.shape == ref.shape
+        assert _min_row_cosine(tp, ref) > 0.99

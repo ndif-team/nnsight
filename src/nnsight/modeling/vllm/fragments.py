@@ -114,13 +114,6 @@ class VLLMFragments(Fragments):
             # input already split by feature. Either way the whole is the ranks'
             # concatenation.
             collective = tensor_model_parallel_all_gather
-            # A layer sharded across decode-context-parallel *groups* (vLLM's
-            # DCPGroupColumnParallelLinear) is replicated within each group, so
-            # the ranks' concatenation carries every shard `group_size` times.
-            groups = getattr(module, "group_size", 1)
-            if groups > 1:
-                world = groups * module.tp_size
-                collective = lambda tensor: _one_per_group(tensor_model_parallel_all_gather(tensor), world, groups)
             # A fused layer's piece is `[q_r | k_r | v_r]`, so the concatenation
             # interleaves its projections; per-head slices and `chunk(2, -1)` need
             # the `[q | k | v]` a single rank produces.
@@ -129,6 +122,13 @@ class VLLMFragments(Fragments):
                 collective = lambda tensor: _unfuse(
                     tensor_model_parallel_all_gather(tensor), parts, module.tp_size
                 )
+            # A layer sharded across decode-context-parallel *groups* (vLLM's
+            # DCPGroupColumnParallelLinear) is replicated within each group, so
+            # the ranks' concatenation carries every shard `group_size` times.
+            elif getattr(module, "group_size", 1) > 1:
+                groups = module.group_size
+                world = groups * module.tp_size
+                collective = lambda tensor: _one_per_group(tensor_model_parallel_all_gather(tensor), world, groups)
         else:
             # Row sharding splits the summed terms, and a deferred-combine FusedMoE
             # leaves each rank a partial sum of the experts' output — either way
