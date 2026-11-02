@@ -168,7 +168,8 @@ class Requests:
         self.templates.pop(registration_id, None)
         self.names.pop(registration_id, None)
         for request in self.requests.values():
-            request.copies.pop(registration_id, None)
+            # A copy may be parked mid-request; dropped without an unwind, it stays.
+            self.finish_dangling(request.copies.pop(registration_id, None), quiet=True)
             request.harvested.pop(registration_id, None)
 
     def add(self, new_requests: list["NewRequestData"], persistent_objects: dict) -> None:
@@ -467,9 +468,16 @@ class Requests:
 
         # A worker whose request is over but which is parked nowhere already erred:
         # the interleaver deferred its exception and cleared its pending, and that
-        # error — not a dangling read — is what its request goes home with.
+        # error — not a dangling read — is what its request goes home with. Still
+        # alive means the error was raised outside the block (a swap that did not
+        # fit its rows), so the block is still suspended; end it, or its greenlet
+        # and everything its scope holds are never freed.
         requester = mediator.pending
         if requester is None:
+            try:
+                mediator.worker.throw()
+            except BaseException:
+                pass
             return
 
         error, expected = dangling_unwind(mediator)
