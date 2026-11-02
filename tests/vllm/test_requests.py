@@ -35,6 +35,11 @@ def _request_state(model):
     return model.vllm_entrypoint.llm_engine.collective_rpc(_worker_request_state)[0]
 
 
+def _out_of_batch(worker) -> int:
+    """How many workers a runner holds as out of the batch, run there via ``collective_rpc``."""
+    return len(worker.model_runner.nnsight_requests.out)
+
+
 class TestClientCleanup:
     @torch.no_grad()
     def test_mediators_cleared_after_trace(self, vllm_gpt2, ET_prompt):
@@ -102,6 +107,26 @@ class TestWorkerCleanup:
 
         assert isinstance(hidden, torch.Tensor)
         assert engine.collective_rpc("nnsight_request_count") == [0]
+
+    @torch.no_grad()
+    def test_nothing_is_held_once_the_last_request_is_collected(
+        self, vllm_gpt2, ET_prompt, MSG_prompt
+    ):
+        # The short request ends one step before the long one, so its worker
+        # sits out that last step, and no step after it lets it go.
+        with vllm_gpt2.trace(temperature=0.0, ignore_eos=True) as tracer:
+            with tracer.invoke(ET_prompt, max_tokens=5):
+                short = list().save()
+                for _ in tracer.all():
+                    short.append(vllm_gpt2.samples)
+            with tracer.invoke(MSG_prompt, max_tokens=6):
+                long = list().save()
+                for _ in tracer.all():
+                    long.append(vllm_gpt2.samples)
+
+        assert len(long) >= 6
+        engine = vllm_gpt2.vllm_entrypoint.llm_engine
+        assert engine.collective_rpc(_out_of_batch) == [0]
 
 
 class TestBatchIsolation:
