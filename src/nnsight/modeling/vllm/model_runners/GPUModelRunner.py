@@ -800,6 +800,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 entry["error"] = request.deferred()
             if done and not request.copies:
                 requests.requests.pop(request.id, None)
+        # A worker that sat out the step before its request ended is still in `out`,
+        # holding its scope, until a next step that an idle engine never takes.
+        requests.out = {mediator for mediator in requests.out if mediator.alive}
 
         if not get_tp_group().is_first_rank:
             return None
