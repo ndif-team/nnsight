@@ -13,6 +13,7 @@ from __future__ import annotations
 import pickle
 from typing import Any, Optional
 
+from vllm import envs
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 
@@ -23,6 +24,19 @@ class NNsightGPUWorker(Worker):
     """A vLLM GPU worker whose model runner interleaves interventions."""
 
     def init_device(self) -> None:
+        # vLLM's compiled-graph Ray executor runs the forward on a thread of its
+        # own, and a block suspended there cannot be resumed from the thread a
+        # collect arrives on, so `tracer.result` and a parked block's error are lost.
+        if (
+            self.vllm_config.parallel_config.distributed_executor_backend == "ray"
+            and not envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND
+        ):
+            raise NotImplementedError(
+                "nnsight does not support vLLM's compiled-graph Ray executor "
+                "(VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0): it runs the forward on a "
+                "different thread from the calls that collect a request's values. "
+                "Unset VLLM_USE_RAY_V2_EXECUTOR_BACKEND to use vLLM's default Ray executor."
+            )
         super().init_device()
         runner = self.model_runner
         if type(runner) is not GPUModelRunner:
