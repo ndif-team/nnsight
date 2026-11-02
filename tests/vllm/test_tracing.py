@@ -654,6 +654,23 @@ class TestDeferredErrors:
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
+    def test_a_raise_after_the_result_is_the_requests_own(self, vllm_gpt2,
+                                                          ET_prompt, MSG_prompt):
+        # `tracer.result` is served inside the collect, so a raise after it once
+        # escaped the collect and took the other invoke's values with it.
+        with pytest.raises(RuntimeError, match="ValueError"):
+            with vllm_gpt2.trace(temperature=0.0, max_tokens=2) as tracer:
+                with tracer.invoke(ET_prompt):
+                    result = tracer.result
+                    raise ValueError("after the result")
+                with tracer.invoke(MSG_prompt):
+                    logits = vllm_gpt2.logits.save()
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
     def test_out_of_order_read_surfaces(self, vllm_gpt2, ET_prompt):
         # Reading a layer the forward already ran past leaves the worker parked with
         # nowhere to be served. When the request finishes it is surfaced as an
