@@ -76,6 +76,29 @@ class TestWorkerCleanup:
         assert state["mediators"] == 0
         assert state["started"] == 0
 
+    @torch.no_grad()
+    def test_only_a_traced_request_is_collected(self, vllm_gpt2, ET_prompt):
+        # A collect waits behind the step in flight, so a request owed nothing
+        # (no block, no edit installed) must not cost one.
+        core = vllm_gpt2.vllm_entrypoint.llm_engine.engine_core
+        rpc, methods = core.collective_rpc, []
+
+        def counted(method, *args, **kwargs):
+            methods.append(method)
+            return rpc(method, *args, **kwargs)
+
+        core.collective_rpc = counted
+        try:
+            vllm_gpt2.generate([ET_prompt, ET_prompt], max_tokens=2)
+            assert "collect_nnsight" not in methods
+
+            with vllm_gpt2.trace(ET_prompt, max_tokens=2):
+                hidden = vllm_gpt2.transformer.h[5].output.save()
+            assert methods.count("collect_nnsight") == 1
+            assert hidden.shape[-1] == 768
+        finally:
+            del core.collective_rpc
+
 
 class TestBatchIsolation:
     @torch.no_grad()

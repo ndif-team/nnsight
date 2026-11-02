@@ -800,7 +800,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
             entry["saves"], entry["registered"] = primary["saves"], primary["registered"]
 
         # Saves may still be device work in flight; they are about to be pickled.
-        torch.cuda.synchronize()
+        # With none, the wait would only stall the engine loop behind the step
+        # async scheduling already has in flight.
+        if any(
+            sequence["saves"] or sequence["registered"]
+            for entry in collected.values()
+            for sequence in entry["sequences"].values()
+        ):
+            torch.cuda.synchronize()
 
         return dumps_compact(collected)
 
@@ -833,5 +840,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         been aborted. A number that only grows across requests means workers are
         outliving their requests — a finished one is freed in `collect_nnsight`,
         an aborted one when its stream is closed (see the async and serve backends).
+        A request nothing collects for (untraced, with no edit installed) is
+        dropped at the next step, off the scheduler's finished set.
         """
         return len(self.nnsight_requests.requests)
