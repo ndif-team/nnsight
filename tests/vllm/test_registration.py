@@ -141,6 +141,27 @@ class TestRegistration:
             registration.clear()
 
 
+class TestEachRequestHasItsOwnScope:
+    @torch.no_grad()
+    def test_a_list_from_outside_the_block_is_one_per_request(self,
+                                                             vllm_gpt2_uncached):
+        # One list shared by every request's copy grew with each request, and
+        # every output carried all the earlier ones' entries.
+        model = vllm_gpt2_uncached
+        rows = []
+
+        with model.edit() as (tracer, edit):
+            rows.append(model.transformer.h[5].output.shape[0])
+            seen = nnsight.save(len(rows))
+        try:
+            outputs = model.generate(["Hello world", "The Eiffel Tower is in"],
+                                     max_tokens=1, temperature=0.0)
+        finally:
+            edit.clear()
+
+        assert [output.saves["seen"] for output in outputs] == [1, 1]
+
+
 class TestAnEditThatRaises:
     """An installed block's error ends its request, not the engine.
 

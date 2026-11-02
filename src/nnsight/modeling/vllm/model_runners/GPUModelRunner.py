@@ -213,7 +213,14 @@ class Requests:
                 name = self.names.get(registration_id)
                 if wanted is not None and name is not None and name not in wanted:
                     continue
-                copy = Mediator(template.code, template.glbls, dict(template.lcls))
+                # A scope of its own, down to the containers bound outside the
+                # block: otherwise every request appends to one list, and each
+                # output carries every earlier request's values too.
+                scope = {
+                    name: value.copy() if isinstance(value, (list, dict, set)) else value
+                    for name, value in template.lcls.items()
+                }
+                copy = Mediator(template.code, template.glbls, scope)
                 copy.presaved = set(template.presaved)
                 request.copies[registration_id] = copy
             if "nnsight_mediator" not in extra_args:
