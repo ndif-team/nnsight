@@ -345,12 +345,17 @@ class Requests:
         Read from the thread-local save-set while still on the thread the workers
         ran on. Collection can happen on another thread — Ray dispatches it through
         its own RPC worker — where that thread-local is empty, so the answer is
-        captured here and carried on the mediator instead. The set only grows across
-        a request's steps, so re-recording each step keeps the latest superset.
+        captured here and carried on the mediator instead.
+
+        The set is emptied once this step's marks are taken. It is keyed by object
+        id and shared by every request, so an id left in it could be a later
+        object's at the same address, and one request taking its ids out could
+        take another's (two requests saving the same interned object).
         """
         for mediator in self.workers():
             if mediator.batch_group is not None:
                 self.record(mediator)
+        _saves().clear()
 
     def record(self, mediator: Any) -> None:
         """Snapshot one worker's saved names, and its error if it has one.
@@ -362,10 +367,15 @@ class Requests:
         saved nothing.
         """
         saved = _saves()
+        # Each name marked while this worker ran, and the id it was bound to, kept
+        # across steps since the set is not; a name rebound since to a value never
+        # marked drops out.
+        marks = mediator.__dict__.setdefault("nnsight_marks", {})
+        marks.update((name, id(value)) for name, value in mediator.lcls.items() if id(value) in saved)
         # Saves marked in this process, plus names the sending process
         # marked before serialization (Mediator.presaved).
         mediator.nnsight_saved = {
-            name for name, value in mediator.lcls.items() if id(value) in saved
+            name for name, mark in marks.items() if id(mediator.lcls.get(name)) == mark
         } | mediator.presaved
         # An error (or stop) is captured on the workers' own thread too, for the
         # same reason saves are — the collect thread cannot read the exception's
@@ -433,6 +443,7 @@ class Requests:
         # the run's last `record_saves` — so take the snapshot again or those
         # names go home missing.
         self.record(mediator)
+        _saves().clear()
 
     def finish_dangling(self, mediator: Any, taps: frozenset = frozenset(), quiet: bool = False) -> None:
         """Surface a worker still parked when its request has finished.
@@ -589,24 +600,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # to open a trace scope, so a block's `.save()` would see no trace and raise.
         # Open one on this thread — the forward thread the greenlet is created and run
         # on, which need not be load_model's (under Ray it isn't). Idempotent: depth
-        # persists per thread, and is left open (collect discards each request's saved
-        # ids; the whole set is cleared below whenever nothing is in flight).
+        # persists per thread, and is left open (`Requests.record_saves` empties its
+        # save-set every step instead).
         if not getattr(_local, "depth", 0):
             inc()
-
-        # `.save()` marks values by object id in a thread-local set that this thread
-        # never clears via dec (depth stays open). collect discards the ids it returns,
-        # but a bare `x.save()` or a loop-reassigned save marks a value that is never
-        # collected, leaking its id — and a later request's value at a reused address
-        # could then be mistaken for saved. Whenever the engine has drained to no
-        # tracked requests, no pending save can matter, so clear the set outright; that
-        # bounds its growth and stops any id reuse across separate waves of requests.
-        # (Residual: reuse *within* one wave of concurrent requests, which is rare.)
-        # Registered copies count as in-flight too: a block spanning several
-        # steps (tracer.iter) is only marked on the step it first bound the value,
-        # and clearing underneath it would drop what `record_saves` already had.
-        if not self.nnsight_requests.requests:
-            _saves().clear()
 
         interleaver = self.nnsight_model.interleaver
         # The scheduler picks this step's requests partway through the forward, so
@@ -740,7 +737,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             requests.harvest(finished)
 
         taps = self.nnsight_model.interleaver.taps
-        saved = _saves()
         for request in list(requests.requests.values()):
             if not request.named(wanted):
                 continue
@@ -775,15 +771,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # Still parked when its request finished: waiting on a
                     # location the model never reached — its deferred error.
                     requests.finish_dangling(mediator, taps)
-                values = request.saves()
-                sequence["saves"] = values
-                if done:
-                    # Drop this request's saved values from the thread-local set
-                    # as they leave: it is keyed by object id, so a finished
-                    # request's ids left behind could be reused by a later
-                    # request's values and mistaken for saved.
-                    for value in values.values():
-                        saved.discard(id(value))
+                sequence["saves"] = request.saves()
             if entry["error"] is None:
                 entry["error"] = request.deferred()
             if done and not request.copies:

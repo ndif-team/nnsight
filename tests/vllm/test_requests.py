@@ -397,6 +397,23 @@ class TestSameNameAcrossInvokes:
         assert rows[0].shape[0] == len(vllm_gpt2.tokenizer.encode(ET_prompt))
         assert rows[1].shape[0] == len(vllm_gpt2.tokenizer.encode(MSG_prompt))
 
+    @torch.no_grad()
+    def test_one_object_saved_by_two_requests_reaches_both(
+        self, vllm_gpt2, ET_prompt, MSG_prompt
+    ):
+        # `.save()` marks by object id, and `True` is one object, so both requests
+        # mark the same id. The short request is collected first; the long one is
+        # still running and re-read every step, and must keep its save.
+        with vllm_gpt2.trace(temperature=0.0, ignore_eos=True) as tracer:
+            with tracer.invoke(ET_prompt, max_tokens=1):
+                short = nnsight.save(True)
+            with tracer.invoke(MSG_prompt, max_tokens=4):
+                long = nnsight.save(True)
+                for _ in tracer.iter[:4]:
+                    vllm_gpt2.samples
+
+        assert short is True and long is True
+
 
 class TestPerInvokeSampling:
     """An invoke's own sampling settings survive the trace-level ones.
