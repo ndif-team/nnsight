@@ -171,6 +171,24 @@ class TestAnEditThatRaises:
                                ignore_eos=True)
         assert after[0].outputs[0].token_ids
 
+    @torch.no_grad()
+    def test_an_edits_stop_does_not_hide_the_traces_error(self, vllm_gpt2_uncached,
+                                                          ET_prompt):
+        # A stop is not raised at the client, so taking the edit's stop as the
+        # request's error would drop the trace's real one on the floor.
+        model = vllm_gpt2_uncached
+
+        with model.edit() as (tracer, edit):
+            hidden = model.transformer.h[5].output.save()
+            tracer.stop()
+        try:
+            with pytest.raises(RuntimeError, match="ValueError"):
+                with model.trace(ET_prompt, temperature=0.0, max_tokens=2):
+                    hidden = model.transformer.h[5].output.save()
+                    raise ValueError("the trace's own")
+        finally:
+            edit.clear()
+
 
 class TestEditHandles:
     @torch.no_grad()

@@ -730,6 +730,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
         def entry_for(request_id: str) -> dict:
             return collected.setdefault(request_id, {"error": None, "sequences": {}})
 
+        def note(entry: dict, error: dict | None) -> None:
+            """Keep the request's first error, but a real one over a stop, which the client does not raise."""
+            if error is not None and (entry["error"] is None or entry["error"]["is_control_flow"]):
+                entry["error"] = error
+
         def sequence_of(entry: dict, index: int) -> dict:
             """One sampled sequence's values."""
             return entry["sequences"].setdefault(index, {"saves": {}, "registered": {}})
@@ -753,8 +758,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # come asking and holding a second copy would just grow.
             for taken in request.harvested.values():
                 sequence["registered"].update(taken["saves"])
-                if entry["error"] is None:
-                    entry["error"] = taken["error"]
+                note(entry, taken["error"])
             request.harvested = {}
 
             mediator = request.mediator
@@ -784,8 +788,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # request's values and mistaken for saved.
                     for value in values.values():
                         saved.discard(id(value))
-            if entry["error"] is None:
-                entry["error"] = request.deferred()
+            note(entry, request.deferred())
             if done and not request.copies:
                 requests.requests.pop(request.id, None)
 
