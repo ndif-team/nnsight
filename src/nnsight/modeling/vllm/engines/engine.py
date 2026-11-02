@@ -5,10 +5,12 @@ output carries them. The engine knows when a request finishes, which is when its
 worker has nothing left to run, so that is where they are fetched and attached to
 the output the request produced.
 
-Every finished request is collected for, not only the traced ones: a registered
-block (see [`nnsight.modeling.vllm.registration`][nnsight.modeling.vllm.registration])
+While a block is registered (see
+[`nnsight.modeling.vllm.registration`][nnsight.modeling.vllm.registration]),
+every finished request is collected for, not only the traced ones: the block
 runs on requests nnsight never created, and this is the one place their values
-can be handed back on the output they belong to.
+can be handed back on the output they belong to. With none registered, only a
+traced request is.
 """
 
 from __future__ import annotations
@@ -67,14 +69,35 @@ async def acollect(engine: Any, request_id: str, output: Any = None) -> dict | N
 
 
 class NNsightLLMEngine(LLMEngine):
-    """An engine that attaches each finished request's saved values to its output."""
+    """An engine that attaches each finished request's saved values to its output.
+
+    `VLLM._load_sync` swaps this class onto vLLM's engine rather than building
+    it, and sets the two attributes `step` reads: ``nnsight_owed``, the requests
+    that carried a block or named edits, and ``nnsight_edits``, the model's
+    installed edits.
+    """
+
+    def add_request(self, request_id: str, prompt: Any, params: Any, *args: Any, **kwargs: Any) -> str:
+        extra_args = getattr(params, "extra_args", None) or {}
+        if "nnsight_mediator" in extra_args or "nnsight_edits" in extra_args:
+            self.nnsight_owed.add(request_id)
+        return super().add_request(request_id, prompt, params, *args, **kwargs)
 
     def step(self) -> Any:
         outputs = super().step()
 
-        # The outputs ride along so a block parked on `tracer.result` can be
-        # served: the value it is waiting for is assembled here, not in the worker.
-        by_id = {output.request_id: output for output in outputs if output.finished}
+        # Only a request that carried a block is owed anything, unless an edit is
+        # installed, which runs on every request. A collect for the rest would
+        # find nothing and still wait behind the step already in flight. The
+        # outputs ride along so a block parked on `tracer.result` can be served:
+        # the value it is waiting for is assembled here, not in the worker.
+        finished = [output for output in outputs if output.finished]
+        by_id = {
+            output.request_id: output
+            for output in finished
+            if self.nnsight_edits or output.request_id in self.nnsight_owed
+        }
+        self.nnsight_owed.difference_update(output.request_id for output in finished)
         if not by_id:
             return outputs
 

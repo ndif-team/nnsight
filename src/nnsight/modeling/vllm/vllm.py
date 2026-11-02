@@ -494,6 +494,8 @@ class VLLM(Remotable):
         )
         # step() collects each finished request's saves; see NNsightLLMEngine.
         llm.llm_engine.__class__ = NNsightLLMEngine
+        llm.llm_engine.nnsight_owed = set()
+        llm.llm_engine.nnsight_edits = self._installed_edits
         return llm
 
     def _load_async(self, repo_id: str, **kwargs: Any) -> Any:
@@ -932,8 +934,10 @@ class VLLM(Remotable):
                 prompt, params, request_id, lora_request=lora_request
             ):
                 pass
-            if output is None:
-                return None
+            # With no edit installed these requests carry no block, so there is
+            # nothing to collect.
+            if output is None or not self._installed_edits:
+                return output
             entry = await acollect(engine, request_id, output)
             if entry is not None:
                 attach(output, entry)

@@ -177,8 +177,10 @@ however many workers read it. See [batching-internals.md](./batching-internals.m
 
 ## Sync result collection
 
-`NNsightLLMEngine(LLMEngine)` (`engines/engine.py`) overrides only `step()`: after
-`super().step()`, for **every** finished request (not only traced ones) it calls
+`NNsightLLMEngine(LLMEngine)` (`engines/engine.py`) overrides `add_request()`, to
+note which requests carried a block or named edits, and `step()`: after
+`super().step()`, for those finished requests — or for **every** finished request
+while an edit is installed, since a registered block runs on all of them — it calls
 `collective_rpc("collect_nnsight", args=(finished, finished, by_id))` — the third
 argument is the finished `RequestOutput`s, which the worker cannot build and needs
 in order to serve `tracer.result` — unpickles the one reply that carries values, and
