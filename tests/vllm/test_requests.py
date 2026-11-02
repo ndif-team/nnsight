@@ -82,6 +82,33 @@ class TestWorkerCleanup:
         assert state["started"] == 0
 
     @torch.no_grad()
+    def test_an_interrupted_run_leaves_nothing_for_the_next(
+        self, vllm_gpt2, ET_prompt, MSG_prompt
+    ):
+        # `LLM.generate` returns every output its engine finishes, so requests an
+        # interrupted run left behind came back in the next trace's variables.
+        engine = vllm_gpt2.vllm_entrypoint.llm_engine
+
+        def interrupted():
+            del engine.step
+            engine.step()
+            raise KeyboardInterrupt
+
+        engine.step = interrupted
+        with pytest.raises(KeyboardInterrupt):
+            with vllm_gpt2.trace(temperature=0.0, max_tokens=8, ignore_eos=True) as tracer:
+                with tracer.invoke(ET_prompt):
+                    hidden = vllm_gpt2.transformer.h[5].output.save()
+                with tracer.invoke(MSG_prompt):
+                    hidden = vllm_gpt2.transformer.h[5].output.save()
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=1):
+            hidden = vllm_gpt2.transformer.h[5].output.save()
+
+        assert isinstance(hidden, torch.Tensor)
+        assert engine.collective_rpc("nnsight_request_count") == [0]
+
+    @torch.no_grad()
     def test_nothing_is_held_once_the_last_request_is_collected(
         self, vllm_gpt2, ET_prompt, MSG_prompt
     ):

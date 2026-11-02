@@ -903,9 +903,13 @@ class VLLM(Remotable):
             # either way: `outputs = model.generate(...)` on a sync engine,
             # `outputs = await model.generate(...)` on an async one.
             return self._generate_async(prompts, params, lora_request)
-        return self.vllm_entrypoint.generate(
-            prompts, params, lora_request=lora_request
-        )
+        try:
+            return self.vllm_entrypoint.generate(
+                prompts, params, lora_request=lora_request
+            )
+        except BaseException:
+            self._abort_unfinished()
+            raise
 
     async def _generate_async(self, prompts: Any, params: Any, lora_request: Any) -> list:
         """Drive the async engine to completion and collect, as the sync path does.
@@ -946,11 +950,28 @@ class VLLM(Remotable):
     ) -> Any:
         """Run the engine with this trace's workers attached to its requests."""
         mediators = self._attach_mediators(params, **kwargs)
-        outputs = self.vllm_entrypoint.generate(
-            prompts, sampling_params=params, lora_request=lora_requests
-        )
+        try:
+            outputs = self.vllm_entrypoint.generate(
+                prompts, sampling_params=params, lora_request=lora_requests
+            )
+        except BaseException:
+            self._abort_unfinished()
+            raise
         self._collect(mediators, outputs)
         return outputs
+
+    def _abort_unfinished(self) -> None:
+        """Abort what a run that raised part-way left in the synchronous engine.
+
+        `LLM.generate` returns every output its engine finishes, so a request left
+        behind by an interrupted run (a ``KeyboardInterrupt`` in a notebook) would
+        come back as part of the next run's, and its values would land in the next
+        trace's variables. Nothing else runs on a synchronous engine, so all of it
+        is the interrupted run's.
+        """
+        engine = self.vllm_entrypoint.llm_engine
+        with contextlib.suppress(Exception):  # an engine that died is its own error
+            engine.abort_request(list(engine.output_processor.request_states), internal=True)
 
     @staticmethod
     def _collect(mediators: list, outputs: list) -> None:
