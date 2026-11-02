@@ -11,8 +11,7 @@ rank) and on the sharded engine (``vllm_qwen_tp``) and comparing element-wise.
 * Column-parallel layers here are *fused* (``qkv_proj`` packs Q/K/V,
   ``gate_up_proj`` packs gate/up), and each rank holds a slice of every packed
   part. The gather reorders the slices into the single-rank layout, so a
-  positional edit is the same logical edit too. A multiset comparison would
-  pass on the ranks' bare concatenation, which is why these do not use one.
+  positional edit is the same logical edit too.
 
 The whole module is skipped unless the machine has >=2 GPUs.
 """
@@ -79,21 +78,9 @@ def _min_row_cosine(a, b):
 class TestShardedRead:
     """A gathered value carries the whole layer's data, not a rank's shard."""
 
-    @pytest.mark.parametrize("path", ROW_PARALLEL)
+    @pytest.mark.parametrize("path", ALL_PARALLEL)
     @torch.no_grad()
-    def test_row_parallel_matches_reference(
-        self, vllm_qwen_ref, vllm_qwen_tp, path, ET_prompt
-    ):
-        ref_hs, ref_logits = _read(vllm_qwen_ref, path, ET_prompt)
-        tp_hs, tp_logits = _read(vllm_qwen_tp, path, ET_prompt)
-
-        assert tp_hs.shape == ref_hs.shape
-        assert tp_logits.argmax(dim=-1).item() == ref_logits.argmax(dim=-1).item()
-        assert _min_row_cosine(tp_hs, ref_hs) > 0.99
-
-    @pytest.mark.parametrize("path", COLUMN_PARALLEL)
-    @torch.no_grad()
-    def test_column_parallel_matches_reference(
+    def test_matches_reference(
         self, vllm_qwen_ref, vllm_qwen_tp, path, ET_prompt
     ):
         ref_hs, ref_logits = _read(vllm_qwen_ref, path, ET_prompt)
@@ -273,8 +260,6 @@ class TestAdHocCall:
             module = _submodule(vllm_qwen_ref, path)
             ref = module(module.input)[0].save()
 
-        # A row-parallel output is all-reduced, so its layout matches the
-        # single-rank run's and the values compare directly.
         assert adhoc.shape == ref.shape
         assert _min_row_cosine(adhoc, ref) > 0.99
 
