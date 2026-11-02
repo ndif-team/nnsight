@@ -59,7 +59,9 @@ dev = [
 ]
 # High-throughput / tensor-parallel serving (needs a CUDA GPU).
 vllm = [
-    "vllm",
+    # nnsight subclasses vLLM's V1 GPU runner and imports its internals, which
+    # move between minor releases; raise the bound once a release is tested.
+    "vllm>=0.27.1,<0.28",
     "triton",
 ]
 # Running an nnsight model server (the nnsight-serve entry point): the vLLM
