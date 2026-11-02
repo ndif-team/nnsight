@@ -116,9 +116,12 @@ combined output is built from the invokes' replacements alone:
   `(group, replacement)` pairs into a `SkipParts` (`batching.py`).
 - `assemble_skip(running)` (`batching.py`) — after every worker has been
   served, concatenates the collected replacements in row order (`concat`,
-  `batching.py`) into the full-batch output. It **requires every row to be
-  covered** — a batched skip must skip the module in every invoke, or none, because
-  a shared forward can't run for only the rows an invoke left unskipped:
+  `batching.py`) into the full-batch output, rebuilding each container as its own
+  type the way `widen` does — namedtuples positionally, a dict subclass by copy —
+  so the module downstream of the skip reads the output it expects. It **requires
+  every row to be covered** — a batched skip must skip the module in every invoke,
+  or none, because a shared forward can't run for only the rows an invoke left
+  unskipped:
 
   ```text
   A batched `.skip()` has to cover every row: skip the module in every invoke, or
