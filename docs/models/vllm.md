@@ -190,6 +190,14 @@ Check the `len()` of what you collected, hold the run to the count with `ignore_
 `min_tokens=N` (vLLM's spelling; the warning's `min_new_tokens=` is refused here), or loop with
 `tracer.all()` and put trailing statements in a separate `tracer.invoke()`.
 
+A request that ends on a stop token or a `stop` string can also give a block one step more than
+its output holds. vLLM schedules a request's next step before the last step's token is known
+(`async_scheduling`, on by default), so the forward after the stop still runs, and a block under
+`tracer.iter` or `tracer.all()` sees it. A request that ends at `max_tokens` is exact. Where the
+two counts must agree, count against `len(result.outputs[0].token_ids)`, or build the engine with
+`VLLM(..., async_scheduling=False)`, which makes a stop token exact at a cost in throughput; a
+`stop` string can still overrun, since it is matched on the decoded text after the step.
+
 ### `generate` traces, or just runs
 
 vLLM generation is driven by `max_tokens`, so there is no forward/generate split. Used as a `with` block, `model.generate(...)` is `trace` (and rewrites `max_new_tokens` → `max_tokens`; `trace` accepts either).
