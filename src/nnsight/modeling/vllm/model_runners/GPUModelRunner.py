@@ -10,7 +10,8 @@ Three points on vLLM's own path carry it:
 * ``_update_states`` — the scheduler has just decided what runs this step, so new
   requests hand over their workers and every worker's token span is recomputed.
 * ``execute_model`` — the forward, run with the interleaver open so hooks serve
-  the parked workers.
+  the parked workers; ``_model_forward`` re-points them from tokens to rows as
+  soon as the forward returns, before the logits are computed.
 * ``_sample`` — logits and sampled ids never pass through a module, so they are
   offered to workers directly by location.
 
@@ -615,9 +616,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
         interleaver.mediators = []
 
         with interleaver:
-            output = super().execute_model(scheduler_output, intermediate_tensors)
-            # The forward is done; what follows it is per-request, not per-token.
-            self.nnsight_requests.unflatten(self.nnsight_model)
+            return super().execute_model(scheduler_output, intermediate_tensors)
+
+    def _model_forward(self, *args: Any, **kwargs: Any) -> Any:
+        output = super()._model_forward(*args, **kwargs)
+        # The forward is done; what follows it — `compute_logits`, which runs the
+        # model's `logits_processor` on one row per request, then the sampler —
+        # is per-request, not per-token.
+        self.nnsight_requests.unflatten(self.nnsight_model)
         return output
 
     def _sample(self, logits: Any, *args: Any, **kwargs: Any) -> Any:
