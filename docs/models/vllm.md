@@ -386,18 +386,14 @@ ops later, so `layers[8].output[0].save()` comes back holding a later layer's da
 is `.clone()` or a reduction before `.save()` (`(out[0] + out[1]).mean(0).cpu().save()`), which is
 easy to forget and silent when forgotten.
 
-`NNSIGHT_VLLM_CLONE_READS=1` makes the trade once, for a whole engine: every value handed to a block
-is a private copy of the request's own rows, so `.save()`, `tracer.cache()` and appends under
-`tracer.iter` keep what was computed. Set it in the environment before `VLLM(...)` builds the engine
-(the copies are made in the worker process), not in `CONFIG`. It costs one allocation per module
-read per step, and **in-place edits do not survive it** — they write to the copy. Assign the edited
-value back instead, which lands under either setting:
-
-```python
-out = model.model.layers[10].output
-out[0][:] += v                                    # alone, dropped under CLONE_READS
-model.model.layers[10].output = out               # lands under either setting
-```
+`NNSIGHT_VLLM_CLONE_READS=1` does the cloning for a whole engine. Each step, a location some block
+or `tracer.cache()` reads is copied once, every reader is served its rows of the copy, and in-place
+edits to the copy are copied back into the engine's buffer. So `.save()`, `tracer.cache()` and
+appends under `tracer.iter` keep what was computed, and in-place edits still land. Set it in the
+environment before `VLLM(...)` builds the engine (the copy is made in the worker process), not in
+`CONFIG`. It costs one copy and one copy-back per read location per step, however many reads. A
+kept uncloned value pins that step's whole copy, every request's rows, until its request's saves
+are collected.
 
 ## Where an error comes from
 

@@ -67,7 +67,7 @@ CONFIG.set_default_api_key("YOUR_NDIF_KEY")   # set APIKEY and save in one call
 | `NNSIGHT_DEBUG` | If set (any value), forces `CONFIG.APP.DEBUG = True`. |
 | `NNSIGHT_DISABLE_CPP_BACKTRACE` | Overrides `CONFIG.APP.DISABLE_CPP_BACKTRACE`. Falsy values (`0`, `false`, `no`, `off`) turn the guard **off**; anything else keeps it on (the default). |
 | `NNSIGHT_CONFIG` | Path to the user config file (overrides the `~/.config/nnsight/config.yaml` default). |
-| `NNSIGHT_VLLM_CLONE_READS` | vLLM only; not a `CONFIG` field, so set it in the environment before `VLLM(...)`. Truthy serves blocks private copies instead of views into engine memory. Behavior and trade-offs: [vLLM: serving copies instead of views](../models/vllm.md#serving-copies-instead-of-views). |
+| `NNSIGHT_VLLM_CLONE_READS` | vLLM only; not a `CONFIG` field, so set it in the environment before `VLLM(...)`. Truthy serves each location a block reads from one copy per step, so a kept read holds what was computed; in-place edits are copied back. Behavior and trade-offs: [vLLM: serving copies instead of views](../models/vllm.md#serving-copies-instead-of-views). |
 | `XDG_CONFIG_HOME` | Base dir for the default user config path. |
 
 Pass `-v` (or `--verbose`) on the command line — e.g. `python train.py -v` — to turn on debug mode for that run (equivalent to `NNSIGHT_DEBUG=1`). Note it's a plain `sys.argv` scan, so any launcher that also uses `-v` (e.g. `pytest -v`) will enable it too.
