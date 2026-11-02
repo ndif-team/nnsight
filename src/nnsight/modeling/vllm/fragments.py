@@ -85,7 +85,14 @@ class VLLMFragments(Fragments):
         if _tp_world_size() < 2:
             return
 
+        from vllm.lora.layers import BaseLayerWithLoRA
+
         module = envoy._module
+        # With LoRA on, vLLM wraps each layer rather than subclassing it, and the
+        # wrapper runs the layer's math itself, so its values are laid out as the
+        # layer's: judge, and keep, the layer.
+        if isinstance(module, BaseLayerWithLoRA):
+            module = module.base_layer
         for side in ("input", "output"):
             if _is_piece(module, side):
                 self.rules[f"{envoy.path}.{side}"] = (module, side)

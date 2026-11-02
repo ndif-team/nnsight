@@ -163,3 +163,43 @@ class TestLoRA:
             result = tracer.result.save()
 
         assert len(result.outputs[0].token_ids) == 3
+
+
+@pytest.fixture(scope="module")
+def vllm_lora_tp():
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs 2 GPUs")
+    from nnsight.modeling.vllm import VLLM
+
+    return VLLM(
+        BASE,
+        enable_lora=True,
+        max_lora_rank=RANK,
+        tensor_parallel_size=2,
+        gpu_memory_utilization=0.25,
+        dispatch=True,
+    )
+
+
+class TestLoRAUnderTensorParallelism:
+    @torch.no_grad()
+    def test_sharded_values_come_back_whole(self, vllm_lora, vllm_lora_tp, lora_path,
+                                            ET_prompt):
+        # vLLM wraps each parallel layer for LoRA rather than subclassing it, so
+        # the wrapper was not recognized as one: a block got this rank's shard,
+        # qkv_proj at half its width, and o_proj's input likewise.
+        reads = []
+        for model in (vllm_lora, vllm_lora_tp):
+            attention = model.model.layers[5].self_attn
+            with model.trace(
+                ET_prompt, temperature=0.0, top_p=1, lora_request=request(lora_path)
+            ):
+                qkv = attention.qkv_proj.output[0].clone().save()
+                into_o = attention.o_proj.input.clone().save()
+            reads.append((qkv, into_o))
+
+        (qkv, into_o), (tp_qkv, tp_into_o) = reads
+        assert tp_qkv.shape == qkv.shape
+        assert tp_into_o.shape == into_o.shape
+        cosine = torch.nn.functional.cosine_similarity(tp_into_o.float(), into_o.float(), dim=-1)
+        assert cosine.min() > 0.99
