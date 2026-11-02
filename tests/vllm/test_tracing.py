@@ -18,6 +18,18 @@ pytest.importorskip("vllm")
 Pair = namedtuple("Pair", "row whole")
 
 
+def _suspended_blocks(worker) -> int:
+    """How many intervention blocks are suspended in a worker, run there via ``collective_rpc``."""
+    import gc
+
+    from greenlet import greenlet
+
+    return sum(
+        1 for obj in gc.get_objects()
+        if isinstance(obj, greenlet) and obj and hasattr(obj, "mediator")
+    )
+
+
 @pytest.fixture(scope="module")
 def vllm_gpt2_float32():
     """gpt2 in float32. In half precision the sampler takes a float32 copy of the
@@ -679,6 +691,21 @@ class TestDeferredErrors:
         with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
             logits = vllm_gpt2.logits.save()
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_swap_that_does_not_fit_leaves_no_block_suspended(self, vllm_gpt2,
+                                                               ET_prompt):
+        # The swap fails in the handoff, outside the block, so the block is still
+        # suspended when its request ends; nothing counts it, and it held its
+        # scope for the life of the engine.
+        engine = vllm_gpt2.vllm_entrypoint.llm_engine
+        before = engine.collective_rpc(_suspended_blocks)
+        for _ in range(3):
+            with pytest.raises(RuntimeError):
+                with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=2):
+                    vllm_gpt2.transformer.h[5].output = torch.zeros(1, 1)
+
+        assert engine.collective_rpc(_suspended_blocks) == before
 
     @torch.no_grad()
     def test_error_in_one_invoke_isolated(self, vllm_gpt2, ET_prompt, MSG_prompt):
