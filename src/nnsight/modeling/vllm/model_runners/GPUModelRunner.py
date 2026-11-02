@@ -817,7 +817,21 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # Saves may still be device work in flight; they are about to be pickled.
         torch.cuda.synchronize()
 
-        return dumps_compact(collected)
+        try:
+            return dumps_compact(collected)
+        except Exception:
+            # A value that will not pickle is its own request's error. Raised from
+            # here it would fail the whole collect, and at tp > 1 leave the other
+            # ranks' replies queued for the next call to read as its own.
+            for request_id, entry in collected.items():
+                try:
+                    dumps_compact(entry)
+                except Exception as exception:
+                    collected[request_id] = {
+                        "error": capture_exception(exception),
+                        "sequences": {}, "saves": {}, "registered": {},
+                    }
+            return dumps_compact(collected)
 
     # ------------------------------------------------------------------
     # Worker-side RPC entry points (called by name via collective_rpc)
