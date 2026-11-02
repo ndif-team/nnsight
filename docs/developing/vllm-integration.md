@@ -84,14 +84,13 @@ startup is not patched. The runner enters the interleaver at three points:
 
 1. **Forward** — `execute_model` (`GPUModelRunner.py`): runs
    `super().execute_model(...)` inside `with interleaver:`, so the module
-   controllers serve parked workers. Afterward `Requests.unflatten` switches each worker's batch
-   group from per-token to per-row.
+   controllers serve parked workers. `_model_forward` calls `Requests.unflatten` as the
+   forward returns, switching each worker's batch group from per-token to per-row before
+   `compute_logits` runs the model's `logits_processor` on one row per request.
 2. **Logits and sampling** — `_sample`, which vLLM's `sample_tokens` calls with the
    step's logits (after a structured-output request's grammar mask): offers them via
    `type(model).logits.provide(model, logits)`, samples from what comes back, then
    offers `sampler_output.sampled_token_ids = type(model).samples.provide(model, ...)`.
-   Then captures all workers' saves in one pass (`record_saves`) while still on the
-   workers' own thread.
 
 `logits`/`samples` are `eproperty` descriptors on `VLLM`, and these `.provide` calls
 are their produce side — the worked example in
@@ -126,9 +125,12 @@ recomputed every step:
   per-request logits/samples tensors.
 - `match(request_ids)` reconciles engine ids with worker ids — vLLM appends
   a content hash, so engine `"0"` maps to worker `"0-<hash>"`.
-- `record_saves()` / `saves` / `error` capture and read back
-  each worker's saved names and any error, on the workers' thread (required because
-  final collection may run on a different thread under Ray).
+- Each worker marks its `.save()`s in a set of its own (`Mediator.saves`, given it
+  in `scope` as it starts), not the thread's: the engine never closes the trace
+  scope a local run clears that set on, so the thread's would be shared by every
+  request. `saves()` / `deferred()` read a worker's saved values and error at
+  collect, on the workers' thread; Ray's compiled-graph executor, where collect
+  would run on another thread, is refused in `NNsightGPUWorker.init_device`.
 - `finish_dangling(worker_id)` throws a still-parked worker at request end
   into a `ValueError` (barrier) or `OutOfOrderError` (the run already ran past its
   location); an over-iterated `tracer.iter` only warns.
@@ -265,8 +267,7 @@ every rank via `collective_rpc("nnsight_register", ...)` and kept there.
   presaved)`; `Requests.add` builds a fresh `Mediator` per arriving request from
   those pieces, so the source is compiled once rather than per request — the
   performance argument for registering.
-- Registered copies are scoped, started, unflattened and `record_saves`-ed
-  alongside traced ones (`Requests.scope` runs them *first*, so a trace on the
+- Registered copies are scoped, started and unflattened alongside traced ones (`Requests.scope` runs them *first*, so a trace on the
   same request sees what they left).
 - `Requests.harvest` moves a finished request's saves into `harvested`, driven by
   `scheduler_output.finished_req_ids` in `_update_states` — **not** by
@@ -351,8 +352,8 @@ the meta model, and a server holds one dispatched async `VLLM`.
 3. The scheduler forwards to the worker; `_update_states` → `Requests.add`
    (deserialize mediators) + `scope` (token spans).
 4. `execute_model` runs the forward under the interleaver (the controllers serve
-   parked workers); `unflatten` switches to per-row spans.
-5. `_sample` serves `logits`, then `samples`; `record_saves` captures saves.
+   parked workers); `unflatten` switches to per-row spans as `_model_forward` returns.
+5. `_sample` serves `logits`, then `samples`.
 6. `NNsightLLMEngine.step` detects finished requests, `collect_nnsight` pulls saves,
    attaches `RequestOutput.saves`.
 7. `VLLM._collect` marks saves into the user's variables and re-raises deferred errors.
@@ -363,7 +364,7 @@ Async replaces steps 2 and 6-7 with `AsyncVLLMBackend` streaming.
 
 Preserve these when changing the integration; each has a test guarding it:
 
-- **A saved value returns by name; bind it.** `record_saves` maps a `.save()`d value
+- **A saved value returns by name; bind it.** Collect maps a `.save()`d value
   back to a variable by scanning the block's locals, so a bare `model.logits.save()`
   with no assignment produces no named save and `output.saves["logits"]` is empty.
   Write `logits = model.logits.save()`.
@@ -387,9 +388,8 @@ Preserve these when changing the integration; each has a test guarding it:
   runs in the worker and the `RequestOutput` is assembled by the engine, so the
   collect is the first moment both exist — the engine passes `{request_id: output}`
   alongside the ids and `Requests.serve_result` hands it to a worker parked on
-  `"result"`, before `finish_dangling` would throw into it. The worker binds its
-  name *after* the run's last `record_saves`, so `serve_result` re-takes that
-  snapshot (`Requests.record`) or the value comes home unbound.
+  `"result"`, before `finish_dangling` would throw into it. Saves are read after
+  that, so a name the block binds past its `tracer.result` read comes home too.
 
 ## Testing
 

@@ -8,6 +8,7 @@ run in the worker, saved values shipped home.
 """
 
 from collections import namedtuple
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -89,6 +90,24 @@ class TestLogits:
 
         for value in (*hidden, *logits):
             assert value.untyped_storage().nbytes() == value.numel() * value.element_size()
+
+    @torch.no_grad()
+    def test_the_logits_processor_is_scoped_to_its_request(self, vllm_gpt2, ET_prompt,
+                                                           MSG_prompt):
+        # It runs after the forward, on one row per request, and was served with
+        # the forward's token spans; on a step where those did not narrow it, the
+        # block got every request's rows, and could write them.
+        with vllm_gpt2.trace(temperature=0.0, ignore_eos=True) as tracer:
+            with tracer.invoke("Hi", max_tokens=3):
+                rows = list().save()
+                for _ in tracer.iter[:3]:
+                    rows.append(vllm_gpt2.logits_processor.output.shape[0])
+            with tracer.invoke(ET_prompt, max_tokens=3):
+                pass
+            with tracer.invoke(MSG_prompt, max_tokens=3):
+                pass
+
+        assert rows == [1, 1, 1]
 
 
 class TestCompactPickle:
@@ -990,6 +1009,9 @@ class TestModelRunnerSelection:
 
         monkeypatch.setattr(Worker, "init_device", lambda self: None)
         worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend="mp")
+        )
 
         worker.model_runner = object()
         with pytest.raises(NotImplementedError, match="instruments vLLM's GPUModelRunner"):
@@ -998,6 +1020,24 @@ class TestModelRunnerSelection:
         worker.model_runner = GPUModelRunner.__new__(GPUModelRunner)
         worker.init_device()
         assert type(worker.model_runner) is NNsightGPUModelRunner
+
+    def test_rays_compiled_graph_executor_is_refused(self, monkeypatch):
+        # It runs the forward on a thread of its own, and a suspended block can
+        # only be resumed from its own thread, so a collect could not finish it.
+        from vllm import envs
+        from vllm.v1.worker.gpu_worker import Worker
+
+        from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
+
+        monkeypatch.setattr(Worker, "init_device", lambda self: None)
+        monkeypatch.setattr(envs, "VLLM_USE_RAY_V2_EXECUTOR_BACKEND", False, raising=False)
+        worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend="ray")
+        )
+
+        with pytest.raises(NotImplementedError, match="compiled-graph Ray executor"):
+            worker.init_device()
 
     def test_asking_for_the_other_one_is_refused(self):
         # Overriding it silently would be worse: the engine comes up with no
@@ -1042,3 +1082,12 @@ def test_speculative_decoding_is_refused_before_anything_is_built():
 
     with pytest.raises(NotImplementedError, match="speculative_config"):
         VLLM("gpt2", speculative_config={"method": "ngram", "num_speculative_tokens": 2})
+
+
+def test_data_parallelism_is_refused_before_anything_is_built():
+    # vLLM answers the collect from the first engine only, so every other
+    # engine's requests came back without their values, and without an error.
+    from nnsight.modeling.vllm import VLLM
+
+    with pytest.raises(NotImplementedError, match="data_parallel_size"):
+        VLLM("gpt2", data_parallel_size=2)

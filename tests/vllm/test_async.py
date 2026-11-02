@@ -190,6 +190,8 @@ class TestAsyncEngine:
             await stream.aclose()
             counts = await engine.collective_rpc("nnsight_request_count")
             assert counts[0] == 0
+            # And the request itself is aborted, not left to run to max_tokens.
+            assert engine.output_processor.get_num_unfinished_requests() == 0
 
         async_loop.run_until_complete(run())
 

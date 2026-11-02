@@ -234,6 +234,10 @@ class Mediator:
         # this worker (see __getstate__); a receiving driver unions them into
         # its own saved-name collection.
         self.presaved: set[str] = set()
+        # The ids this worker's `.save()` calls marked, for a driver that keeps
+        # them per worker; None leaves them in the thread's set, which a local
+        # trace reads as it exits (see `nnsight.tracing.tracer._saves`).
+        self.saves: set[int] | None = None
 
     def _run(self) -> None:
         """Execute the captured block (the worker greenlet's body).

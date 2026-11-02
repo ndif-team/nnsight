@@ -82,6 +82,33 @@ class TestWorkerCleanup:
         assert state["started"] == 0
 
     @torch.no_grad()
+    def test_an_interrupted_run_leaves_nothing_for_the_next(
+        self, vllm_gpt2, ET_prompt, MSG_prompt
+    ):
+        # `LLM.generate` returns every output its engine finishes, so requests an
+        # interrupted run left behind came back in the next trace's variables.
+        engine = vllm_gpt2.vllm_entrypoint.llm_engine
+
+        def interrupted():
+            del engine.step
+            engine.step()
+            raise KeyboardInterrupt
+
+        engine.step = interrupted
+        with pytest.raises(KeyboardInterrupt):
+            with vllm_gpt2.trace(temperature=0.0, max_tokens=8, ignore_eos=True) as tracer:
+                with tracer.invoke(ET_prompt):
+                    hidden = vllm_gpt2.transformer.h[5].output.save()
+                with tracer.invoke(MSG_prompt):
+                    hidden = vllm_gpt2.transformer.h[5].output.save()
+
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, max_tokens=1):
+            hidden = vllm_gpt2.transformer.h[5].output.save()
+
+        assert isinstance(hidden, torch.Tensor)
+        assert engine.collective_rpc("nnsight_request_count") == [0]
+
+    @torch.no_grad()
     def test_nothing_is_held_once_the_last_request_is_collected(
         self, vllm_gpt2, ET_prompt, MSG_prompt
     ):
@@ -421,6 +448,23 @@ class TestSameNameAcrossInvokes:
         assert rows[0] is not None and rows[1] is not None
         assert rows[0].shape[0] == len(vllm_gpt2.tokenizer.encode(ET_prompt))
         assert rows[1].shape[0] == len(vllm_gpt2.tokenizer.encode(MSG_prompt))
+
+    @torch.no_grad()
+    def test_one_object_saved_by_two_requests_reaches_both(
+        self, vllm_gpt2, ET_prompt, MSG_prompt
+    ):
+        # `.save()` marks by object id, and `True` is one object, so both requests
+        # mark the same id. The short request is collected first; the long one is
+        # still running and re-read every step, and must keep its save.
+        with vllm_gpt2.trace(temperature=0.0, ignore_eos=True) as tracer:
+            with tracer.invoke(ET_prompt, max_tokens=1):
+                short = nnsight.save(True)
+            with tracer.invoke(MSG_prompt, max_tokens=4):
+                long = nnsight.save(True)
+                for _ in tracer.iter[:4]:
+                    vllm_gpt2.samples
+
+        assert short is True and long is True
 
 
 class TestPerInvokeSampling:
