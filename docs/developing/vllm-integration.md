@@ -127,8 +127,9 @@ recomputed every step:
 - `match(request_ids)` reconciles engine ids with worker ids — vLLM appends
   a content hash, so engine `"0"` maps to worker `"0-<hash>"`.
 - `record_saves()` / `saves` / `error` capture and read back
-  each worker's saved names and any error, on the workers' thread (required because
-  final collection may run on a different thread under Ray).
+  each worker's saved names and any error, on the workers' thread. Collection runs on
+  that thread too; Ray's compiled-graph executor, where it would not, is refused in
+  `NNsightGPUWorker.init_device`.
 - `finish_dangling(worker_id)` throws a still-parked worker at request end
   into a `ValueError` (barrier) or `OutOfOrderError` (the run already ran past its
   location); an over-iterated `tracer.iter` only warns.

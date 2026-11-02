@@ -8,6 +8,7 @@ run in the worker, saved values shipped home.
 """
 
 from collections import namedtuple
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -946,6 +947,9 @@ class TestModelRunnerSelection:
 
         monkeypatch.setattr(Worker, "init_device", lambda self: None)
         worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend="mp")
+        )
 
         worker.model_runner = object()
         with pytest.raises(NotImplementedError, match="instruments vLLM's GPUModelRunner"):
@@ -954,6 +958,24 @@ class TestModelRunnerSelection:
         worker.model_runner = GPUModelRunner.__new__(GPUModelRunner)
         worker.init_device()
         assert type(worker.model_runner) is NNsightGPUModelRunner
+
+    def test_rays_compiled_graph_executor_is_refused(self, monkeypatch):
+        # It runs the forward on a thread of its own, and a suspended block can
+        # only be resumed from its own thread, so a collect could not finish it.
+        from vllm import envs
+        from vllm.v1.worker.gpu_worker import Worker
+
+        from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
+
+        monkeypatch.setattr(Worker, "init_device", lambda self: None)
+        monkeypatch.setattr(envs, "VLLM_USE_RAY_V2_EXECUTOR_BACKEND", False, raising=False)
+        worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend="ray")
+        )
+
+        with pytest.raises(NotImplementedError, match="compiled-graph Ray executor"):
+            worker.init_device()
 
     def test_asking_for_the_other_one_is_refused(self):
         # Overriding it silently would be worse: the engine comes up with no

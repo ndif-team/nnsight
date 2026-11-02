@@ -457,6 +457,9 @@ False ...}`.
   Reads and writes are scoped to the right tokens either way. Declaring `taps` on such a model is
   not covered: the graph-replay path still trims padding on dim 0, so a tap can be served the
   step's padding rows.
+- **Not Ray's compiled-graph executor** — with `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0`, Ray runs the
+  forward on a thread of its own, where a block cannot be resumed to finish or report its
+  error, so the engine refuses to start. vLLM's default Ray executor works.
 
 ## vLLM versions
 

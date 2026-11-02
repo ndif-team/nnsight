@@ -17,10 +17,10 @@ Three points on vLLM's own path carry it:
 Workers run as greenlets on this thread. ``_update_states`` is called from
 ``execute_model``, and hooks fire on whichever thread runs the forward, so the
 worker and the model take strict turns on one thread — there is nothing to
-synchronize *during the forward*. Collection (``collect_nnsight``) is the
-exception: under Ray it lands on a different thread than the forward, which is why
-saves and errors are snapshotted onto the mediator on the worker thread
-(``record_saves``, ``finish_dangling``) rather than read live at collect time.
+synchronize *during the forward*. Collection (``collect_nnsight``) runs on that
+thread too, between steps, which is what lets it resume a worker to serve
+``tracer.result`` or unwind it; the one executor where it would not, Ray's
+compiled-graph one, is refused (see ``NNsightGPUWorker``).
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ import warnings
 from typing import TYPE_CHECKING, Any
 
 import torch
-from greenlet import error as greenlet_error
 from vllm import envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -415,20 +414,14 @@ class Requests:
         """Hand a finished request's output to a worker parked on ``tracer.result``.
 
         A worker parked anywhere else is left alone — its own location is what it
-        is waiting for, and `finish_dangling` reports it. Runs on the workers'
-        own thread where the greenlet can be resumed; where that differs (Ray's
-        collect) the switch is refused and the read is left unserved, exactly as
-        it was before.
+        is waiting for, and `finish_dangling` reports it.
         """
         if mediator is None or not mediator.alive:
             return
         pending = mediator.pending
         if pending is None or pending.provider != "result":
             return
-        try:
-            mediator.handle("result", output)
-        except greenlet_error:
-            return
+        mediator.handle("result", output)
         # The block ran on past its read and bound whatever it saved there, after
         # the run's last `record_saves` — so take the snapshot again or those
         # names go home missing.
@@ -448,10 +441,6 @@ class Requests:
         keeping the values from the steps that ran. Surfacing differs, since the
         client is in another process: an error becomes the request's deferred error
         and is raised there.
-
-        Runs on the workers' own thread, where the greenlet can be resumed — the throw
-        is skipped where that thread differs (e.g. Ray's collect), leaving the worker
-        to be dropped without a surfaced error.
 
         ``taps`` is the engine's tap set when it replays CUDA graphs: a module
         location outside it is never reached by a replayed step, and the error
@@ -490,8 +479,6 @@ class Requests:
 
         try:
             mediator.worker.throw(error)
-        except greenlet_error:
-            return
         except BaseException as thrown:
             if quiet:
                 return
