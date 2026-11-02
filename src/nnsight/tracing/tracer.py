@@ -35,6 +35,8 @@ import threading
 from types import CodeType, FrameType, TracebackType
 from typing import Any
 
+from greenlet import getcurrent
+
 from .backend import Backend
 from .globals import BLOCKS, SOURCES
 from .util import (
@@ -231,7 +233,17 @@ _local = threading.local()
 
 
 def _saves() -> set:
-    """This thread's set of saved object ids."""
+    """The set of saved object ids a `.save()` here marks into.
+
+    This thread's, unless the worker running the code keeps its own
+    (`Mediator.saves`). vLLM's engine runs every request's worker in one trace
+    scope that never closes, so a thread's set would be read, and cleared, across
+    requests; each of its workers keeps its own instead.
+    """
+    worker = getattr(getcurrent(), "mediator", None)
+    own = None if worker is None else getattr(worker(), "saves", None)
+    if own is not None:
+        return own
     saves = getattr(_local, "saves", None)
     if saves is None:
         saves = _local.saves = set()
