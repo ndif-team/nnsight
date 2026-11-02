@@ -151,6 +151,29 @@ class TestServe:
         assert serve_client.tokenizer.decode(b.argmax(dim=-1)) == " New"
 
     @torch.no_grad()
+    def test_a_later_trace_from_the_same_file_runs_its_own_invokes(
+        self, serve_client, serve_url, ET_prompt, MSG_prompt
+    ):
+        # The server registers each block's source under the client's filename
+        # and parses its invokes from there, so a cache of that filename's
+        # source kept the first trace's and parsed every later one against it.
+        with serve_client.trace(temperature=0.0, top_p=1, serve=serve_url) as tracer:
+            with tracer.invoke(ET_prompt):
+                a = serve_client.logits.save()
+            with tracer.invoke(MSG_prompt):
+                b = serve_client.logits.save()
+
+        with serve_client.trace(temperature=0.0, top_p=1, serve=serve_url) as tracer:
+            swapped = True
+            with tracer.invoke(MSG_prompt):
+                c = serve_client.logits.save()
+            with tracer.invoke(ET_prompt):
+                d = serve_client.logits.save()
+
+        assert serve_client.tokenizer.decode(c.argmax(dim=-1)) == " New"
+        assert serve_client.tokenizer.decode(d.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
     def test_error_surfaces(self, serve_client, serve_url, ET_prompt):
         # An intervention error on the server comes back and raises at the client.
         with pytest.raises(RuntimeError, match="ZeroDivisionError"):

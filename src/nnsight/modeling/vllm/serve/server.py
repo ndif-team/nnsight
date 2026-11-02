@@ -80,10 +80,18 @@ def _build_tracer(body: bytes, compress: bool) -> Any:
     import linecache
 
     from ....schema.request import RequestModel
+    from ....tracing.globals import BLOCKS, SOURCES
 
     tracer = RequestModel.deserialize(body, _persistent_objects, compress=compress)
-    source = "".join(linecache.cache[tracer.info.frame.f_code.co_filename][2])
+    filename = tracer.info.frame.f_code.co_filename
+    source = "".join(linecache.cache[filename][2])
     tracer.node = ast.parse(source)
+    # The block's invokes are parsed from that source and memoized by filename,
+    # so what an earlier request from the same file left there is stale. Safe to
+    # drop here and not in deserialize, which also runs in a client's own process.
+    SOURCES.pop(filename, None)
+    for key in [key for key in BLOCKS if key[0] == filename]:
+        del BLOCKS[key]
     return tracer
 
 
