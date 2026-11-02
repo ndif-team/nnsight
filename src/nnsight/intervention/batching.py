@@ -56,16 +56,26 @@ def concat(structures: list) -> Any:
     Every structure is one invoke's skip replacement, so they share a shape:
     tensors concatenate, containers recurse in parallel, and a non-tensor leaf
     (a ``None`` in a layer's output tuple, say) is taken from the first — they
-    agree by construction.
+    agree by construction. Each container is rebuilt as its own exact type, so
+    the module downstream of the skip reads the output it expects.
     """
     first = structures[0]
     if isinstance(first, torch.Tensor):
         return torch.cat(structures, dim=0)
     if isinstance(first, (list, tuple)):
         combined = [concat([s[i] for s in structures]) for i in range(len(first))]
+        # namedtuples take positional fields, not a single iterable.
+        if isinstance(first, tuple) and hasattr(first, "_fields"):
+            return type(first)(*combined)
         return type(first)(combined)
     if isinstance(first, dict):
-        return {key: concat([s[key] for s in structures]) for key in first}
+        # Copy first to preserve the exact type (OrderedDict, a HF ModelOutput,
+        # ...) rather than rebuilding a plain dict, matching how apply/widen keep
+        # the container type.
+        combined = first.copy()
+        for key in first:
+            combined[key] = concat([s[key] for s in structures])
+        return combined
     return first
 
 
