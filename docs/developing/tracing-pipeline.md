@@ -190,7 +190,9 @@ order:
 `def` inside the block reaches the block's own names (their free variables compile
 to `LOAD_GLOBAL`, which honors `__missing__` on a dict subclass). Writes land in
 the scope *and* in `shared`, so a block sees its own assignments and so do the
-blocks written beside it.
+blocks written beside it. A `del` removes the name from both, so neither the block
+nor a later sibling reads it and the value is freed; the frame's binding is
+untouched.
 
 ### push_result and saving
 
