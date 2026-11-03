@@ -272,7 +272,9 @@ len(hidden)      # == len(prompts)
 A name saved by exactly one invoke is that value, not a list of one, so a distinct name per invoke also works.
 
 A container bound *and saved* **above** the invokes is one object locally, and each request gets
-its own copy: assigning into pre-sized slots merges back, `append` does not.
+its own copy: assigning into pre-sized slots merges back, `append` does not. Only the trace's own
+body counts: a value saved before the trace, by an earlier trace or a `session()` body, reaches the
+requests as an input and does not come back.
 
 ```python
 with model.trace(temperature=0.0, max_tokens=1) as tracer:
