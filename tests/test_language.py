@@ -1346,10 +1346,16 @@ class TestPeft:
         assert type(model).load_adapter is TransformersModel.load_adapter
 
     def test_an_attach_and_detach_leave_every_requires_grad_flag(self, trained_peft_bundle):
-        # peft freezes every base parameter on injection. Left frozen, a base
-        # run after a detach is not the base run before it: a Linear whose
-        # weight does not require grad can take another matmul kernel.
+        # peft freezes every base parameter on injection; left frozen, the base
+        # refuses every backward once the adapter is gone.
         base_path, adapter = trained_peft_bundle
+        built = TransformersModel(base_path, task="text-generation", peft=adapter, dispatch=True)
+        assert all(
+            p.requires_grad
+            for name, p in built._module.named_parameters()
+            if "lora_" not in name and "modules_to_save" not in name
+        )
+
         model = TransformersModel(base_path, task="text-generation", dispatch=True)
         model._module.transformer.h[0].mlp.requires_grad_(False)  # a mixed pattern
         before = {name: p.requires_grad for name, p in model._module.named_parameters()}
@@ -1367,18 +1373,19 @@ class TestPeft:
         model.load_adapter(None)
         assert {name: p.requires_grad for name, p in model._module.named_parameters()} == before
 
-    def test_the_peft_kwarg_leaves_the_base_trainable(self, trained_peft_bundle):
+    def test_a_backward_runs_with_an_adapter_and_after_it(self, trained_peft_bundle):
+        # The server path: one request brings an adapter, the next one does
+        # not. A saved adapter is frozen, so with the base frozen as well
+        # nothing in either forward requires grad and both backwards refuse.
         base_path, adapter = trained_peft_bundle
-        plain = TransformersModel(base_path, task="text-generation", dispatch=True)
-        model = TransformersModel(base_path, task="text-generation", peft=adapter, dispatch=True)
-        expected = [p.requires_grad for p in plain._module.parameters()]
-        assert all(expected)
-        base = [
-            p.requires_grad
-            for name, p in model._module.named_parameters()
-            if "lora_" not in name and "modules_to_save" not in name
-        ]
-        assert base == expected
+        server = TransformersModel(base_path, task="text-generation", dispatch=True)
+        for env in ({"peft": adapter}, {}):
+            server._remoteable_set_env(env)
+            with server.trace(torch.tensor([[2, 5, 7, 3]])):
+                hidden = server.transformer.h[0].output
+                with server.output.logits[0, -1].max().backward():
+                    grad = hidden.grad.save()
+            assert grad.shape == (1, 4, 8) and grad.abs().sum() > 0
 
     @torch.no_grad()
     def test_the_switch_runs_the_base_and_the_adapter_on_one_tree(self, trained_peft_bundle):
@@ -1475,6 +1482,103 @@ class TestPeft:
         server._remoteable_set_env({})
         assert server.peft is None and not _has_lora(server)
 
+    @torch.no_grad()
+    def test_a_request_that_switches_the_adapter_off_leaves_the_next_one_on(
+        self, trained_peft_bundle
+    ):
+        # A request body runs on a copy of the server's wrapper that shares its
+        # module, so `disable_adapters()` there switches the shared module off
+        # without the server's wrapper taking part. The next request asks for
+        # the adapter and must get it.
+        from nnsight.schema.request import RequestModel
+        from nnsight.tracing.backend import Backend
+
+        base_path, adapter = trained_peft_bundle
+        ids = torch.tensor([[2, 5, 7, 3]])
+        server = TransformersModel(base_path, task="text-generation", dispatch=True)
+
+        class Server(Backend):
+            def __init__(self, client):
+                self.client = client
+
+            def __call__(self, tracer):
+                blob = RequestModel.serialize(tracer, compress=False)
+                server._remoteable_set_env(self.client._remoteable_get_env())
+                remote = RequestModel.deserialize(
+                    blob, server._remoteable_persistent_objects(), compress=False
+                )
+                remote.execute(remote.info.code)
+                self.saves = dict(remote.info.frame.f_locals)
+
+        def request(switch_off):
+            client = TransformersModel(base_path, task="text-generation", peft=adapter)
+            backend = Server(client)
+            with client.trace(ids, backend=backend):
+                if switch_off:
+                    client.disable_adapters()
+                logits = client.output.logits.save()
+            return backend.saves["logits"]
+
+        on, off = request(False), request(True)
+        assert not torch.allclose(on, off, atol=1e-4)
+        assert torch.equal(request(False), on)
+
+    def test_an_adapter_that_fails_to_load_leaves_the_base_as_it_was(
+        self, tiny_peft_bundle, tmp_path
+    ):
+        # The names match but the shapes do not: an adapter for another size
+        # of the same family.
+        from peft import LoraConfig, get_peft_model
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        wider = GPT2Config(vocab_size=32, n_positions=16, n_embd=16, n_layer=1, n_head=1)
+        lora = LoraConfig(target_modules=["c_attn"], r=2, init_lora_weights=False)
+        get_peft_model(GPT2LMHeadModel(wider), lora).save_pretrained(tmp_path / "wider")
+
+        base_path, _, _ = tiny_peft_bundle
+        ids = torch.tensor([[2, 5, 7, 3]])
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        with torch.no_grad(), model.trace(ids):
+            before = model.output.logits.save()
+        with pytest.raises(RuntimeError, match="size mismatch"):
+            model.load_adapter(str(tmp_path / "wider"))
+        assert model.peft is None and not _has_lora(model)
+        with torch.no_grad(), model.trace(ids):
+            after = model.output.logits.save()
+        assert torch.equal(after, before)
+
+    @torch.no_grad()
+    def test_removing_a_merged_adapter_gives_the_base(self, trained_peft_bundle):
+        from peft.tuners.tuners_utils import BaseTunerLayer
+
+        base_path, adapter = trained_peft_bundle
+        ids = torch.tensor([[2, 5, 7, 3]])
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        with model.trace(ids):
+            base = model.output.logits.save()
+        model.load_adapter(adapter)
+        for module in model._module.modules():
+            if isinstance(module, BaseTunerLayer):
+                module.merge()
+        model.load_adapter(None)
+        with model.trace(ids):
+            logits = model.output.logits.save()
+        torch.testing.assert_close(logits, base, atol=1e-6, rtol=0)
+
+    def test_a_tensor_parallel_model_refuses_an_adapter(self, tiny_peft_bundle):
+        # What a `distributed_config` load leaves on the model, read without
+        # launching ranks.
+        class Mesh:
+            def size(self):
+                return 2
+
+        base_path, adapter_a, _ = tiny_peft_bundle
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        model._module._device_mesh = Mesh()
+        with pytest.raises(ValueError, match="not supported on a tensor-parallel load"):
+            model.load_adapter(adapter_a)
+        assert model.peft is None and not _has_lora(model)
+
     def test_autocast_adapter_dtype(self, tmp_path):
         from peft import LoraConfig, get_peft_model
         from transformers import GPT2Config, GPT2LMHeadModel
@@ -1500,11 +1604,11 @@ class TestPeft:
 
         held = build(peft=adapter, dispatch=True)
         assert dtypes(held) == {torch.float32}
-        assert "autocast_adapter_dtype" not in held._remoteable_get_env()
 
-        # Stored before dispatch and applied at it.
+        # Stored before dispatch and applied at it. Local only: it does not
+        # travel with a remote request.
         kept = build(peft=adapter, autocast_adapter_dtype=False)
-        assert kept._remoteable_get_env()["autocast_adapter_dtype"] is False
+        assert "autocast_adapter_dtype" not in kept._remoteable_get_env()
         assert dtypes(kept) == {torch.bfloat16}
 
         loaded = build()
@@ -1515,12 +1619,6 @@ class TestPeft:
         assert dtypes(loaded) == {torch.float32}
         loaded.load_adapter(adapter, autocast_adapter_dtype=False)
         assert dtypes(loaded) == {torch.bfloat16}
-
-        server = TransformersModel(base_path, task="text-generation", dtype=torch.bfloat16, dispatch=True)
-        server._remoteable_set_env({"peft": adapter, "autocast_adapter_dtype": False})
-        assert dtypes(server) == {torch.bfloat16}
-        server._remoteable_set_env({"peft": adapter})
-        assert dtypes(server) == {torch.float32}
 
 
 def _hidden(block_output):
