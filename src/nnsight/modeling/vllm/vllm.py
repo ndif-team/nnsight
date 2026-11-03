@@ -359,6 +359,17 @@ class VLLM(Remotable):
         # submitted and cannot flag, and only the engine's scheduler decides. So
         # off unless asked for; editing an engine that has it on warns.
         kwargs.setdefault("enable_prefix_caching", False)
+        # A group's members arrive one request at a time, and an idle engine
+        # starts a step on the first. `groups.scheduler` — the scheduler the engine
+        # would have used, a caller's included, wrapped — holds them until the last
+        # has come, so they are admitted together.
+        scheduler_cls = kwargs.pop("scheduler_cls", None)
+        if scheduler_cls is not None:
+            kwargs["additional_config"] = {
+                **(kwargs.get("additional_config") or {}),
+                "nnsight_scheduler_cls": scheduler_cls,
+            }
+        kwargs["scheduler_cls"] = "nnsight.modeling.vllm.groups.scheduler"
 
         if self.taps:
             # vLLM's breakable graphs are what let a Python callable run at a

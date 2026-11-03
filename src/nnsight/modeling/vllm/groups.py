@@ -18,8 +18,10 @@ step at once:
                 h[[m.start + m.size - 1 for m in members]] += v
 
 The engine decides which members run in a step, and where their tokens sit in
-the step's slab: members prefill together when the scheduler fits them, later
-otherwise, and finish at different steps. So a group's rows are recomputed every step
+the step's slab. Its scheduler admits a group's members together once the last
+of them has arrived (see [`scheduler`][nnsight.modeling.vllm.groups.scheduler]),
+so they prefill in one step when they fit in it, and in several when they do
+not; they finish at different steps. So a group's rows are recomputed every step
 like any request's span, and the block learns the step's shape from
 ``tracer.group`` — a [`Member`][nnsight.modeling.vllm.groups.Member] per member
 in the step, in member order.
@@ -30,14 +32,16 @@ An edit to it reaches the model because the batcher scatters it back over the
 spans as soon as the block moves on (see
 [`Batcher.copies`][nnsight.intervention.batching.Batcher.copies]), edited or not.
 
-Three pieces live here: the layout entry a block reads, the batch group the
+Four pieces live here: the layout entry a block reads, the batch group the
 batcher gathers and scatters by ([`Spans`][nnsight.modeling.vllm.groups.Spans]),
-and the engine's record of one group ([`Group`][nnsight.modeling.vllm.groups.Group]),
-which `Requests` in the model runner keeps.
+the engine's record of one group ([`Group`][nnsight.modeling.vllm.groups.Group]),
+which `Requests` in the model runner keeps, and the scheduler that admits a
+group whole.
 """
 
 from __future__ import annotations
 
+import functools
 from typing import Any, NamedTuple
 
 import torch
@@ -159,3 +163,86 @@ class Group:
     def __repr__(self) -> str:
         return f"Group({self.id!r}, size={self.size}, left={sorted(self.left)}, layout={self.layout})"
 
+
+# ---------------------------------------------------------------------------
+# Admitting a group whole
+# ---------------------------------------------------------------------------
+
+
+def scheduler(*args: Any, **kwargs: Any) -> Any:
+    """Build the engine's scheduler: vLLM's own, holding each group's members back until the last arrives.
+
+    A trace's requests reach the engine one at a time, and an idle engine starts a
+    step on the first: left alone, a group's first member prefills by itself and
+    the rest a step later, so a block that reads the group once would see one
+    member. Held until the group is complete, the members enter the waiting
+    queue together, in member order, and the scheduler admits them as it would
+    any requests — together when they fit the step.
+
+    Installed as vLLM's ``scheduler_cls`` (see ``VLLM._load``), which vLLM calls
+    with the scheduler's arguments. The class held over is the one vLLM would
+    have chosen — the async scheduler under ``async_scheduling`` — or the one the
+    caller named, which ``_load`` moves into
+    ``additional_config["nnsight_scheduler_cls"]``.
+    """
+    config = kwargs["vllm_config"]
+    base = (config.additional_config or {}).get("nnsight_scheduler_cls")
+    if isinstance(base, str):
+        from vllm.utils.import_utils import resolve_obj_by_qualname  # lazy: engine process only
+
+        base = resolve_obj_by_qualname(base)
+    elif base is None and config.scheduler_config.async_scheduling:
+        from vllm.v1.core.sched.async_scheduler import AsyncScheduler as base  # lazy: engine process only
+    elif base is None:
+        from vllm.v1.core.sched.scheduler import Scheduler as base  # lazy: engine process only
+    return _holding(base)(*args, **kwargs)
+
+
+# Keyed by scheduler class, of which a process builds one or two.
+@functools.cache
+def _holding(base: type) -> type:
+    """``base`` with `add_request` holding a group's members until the group is complete."""
+
+    class Holding(base):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            # Group id -> the members that have arrived, while some have not.
+            self.nnsight_held: dict[str, list] = {}
+
+        def add_request(self, request: Any) -> None:
+            extra_args = getattr(request.sampling_params, "extra_args", None) or {}
+            member = extra_args.get("nnsight_group")
+            if member is None or request.request_id in self.requests:
+                return super().add_request(request)
+            group_id, _, size = member
+            held = self.nnsight_held.setdefault(group_id, [])
+            held.append(request)
+            if len(held) < size:
+                return None
+            del self.nnsight_held[group_id]
+            for request in sorted(held, key=lambda request: request.sampling_params.extra_args["nnsight_group"][1]):
+                super().add_request(request)
+            return None
+
+        def finish_requests(self, request_ids: Any, finished_status: Any) -> list:
+            # A held member is not the scheduler's yet, so the base does not know
+            # to drop it; an abort that names it (or names nothing: every request)
+            # must, or it waits forever for members that will not come.
+            finished = super().finish_requests(request_ids, finished_status)
+            named = (
+                None if request_ids is None
+                else {request_ids} if isinstance(request_ids, str)
+                else set(request_ids)
+            )
+            for group_id, held in list(self.nnsight_held.items()):
+                dropped = [request for request in held if named is None or request.request_id in named]
+                for request in dropped:
+                    request.status = finished_status
+                    held.remove(request)
+                finished.extend(dropped)
+                if not held:
+                    del self.nnsight_held[group_id]
+            return finished
+
+    Holding.__name__ = Holding.__qualname__ = f"NNsight{base.__name__}"
+    return Holding
