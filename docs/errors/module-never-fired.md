@@ -42,6 +42,7 @@ this input, so nothing ever delivered its value. Common cases:
 - **Branch paths** — `if self.config.use_flash_attention: ... else: ...` runs only one side; a submodule on the path not taken never fires.
 - **Modules not reached by this input** — auxiliary heads, MoE experts not routed to, a vision encoder on a text-only query.
 - **Children of a skipped module** — after `module.skip(value)`, that module's submodules don't run.
+- **A switched-off PEFT adapter** — after `model.disable_adapters()`, the adapter's own modules (`lora_A`, `lora_B`) don't run; `.base_layer` does. See [PEFT adapters](../models/transformers-model.md#base-and-adapted-runs-on-one-model).
 
 ### 2. A loop asked for more steps than the run made
 
