@@ -1025,6 +1025,57 @@ class TestVLLMBatcherTokenAxis:
         assert batcher.widen(stats, [3, 5], torch.ones(3, 4)) is stats
 
 
+class TestCopyingBatcherWriteBack:
+    """A batcher whose `narrow` serves a copy gets the copy widened back after each read.
+
+    Nothing aliases the model's value, so an in-place edit would otherwise be
+    lost; `Batcher.copies` is what tells `Mediator.handle` to widen it back once
+    the worker moves on, edited or not.
+    """
+
+    @staticmethod
+    def _envoy():
+        from nnsight.intervention.batching import Batcher
+
+        class CopyingBatcher(Batcher):
+            def _narrow_tensor(self, tensor, group):
+                return super()._narrow_tensor(tensor, group).clone()
+
+            def copies(self, group):
+                return True
+
+        class CopyingEnvoy(_BatchEnvoy):
+            _batcher_class = CopyingBatcher
+
+        torch.manual_seed(0)
+        return CopyingEnvoy(_MLP())
+
+    @torch.no_grad()
+    def test_an_in_place_edit_of_a_copy_lands(self):
+        envoy = self._envoy()
+        with envoy.trace() as tracer:
+            with tracer.invoke(torch.randn(2, 8)):
+                envoy.fc1.output[:] = 0
+                edited = envoy.output.save()
+            with tracer.invoke(torch.randn(3, 8)):
+                untouched = envoy.fc1.output.save()
+        assert torch.equal(edited, envoy._module.fc2.bias.expand(2, 8))
+        assert bool((untouched != 0).any())
+
+    @torch.no_grad()
+    def test_a_swap_after_the_read_wins(self):
+        envoy = self._envoy()
+        with envoy.trace() as tracer:
+            with tracer.invoke(torch.randn(2, 8)):
+                served = envoy.fc1.output
+                served[:] = 7
+                envoy.fc1.output = torch.zeros(2, 8)
+                edited = envoy.output.save()
+            with tracer.invoke(torch.randn(3, 8)):
+                envoy.output.save()
+        assert torch.equal(edited, envoy._module.fc2.bias.expand(2, 8))
+
+
 class TestVLLMBatcherCloneReads:
     """``NNSIGHT_VLLM_CLONE_READS`` serves copies instead of views into the slab.
 
