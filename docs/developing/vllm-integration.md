@@ -75,6 +75,19 @@ request's mediator with `loads(..., persistent_objects=model._remoteable_persist
 (the tokenizer resolves by persistent ID). Requests with no nnsight payload — other
 tenants sharing the engine — are skipped.
 
+A **group** (a list of prompts in one invoke, `groups.py`) is one mediator over
+several requests. `_batch_size` counts its prompts, so the batcher hands the invoke
+`[start, n]`, and `_attach_mediators` serializes the mediator once and puts the same
+bytes on every member's `extra_args` with `nnsight_group = (group_id, index, n)`.
+Every member carries them because vLLM can schedule a later member first (a request
+skipped while its grammar compiles, LoRA slot limits); `Requests.add` loads the
+mediator once, from whichever member arrives first, into a `Group`. The members also
+reach the engine one at a time, and an idle engine steps on the first, so
+`VLLM._load` installs `groups.scheduler` as vLLM's `scheduler_cls`: vLLM's own
+scheduler (async or not, or the caller's `scheduler_cls`, kept in
+`additional_config["nnsight_scheduler_cls"]`) with `add_request` holding a group's
+members until the last has arrived, so they are admitted together.
+
 ## The three interleaver entry points
 
 `NNsightGPUModelRunner(GPUModelRunner)` (`GPUModelRunner.py`) is installed by
@@ -123,6 +136,19 @@ recomputed every step:
   which `condense`/reorders can diverge from.
 - `unflatten(model)` re-points each scheduled worker to `[row, 1]` for the
   per-request logits/samples tensors.
+- A group's members are placed as `scope` meets them; after every request's own
+  workers, `Group.settle` hands the group's mediator a `Spans` (each member's
+  `[start, size]`, in member order) for the forward and another of its rows for
+  logits/samples, and the step's layout (`mediator.layout`, what `tracer.group`
+  returns). `VLLMBatcher` gathers a `Spans` with `index_select` and scatters it back
+  with `index_copy_`; `copies` answers `True` for it, so the base `Mediator.handle`
+  writes each read back after the worker's turn. `_update_states` then serves the
+  `"group"` location once, which a block reading `tracer.group` ahead of its step is
+  parked on. `collect_nnsight` keeps each finished member's output (`Requests.leave`)
+  and, at the last member, serves `tracer.result` the list of them, unwinds a dangling
+  block, and returns the group's saves and error on that member's entry; a member
+  collected without an output (an abort) abandons the group. `_finish_erred` forces
+  EOS on every member's row of an erred group.
 - `match(request_ids)` reconciles engine ids with worker ids — vLLM appends
   a content hash, so engine `"0"` maps to worker `"0-<hash>"`.
 - Each worker marks its `.save()`s in a set of its own (`Mediator.saves`, given it
@@ -242,7 +268,8 @@ call input **without running the model**, returning `(mediators, args, kwargs)`.
 - `__call__(tracer)` runs on `__exit__` while the frame is live: dispatches,
   `tracer.prepare(...)`, `_attach_mediators`, then starts
   `model.vllm_entrypoint.generate(prompt, param, request_id)` and stores the async
-  generator. One prompt only (`NotImplementedError` otherwise).
+  generator. One prompt only (`NotImplementedError` otherwise, a group of several
+  included).
 - `__aiter__` — `async for output in tracer.backend:` yields each step's
   `RequestOutput`; on `output.finished` it collects saves via `collective_rpc(
   "collect_nnsight", ...)`, attaches `output.saves`, and `raise_deferred`s. If the
@@ -368,10 +395,10 @@ Preserve these when changing the integration; each has a test guarding it:
   back to a variable by scanning the block's locals, so a bare `model.logits.save()`
   with no assignment produces no named save and `output.saves["logits"]` is empty.
   Write `logits = model.logits.save()`.
-- **One prompt per invoke.** Each `tracer.invoke(...)` becomes exactly one vLLM
-  request — batch several prompts with several invokes, never a list in one invoke
-  (that raises). An empty `tracer.invoke()` has no request to ride: a do-nothing body
-  is a dropped no-op, but a body with interventions raises (they'd vanish silently).
+- **One request per prompt.** Each `tracer.invoke(prompt)` becomes exactly one vLLM
+  request, and a group's invoke one per member, all carrying the same block. An empty
+  `tracer.invoke()` has no request to ride: a do-nothing body is a dropped no-op, but a
+  body with interventions raises (they'd vanish silently).
 - **`trace`/`invoke` keyword arguments are sampling params, not data.** They flow into
   `SamplingParams`; an unknown one (a typo) raises rather than being silently ignored.
 - **The save-scope must open on the forward thread.** `execute_model` calls `inc()` so

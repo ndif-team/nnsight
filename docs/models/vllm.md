@@ -12,7 +12,7 @@ sources: [src/nnsight/modeling/vllm/vllm.py, src/nnsight/modeling/vllm/tracer.py
 
 `nnsight.modeling.vllm.VLLM` runs NNsight interventions on top of vLLM's inference engine. The model runs in vLLM's own worker process(es); your intervention code is serialized onto each request (via `SamplingParams.extra_args`), carried into the worker, run against the real module, and the saved values shipped back. You get PagedAttention, continuous batching, tensor parallelism, and optional async streaming, with arbitrary Python interventions inline with the forward.
 
-Interventions are written exactly as for any other model — the module tree mirrors what vLLM loaded. The one structural difference: each `tracer.invoke(...)` is **one vLLM request** (one prompt), so several prompts means several invokes, not a list.
+Interventions are written exactly as for any other model — the module tree mirrors what vLLM loaded. The one structural difference: each `tracer.invoke(prompt)` is **one vLLM request** with a block of its own, and a list of prompts in one invoke is a [group](#one-block-over-several-prompts-a-group) — one request per prompt, sharing one block.
 
 This page is the engine and what a block sees inside it. Three companions carry the rest:
 [Editing a vLLM engine](vllm-editing.md) for `model.edit()`, [Async mode and
@@ -93,7 +93,8 @@ What differs from the HuggingFace path:
 
 - **Clone what you keep.** A served value is the engine's live buffer and is overwritten a few ops
   later; `.clone()` or reduce before you save. See [Serving copies instead of
-  views](#serving-copies-instead-of-views).
+  views](#serving-copies-instead-of-views). A [group](#one-block-over-several-prompts-a-group)'s
+  served value is already a copy.
 - **Where tensors live.** A tensor your block references from outside (a steering vector) is
   serialized with the block and arrives in the worker as it was; move it onto the served value
   (`v.to(h.device, h.dtype)`). Saved tensors come back on the worker's device (`cuda:0`) unless
@@ -213,7 +214,8 @@ On `mode="async"` the same call returns an awaitable: `outputs = await model.gen
 
 ### `tracer.result`
 
-`tracer.result` is the finished `RequestOutput` for the request an invoke made — one per invoke:
+`tracer.result` is the finished `RequestOutput` for the request an invoke made — one per invoke
+(a group's is the list of its members'):
 
 ```python
 with model.trace("The Eiffel Tower is in", temperature=0.0, max_tokens=3) as tracer:
@@ -251,7 +253,7 @@ Anything `vllm.SamplingParams` takes is accepted (`temperature`, `top_p`, `top_k
 
 ### Input forms per invoke
 
-One prompt per invoke: a string, a list of token ids, a tokenizer's `{input_ids, attention_mask}` output, or one of vLLM's own prompt dicts (`TokensPrompt`, `TextPrompt`). A list of strings / multiple prompts is rejected — use one invoke each.
+One prompt per invoke: a string, a list of token ids, a tokenizer's `{input_ids, attention_mask}` output, or one of vLLM's own prompt dicts (`TokensPrompt`, `TextPrompt`). A list of prompts in any of those forms — or a tokenizer's output with several rows — is a [group](#one-block-over-several-prompts-a-group), in `invoke` and in `trace` alike. Two prompts passed as separate arguments are refused.
 
 ### Continuous batching (multiple invokes)
 
@@ -302,7 +304,61 @@ with model.trace(temperature=0.0, max_tokens=1) as tracer:
 ```
 
 Many invokes in one trace still batch: a layer sweep is one trace with one
-patched invoke per layer.
+patched invoke per layer. To do the same computation over several prompts at once,
+put them in one group instead.
+
+### One block over several prompts (a group)
+
+A list of prompts in one invoke is a **group**: one request per prompt, one block for all
+of them. Use it for a batched intervention written once for every row — the block is
+shipped once and runs once per step over every member in the step, where an invoke per
+prompt ships and runs it once per prompt.
+
+```python
+with model.trace(temperature=0.0, max_tokens=8, ignore_eos=True) as tracer:
+    with tracer.invoke(prompts):                     # one group: len(prompts) requests
+        layouts = list().save()
+        for step in tracer.iter[:8]:
+            members = tracer.group                   # this step's layout
+            out = model.model.layers[8].output       # every member's tokens, in member order
+            out[0][[m.start + m.size - 1 for m in members]] += v   # each member's last token
+            layouts.append(members)
+            samples = model.samples                  # [len(members), 1]
+        result = tracer.result.save()                # every member's RequestOutput, in order
+```
+
+At each step the block is served the rows of the members the engine scheduled into it,
+concatenated in member order: a module value is `[their tokens, hidden]` (a member's
+prompt on its prefill, one row per decode step), `model.logits` is `[len(members), vocab]`
+and `model.samples` `[len(members), 1]`, row `i` being `tracer.group[i]`'s.
+
+`tracer.group` is that step's layout, a tuple of `Member(index, start, size, step)` in
+member order: `index` is the member's position in the list, `start` and `size` its rows in
+a module value, `step` its own step (0 its prefill, k its k-th decode step). The engine
+admits a group's members together, so they prefill in one step when they fit its token
+budget (`max_num_batched_tokens`); a larger group prefills over several steps, and a step
+then mixes prefills and decodes. A member that has finished drops out of later layouts —
+one step late after a stop token, and up to two after a `stop` string, for the reasons
+under [A loop that outruns the request](#a-loop-that-outruns-the-request). Read
+`tracer.group` anywhere in the step; at the top of a `tracer.iter` iteration it waits for
+the step to begin.
+
+- **Served as a copy.** The members' rows need not sit together in the step's slab, so
+  they are gathered, and a group needs no `.clone()` to keep a value. Edits still land:
+  once the block moves on from a value it read, the value is scattered back over the
+  members' rows, edited or not. An edit made after the block's next read is not written
+  back, and a replacement (`layer.output = t`) has to keep the served shape.
+- **Saves come home once.** A name the block saves is one value, the group's, as for
+  one invoke; a list appended per step comes back as built.
+- **Settings apply to every member.** The invoke's sampling settings, and the trace's,
+  are each member's. Refused on a group: `n > 1`, `lora_request`, and a list where vLLM
+  takes one value (`max_tokens=[3, 5]`, `seed=[0, 1]`) — use one invoke per prompt for
+  per-prompt settings. A list-valued setting (`stop=[".", "\n"]`) applies to every member.
+- **An error ends every member.** An exception or a `tracer.stop()` in the block ends
+  each member at its next step (one under `ignore_eos` runs to `max_tokens`, as a single
+  request does).
+- `.skip()` is refused in a group, an async engine takes a group of one prompt only, and
+  [`model.edit()`](vllm-editing.md) edits still run on each member's request separately.
 
 ### Several sampled sequences (`n > 1`)
 
@@ -441,6 +497,11 @@ usually many screens of vLLM logging back. Two causes are common enough to recog
   shared GPU, when another process frees memory while vLLM profiles. Nothing is wrong with the
   trace: build again, or use a card nothing else is holding.
 
+`Using custom scheduler class nnsight.modeling.vllm.groups.scheduler` is printed on every
+construction too: it is the scheduler that admits a
+[group](#one-block-over-several-prompts-a-group)'s members together, wrapped around the one
+vLLM would have used (or the `scheduler_cls=` you pass).
+
 `Chunked prefill is enabled with max_num_batched_tokens=...` is printed on every construction and
 does not describe the engine you get. It comes from the meta tree nnsight builds first; the real
 engine's arguments are logged a few lines later as `non-default args: {... 'enable_chunked_prefill':
@@ -448,7 +509,8 @@ False ...}`.
 
 ## Limitations
 
-- **One prompt per invoke** — no `tracer.invoke(["a", "b"])`.
+- **A group shares its settings** — `n > 1`, `lora_request` and per-prompt settings are
+  refused on a [group](#one-block-over-several-prompts-a-group); use one invoke per prompt.
 - **`.skip()` is effectively unsupported** — see [`.skip()` needs the whole step](#skip-needs-the-whole-step).
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
 - **No speculative decoding** — a speculative step scores several draft tokens per request, and a block is scoped to one logits row and one sampled token per request. `VLLM(..., speculative_config=...)` raises `NotImplementedError` before anything is built.

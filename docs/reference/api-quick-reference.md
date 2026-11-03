@@ -40,6 +40,7 @@ Notes:
 - **Kwargs the tracer does not consume go to the underlying call** (the forward, `generate`, or the pipeline), and its return value is `tracer.result` —
   e.g. `generate(..., return_dict_in_generate=True, output_scores=True)` puts HF's full generation output there.
 - `VLLM` sampling params (`temperature`, `max_tokens`, `top_p`, ...) go to `trace`/`invoke`, not the constructor.
+- On `VLLM` a list of prompts in one invoke (or in `trace`) is a *group*: one request per prompt, one block run once per step over all of them; see [models/vllm.md](../models/vllm.md#one-block-over-several-prompts-a-group).
 
 ## Tracer methods and attributes
 
@@ -54,6 +55,7 @@ Notes:
 | `tracer.cache` | `tracer.cache(modules=None, device=cpu, dtype=None, detach=True, include_output=True, include_inputs=False, non_blocking=False)` | Record many modules' activations at once; returns a `CacheView` that fills as the run proceeds. |
 | `tracer.barrier` | `tracer.barrier(n: int) -> Barrier` | A meeting point for `n` of this trace's blocks; the last to call it releases them all. |
 | `tracer.stop` | `tracer.stop()` | Halt the model's forward pass early (raises `EarlyStopException`). |
+| `tracer.group` | `tracer.group -> tuple[Member, ...]` | `VLLM` group only: the step's layout, one `Member(index, start, size, step)` per member in the step, in member order. |
 
 
 ## Envoy properties

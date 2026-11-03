@@ -81,7 +81,8 @@ The run's `Batcher` calls back into your model for the row math:
   inputs into one call. **Base default:** pass a single invoke straight through; two or
   more raise `NotImplementedError`. Override to merge (`TransformersModel._batch`,
   `transformers.py`, dispatches by `fn.__name__` and pads/collates; `VLLM._batch`,
-  `vllm.py`, extends prompt/params/lora lists — one request per invoke).
+  `vllm.py`, extends prompt/params/lora lists — one request per prompt, so a group's
+  invoke makes several).
 
 For an **exotic tensor layout** (a first dim that isn't the batch — vLLM's flat
 `[total_tokens, hidden]`, tensor-parallel shards), subclass `Batcher`, override
