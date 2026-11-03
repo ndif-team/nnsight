@@ -8,12 +8,20 @@ held modules back. `swap` moves a loaded model from one adapter to another
 and rebuilds its envoy tree, which is what ``model.load_adapter`` and a
 per-request adapter on the server go through.
 
+None of these changes a ``requires_grad`` flag the model had. peft's
+injection does (it freezes every base parameter), and the flag is not only
+about training: a ``Linear`` whose weight requires grad can take a different
+matmul kernel for the same input, so a frozen copy of a model is not always
+bit-identical to the model. The flags are put back after the injection
+(`_requires_grad_kept`).
+
 ``peft`` is an optional dependency, imported on demand (`import_peft`).
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 import torch
 
@@ -33,6 +41,21 @@ def import_peft():
         ) from error
     return peft
 
+
+@contextmanager
+def _requires_grad_kept(model: torch.nn.Module) -> Iterator[None]:
+    """Put back, on exit, the ``requires_grad`` of every parameter ``model`` has on entry.
+
+    Parameters created inside the block are left as they were made.
+    """
+    flags = [(parameter, parameter.requires_grad) for parameter in model.parameters()]
+    try:
+        yield
+    finally:
+        for parameter, requires_grad in flags:
+            parameter.requires_grad_(requires_grad)
+
+
 def attach(model: torch.nn.Module, peft_id: str, weights: bool = True) -> None:
     """Attach a PEFT adapter to ``model`` in place, from its repo id or path.
 
@@ -41,6 +64,11 @@ def attach(model: torch.nn.Module, peft_id: str, weights: bool = True) -> None:
     the adapter's layer holding the original as ``base_layer``, and every other
     module stays where it was. So a path into the base model
     (``transformer.h.0.attn``) names the same module with or without an adapter.
+
+    Every base parameter keeps the ``requires_grad`` it had: peft freezes them
+    all on injection, and that is put back. The adapter's own parameters keep
+    what peft gives them, which for a saved adapter (``inference_mode``) is
+    frozen.
 
     ``weights=False`` reads only the adapter's config, which is all a meta model
     needs: it gains the adapter's modules and paths, and no weights are loaded.
@@ -63,7 +91,8 @@ def attach(model: torch.nn.Module, peft_id: str, weights: bool = True) -> None:
     from peft.functional import cast_adapter_dtype
 
     base = {id(parameter) for parameter in model.parameters()}
-    peft.inject_adapter_in_model(config, model)
+    with _requires_grad_kept(model):
+        peft.inject_adapter_in_model(config, model)
     # What `PeftModel` does on construction: a half-precision adapter is held
     # in float32.
     cast_adapter_dtype(model, "default")
@@ -98,7 +127,8 @@ def detach(model: torch.nn.Module) -> None:
     """Take a PEFT adapter attached by `attach` back out, in place.
 
     Every adapter layer is replaced by the module it holds, which leaves the
-    model with the modules and paths it had before.
+    model with the modules and paths it had before, and, as `attach` changed
+    no flag of theirs, with the ``requires_grad`` flags it had before.
     """
     from peft.tuners.tuners_utils import BaseTunerLayer
     from peft.utils.other import AuxiliaryTrainingWrapper

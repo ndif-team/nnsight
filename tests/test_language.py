@@ -1009,6 +1009,37 @@ def tiny_peft_bundle(tmp_path_factory):
     return str(base_path), *adapters
 
 
+@pytest.fixture(scope="module")
+def trained_peft_bundle(tmp_path_factory):
+    """A local base checkpoint and an adapter that is not the identity.
+
+    ``init_lora_weights=False`` gives ``lora_B`` values, and the
+    ``modules_to_save`` copy of ``ln_f`` is moved off the original, so both
+    kinds of adapter module change the output and a disabled adapter can only
+    match the base by running neither.
+    """
+    from peft import LoraConfig, get_peft_model
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    root = tmp_path_factory.mktemp("trained_peft_bundle")
+    config = GPT2Config(
+        vocab_size=32, n_positions=16, n_embd=8, n_layer=1, n_head=1,
+        bos_token_id=0, eos_token_id=1,
+    )
+    torch.manual_seed(0)
+    GPT2LMHeadModel(config).save_pretrained(root / "base")
+    lora = LoraConfig(
+        target_modules=["c_attn"], modules_to_save=["ln_f"], r=2, init_lora_weights=False
+    )
+    adapted = get_peft_model(GPT2LMHeadModel(config), lora)
+    with torch.no_grad():
+        for name, parameter in adapted.named_parameters():
+            if "modules_to_save" in name:
+                parameter.add_(0.5)
+    adapted.save_pretrained(root / "adapter")
+    return str(root / "base"), str(root / "adapter")
+
+
 @pytest.mark.skipif(not peft_installed, reason="peft is not installed")
 class TestPeft:
     def test_meta_load_grafts_adapter(self, lora_adapter):
@@ -1313,6 +1344,41 @@ class TestPeft:
         # outright on meta). Ours must win the name.
         model = TransformersModel("gpt2", task="text-generation")
         assert type(model).load_adapter is TransformersModel.load_adapter
+
+    def test_an_attach_and_detach_leave_every_requires_grad_flag(self, trained_peft_bundle):
+        # peft freezes every base parameter on injection. Left frozen, a base
+        # run after a detach is not the base run before it: a Linear whose
+        # weight does not require grad can take another matmul kernel.
+        base_path, adapter = trained_peft_bundle
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        model._module.transformer.h[0].mlp.requires_grad_(False)  # a mixed pattern
+        before = {name: p.requires_grad for name, p in model._module.named_parameters()}
+        by_identity = {id(p): p.requires_grad for p in model._module.parameters()}
+        assert 0 < sum(before.values()) < len(before)
+
+        model.load_adapter(adapter)
+        base = [p for p in model._module.parameters() if id(p) in by_identity]
+        added = [p for p in model._module.parameters() if id(p) not in by_identity]
+        assert len(base) == len(by_identity) and added
+        assert all(p.requires_grad == by_identity[id(p)] for p in base)
+        # The adapter's own parameters keep what peft gives a saved adapter.
+        assert not any(p.requires_grad for p in added)
+
+        model.load_adapter(None)
+        assert {name: p.requires_grad for name, p in model._module.named_parameters()} == before
+
+    def test_the_peft_kwarg_leaves_the_base_trainable(self, trained_peft_bundle):
+        base_path, adapter = trained_peft_bundle
+        plain = TransformersModel(base_path, task="text-generation", dispatch=True)
+        model = TransformersModel(base_path, task="text-generation", peft=adapter, dispatch=True)
+        expected = [p.requires_grad for p in plain._module.parameters()]
+        assert all(expected)
+        base = [
+            p.requires_grad
+            for name, p in model._module.named_parameters()
+            if "lora_" not in name and "modules_to_save" not in name
+        ]
+        assert base == expected
 
 
 def _hidden(block_output):
