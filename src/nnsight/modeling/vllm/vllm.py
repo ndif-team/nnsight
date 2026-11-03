@@ -9,20 +9,25 @@ the worker, where [`GPUModelRunner`][nnsight.modeling.vllm.model_runners.GPUMode
 deserializes it, runs it against the real module, and ships saved values back.
 
 Two consequences shape everything here. Interventions are scoped to a *request*,
-so each invoke carries exactly one prompt — batching several prompts means several
-``tracer.invoke(...)`` blocks, not a list. And because the engine decides when a
-request runs, an activation arrives as a flat ``[total_tokens, hidden]`` slab of
-whatever the scheduler packed into that step rather than a padded ``[batch, seq]``
-stack; [`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher] is what maps a worker
-onto its own tokens within it.
+so an invoke with one prompt is one request with a block of its own; an invoke
+given a list of prompts is a *group*, one request per prompt sharing one block
+(see [`groups`][nnsight.modeling.vllm.groups]). And because the engine decides
+when a request runs, an activation arrives as a flat ``[total_tokens, hidden]``
+slab of whatever the scheduler packed into that step rather than a padded
+``[batch, seq]`` stack; [`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher]
+is what maps a worker onto its own tokens within it.
 """
 
 from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import os
 import re
+import types
+import typing
+import uuid
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -56,14 +61,21 @@ class VLLM(Remotable):
             ...     logits = model.logits.save()
             >>> model.tokenizer.decode(logits.argmax(dim=-1))
 
-        Several prompts is several ``invoke`` blocks (each is one request), not a
-        list — a shared save escapes each into its own name::
+        Several prompts is several ``invoke`` blocks, each one request with a
+        block of its own — a shared save escapes each into its own name::
 
             >>> with model.trace(temperature=0.0) as tracer:
             ...     with tracer.invoke("The Eiffel Tower is in"):
             ...         a = model.logits.save()
             ...     with tracer.invoke("The capital of Japan is"):
             ...         b = model.logits.save()
+
+        Or a list in one invoke — a group, one block run once per step over every
+        prompt's rows (see [`VLLMTracer.group`][nnsight.modeling.vllm.tracer.VLLMTracer.group])::
+
+            >>> with model.trace(temperature=0.0) as tracer:
+            ...     with tracer.invoke(["The Eiffel Tower is in", "The capital of Japan is"]):
+            ...         logits = model.logits.save()          # [2, vocab]
 
         Streaming with ``mode="async"`` — saves arrive on the finished output::
 
@@ -533,19 +545,26 @@ class VLLM(Remotable):
         return AsyncLLM.from_engine_args(engine_args)
 
     def _batch_size(self, *inputs: Any, **kwargs: Any) -> int:
-        """Number of batch rows an invoke contributes — one request, so one row.
+        """Number of requests an invoke makes: one per prompt, so n for a group of n.
 
         Keyword arguments are sampling settings rather than data, so an invoke with
-        only kwargs contributes nothing and sees the whole batch.
+        only kwargs contributes nothing and sees the whole batch. The count is the
+        size of the ``[start, size]`` the batcher hands the invoke, which
+        `_attach_mediators` reads as the invoke's run of requests.
         """
-        return 1 if inputs else 0
+        if not inputs:
+            return 0
+        group = self._group(*inputs)
+        return 1 if group is None else len(group)
 
     def _batch(self, invokes: list[tuple], fn: Any) -> tuple:
         """Turn each invoke into one vLLM request.
 
         Unlike a stacked-tensor model there is nothing to pad or combine: the
         engine batches requests itself, so this only converts each invoke's input
-        into a prompt and its kwargs into that request's ``SamplingParams``.
+        into a prompt and its kwargs into that request's ``SamplingParams``. A
+        group's invoke is one request per prompt, each with the invoke's settings,
+        marked ``nnsight_group`` for `_attach_mediators`.
 
         Returns:
             ``((prompts, params, lora_requests), {})`` for the traced call.
@@ -555,21 +574,78 @@ class VLLM(Remotable):
         prompts, params, lora_requests = [], [], []
         for inputs, kwargs in invokes:
             kwargs = dict(kwargs)
-            lora_requests.append(kwargs.pop("lora_request", None))
-            prompts.append(self._prompt(*inputs))
+            lora_request = kwargs.pop("lora_request", None)
             # Which installed edits this request runs — nnsight's, not a sampling
             # setting; it rides `extra_args` (see `_attach_mediators`).
             edits = kwargs.pop("edits", None)
-            param = SamplingParams(**kwargs)
-            # Which settings this invoke named, for `_attach_mediators` to leave
-            # alone. Recorded rather than inferred: the value a caller passed
-            # cannot be told from the one it would have had by default, and half
-            # of vLLM's defaults are the obvious thing to type.
-            param.nnsight_named = frozenset(kwargs) | ({"edits"} if edits is not None else set())
-            param.nnsight_edits = self._edit_names(edits)
-            params.append(param)
+            group = self._group(*inputs)
+            if group is None:
+                members = [self._prompt(*inputs)]
+            else:
+                if lora_request is not None:
+                    raise ValueError(
+                        "lora_request is not supported on a group (a list of prompts "
+                        "in one invoke); use one tracer.invoke per prompt"
+                    )
+                self._refuse_per_member(kwargs)
+                members = [self._prompt(prompt) for prompt in group]
+            for prompt in members:
+                lora_requests.append(lora_request)
+                prompts.append(prompt)
+                param = SamplingParams(**kwargs)
+                # Which settings this invoke named, for `_attach_mediators` to leave
+                # alone. Recorded rather than inferred: the value a caller passed
+                # cannot be told from the one it would have had by default, and half
+                # of vLLM's defaults are the obvious thing to type.
+                param.nnsight_named = frozenset(kwargs) | ({"edits"} if edits is not None else set())
+                param.nnsight_edits = self._edit_names(edits)
+                if group is not None:
+                    param.nnsight_group = True
+                params.append(param)
 
         return (prompts, params, lora_requests), {}
+
+    @staticmethod
+    def _group(*inputs: Any) -> list | None:
+        """The prompts of a group — an invoke given a list of prompts — or ``None`` for one prompt.
+
+        A list whose first element is not a token id is a list of prompts, and a
+        tokenizer's output with several rows is one prompt per row. Each is left
+        for `_prompt` to convert, so a member takes any form a single invoke does.
+        """
+        if len(inputs) != 1:
+            return None
+        prompt = inputs[0]
+        if isinstance(prompt, Mapping) and "input_ids" in prompt:
+            ids, mask = prompt["input_ids"], prompt.get("attention_mask")
+            ids = ids.tolist() if isinstance(ids, torch.Tensor) else ids
+            mask = mask.tolist() if isinstance(mask, torch.Tensor) else mask
+            if len(ids) < 2 or not isinstance(ids[0], list):
+                return None
+            return [
+                {"input_ids": row, "attention_mask": None if mask is None else mask[i]}
+                for i, row in enumerate(ids)
+            ]
+        if isinstance(prompt, (list, tuple)) and prompt and not isinstance(prompt[0], int):
+            return list(prompt)
+        return None
+
+    @staticmethod
+    def _refuse_per_member(settings: dict) -> None:
+        """Refuse a list where vLLM takes one value: a group's per-member form, which it cannot split.
+
+        A group's settings are one ``SamplingParams`` for every member, so
+        ``max_tokens=[3, 5]`` reads as one setting per prompt, which nothing here
+        could honour and vLLM would take for a number. A field that takes a list
+        (``stop=[...]``) is a setting like any other.
+        """
+        for name, value in settings.items():
+            if isinstance(value, (list, tuple)) and name in _scalar_settings():
+                raise ValueError(
+                    f"{name}={value!r} cannot be split across a group's prompts; a "
+                    "group's sampling settings apply to every member, so use one "
+                    "tracer.invoke per prompt for per-prompt settings"
+                )
 
     def _prompt(self, *inputs: Any) -> Any:
         """Convert one invoke's input into a vLLM prompt.
@@ -577,7 +653,8 @@ class VLLM(Remotable):
         Accepts a string, a list of token ids, a tokenizer's output, or one
         of vLLM's own prompt dicts (``TokensPrompt``, ``TextPrompt``, and the
         multimodal forms). A request is one sequence, so anything carrying several
-        prompts is rejected here rather than silently generating from the first.
+        prompts here — a group's member that is itself a list — is rejected rather
+        than silently generating from the first.
         """
         from vllm.inputs import TokensPrompt
 
@@ -607,8 +684,8 @@ class VLLM(Remotable):
             if isinstance(prompt[0], int):
                 return TokensPrompt(prompt_token_ids=list(prompt))
             raise ValueError(
-                "Multiple prompts per invoke are not supported. "
-                "Use a separate tracer.invoke(...) per prompt."
+                "A prompt in a list is one prompt, not another list of them; pass "
+                "one flat list of prompts to tracer.invoke([...])."
             )
         return prompt
 
@@ -634,8 +711,8 @@ class VLLM(Remotable):
         if isinstance(input_ids[0], list):
             if len(input_ids) > 1:
                 raise ValueError(
-                    "Multiple prompts per invoke are not supported. "
-                    "Use a separate tracer.invoke(...) per prompt."
+                    "A prompt in a list is one prompt, not a tokenizer output of "
+                    "several; pass the tokenizer output itself to tracer.invoke(...)."
                 )
             input_ids = input_ids[0]
             mask = mask[0] if mask else None
@@ -1011,7 +1088,8 @@ class VLLM(Remotable):
         stays that value, which is every trace that does not use several invokes
         or ``n``; so does one whose runs all saved the same object, as they do for
         ``tracer.result``, which is the request's single output however many
-        sequences sampled from it.
+        sequences sampled from it. A group's block ran once for all its members,
+        so its names come back once, on the output of its last member to finish.
         """
         from ...intervention.errors import raise_deferred
         from ...tracing.tracer import mark
@@ -1078,6 +1156,10 @@ class VLLM(Remotable):
         let the trace-level setting overwrite an invoke that asked for one of them
         while honouring a neighbouring ``temperature=0.99``.
 
+        A group's worker is serialized once and its bytes ride every member's
+        request, with ``nnsight_group``: an id for the group, the member's index
+        and the group's size, from which the engine reassembles the group.
+
         Returns:
             The workers that were attached, in request order.
         """
@@ -1117,26 +1199,45 @@ class VLLM(Remotable):
                     "(temperature, top_p, max_tokens, ...)."
                 )
 
-        for mediator, param in zip(attached, params):
-            param.extra_args = {"nnsight_mediator": dumps(mediator)}
-            named = getattr(param, "nnsight_named", frozenset())
-            edits = getattr(param, "nnsight_edits", None) if "edits" in named else trace_edits
-            if edits is not None:
-                param.extra_args["nnsight_edits"] = edits
-            # A prefix-cached token is served from the KV cache without a forward
-            # pass, so no hook fires for it and the intervention silently sees a
-            # short activation — the trace reads only the tokens that were
-            # recomputed. That is invisible at the call site (no error, just fewer
-            # rows), and it bites exactly when a prompt repeats or shares a prefix
-            # with an earlier one, which is the normal case for a dataset sweep.
-            # Interventions are worth more than the cache hit, so force the
-            # recompute. Older vLLM has no such field; there the cache is not
-            # consulted this way and the read is whole anyway.
-            if hasattr(param, "skip_reading_prefix_cache"):
-                param.skip_reading_prefix_cache = True
-            for attr, value in kwargs.items():
-                if attr not in named:
-                    setattr(param, attr, value)
+        for mediator in attached:
+            # The invoke's run of requests: one, or a group's n.
+            start, size = mediator.batch_group
+            members = params[start : start + size]
+            payload = dumps(mediator)
+            grouped = getattr(members[0], "nnsight_group", False)
+            if grouped:
+                self._refuse_per_member(kwargs)
+                group_id = uuid.uuid4().hex
+            for index, param in enumerate(members):
+                param.extra_args = {"nnsight_mediator": payload}
+                if grouped:
+                    param.extra_args["nnsight_group"] = (group_id, index, size)
+                named = getattr(param, "nnsight_named", frozenset())
+                edits = getattr(param, "nnsight_edits", None) if "edits" in named else trace_edits
+                if edits is not None:
+                    param.extra_args["nnsight_edits"] = edits
+                # A prefix-cached token is served from the KV cache without a forward
+                # pass, so no hook fires for it and the intervention silently sees a
+                # short activation — the trace reads only the tokens that were
+                # recomputed. That is invisible at the call site (no error, just fewer
+                # rows), and it bites exactly when a prompt repeats or shares a prefix
+                # with an earlier one, which is the normal case for a dataset sweep.
+                # Interventions are worth more than the cache hit, so force the
+                # recompute. Older vLLM has no such field; there the cache is not
+                # consulted this way and the read is whole anyway.
+                if hasattr(param, "skip_reading_prefix_cache"):
+                    param.skip_reading_prefix_cache = True
+                for attr, value in kwargs.items():
+                    if attr not in named:
+                        setattr(param, attr, value)
+                # vLLM fans an `n > 1` request into a child per sequence, which a
+                # group's layout (one row per member) has no place for.
+                if grouped and param.n > 1:
+                    raise ValueError(
+                        f"n={param.n} is not supported on a group (a list of prompts "
+                        "in one invoke); use one tracer.invoke per prompt to sample "
+                        "several sequences"
+                    )
 
         return attached
 
@@ -1174,3 +1275,20 @@ class VLLM(Remotable):
         if self.tokenizer is not None:
             self.tokenizer._persistent_id = "Tokenizer"
         return state
+
+
+@functools.cache
+def _scalar_settings() -> frozenset[str]:
+    """The ``SamplingParams`` fields that take one value rather than a list, read off its annotations.
+
+    Cached for the process: the annotations are fixed by the installed vLLM.
+    """
+    from vllm import SamplingParams
+
+    def takes_list(annotation: Any) -> bool:
+        union = typing.get_origin(annotation) in (typing.Union, types.UnionType)
+        options = typing.get_args(annotation) if union else (annotation,)
+        return any((typing.get_origin(option) or option) in (list, tuple, set) for option in options)
+
+    hints = typing.get_type_hints(SamplingParams)
+    return frozenset(name for name, annotation in hints.items() if not takes_list(annotation))

@@ -214,6 +214,20 @@ class TestServeResult:
         assert len(result.outputs[0].token_ids) == 3
 
 
+class TestServeGroup:
+    @torch.no_grad()
+    def test_a_group_runs_once_over_its_members(self, serve_client, serve_url, ET_prompt, MSG_prompt):
+        # The server submits each member as its own request; the engine
+        # reassembles the group and sends its saves home once.
+        with serve_client.trace(temperature=0.0, top_p=1, max_tokens=2, serve=serve_url) as tracer:
+            with tracer.invoke([ET_prompt, MSG_prompt]):
+                logits = serve_client.logits.save()
+                result = tracer.result.save()
+
+        assert [serve_client.tokenizer.decode(token) for token in logits.argmax(dim=-1)] == [" Paris", " New"]
+        assert [output.prompt for output in result] == [ET_prompt, MSG_prompt]
+
+
 class TestServeEdit:
     """`model.edit(serve=url)` — the block installs over HTTP, on the server's engine."""
 
