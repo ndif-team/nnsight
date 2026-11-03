@@ -110,7 +110,7 @@ model itself is never carried — it is identified by `model_key`. Fields:
 | `model_key: str` | identifies the server-side model (see `to_model_key()`) |
 | `session_id: str` | session grouping |
 | `compress: bool` | zstd-compress the payload and ask the server to compress its result |
-| `env: dict` | per-request environment the server applies to the model before running, from the model's `_remoteable_get_env()`: `TransformersModel` sends `{"attn_implementation": <resolved name>}` on every request, plus `"peft": <adapter repo id>` when an adapter is loaded |
+| `env: dict` | per-request environment the server applies to the model before running, from the model's `_remoteable_get_env()`: `TransformersModel` sends `{"attn_implementation": <resolved name>}` on every request, plus `"peft": <adapter repo id>` when an adapter is loaded, and with it `"autocast_adapter_dtype": False` / `"adapters_enabled": False` when those are not the defaults (the server resets both to the defaults on a request without them) |
 
 - `serialize(tracer, compress=False)` (`request.py`, classmethod) builds the
   binary execution payload: `variables = dict(tracer.info.frame.f_locals)`,
