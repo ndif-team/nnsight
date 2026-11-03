@@ -153,6 +153,20 @@ def attach(
         raise
 
 
+def _unmerge(model: torch.nn.Module) -> None:
+    """Unmerge every adapter layer of ``model`` merged into the weights it holds.
+
+    peft's ``merge()`` adds the layer's delta into its held weight;
+    ``unmerge()`` subtracts it again, which rounds, so the weight comes back to
+    within rounding of the base, not bit for bit.
+    """
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    for module in model.modules():
+        if isinstance(module, BaseTunerLayer) and module.merged:
+            module.unmerge()
+
+
 def detach(model: torch.nn.Module) -> None:
     """Take a PEFT adapter attached by `attach` back out, in place.
 
@@ -165,9 +179,7 @@ def detach(model: torch.nn.Module) -> None:
     from peft.tuners.tuners_utils import BaseTunerLayer
     from peft.utils.other import AuxiliaryTrainingWrapper
 
-    for module in model.modules():
-        if isinstance(module, BaseTunerLayer) and module.merged:
-            module.unmerge()
+    _unmerge(model)
     for parent in list(model.modules()):
         for name, child in list(parent.named_children()):
             if isinstance(child, BaseTunerLayer):
@@ -186,6 +198,11 @@ def set_enabled(model: torch.nn.Module, enabled: bool) -> None:
     the base model's; on, it is the adapted one. No module moves, so the envoy
     tree and every path stay valid either way.
 
+    Switching off first unmerges a layer merged into the weights it holds
+    (peft's ``merge()``), so the held weights are the base model's again, to
+    rounding (see `_unmerge`). Switching on leaves it unmerged, which computes
+    what the merged layer did, to rounding.
+
     peft's switch (``enable_adapters`` on each adapter layer and on the
     ``modules_to_save`` / trainable-token wrappers) also sets
     ``requires_grad``: switching on makes the adapter trainable, and switching
@@ -196,6 +213,8 @@ def set_enabled(model: torch.nn.Module, enabled: bool) -> None:
     from peft.utils.other import AuxiliaryTrainingWrapper
 
     with _requires_grad_kept(model):
+        if not enabled:
+            _unmerge(model)
         for module in model.modules():
             if isinstance(module, (BaseTunerLayer, AuxiliaryTrainingWrapper)):
                 module.enable_adapters(enabled)

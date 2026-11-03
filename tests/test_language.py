@@ -1565,6 +1565,43 @@ class TestPeft:
             logits = model.output.logits.save()
         torch.testing.assert_close(logits, base, atol=1e-6, rtol=0)
 
+    @torch.no_grad()
+    def test_switching_off_unmerges_a_merged_layer(self, trained_peft_bundle):
+        from peft.tuners.tuners_utils import BaseTunerLayer
+
+        base_path, adapter = trained_peft_bundle
+        ids = torch.tensor([[2, 5, 7, 3]])
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        with model.trace(ids):
+            base = model.output.logits.save()
+        model.load_adapter(adapter)
+        with model.trace(ids):
+            adapted = model.output.logits.save()
+        (layer,) = [m for m in model._module.modules() if isinstance(m, BaseTunerLayer)]
+        weight = layer.base_layer.weight.clone()
+
+        layer.merge()
+        model.disable_adapters()
+        assert not layer.merged
+        with model.trace(ids):
+            logits = model.output.logits.save()
+        # Subtracting the merged delta again rounds.
+        torch.testing.assert_close(logits, base, atol=1e-6, rtol=0)
+        model.enable_adapters()
+
+        # Bit for bit: a copy of the weight, put back once the switch has unmerged.
+        layer.merge()
+        model.disable_adapters()
+        layer.base_layer.weight.copy_(weight)
+        with model.trace(ids):
+            logits = model.output.logits.save()
+        assert torch.equal(logits, base)
+
+        model.enable_adapters()
+        with model.trace(ids):
+            logits = model.output.logits.save()
+        assert torch.equal(logits, adapted)
+
     def test_a_tensor_parallel_model_refuses_an_adapter(self, tiny_peft_bundle):
         # What a `distributed_config` load leaves on the model, read without
         # launching ranks.
