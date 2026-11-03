@@ -1146,7 +1146,7 @@ class TestVLLMBatcherGroups:
     def test_a_step_layout_puts_members_in_member_order(self):
         from nnsight.modeling.vllm.groups import Group, Member
 
-        group = Group(3)
+        group = Group("g", 3)
         group.place(2, "c", start=0, tokens=1, row=0)
         group.place(0, "a", start=4, tokens=5, row=2)
         tokens, rows = group.settle()

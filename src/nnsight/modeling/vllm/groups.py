@@ -19,8 +19,8 @@ step at once:
 
 The engine decides which members run in a step, and where their tokens sit in
 the step's slab: members prefill together when the scheduler fits them, later
-otherwise, and finish at different steps. So a group's rows are recomputed every
-step like any request's span, and the block learns the step's shape from
+otherwise, and finish at different steps. So a group's rows are recomputed every step
+like any request's span, and the block learns the step's shape from
 ``tracer.group`` — a [`Member`][nnsight.modeling.vllm.groups.Member] per member
 in the step, in member order.
 
@@ -93,6 +93,7 @@ class Group:
     last member is collected as finished, which is when its block goes home.
 
     Attributes:
+        id: The id the client gave the group, which its members' requests carry.
         size: How many members the invoke listed.
         mediator: The block, loaded once from whichever member arrived first;
             ``None`` once the group has given it up (a chunked prompt, an abort).
@@ -102,18 +103,24 @@ class Group:
             own step number in the next one.
         outputs: Member index -> its finished ``RequestOutput``, kept to serve
             ``tracer.result`` when the last member finishes.
+        joined: How many members have arrived on the engine.
         left: Member indexes collected as finished.
+        abandoned: Whether a member was collected with no output to give it — an
+            abort — which ends the block and leaves the rest to run without it.
         layout: This step's `tracer.group`.
         ids: This step's members' request ids, in member order.
     """
 
-    def __init__(self, size: int) -> None:
+    def __init__(self, group_id: str, size: int) -> None:
+        self.id = group_id
         self.size = size
         self.mediator: Any = None
         self.error: dict | None = None
         self.steps: dict[int, int] = {}
         self.outputs: dict[int, Any] = {}
+        self.joined = 0
         self.left: set[int] = set()
+        self.abandoned = False
         self.layout: tuple[Member, ...] = ()
         self.ids: list[str] = []
         # This step's members as `Requests.scope` meets them, in slab order:
@@ -144,5 +151,11 @@ class Group:
         self.ids = [request_id for _, request_id, *_ in placed]
         return (Spans(tokens), Spans(rows)) if placed else None
 
+    @property
+    def over(self) -> bool:
+        """Whether every member is collected — of those that arrived, once abandoned."""
+        return len(self.left) == (self.joined if self.abandoned else self.size)
+
     def __repr__(self) -> str:
-        return f"Group(size={self.size}, left={sorted(self.left)}, layout={self.layout})"
+        return f"Group({self.id!r}, size={self.size}, left={sorted(self.left)}, layout={self.layout})"
+
