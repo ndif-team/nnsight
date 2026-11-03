@@ -148,7 +148,7 @@ Two constraints fall out of this line-based mechanism:
 built from the caller's locals, then `push_result` writes results back:
 
 ```python
-scope = Scope(dict(frame.f_locals), frame.f_locals, frame.f_globals)
+scope = Scope(dict(frame.f_locals), {}, frame.f_globals)
 exec(code, scope)
 push_result(frame, scope)
 ```
@@ -182,15 +182,20 @@ order:
 
 1. **A snapshot** of the frame's locals taken at capture (so a `for prompt in
    prompts:` variable means what it meant *where the block was written*).
-2. `shared` — the live locals of the frame the block was written in, so a name
-   bound by a *sibling* block (an earlier `tracer.invoke(...)`) is visible.
+2. `shared` — the store the blocks written in one frame share
+   (`shared_locals`, `src/nnsight/intervention/util.py`), so a name bound by a
+   *sibling* block (an earlier `tracer.invoke(...)`) is visible. Invoke blocks and
+   the `trace()` body that holds them get it; every other block gets a private
+   `{}`, as in the sample above.
 3. `glbls` — the frame's globals, by fallback via `__missing__`.
 
 `Scope` is passed as `exec`'s *globals* (not just locals), so a `lambda` or nested
 `def` inside the block reaches the block's own names (their free variables compile
 to `LOAD_GLOBAL`, which honors `__missing__` on a dict subclass). Writes land in
 the scope *and* in `shared`, so a block sees its own assignments and so do the
-blocks written beside it.
+blocks written beside it. A `del` removes the name from both, so neither the block
+nor a later sibling reads it and the value is freed; the frame's binding is
+untouched.
 
 ### push_result and saving
 

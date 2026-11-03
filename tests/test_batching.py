@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import weakref
 from collections import OrderedDict, namedtuple
 
 import pytest
@@ -609,6 +610,50 @@ class TestInvokeScope:
                     first = gpt2.transformer.h[0].output
                 with tracer.invoke(MSG):
                     crossed = first.clone().save()
+
+    @torch.no_grad()
+    def test_deleted_name_no_longer_reads(self):
+        envoy = _BatchEnvoy(_MLP())
+        with pytest.raises(NameError, match="'gone'"):
+            with envoy.trace(torch.randn(1, 8)):
+                gone = envoy.fc1.output
+                del gone
+                gone
+
+    @torch.no_grad()
+    def test_name_deleted_in_one_invoke_is_gone_from_the_next(self):
+        envoy = _BatchEnvoy(_MLP())
+        with pytest.raises(NameError, match="'handoff'"):
+            with envoy.trace() as tracer:
+                with tracer.invoke(torch.randn(1, 8)):
+                    handoff = envoy.fc1.output
+                    del handoff
+                with tracer.invoke(torch.randn(1, 8)):
+                    envoy.fc2.output  # park past the other invoke's bind and del
+                    handoff
+
+    @torch.no_grad()
+    def test_deleted_name_is_not_pushed(self):
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.trace() as tracer:
+            with tracer.invoke(torch.randn(1, 8)):
+                dropped = envoy.fc1.output.save()
+                del dropped
+        with pytest.raises(NameError):
+            dropped
+
+    @torch.no_grad()
+    def test_del_releases_the_value(self):
+        # The store the invokes share outlives each block until the trace ends,
+        # so a copy left there would keep the value alive past the `del`.
+        envoy = _BatchEnvoy(_MLP())
+        with envoy.trace() as tracer:
+            with tracer.invoke(torch.randn(1, 8)):
+                scratch = envoy.fc1.output.clone()
+                ref = weakref.ref(scratch)
+                del scratch
+                released = nnsight.save(ref() is None)
+        assert released
 
 
 class TestInvokeFromHelper:

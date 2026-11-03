@@ -88,6 +88,17 @@ class Scope(dict):
         self.shared[key] = value
         self.written.add(key)
 
+    def __delitem__(self, key: str) -> None:
+        # A bound name can sit here, in `shared`, or both; unbinding only this
+        # dict leaves `__missing__` to find the `shared` copy, so the name still
+        # reads and its value lives until the trace ends. The frame is untouched:
+        # `push` only ever binds.
+        if key not in self and key not in self.shared:
+            raise KeyError(key)  # `del` surfaces it as NameError
+        self.pop(key, None)
+        self.shared.pop(key, None)
+        self.written.discard(key)
+
     def writes(self) -> dict:
         """The names this block bound, with their current values."""
         return {k: self[k] for k in self.written if k in self}
