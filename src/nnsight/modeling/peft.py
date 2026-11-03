@@ -6,13 +6,15 @@ targeted module becomes the adapter's layer, holding the original as
 names the same module with or without an adapter, and `detach` puts the
 held modules back. `swap` moves a loaded model from one adapter to another
 and rebuilds its envoy tree, which is what ``model.load_adapter`` and a
-per-request adapter on the server go through.
+per-request adapter on the server go through. `set_enabled` switches an
+attached adapter off and on without touching the tree.
 
-None of these changes a ``requires_grad`` flag the model had. peft's
-injection does (it freezes every base parameter), and the flag is not only
-about training: a ``Linear`` whose weight requires grad can take a different
-matmul kernel for the same input, so a frozen copy of a model is not always
-bit-identical to the model. The flags are put back after the injection
+None of these changes a ``requires_grad`` flag the model had. peft's own
+calls do (injecting an adapter freezes every base parameter, and its switch
+makes the adapter trainable), and the flag is not only about training: a
+``Linear`` whose weight requires grad can take a different matmul kernel for
+the same input, so a frozen copy of a model is not always bit-identical to
+the model. The flags are put back after each of those calls
 (`_requires_grad_kept`).
 
 ``peft`` is an optional dependency, imported on demand (`import_peft`).
@@ -56,7 +58,12 @@ def _requires_grad_kept(model: torch.nn.Module) -> Iterator[None]:
             parameter.requires_grad_(requires_grad)
 
 
-def attach(model: torch.nn.Module, peft_id: str, weights: bool = True) -> None:
+def attach(
+    model: torch.nn.Module,
+    peft_id: str,
+    weights: bool = True,
+    autocast_adapter_dtype: bool = True,
+) -> None:
     """Attach a PEFT adapter to ``model`` in place, from its repo id or path.
 
     The adapter's layers are injected into the model it was given, where
@@ -69,6 +76,11 @@ def attach(model: torch.nn.Module, peft_id: str, weights: bool = True) -> None:
     all on injection, and that is put back. The adapter's own parameters keep
     what peft gives them, which for a saved adapter (``inference_mode``) is
     frozen.
+
+    ``autocast_adapter_dtype`` is peft's flag of that name. ``True`` holds a
+    float16 or bfloat16 adapter in float32, as ``PeftModel.from_pretrained``
+    does; ``False`` holds it in the dtype of the weights it adapts, so on a
+    bfloat16 model the adapter is bfloat16 whatever dtype it was saved in.
 
     ``weights=False`` reads only the adapter's config, which is all a meta model
     needs: it gains the adapter's modules and paths, and no weights are loaded.
@@ -93,9 +105,7 @@ def attach(model: torch.nn.Module, peft_id: str, weights: bool = True) -> None:
     base = {id(parameter) for parameter in model.parameters()}
     with _requires_grad_kept(model):
         peft.inject_adapter_in_model(config, model)
-    # What `PeftModel` does on construction: a half-precision adapter is held
-    # in float32.
-    cast_adapter_dtype(model, "default")
+    cast_adapter_dtype(model, "default", autocast_adapter_dtype=autocast_adapter_dtype)
     if not weights:
         return
     # The adapter's own parameters: a wrapped module's keep their identity but
@@ -143,11 +153,35 @@ def detach(model: torch.nn.Module) -> None:
     if hasattr(model, "peft_config"):
         del model.peft_config
 
-def swap(model, requested: Optional[str]) -> None:
+
+def set_enabled(model: torch.nn.Module, enabled: bool) -> None:
+    """Switch the adapter attached to ``model`` off or on, in place.
+
+    Off, every adapter layer runs only the module it holds, so the forward is
+    the base model's; on, it is the adapted one. No module moves, so the envoy
+    tree and every path stay valid either way.
+
+    peft's switch (``enable_adapters`` on each adapter layer and on the
+    ``modules_to_save`` / trainable-token wrappers) also sets
+    ``requires_grad``: switching on makes the adapter trainable, and switching
+    a wrapper off makes the module it holds trainable. Those flags are put
+    back, so the switch changes which path the forward takes and nothing else.
+    """
+    from peft.tuners.tuners_utils import BaseTunerLayer
+    from peft.utils.other import AuxiliaryTrainingWrapper
+
+    with _requires_grad_kept(model):
+        for module in model.modules():
+            if isinstance(module, (BaseTunerLayer, AuxiliaryTrainingWrapper)):
+                module.enable_adapters(enabled)
+
+
+def swap(model, requested: Optional[str], autocast_adapter_dtype: bool = True) -> None:
     """Swap ``model``'s loaded PEFT adapter to ``requested``, and re-point its envoy tree.
 
-    The module changes only when the requested adapter differs from the
-    current one, so a repeat request pays nothing:
+    An adapter is its id and its ``autocast_adapter_dtype``; the module changes
+    only when the requested one differs from the current one, so a repeat
+    request pays nothing:
 
         current  requested  action
         -------  ---------  ------
@@ -156,8 +190,10 @@ def swap(model, requested: Optional[str]) -> None:
         X        X          no-op
         X        Y          detach X, attach Y
         X        None       detach X
+
+    A newly attached adapter starts enabled (`set_enabled`).
     """
-    if requested == model.peft:
+    if (requested, autocast_adapter_dtype) == (model.peft, model.autocast_adapter_dtype):
         return
 
     if model.peft is not None:
@@ -165,6 +201,8 @@ def swap(model, requested: Optional[str]) -> None:
         # The module is the base checkpoint from here; keep `model.peft` honest
         # so a refused load below leaves the model self-consistent.
         model.peft = None
+    model.autocast_adapter_dtype = autocast_adapter_dtype
+    model.adapters_enabled = True
     try:
         if requested:
             # Refused before the tree is rebuilt, so a no-op adapter is never
@@ -172,7 +210,7 @@ def swap(model, requested: Optional[str]) -> None:
             # several adapters over one loaded base is exactly the workload
             # where every organism silently collapsing to the base
             # checkpoint looks like a real result.
-            attach(model._module, requested)
+            attach(model._module, requested, autocast_adapter_dtype=autocast_adapter_dtype)
             model.peft = requested
     finally:
         model._update(model._module)

@@ -1380,6 +1380,148 @@ class TestPeft:
         ]
         assert base == expected
 
+    @torch.no_grad()
+    def test_the_switch_runs_the_base_and_the_adapter_on_one_tree(self, trained_peft_bundle):
+        base_path, adapter = trained_peft_bundle
+        ids = torch.tensor([[2, 5, 7, 3]])
+        model = TransformersModel(base_path, task="text-generation", dispatch=True)
+        with model.trace(ids):
+            base_logits = model.output.logits.save()
+
+        model.load_adapter(adapter)
+        assert model.adapters_enabled
+        with model.trace(ids):
+            adapted_logits = model.output.logits.save()
+        assert not torch.allclose(adapted_logits, base_logits, atol=1e-4)
+
+        paths = [envoy.path for envoy in model.modules()]
+        flags = {name: p.requires_grad for name, p in model._module.named_parameters()}
+        module = model._module
+        c_attn = model.transformer.h[0].attn.c_attn
+        for enabled, expected in ((False, base_logits), (True, adapted_logits), (False, base_logits)):
+            (model.enable_adapters if enabled else model.disable_adapters)()
+            assert model.adapters_enabled is enabled
+            # Nothing in the tree moved, and no flag changed.
+            assert model._module is module and model.transformer.h[0].attn.c_attn is c_attn
+            assert [envoy.path for envoy in model.modules()] == paths
+            assert {name: p.requires_grad for name, p in model._module.named_parameters()} == flags
+            with model.trace(ids):
+                held = model.transformer.h[0].attn.c_attn.base_layer.output.save()
+                hidden = model.transformer.h[0].attn.c_attn.output.save()
+                logits = model.output.logits.save()
+            assert torch.equal(logits, expected)
+            assert torch.equal(hidden, held) is not enabled
+
+        # Off, the adapter's own modules are in the tree but do not run.
+        assert _has_lora(model)
+        with pytest.raises(nnsight.intervention.interleaver.OutOfOrderError):
+            with model.trace(ids):
+                model.transformer.h[0].attn.c_attn.lora_A.default.output.save()
+
+    def test_the_switch_needs_an_attached_adapter(self, gpt2):
+        for switch in (gpt2.disable_adapters, gpt2.enable_adapters):
+            with pytest.raises(ValueError, match="No PEFT adapter is attached"):
+                switch()
+        # Ours, not transformers' (which refuses an adapter nnsight attached).
+        assert type(gpt2).disable_adapters is TransformersModel.disable_adapters
+        assert type(gpt2).enable_adapters is TransformersModel.enable_adapters
+
+    def test_a_newly_loaded_adapter_starts_enabled(self, tiny_peft_bundle):
+        base_path, adapter_a, adapter_b = tiny_peft_bundle
+        for dispatch in (False, True):
+            model = TransformersModel(base_path, task="text-generation", peft=adapter_a, dispatch=dispatch)
+            model.disable_adapters()
+            model.load_adapter(adapter_a)  # the same adapter: a no-op
+            assert model.adapters_enabled is False
+            model.load_adapter(adapter_b)
+            assert model.adapters_enabled is True
+            from peft.tuners.tuners_utils import BaseTunerLayer
+
+            layers = [m for m in model._module.modules() if isinstance(m, BaseTunerLayer)]
+            assert layers and not any(layer.disable_adapters for layer in layers)
+
+    @torch.no_grad()
+    def test_a_disabled_adapter_stays_off_through_dispatch(self, trained_peft_bundle):
+        base_path, adapter = trained_peft_bundle
+        ids = torch.tensor([[2, 5, 7, 3]])
+        base = TransformersModel(base_path, task="text-generation", dispatch=True)
+        with base.trace(ids):
+            expected = base.output.logits.save()
+
+        model = TransformersModel(base_path, task="text-generation", peft=adapter)
+        model.disable_adapters()
+        with model.trace(ids):  # dispatches
+            logits = model.output.logits.save()
+        assert model.dispatched and model.adapters_enabled is False
+        assert torch.equal(logits, expected)
+
+    @torch.no_grad()
+    def test_the_switch_travels_with_a_remote_request(self, trained_peft_bundle):
+        base_path, adapter = trained_peft_bundle
+        client = TransformersModel(base_path, task="text-generation", peft=adapter)
+        assert "adapters_enabled" not in client._remoteable_get_env()
+        client.disable_adapters()
+        env = client._remoteable_get_env()
+        assert env["peft"] == adapter and env["adapters_enabled"] is False
+
+        server = TransformersModel(base_path, task="text-generation", dispatch=True)
+        server._remoteable_set_env(env)
+        assert server.peft == adapter and server.adapters_enabled is False
+        module = server._module
+        # The server's model is shared: a request that names the adapter and
+        # says nothing else runs it enabled, whatever the last caller asked.
+        server._remoteable_set_env({"peft": adapter})
+        assert server.adapters_enabled is True and server._module is module
+        server._remoteable_set_env({})
+        assert server.peft is None and not _has_lora(server)
+
+    def test_autocast_adapter_dtype(self, tmp_path):
+        from peft import LoraConfig, get_peft_model
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        config = GPT2Config(vocab_size=32, n_positions=16, n_embd=8, n_layer=1, n_head=1)
+        GPT2LMHeadModel(config).save_pretrained(tmp_path / "base")
+        lora = LoraConfig(target_modules=["c_attn"], r=2, init_lora_weights=False)
+        # peft's own default would save it in float32.
+        get_peft_model(
+            GPT2LMHeadModel(config).to(torch.bfloat16), lora, autocast_adapter_dtype=False
+        ).save_pretrained(tmp_path / "adapter")
+        base_path, adapter = str(tmp_path / "base"), str(tmp_path / "adapter")
+
+        def dtypes(model):
+            if not model.dispatched:
+                model.dispatch()
+            return {p.dtype for name, p in model._module.named_parameters() if "lora_" in name}
+
+        def build(**kwargs):
+            return TransformersModel(
+                base_path, task="text-generation", dtype=torch.bfloat16, **kwargs
+            )
+
+        held = build(peft=adapter, dispatch=True)
+        assert dtypes(held) == {torch.float32}
+        assert "autocast_adapter_dtype" not in held._remoteable_get_env()
+
+        # Stored before dispatch and applied at it.
+        kept = build(peft=adapter, autocast_adapter_dtype=False)
+        assert kept._remoteable_get_env()["autocast_adapter_dtype"] is False
+        assert dtypes(kept) == {torch.bfloat16}
+
+        loaded = build()
+        loaded.load_adapter(adapter, autocast_adapter_dtype=False)
+        assert dtypes(loaded) == {torch.bfloat16}
+        # The same adapter with the other choice is another adapter.
+        loaded.load_adapter(adapter)
+        assert dtypes(loaded) == {torch.float32}
+        loaded.load_adapter(adapter, autocast_adapter_dtype=False)
+        assert dtypes(loaded) == {torch.bfloat16}
+
+        server = TransformersModel(base_path, task="text-generation", dtype=torch.bfloat16, dispatch=True)
+        server._remoteable_set_env({"peft": adapter, "autocast_adapter_dtype": False})
+        assert dtypes(server) == {torch.bfloat16}
+        server._remoteable_set_env({"peft": adapter})
+        assert dtypes(server) == {torch.float32}
+
 
 def _hidden(block_output):
     """A gpt2 block's output is a tuple (string path) or a bare tensor (raw
