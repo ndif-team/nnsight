@@ -344,7 +344,7 @@ A model holds one adapter. For several named adapters, merging one into the base
 
 ### Base and adapted runs on one model
 
-For the two sides of one experiment, keep the adapter attached and switch it: `model.disable_adapters()` runs the base model's forward bit for bit, `model.enable_adapters()` runs the adapted one. They correspond to peft's `with model.disable_adapter():`. Nothing in the module tree changes, so the same intervention code and every envoy path work in both states. Removing the adapter with `load_adapter(None)` and loading it again re-reads it from disk and rebuilds the envoy tree.
+For the two sides of one experiment, keep the adapter attached and switch it: `model.disable_adapters()` runs the base model's forward bit for bit, `model.enable_adapters()` runs the adapted one. They correspond to peft's `with model.disable_adapter():`. Switching off unmerges a layer you merged with peft's `merge()` (to read the merged weight, say), so the forward is the base model's; unmerging subtracts the delta again, which rounds (visibly in half precision), so for a bit-exact base after a merge keep a copy of the weight and copy it back after `disable_adapters()`. Nothing in the module tree changes, so the same intervention code and every envoy path work in both states. Removing the adapter with `load_adapter(None)` and loading it again re-reads it from disk and rebuilds the envoy tree.
 
 ```python
 model = TransformersModel("openai-community/gpt2", peft=adapter_dir, dispatch=True)

@@ -834,12 +834,14 @@ class TransformersModel(HuggingFaceModel):
         """Switch the attached PEFT adapter off, keeping it attached.
 
         Until `enable_adapters`, every adapter layer runs only the module it
-        holds, so the forward is the base model's bit for bit. Nothing in the
-        module tree changes: every envoy path stays valid, ``.base_layer`` and
-        the adapter's modules included, though the adapter's own modules do
-        not run while it is off. Use it for the two sides of one experiment on
-        one loaded model; `load_adapter` with ``None`` removes the adapter
-        instead.
+        holds, so the forward is the base model's bit for bit. A layer merged
+        with peft's ``merge()`` is unmerged first, which rounds (visibly in
+        half precision): for a bit-exact base, keep a copy of the weight before
+        the merge and copy it back after this call. Nothing in the module tree
+        changes: every envoy path stays valid, ``.base_layer`` and the
+        adapter's modules included, though the adapter's own modules do not run
+        while it is off. Use it for the two sides of one experiment on one
+        loaded model; `load_adapter` with ``None`` removes the adapter instead.
 
         No ``requires_grad`` flag changes. The state is ``adapters_enabled``,
         it survives dispatch, and it travels with remote requests. Switch
