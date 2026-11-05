@@ -16,7 +16,7 @@ from typing import Any
 
 from ...intervention.interleaver import Mediator
 from ...intervention.tracer import InterleavingTracer
-from ...tracing.tracer import push_result
+from ...tracing.tracer import _saves, push_result
 from ...intervention.util import clear_shared_locals, shared_locals
 from ...tracing.util import Scope
 
@@ -62,6 +62,10 @@ class VLLMTracer(InterleavingTracer):
         frame = self.info.frame
         glbls = frame.f_globals
         interleaver = self.envoy.interleaver
+        # Only what the body marks above its invokes travels with them as saved
+        # (see Mediator.__getstate__); the thread's set also holds what a
+        # session's earlier traces marked.
+        before = set(_saves())
         # The batcher belongs to this trace; each Invoker adds its input to it through
         # self.tracer.batcher while the body runs to collect invokes.
         self.batcher = self.envoy._batcher_class(self.envoy, self.kwargs)
@@ -89,6 +93,9 @@ class VLLMTracer(InterleavingTracer):
                 )
 
         mediators = list(interleaver.mediators)
+        saved_above = _saves() - before
+        for mediator in mediators:
+            mediator.saved_above = saved_above
         args, kwargs = self.batcher.assemble(self.fn)
         return mediators, args, {**kwargs, **forward_kwargs}
 
