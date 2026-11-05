@@ -222,22 +222,31 @@ async def generate(request: Request) -> Response:
                 await asyncio.shield(cleanup)
 
     tasks = [
-        run_invoke(prompt, param, lora_requests[index] if lora_requests else None)
+        asyncio.create_task(
+            run_invoke(prompt, param, lora_requests[index] if lora_requests else None)
+        )
         for index, (prompt, param) in enumerate(zip(prompts, params))
     ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # The members of a trace finish together. When one raises, the rest are
+    # cancelled: a cancelled ``generate`` aborts its request, so a member the
+    # scheduler holds for its group is released with it. The trace then comes
+    # back with that error, as the deferred error, like a build error.
+    try:
+        results = await asyncio.gather(*tasks)
+    except BaseException as exception:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if isinstance(exception, asyncio.CancelledError):
+            raise
+        logger.exception("Generation failed", exc_info=exception)
+        return _payload({}, capture_exception(exception))
 
     # Merge each invoke's saves (later invoke wins a name clash, matching the local
-    # push). A generation failure surfaces as the deferred error, like a build error.
+    # push). An intervention error surfaces as the deferred error.
     all_saves: dict = {}
     first_error = None
-    for result in results:
-        if isinstance(result, BaseException):
-            logger.exception("Generation failed", exc_info=result)
-            if first_error is None:
-                first_error = capture_exception(result)
-            continue
-        saves, error = result
+    for saves, error in results:
         all_saves.update(saves)
         if error is not None and first_error is None:
             first_error = error
