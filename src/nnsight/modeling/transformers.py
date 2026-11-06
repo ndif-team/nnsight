@@ -128,6 +128,23 @@ def _infer_task(module: torch.nn.Module) -> str:
     )
 
 
+def _hub_task(repo_id: str, revision: str | None, token: bool | str | None = None) -> str:
+    """Infer a pipeline task from a repo's ``pipeline_tag`` on the Hub, at ``revision``.
+
+    Not ``transformers.pipelines.get_task``, which always reads ``main`` and
+    refuses a repo whose card names any library but transformers, or none.
+    """
+    from huggingface_hub import HfApi  # lazy: only needed when no task is given
+
+    task = HfApi().model_info(repo_id, revision=revision, token=token).pipeline_tag
+    if not task:
+        raise ValueError(
+            f"Could not infer a pipeline task for {repo_id!r}, which has no "
+            "pipeline_tag on the Hub; pass task=... explicitly."
+        )
+    return task
+
+
 def _split_pipeline_kwargs(kwargs: dict) -> tuple[dict, dict]:
     """Split kwargs into (top-level pipeline args, model_kwargs) for ``pipeline()``.
 
@@ -405,7 +422,7 @@ class TransformersModel(HuggingFaceModel):
 
     def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import AutoConfig, pipeline
-        from transformers.pipelines import check_task, get_task
+        from transformers.pipelines import check_task
 
         from .quantization import resolve_load_kwargs
 
@@ -436,7 +453,7 @@ class TransformersModel(HuggingFaceModel):
 
         # pipeline can't from_config, so resolve the task's model classes and
         # build the meta model ourselves, then wrap it in a meta pipeline.
-        self.task = self.task or get_task(repo_id)
+        self.task = self.task or _hub_task(repo_id, self.revision, kwargs.get("token"))
         _, targeted, _ = check_task(self.task)
 
         # The config takes every kwarg, and keeps the ones it owns, the same split
@@ -505,13 +522,16 @@ class TransformersModel(HuggingFaceModel):
         # and lands in `model_kwargs`, which is where from_pretrained wants it.
         kwargs = resolve_load_kwargs(kwargs)
 
+        # Resolved here rather than left to pipeline(), which infers a missing
+        # task with `get_task` (see `_hub_task`).
+        self.task = self.task or _hub_task(repo_id, self.revision, kwargs.get("token"))
+
         top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
         if "config" in top_level:
             # pipeline() reads `config` only to pick the class, never passing it
             # to from_pretrained, so load the model with it here and wrap it.
-            from transformers.pipelines import check_task, get_task
+            from transformers.pipelines import check_task
 
-            self.task = self.task or get_task(repo_id)
             for name in ("config", "dtype", "torch_dtype", "device_map", "trust_remote_code", "token"):
                 if name in top_level:
                     model_kwargs[name] = top_level[name]
