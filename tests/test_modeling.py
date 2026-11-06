@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from nnsight.intervention.envoy import Envoy
 from nnsight.modeling.huggingface import HuggingFaceModel
-from nnsight.modeling.transformers import TransformersModel
+from nnsight.modeling.transformers import TransformersModel, _hub_task
 from nnsight.modeling.mixins.loadable import Loadable
 from nnsight.modeling.mixins.meta import Meta, MetaDevice
 from nnsight.modeling.mixins.remotable import Remotable
@@ -635,6 +635,36 @@ class TestTransformers:
         assert state["pipeline"] is model.pipeline
         assert model.pipeline._persistent_id == "Pipeline"
         assert model.tokenizer._persistent_id == "Tokenizer"
+
+
+class TestHubTask:
+    def _hub(self, monkeypatch, **card):
+        import huggingface_hub
+
+        calls = []
+
+        class Api:
+            def model_info(self, repo_id, **kwargs):
+                calls.append(kwargs)
+                return huggingface_hub.ModelInfo(id=repo_id, **card)
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+        return calls
+
+    @pytest.mark.parametrize("library", [None, "Model Optimizer"])
+    def test_task_is_inferred_whatever_library_the_card_names(self, monkeypatch, library):
+        self._hub(monkeypatch, library_name=library, pipeline_tag="text-generation")
+        assert _hub_task("Qwen/Qwen2.5-32B", None) == "text-generation"
+
+    def test_missing_pipeline_tag_asks_for_task(self, monkeypatch):
+        self._hub(monkeypatch)
+        with pytest.raises(ValueError, match="task="):
+            _hub_task("some/repo", None)
+
+    def test_card_is_read_at_the_revision(self, monkeypatch):
+        calls = self._hub(monkeypatch, pipeline_tag="text-generation")
+        _hub_task("some/repo", "abc123")
+        assert calls[0]["revision"] == "abc123"
 
 
 class TestStatusDisplay:
