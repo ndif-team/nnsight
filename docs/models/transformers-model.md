@@ -3,7 +3,7 @@ title: TransformersModel
 one_liner: Primary wrapper for any HuggingFace transformers task; trace/generate/pipe/scan with tokenization and batching handled by the task's pipeline.
 tags: [models, transformers, primary]
 related: [docs/models/index.md, docs/models/nnsight-base.md, docs/models/language-model.md, docs/models/vision-language-model.md, docs/models/vllm.md]
-sources: [src/nnsight/modeling/transformers.py, src/nnsight/modeling/processing.py, src/nnsight/modeling/huggingface.py, src/nnsight/modeling/mixins/meta.py, tests/test_language.py, tests/test_encoder.py, tests/test_vision.py, tests/test_vlm.py, tests/test_chunked_tasks.py, tests/test_modeling.py]
+sources: [src/nnsight/modeling/transformers.py, src/nnsight/modeling/peft.py, src/nnsight/modeling/processing.py, src/nnsight/modeling/huggingface.py, src/nnsight/modeling/mixins/meta.py, tests/test_language.py, tests/test_encoder.py, tests/test_vision.py, tests/test_vlm.py, tests/test_chunked_tasks.py, tests/test_modeling.py]
 ---
 
 # TransformersModel
@@ -75,7 +75,8 @@ TransformersModel(
     processor=None,             # multimodal processor (VLMs)
     image_processor=None,       # vision tasks
     feature_extractor=None,     # audio tasks
-    peft=None,                  # HF repo id of a PEFT/LoRA adapter to apply
+    peft=None,                  # repo id or local path of a PEFT/LoRA adapter
+    autocast_adapter_dtype=True, # hold a half-precision adapter in float32
     revision=None,              # git branch / tag / commit
     dispatch=False,             # True = load real weights now; False = lazy meta build
     rename=None,                # dict of module-path aliases
@@ -89,7 +90,8 @@ TransformersModel(
 | `repo_id` | A HuggingFace repo id string, or an already-instantiated `torch.nn.Module`. |
 | `task` | The pipeline task (`"text-generation"`, `"fill-mask"`, `"text-classification"`, `"image-classification"`, `"image-text-to-text"`, ...). If `None`, inferred from the checkpoint — which asks the Hub, so pass it explicitly when you are offline (see [Loading](#loading)). |
 | `tokenizer` / `processor` / `image_processor` / `feature_extractor` | Pass one to adopt it instead of letting the pipeline load it. Which of them a task uses varies; the unused ones stay `None` (`transformers.py`, `_preprocessor_sources`). |
-| `peft` | Repo id of a PEFT adapter grafted onto the base model at load. `model.load_adapter(repo_id)` does the same after construction, swaps to another adapter, or removes the current one with `None`. The adapter is attached in place, so every path of the base model still names the same module (`model.transformer.h[0].attn.c_attn` is now the adapter's layer, holding the original as `.base_layer`), and a trace written for the base model runs unchanged with an adapter. Prompt-learning adapters (prefix/prompt tuning), which wrap the forward instead, are refused. See `tests/test_language.py` for verified PEFT usage. |
+| `peft` | Repo id or local path of a PEFT adapter attached to the base model at load. See [PEFT adapters](#peft-adapters). |
+| `autocast_adapter_dtype` | `True` (default) holds a float16/bfloat16 adapter in float32; `False` holds it in the model's dtype. See [Adapter dtype](#adapter-dtype). |
 | `dispatch` | `True` loads real weights during `__init__`; `False` (default) builds the architecture on the `meta` device and loads weights lazily on the first `trace`/`generate`/`pipe`. |
 | `dtype` | Forwarded. A torch dtype, or a quantization name (`"nf4"`, `"int8"`, ...) — see [quantization.md](quantization.md). The transformers 4 spelling `torch_dtype` is still accepted. |
 | `device` | The single device to load onto (`"cpu"`, `"cuda:1"`, `0`). Defaults to the first accelerator. See [Choosing a device](#choosing-a-device). |
@@ -334,6 +336,40 @@ Per-step reads and edits during generation use `tracer.iter`; see [iteration.md]
 
 Reading, editing, gradients, `skip`, `tracer.cache` and `rename=` work as on any wrapper; see [access-and-modify.md](../usage/access-and-modify.md), [backward-and-grad.md](../usage/backward-and-grad.md), [skip.md](../usage/skip.md), [cache.md](../usage/cache.md) and [rename-modules.md](../usage/rename-modules.md).
 
+## PEFT adapters
+
+`peft=` attaches a PEFT adapter (LoRA and its relatives) at load; `model.load_adapter(repo_id)` does the same after construction, swaps to another adapter, or removes the current one with `None`. The adapter is attached in place, so every path of the base model still names the same module (`model.transformer.h[0].attn.c_attn` is now the adapter's layer, holding the original as `.base_layer`), and a trace written for the base model runs unchanged with an adapter. Before dispatch only the adapter's config is read, so the meta tree already has the adapter's modules. An adapter with any weight that peft cannot place on the model is refused, and so are prompt-learning adapters (prefix/prompt tuning), which wrap the forward instead; a refused adapter leaves the model as it was.
+
+A model holds one adapter. For several named adapters, merging one into the base, or a batch that mixes adapters, wrap a `PeftModel` yourself (local only). Adapters are not available on a tensor-parallel load (`distributed_config`). `VLLM` takes no `peft=`: it uses vLLM's own LoRA support, `enable_lora=True` on the engine and a `lora_request=` per invoke.
+
+### Base and adapted runs on one model
+
+For the two sides of one experiment, keep the adapter attached and switch it: `model.disable_adapters()` runs the base model's forward bit for bit, `model.enable_adapters()` runs the adapted one. They correspond to peft's `with model.disable_adapter():`. Switching off unmerges a layer you merged with peft's `merge()` (to read the merged weight, say), so the forward is the base model's; unmerging subtracts the delta again, which rounds (visibly in half precision), so for a bit-exact base after a merge keep a copy of the weight and copy it back after `disable_adapters()`. Nothing in the module tree changes, so the same intervention code and every envoy path work in both states. Removing the adapter with `load_adapter(None)` and loading it again re-reads it from disk and rebuilds the envoy tree.
+
+```python
+model = TransformersModel("openai-community/gpt2", peft=adapter_dir, dispatch=True)
+
+with model.trace(prompt):
+    adapted = model.output.logits.save()
+
+model.disable_adapters()
+with model.trace(prompt):
+    base = model.output.logits.save()    # the base model's logits, exactly
+model.enable_adapters()
+```
+
+Switch between traces, not inside one: a call inside a trace body switches the module under every invoke from that point on, and it stays switched after the trace. To run one invoke on the base, assign each adapted layer's `base_layer.output` to its output inside that invoke (`c_attn.output = c_attn.base_layer.output`).
+
+While the adapter is off its own modules (`lora_A`, `lora_B`) do not run, so reading one raises `OutOfOrderError`; `.base_layer` runs in both states. `model.adapters_enabled` holds the state.
+
+### `requires_grad`
+
+A frozen base refuses every backward through the model (a saved adapter's own parameters arrive frozen, so nothing else requires grad), and on a shared server it would stay frozen for every request after. So attaching, switching and removing an adapter leave every `requires_grad` flag of the base model as it was. To train an adapter, freeze the base after dispatch (`model.requires_grad_(False)`; a flag set on the meta model is lost at dispatch), then switch on the adapter's parameters (the `lora_` ones in `model._module.named_parameters()`).
+
+### Adapter dtype
+
+`autocast_adapter_dtype=True` (the default, on the constructor and on `load_adapter`) holds a float16 or bfloat16 adapter in float32, as `PeftModel.from_pretrained` does. `False` holds it in the dtype of the weights it adapts: on a bfloat16 model the adapter is bfloat16, whatever dtype it was saved in. Use `False` to reproduce numbers made with an adapter in the model's dtype.
+
 ## Dispatch behavior
 
 - `dispatch=False` (default): only configs download; the architecture is built on the `meta` device and the Envoy tree is fully usable for writing intervention code. The meta config takes the same load kwargs as the real load (`attn_implementation`, `experts_implementation`, `dtype`, config overrides), so `model.config` is the same before and after dispatch; placement kwargs (`device_map`, `max_memory`, ...) wait for dispatch.
@@ -345,7 +381,7 @@ Reading, editing, gradients, `skip`, `tracer.cache` and `rename=` work as on any
 
 `TransformersModel` is remoteable (`trace(..., remote=True)`; see [docs/remote/](../remote/index.md)). `model.to_model_key()` is the repo id + revision, canonicalized via the Hub, plus the resolved pipeline task and `trust_remote_code` when set (the fields are defined in [backends.md](../developing/backends.md#model-identity-to_model_key)), so each task of a checkpoint is its own remote model and the server rebuilds the exact pipeline you traced. The deprecated aliases use this class's key with their pinned task, so they reach a deployment only when its task is `text-generation` / `image-text-to-text` respectively.
 
-A request also carries what is layered on the base model, and the server applies it before running: the PEFT adapter (`peft=`), when there is one, and the attention implementation. The implementation is always sent, as the model resolved it locally (`model.attn_implementation`), because the server's model is shared with other callers: the previous request may have switched it to `"eager"`, and a request that said nothing would otherwise run with that. So a model loaded with `attn_implementation="eager"` gets attention weights out of `attn.output[1]` remotely as it does locally, and one loaded with the default gets the default. A model that cannot switch dynamically (one not written against transformers' attention interface) refuses the request rather than silently keeping its implementation.
+A request also carries what is layered on the base model, and the server applies it before running: the PEFT adapter (`peft=`), when there is one, and whether it is switched on, and the attention implementation. Remotely `peft=` must be a Hub id the server can read, and a half-precision model computes its adapter in its own dtype there, whatever `autocast_adapter_dtype` says. The implementation is always sent, as the model resolved it locally (`model.attn_implementation`), because the server's model is shared with other callers: the previous request may have switched it to `"eager"`, and a request that said nothing would otherwise run with that. So a model loaded with `attn_implementation="eager"` gets attention weights out of `attn.output[1]` remotely as it does locally, and one loaded with the default gets the default. A model that cannot switch dynamically (one not written against transformers' attention interface) refuses the request rather than silently keeping its implementation.
 
 ## Related
 

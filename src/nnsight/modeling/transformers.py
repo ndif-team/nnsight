@@ -269,6 +269,7 @@ class TransformersModel(HuggingFaceModel):
         image_processor: Optional[Any] = None,
         feature_extractor: Optional[Any] = None,
         peft: Optional[str] = None,
+        autocast_adapter_dtype: bool = True,
         **kwargs: Any,
     ) -> None:
         self.task = task
@@ -277,10 +278,14 @@ class TransformersModel(HuggingFaceModel):
         self.processor = processor
         self.image_processor = image_processor
         self.feature_extractor = feature_extractor
-        # HuggingFace repo id of a PEFT adapter to apply on top of the base
+        # Repo id or local path of a PEFT adapter to apply on top of the base
         # model. Applied at load time (below); server-side it can be swapped
         # per request via _remoteable_set_env without redeploying the base.
+        # The dtype choice is part of that adapter, kept beside it so a
+        # dispatch and a swap carry it; whether it is switched on is read off
+        # the module (`adapters_enabled`).
         self.peft = peft
+        self.autocast_adapter_dtype = autocast_adapter_dtype
 
         # A sharded module called ad hoc — a logit lens — deals in one rank's
         # slices either side, where the caller is holding whole tensors.
@@ -551,9 +556,18 @@ class TransformersModel(HuggingFaceModel):
 
     def _finalize_pipeline(self) -> torch.nn.Module:
         if self.peft is not None:
+            # Read off the meta module, which `_module` still is until the swap.
+            enabled = self.adapters_enabled
             # The pipeline loaded the base weights; attach the adapter with its
             # real weights so the dispatched model runs with the adapter applied.
-            peft.attach(self.pipeline.model, self.peft)
+            peft.attach(
+                self.pipeline.model,
+                self.peft,
+                autocast_adapter_dtype=self.autocast_adapter_dtype,
+            )
+            # Switched off on the meta model: the real one starts off too.
+            if not enabled:
+                peft.set_enabled(self.pipeline.model, False)
         self._sync()
         return self.pipeline.model
 
@@ -681,7 +695,12 @@ class TransformersModel(HuggingFaceModel):
         applies it via `_remoteable_set_env` before running. The base model is
         identified by the model key; what travels here is the state layered on
         it: the PEFT adapter, when there is one, and the attention
-        implementation.
+        implementation. An adapter's on/off state travels only when it is off:
+        the server switches the adapter on for a request that names it and
+        says nothing else, so a missing key cannot mean the last caller's
+        choice. ``autocast_adapter_dtype`` does not travel: NDIF runs every
+        request under autocast in the model's dtype, where the two settings
+        give the same numbers.
 
         The attention implementation is always sent, resolved rather than as
         passed, because the server's model is shared: the previous request may
@@ -693,18 +712,25 @@ class TransformersModel(HuggingFaceModel):
         env = {"attn_implementation": self.attn_implementation}
         if self.peft is not None:
             env["peft"] = self.peft
+            if not self.adapters_enabled:
+                env["adapters_enabled"] = False
         return env
 
     def _remoteable_set_env(self, env: Optional[dict]) -> None:
         """Apply a per-request environment on the server side.
 
         The base model is identified by the model key; this applies what is
-        layered on it. See `peft.swap` for the adapter transitions. The
-        attention implementation is switched in place when it differs from
-        what the model runs: the module tree is unchanged, and the attention
-        modules pick the implementation up from the config on their next
-        forward. A request with no implementation at all came from an older
-        client, and leaves the model running whatever it was.
+        layered on it. See `peft.swap` for the adapter transitions; an attached
+        adapter is then switched on or off as the request says, and on when it
+        says nothing. The switch is applied whatever state the module is in: a
+        request body that called ``model.disable_adapters()`` switched the
+        shared module off without the server's wrapper seeing it, so the
+        module's state says nothing about what this request asked for. The
+        attention implementation is switched in place when it
+        differs from what the model runs: the module tree is unchanged, and the
+        attention modules pick the implementation up from the config on their
+        next forward. A request with no implementation at all came from an
+        older client, and leaves the model running whatever it was.
 
         The switch is checked rather than trusted: transformers only warns
         when a model cannot switch dynamically (one not written against its
@@ -718,6 +744,8 @@ class TransformersModel(HuggingFaceModel):
         """
         env = env or {}
         peft.swap(self, env.get("peft"))
+        if self.peft is not None:
+            peft.set_enabled(self._module, env.get("adapters_enabled", True))
         requested = env.get("attn_implementation")
         if requested is None or requested == self.attn_implementation:
             return
@@ -740,11 +768,28 @@ class TransformersModel(HuggingFaceModel):
         """
         return getattr(self._module.config, "_attn_implementation", None)
 
-    def load_adapter(self, peft_id: Optional[str]) -> None:
+    @property
+    def adapters_enabled(self) -> bool:
+        """Whether the attached PEFT adapter is switched on.
+
+        Read off the module, so it is what the next forward runs: ``False``
+        once `disable_adapters` switched it off, ``True`` when it is on or no
+        adapter is attached. Sent with a remote request when it is off.
+        """
+        module = self.__dict__.get("_module")
+        if self.peft is None or module is None:
+            return True
+        return peft.is_enabled(module)
+
+    def load_adapter(
+        self, peft_id: Optional[str], *, autocast_adapter_dtype: bool = True
+    ) -> None:
         """Attach a PEFT adapter — the post-hoc form of the ``peft=`` kwarg.
 
         Call again with a different id to swap adapters, or with ``None`` to
-        remove the current one (see `peft.swap` for the transitions).
+        remove the current one (see `peft.swap` for the transitions). A newly
+        loaded adapter starts enabled. A model holds one adapter, and none on
+        a tensor-parallel load.
 
         Works before dispatch: only the adapter's config is grafted onto the
         meta module, so the tree gains the adapter's modules — and remote
@@ -763,15 +808,19 @@ class TransformersModel(HuggingFaceModel):
         Args:
             peft_id: The adapter's repo id or local path, or ``None`` to
                 remove the current adapter.
+            autocast_adapter_dtype: peft's flag of that name (see
+                `peft.attach`). Local only: remotely a half-precision model
+                computes its adapter in its own dtype.
         """
         if self.dispatched:
-            peft.swap(self, peft_id)
+            peft.swap(self, peft_id, autocast_adapter_dtype)
             return
-        if peft_id == self.peft:
+        if (peft_id, autocast_adapter_dtype) == (self.peft, self.autocast_adapter_dtype):
             return
         from .mixins.meta import MetaDevice
 
         self.peft = peft_id
+        self.autocast_adapter_dtype = autocast_adapter_dtype
         # Rebuild the meta skeleton exactly as construction would have built it
         # with this adapter: `_load_meta` reads `self.peft` and grafts the
         # adapter's architecture from its config alone.
@@ -780,6 +829,49 @@ class TransformersModel(HuggingFaceModel):
         self._update(module)
         if self.pipeline is not None:
             self.pipeline.model = module
+
+    def disable_adapters(self) -> None:
+        """Switch the attached PEFT adapter off, keeping it attached.
+
+        Until `enable_adapters`, every adapter layer runs only the module it
+        holds, so the forward is the base model's bit for bit. A layer merged
+        with peft's ``merge()`` is unmerged first, which rounds (visibly in
+        half precision): for a bit-exact base, keep a copy of the weight before
+        the merge and copy it back after this call. Nothing in the module tree
+        changes: every envoy path stays valid, ``.base_layer`` and the
+        adapter's modules included, though the adapter's own modules do not run
+        while it is off. Use it for the two sides of one experiment on one
+        loaded model; `load_adapter` with ``None`` removes the adapter instead.
+
+        No ``requires_grad`` flag changes. The state is ``adapters_enabled``,
+        it survives dispatch, and it travels with remote requests. Switch
+        between traces: inside a trace body the call switches the module under
+        every invoke from that point on, and it stays switched after the trace.
+
+        This shadows ``PreTrainedModel.disable_adapters``, which refuses an
+        adapter attached by nnsight.
+
+        Raises:
+            ValueError: if no adapter is attached.
+        """
+        self._switch_adapters(False)
+
+    def enable_adapters(self) -> None:
+        """Switch the attached PEFT adapter back on; see `disable_adapters`.
+
+        Raises:
+            ValueError: if no adapter is attached.
+        """
+        self._switch_adapters(True)
+
+    def _switch_adapters(self, enabled: bool) -> None:
+        """Switch the attached adapter on or off."""
+        if self.peft is None:
+            raise ValueError(
+                "No PEFT adapter is attached, so there is none to switch: attach "
+                "one with `peft=` or `model.load_adapter(...)`."
+            )
+        peft.set_enabled(self._module, enabled)
 
     def __getstate__(self) -> dict:
         state = super().__getstate__()
