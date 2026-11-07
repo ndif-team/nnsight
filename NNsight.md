@@ -2241,7 +2241,7 @@ the underscore-prefixed extension points that make it a real model:
   `interleave` override only if your runtime doesn't run a local forward.
 - `eproperty` values for engine-internal outputs, served with `.provide` (see
   [Custom hookable values (eproperty)](#102-custom-hookable-values-eproperty)).
-- the `Remotable` hooks (`_remoteable_model_key`, `_remoteable_persistent_objects`,
+- the `Remotable` hooks (`_remoteable_model_key`, `_persistent_attachments`,
   ...) if it should run on NDIF.
 
 `VLLM` (`src/nnsight/modeling/vllm/vllm.py`) is the deepest reference — a

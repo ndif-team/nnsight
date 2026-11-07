@@ -152,6 +152,22 @@ class TestModelFreedWhileTracerHeld:
         assert ref() is None
         assert isinstance(out, torch.Tensor)
 
+    def test_module_freed_with_session_tracer_held(self):
+        # `with model.session() as session:` leaves the session bound after the
+        # block; a session is opened on the model and must let go of it too.
+        def run():
+            model = Envoy(TwoLayer())
+            with model.session() as session:
+                with model.trace(_x()):
+                    hidden = model.a.output
+                with model.trace(_x()):
+                    out = (hidden * 2).save()
+            return session, out, weakref.ref(model._module)
+
+        session, out, ref = run()
+        assert ref() is None
+        assert isinstance(out, torch.Tensor)
+
     def test_module_freed_with_invoke_tracer_held(self):
         def run():
             model = Envoy(TwoLayer())

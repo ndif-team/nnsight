@@ -62,18 +62,25 @@ vLLM's built-in `SamplingParams.extra_args` — a dict field that survives both 
 boundary; for each mediator with a non-`None` `batch_group`:
 
 ```python
-param.extra_args = {"nnsight_mediator": dumps(mediator)}
+param.extra_args = {"nnsight_mediator": dumps(mediator, tree=self)}
 ```
 
 `dumps` is the source-based pickler (see [serialization.md](./serialization.md)), so
 the mediator's block recompiles against the worker's Python; its `__globals__`
-(including referenced user variables) travel with it. Trace-level sampling kwargs
-fill in any `SamplingParams` field still at its default.
+(including referenced user variables) travel with it. The block names `model`, and
+`tree=self` makes every envoy of the model's tree travel as `Envoy:<path>`: the worker
+wraps the same model at the same paths and resolves each to a copy made for the
+request, so a request's payload is a few hundred bytes. An envoy holding state the
+worker lacks (an alias, a wrapper subclass's class) goes by value. Trace-level
+sampling kwargs fill in any `SamplingParams` field still at its default.
 
 On the worker, `Requests.add` (`GPUModelRunner.py`) deserializes each new
 request's mediator with `loads(..., persistent_objects=model._remoteable_persistent_objects())`
-(the tokenizer resolves by persistent ID). Requests with no nnsight payload — other
-tenants sharing the engine — are skipped.
+(the tokenizer and every envoy resolve by persistent ID). The worker's tree is
+built once at load and marked `interleaver.shared = True`: a block that mounts a
+module on it (`model.sae = module`) gets an `AttributeError`, since the module would
+reach every later request. Requests with no nnsight payload, from other tenants
+sharing the engine, are skipped.
 
 ## The three interleaver entry points
 

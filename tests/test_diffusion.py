@@ -655,8 +655,7 @@ class TestRemoteSimulation:
 
     def test_pipeline_is_a_persistent_object(self, sd):
         sd.dispatch()
-        state = sd.__getstate__()
-        assert state["pipeline"]._persistent_id == "Pipeline"
+        assert sd._persistent_attachments()["Pipeline"] is sd.pipeline
         assert sd._remoteable_persistent_objects()["Pipeline"] is sd.pipeline
 
     @torch.no_grad()
