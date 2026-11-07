@@ -83,7 +83,7 @@ class AsyncVLLMBackend(Backend):
             if len(prompts) != 1:
                 raise NotImplementedError(
                     "Async tracing takes a single prompt; use one tracer.invoke or a "
-                    "direct input, not several invokes."
+                    "direct input, not several invokes or a list of prompts."
                 )
             self.model._attach_mediators(params, **forward_kwargs)
 

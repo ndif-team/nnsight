@@ -15,6 +15,10 @@ Three points on vLLM's own path carry it:
 * ``_sample`` — logits and sampled ids never pass through a module, so they are
   offered to workers directly by location.
 
+A *group* — one block over several prompts — rides several requests at once;
+`Requests` keeps one [`Group`][nnsight.modeling.vllm.groups.Group] for it, which
+places its members every step and sends its block home with the last of them.
+
 Workers run as greenlets on this thread. ``_update_states`` is called from
 ``execute_model``, and hooks fire on whichever thread runs the forward, so the
 worker and the model take strict turns on one thread — there is nothing to
@@ -43,6 +47,7 @@ from ....tracing.tracer import _local, inc
 from ..batching import VLLMBatcher
 from ..collect import dumps_compact
 from ..fragments import VLLMFragments
+from ..groups import GROUP, Group
 from ..interleaver import VLLMInterleaver
 from ..vllm import VLLM
 
@@ -59,10 +64,16 @@ class Request:
     the external id; both spellings are parsed here once. ``mediator`` is the
     traced worker, if the request is an nnsight trace; ``copies`` are the
     registered blocks' per-request workers, moved to ``harvested`` once the
-    request is over; ``error`` is a payload that failed to deserialize.
+    request is over; ``error`` is a payload that failed to deserialize. A member
+    of a group has no ``mediator`` of its own: ``group`` is the
+    [`Group`][nnsight.modeling.vllm.groups.Group] whose block it shares, and
+    ``member`` its index in it.
     """
 
-    __slots__ = ("id", "stem", "engine_id", "index", "mediator", "copies", "harvested", "error")
+    __slots__ = (
+        "id", "stem", "engine_id", "index", "mediator", "copies", "harvested", "error",
+        "group", "member",
+    )
 
     def __init__(self, request_id: str) -> None:
         self.id = request_id
@@ -81,6 +92,8 @@ class Request:
         self.copies: dict[str, Any] = {}
         self.harvested: dict[str, dict] = {}
         self.error: dict | None = None
+        self.group: Group | None = None
+        self.member = 0
 
     def named(self, ids) -> bool:
         """Whether ``ids`` (the engine's, or the scheduler's) name this request."""
@@ -149,12 +162,15 @@ class Requests:
             A request that names the edits it wants (``extra_args["nnsight_edits"]``)
             gets copies of those and of every unnamed one; a request that names
             none gets copies of them all.
+        groups: Group id -> the [`Group`][nnsight.modeling.vllm.groups.Group]
+            whose members are in flight, until the last of them is collected.
     """
 
     def __init__(self) -> None:
         self.requests: dict[str, Request] = {}
         self.templates: dict[str, Any] = {}
         self.names: dict[str, str | None] = {}
+        self.groups: dict[str, Group] = {}
         # Workers whose request is out of the batch (preempted), and the
         # interleaver's counts when that was last noted, so the visits they sit
         # out are subtracted from their own count (see `scope`).
@@ -197,6 +213,13 @@ class Requests:
         resuming; its workers continue (the engine replays the tokens they already
         saw inside one recompute step, so a fresh block would be short by exactly
         those steps — `scope` keeps the steps they sat out off their count).
+
+        A member of a group (``extra_args["nnsight_group"]``: the group's id, its
+        index, the group's size) joins its group instead, and the first member to
+        arrive loads the block for all of them. Every member carries the payload
+        because any of them can be first: vLLM's scheduler passes over a waiting
+        request it cannot place yet (a grammar still compiling, a LoRA slot) and
+        schedules the ones behind it.
         """
         for data in new_requests:
             if data.req_id in self.requests:
@@ -236,6 +259,17 @@ class Requests:
                 request.copies[registration_id] = copy
             if "nnsight_mediator" not in extra_args:
                 continue
+            if "nnsight_group" in extra_args:
+                group_id, request.member, size = extra_args["nnsight_group"]
+                group = request.group = self.groups.get(group_id)
+                if group is None:
+                    group = request.group = self.groups[group_id] = Group(group_id, size)
+                    try:
+                        group.mediator = loads(extra_args["nnsight_mediator"], persistent_objects=persistent_objects)
+                    except Exception as exception:
+                        group.error = capture_exception(exception)
+                group.joined += 1
+                continue
             try:
                 request.mediator = loads(extra_args["nnsight_mediator"], persistent_objects=persistent_objects)
             except Exception as exception:
@@ -253,11 +287,14 @@ class Requests:
         for request_id, scheduled in spans:
             request = self.requests.get(request_id)
             state = states.get(request_id)
-            if request is None or state is None or request.mediator is None:
+            if request is None or state is None:
+                continue
+            group = request.group
+            if request.mediator is None and (group is None or group.mediator is None):
                 continue
             if state.num_computed_tokens + scheduled >= state.num_prompt_tokens:
                 continue
-            request.error = capture_exception(
+            error = capture_exception(
                 RuntimeError(
                     f"This request's {state.num_prompt_tokens}-token prompt was split "
                     f"across steps by chunked prefill ({scheduled} tokens this step), "
@@ -266,12 +303,21 @@ class Requests:
                     "max_num_batched_tokens past the prompt length."
                 )
             )
-            request.mediator = None
             request.copies = {}
+            if group is None:
+                request.error = error
+                request.mediator = None
+                continue
+            # The block may already be parked on members that started earlier.
+            group.error = error
+            self.finish_dangling(group.mediator, quiet=True)
+            group.mediator = None
 
     def workers(self) -> list:
-        """Every worker this engine is carrying, traced and registered alike."""
-        return [mediator for request in self.requests.values() for mediator in request.workers()]
+        """Every worker this engine is carrying, traced, registered and grouped alike."""
+        return [mediator for request in self.requests.values() for mediator in request.workers()] + [
+            group.mediator for group in self.groups.values() if group.mediator is not None
+        ]
 
     def scope(self, model: "VLLM", spans: list[tuple[str, int]]) -> None:
         """Point every worker at its own tokens within this step's batch.
@@ -283,6 +329,11 @@ class Requests:
         a block that already ran to completion is dropped too, since the
         interleaver starts anything not alive and a finished block must not run a
         second time.
+
+        A group's block runs once for all of its members in the step: each member
+        is placed as it is met, and the group is handed its members' spans in
+        member order once the step is laid out — after every request's own
+        workers, so it reads what its members' registered blocks left.
         """
         workers = self.workers()
         for mediator in workers:
@@ -292,8 +343,8 @@ class Requests:
         scheduled = []
         start = 0
 
-        def take(mediator: Any, row: int, tokens: int) -> None:
-            """Give one worker this request's span, starting it the first time."""
+        def take(mediator: Any, tokens: list, rows: list) -> None:
+            """Give one worker its token span and logits row, starting it the first time."""
             # A finished block is dropped — its work is done and it must not run
             # again — unless it holds open caches (tracer.cache() observes every
             # step until the request ends) or raised: an erred worker keeps a row
@@ -305,8 +356,8 @@ class Requests:
             finished = started and not mediator.alive
             if finished and not mediator.caches and mediator.exception is None:
                 return
-            mediator.batch_group = [start, tokens]
-            mediator.row = row
+            mediator.batch_group = tokens
+            mediator.rows = rows
             scheduled.append(mediator)
             # Which requests run is only settled here, once the forward has
             # already begun, so a worker is started the moment its request is
@@ -329,8 +380,16 @@ class Requests:
             request = self.requests.get(request_id)
             if request is not None:
                 for mediator in request.workers():
-                    take(mediator, row, tokens)
+                    take(mediator, [start, tokens], [row, 1])
+                if request.group is not None:
+                    request.group.place(request.member, request.id, start, tokens, row)
             start += tokens
+
+        for group in self.groups.values():
+            settled = group.settle()
+            if settled is not None and group.mediator is not None:
+                group.mediator.layout = group.layout
+                take(group.mediator, *settled)
 
         # A started worker whose request is out of this step (vLLM preempted it)
         # must not count the step's visits as its own: move its `base` past
@@ -358,7 +417,7 @@ class Requests:
         spans that scoped the forward would select the wrong thing.
         """
         for mediator in model.interleaver.mediators:
-            mediator.batch_group = [mediator.row, 1]
+            mediator.batch_group = mediator.rows
         model.interleaver.batcher.total = self.nrows
 
     def harvest(self, finished: set[str]) -> None:
@@ -390,7 +449,10 @@ class Requests:
         # say — is over and owed nothing, and no collect will come asking about
         # it, so it is dropped here, off the scheduler.
         for request in list(self.requests.values()):
-            if request.named(finished) and request.mediator is None and request.error is None and not request.harvested:
+            if (
+                request.named(finished) and request.mediator is None and request.group is None
+                and request.error is None and not request.harvested
+            ):
                 del self.requests[request.id]
 
     def serve_result(self, mediator: Any, output: Any) -> None:
@@ -410,6 +472,36 @@ class Requests:
             # Raised by the block after its read: this request's error, deferred
             # like any other, not the collect's, which every request in it shares.
             mediator.exception = exception
+
+    def leave(self, request: Request, output: Any, taps: frozenset) -> tuple[dict, dict | None]:
+        """Collect a group's member as finished; at its last member, return the group's saves and error.
+
+        The block ran once for every member, so what it saved goes home once, on
+        the output of whichever member finishes last; the others carry nothing of
+        it. Each finished member's ``output`` is kept until then, because
+        ``tracer.result`` on a group is every member's, in member order. A member
+        collected with no output is an abort (or a stream the client closed): the
+        block is unwound now, quietly, and the members still running run without
+        it.
+        """
+        group = request.group
+        group.left.add(request.member)
+        if output is None:
+            group.abandoned = True
+            self.finish_dangling(group.mediator, quiet=True)
+            group.mediator = None
+        else:
+            group.outputs[request.member] = output
+        if not group.over:
+            return {}, None
+        self.groups.pop(group.id, None)
+        mediator = group.mediator
+        if mediator is None:
+            return {}, group.error
+        if len(group.outputs) == group.size:
+            self.serve_result(mediator, [group.outputs[index] for index in range(group.size)])
+        self.finish_dangling(mediator, taps)
+        return _saved(mediator), group.error or _error(mediator)
 
     def finish_dangling(self, mediator: Any, taps: frozenset = frozenset(), quiet: bool = False) -> None:
         """Surface a worker still parked when its request has finished.
@@ -556,6 +648,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
         spans = [(rid, tokens[rid]) for rid in self.input_batch.req_ids]
         requests.refuse_chunked(spans, self.requests)
         requests.scope(self.nnsight_model, spans)
+        # The step has begun: a block that read `tracer.group` before its step
+        # was scheduled (the top of a `tracer.iter` iteration) is parked here.
+        if requests.groups:
+            self.nnsight_model.interleaver.handle(GROUP, None)
         return corrections
 
     def execute_model(
@@ -626,8 +722,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         ``sampling_params.eos_token_id`` — which then finishes it. Whether the
         exception was an intentional stop or a real error only decides if it is
         re-raised at the client (see [`nnsight.intervention.errors`][nnsight.intervention.errors]). Only a
-        request's traced worker ends it — a registered copy's error stays its own — so
-        they are found on the tracked requests; its row in this step's output is
+        request's traced worker ends it, or a group's block, which ends every member in
+        the step — a registered copy's error stays its own — so they are found on the
+        tracked requests and groups; its row in this step's output is
         its ``batch_group`` (an erred worker is kept scheduled — see
         [`Requests.scope`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.scope] — so [`Requests.unflatten`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.unflatten] gives it one every step).
 
@@ -646,6 +743,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
             eos = self.requests[request.id].sampling_params.eos_token_id
             if eos is not None:
                 sampler_output.sampled_token_ids[mediator.batch_group[0]] = eos
+        # A group's error ends every member in the step, each at its own row.
+        for group in self.nnsight_requests.groups.values():
+            mediator = group.mediator
+            if mediator is None or mediator.exception is None or mediator.batch_group is None:
+                continue
+            for request_id, (row, _) in zip(group.ids, mediator.batch_group):
+                eos = self.requests[request_id].sampling_params.eos_token_id
+                if eos is not None:
+                    sampler_output.sampled_token_ids[row] = eos
 
     def collect_nnsight(
         self,
@@ -743,6 +849,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # location the model never reached — its deferred error.
                     requests.finish_dangling(mediator, taps)
                 sequence["saves"] = request.saves()
+            elif done and request.group is not None:
+                output = outputs.get(engine_id) if outputs else None
+                if output is not None and sequence["registered"]:
+                    output.saves = dict(sequence["registered"])
+                sequence["saves"], error = requests.leave(request, output, taps)
+                note(entry, error)
             note(entry, request.deferred())
             if done and not request.copies:
                 requests.requests.pop(request.id, None)
@@ -802,11 +914,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
         self.nnsight_requests.unregister(registration_id)
 
     def nnsight_request_count(self) -> int:
-        """How many requests' workers this runner still tracks.
+        """How many requests' and groups' workers this runner still tracks.
 
         A leak gauge: it should return to zero once every request has finished or
         been aborted. A number that only grows across requests means workers are
         outliving their requests — a finished one is freed in `collect_nnsight`,
         an aborted one when its stream is closed (see the async and serve backends).
         """
-        return len(self.nnsight_requests.requests)
+        return len(self.nnsight_requests.requests) + len(self.nnsight_requests.groups)

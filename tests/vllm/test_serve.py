@@ -214,6 +214,38 @@ class TestServeResult:
         assert len(result.outputs[0].token_ids) == 3
 
 
+class TestServeGroup:
+    @torch.no_grad()
+    def test_a_group_runs_once_over_its_members(self, serve_client, serve_url, ET_prompt, MSG_prompt):
+        # The server submits each member as its own request; the engine
+        # reassembles the group and sends its saves home once.
+        with serve_client.trace(temperature=0.0, top_p=1, max_tokens=2, serve=serve_url) as tracer:
+            with tracer.invoke([ET_prompt, MSG_prompt]):
+                logits = serve_client.logits.save()
+                result = tracer.result.save()
+
+        assert [serve_client.tokenizer.decode(token) for token in logits.argmax(dim=-1)] == [" Paris", " New"]
+        assert [output.prompt for output in result] == [ET_prompt, MSG_prompt]
+
+    @torch.no_grad()
+    def test_a_member_the_engine_refuses_ends_the_group(self, serve_client, serve_url, ET_prompt, MSG_prompt):
+        # The engine admits a group once every member has arrived. A member it
+        # refuses (here, a prompt past the model's length) ends the whole trace
+        # with that error, and the members it did admit are released, so the next
+        # group on the same server runs.
+        too_long = "hello " * 1100
+        with pytest.raises(RuntimeError, match="maximum context length"):
+            with serve_client.trace(temperature=0.0, top_p=1, max_tokens=1, serve=serve_url) as tracer:
+                with tracer.invoke([ET_prompt, too_long, MSG_prompt]):
+                    serve_client.logits.save()
+
+        with serve_client.trace(temperature=0.0, top_p=1, max_tokens=1, serve=serve_url) as tracer:
+            with tracer.invoke([ET_prompt, MSG_prompt]):
+                logits = serve_client.logits.save()
+
+        assert [serve_client.tokenizer.decode(token) for token in logits.argmax(dim=-1)] == [" Paris", " New"]
+
+
 class TestServeEdit:
     """`model.edit(serve=url)` — the block installs over HTTP, on the server's engine."""
 

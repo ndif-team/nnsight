@@ -1025,6 +1025,140 @@ class TestVLLMBatcherTokenAxis:
         assert batcher.widen(stats, [3, 5], torch.ones(3, 4)) is stats
 
 
+class TestCopyingBatcherWriteBack:
+    """A batcher whose `narrow` serves a copy gets the copy widened back after each read.
+
+    Nothing aliases the model's value, so an in-place edit would otherwise be
+    lost; `Batcher.copies` is what tells `Mediator.handle` to widen it back once
+    the worker moves on, edited or not.
+    """
+
+    @staticmethod
+    def _envoy():
+        from nnsight.intervention.batching import Batcher
+
+        class CopyingBatcher(Batcher):
+            def _narrow_tensor(self, tensor, group):
+                return super()._narrow_tensor(tensor, group).clone()
+
+            def copies(self, group):
+                return True
+
+        class CopyingEnvoy(_BatchEnvoy):
+            _batcher_class = CopyingBatcher
+
+        torch.manual_seed(0)
+        return CopyingEnvoy(_MLP())
+
+    @torch.no_grad()
+    def test_an_in_place_edit_of_a_copy_lands(self):
+        envoy = self._envoy()
+        with envoy.trace() as tracer:
+            with tracer.invoke(torch.randn(2, 8)):
+                envoy.fc1.output[:] = 0
+                edited = envoy.output.save()
+            with tracer.invoke(torch.randn(3, 8)):
+                untouched = envoy.fc1.output.save()
+        assert torch.equal(edited, envoy._module.fc2.bias.expand(2, 8))
+        assert bool((untouched != 0).any())
+
+    @torch.no_grad()
+    def test_a_swap_after_the_read_wins(self):
+        envoy = self._envoy()
+        with envoy.trace() as tracer:
+            with tracer.invoke(torch.randn(2, 8)):
+                served = envoy.fc1.output
+                served[:] = 7
+                envoy.fc1.output = torch.zeros(2, 8)
+                edited = envoy.output.save()
+            with tracer.invoke(torch.randn(3, 8)):
+                envoy.output.save()
+        assert torch.equal(edited, envoy._module.fc2.bias.expand(2, 8))
+
+
+class TestVLLMBatcherGroups:
+    """A group's ``Spans`` are gathered into a copy and scattered back.
+
+    A group's members sit wherever the scheduler put them in the step's slab, in
+    any order, with other requests' rows between them, so a group is served its
+    members' rows gathered in member order and its writes are scattered back
+    over the same rows. CPU-only, no engine.
+    """
+
+    @staticmethod
+    def _batcher(total=8):
+        from nnsight.modeling.vllm.batching import VLLMBatcher
+
+        batcher = VLLMBatcher(None)
+        batcher.total = total
+        return batcher
+
+    @staticmethod
+    def _spans(*spans):
+        from nnsight.modeling.vllm.groups import Spans
+
+        return Spans([list(span) for span in spans])
+
+    def test_spans_are_gathered_in_member_order(self):
+        batcher = self._batcher()
+        slab = torch.arange(8.0).unsqueeze(1).expand(8, 4)
+        served = batcher.narrow(slab, self._spans((5, 2), (0, 1)))
+        assert torch.equal(served[:, 0], torch.tensor([5.0, 6.0, 0.0]))
+
+    def test_a_group_is_served_a_copy(self):
+        batcher = self._batcher()
+        slab = torch.zeros(8, 4)
+        batcher.narrow(slab, self._spans((5, 2), (0, 1)))[...] = 1
+        assert torch.all(slab == 0)
+        assert batcher.copies(self._spans((5, 2)))
+        assert not batcher.copies([5, 2])
+
+    def test_a_write_back_lands_on_the_spans_only(self):
+        batcher = self._batcher()
+        slab = torch.zeros(8, 4)
+        spans = self._spans((5, 2), (0, 1))
+        merged = batcher.widen(slab, spans, torch.tensor([[1.0], [2.0], [3.0]]).expand(3, 4))
+        assert torch.equal(merged[:, 0], torch.tensor([3.0, 0, 0, 0, 0, 1.0, 2.0, 0]))
+
+    def test_transformers_backend_slab_gathers_on_dim_1(self):
+        batcher = self._batcher()
+        slab = torch.arange(8.0).reshape(1, 8, 1).expand(1, 8, 4).clone()
+        spans = self._spans((6, 1), (2, 2))
+        served = batcher.narrow(slab, spans)
+        assert torch.equal(served[0, :, 0], torch.tensor([6.0, 2.0, 3.0]))
+        batcher.widen(slab, spans, torch.zeros_like(served))
+        assert torch.equal(slab[0, :, 0], torch.tensor([0.0, 1.0, 0, 0, 4.0, 5.0, 0, 7.0]))
+
+    def test_clone_reads_does_not_copy_a_group_twice(self, monkeypatch):
+        from nnsight.modeling.vllm.batching import CLONE_READS
+
+        monkeypatch.setenv(CLONE_READS, "1")
+        batcher = self._batcher()
+        slab = torch.zeros(8, 4)
+        served = batcher.narrow(slab, self._spans((5, 2)))
+        assert served.shape == (2, 4)
+
+    def test_a_group_skip_is_refused(self):
+        batcher = self._batcher()
+        with pytest.raises(ValueError, match="not supported in a group"):
+            batcher.gather_skip(None, self._spans((5, 2)), torch.zeros(2, 4))
+
+    def test_a_step_layout_puts_members_in_member_order(self):
+        from nnsight.modeling.vllm.groups import Group, Member
+
+        group = Group("g", 3)
+        group.place(2, "c", start=0, tokens=1, row=0)
+        group.place(0, "a", start=4, tokens=5, row=2)
+        tokens, rows = group.settle()
+        assert tokens == [[4, 5], [0, 1]] and rows == [[2, 1], [0, 1]]
+        assert group.layout == (Member(0, 0, 5, 0), Member(2, 5, 1, 0))
+        assert group.ids == ["a", "c"]
+        group.place(0, "a", start=0, tokens=1, row=0)
+        group.settle()
+        assert group.layout == (Member(0, 0, 1, 1),)
+        assert group.settle() is None
+
+
 class TestVLLMBatcherCloneReads:
     """``NNSIGHT_VLLM_CLONE_READS`` serves copies instead of views into the slab.
 

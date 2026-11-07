@@ -7,6 +7,10 @@ step on its own, before any forward. [`VLLMTracer`][nnsight.modeling.vllm.tracer
 [`prepare`][nnsight.modeling.vllm.tracer.VLLMTracer.prepare]; the synchronous path (`execute`) still runs it and then the
 forward, exactly as the base does. Keeping this in the vLLM package leaves the base
 tracer untouched.
+
+It also carries what a group's block reads about its step,
+[`group`][nnsight.modeling.vllm.tracer.VLLMTracer.group] (see
+[`groups`][nnsight.modeling.vllm.groups]).
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from ...intervention.tracer import InterleavingTracer
 from ...tracing.tracer import push_result
 from ...intervention.util import clear_shared_locals, shared_locals
 from ...tracing.util import Scope
+from .groups import GROUP, Member
 
 
 def no_barrier(n: int) -> None:
@@ -45,6 +50,55 @@ class VLLMTracer(InterleavingTracer):
     def barrier(self, n: int) -> None:
         """Not available here — see [`no_barrier`][nnsight.modeling.vllm.tracer.no_barrier]."""
         no_barrier(n)
+
+    @property
+    def group(self) -> tuple[Member, ...]:
+        """The layout of the step a group's block is in: who is in it, and where their rows are.
+
+        A group — ``tracer.invoke([p1, ..., pn])`` — is served, at each step, the
+        rows of the members the engine scheduled into that step, concatenated in
+        member order. This says which members those are and how the value splits:
+        one [`Member`][nnsight.modeling.vllm.groups.Member] per member in the step,
+        in member order, giving its index in the list, the start and size of its
+        rows in a module value, and its own step (0 its prefill, k its k-th decode
+        step). Row ``i`` of ``model.logits`` and ``model.samples`` is entry
+        ``i``'s. A member that has finished is not in it.
+
+        Read it anywhere in the step: before the step has begun — at the top of a
+        ``tracer.iter`` iteration — it waits for the step, like a read of the
+        step's values would.
+
+        Returns:
+            A tuple of ``Member(index, start, size, step)``.
+
+        Raises:
+            ValueError: In a block that is not a group's (one prompt per invoke).
+
+        Examples:
+            The last token of every member, at every step::
+
+                >>> with model.trace(temperature=0.0, max_tokens=4) as tracer:  # doctest: +SKIP
+                ...     with tracer.invoke(["The Eiffel Tower is in", "Rome is in"]):
+                ...         layouts = list().save()
+                ...         for step in tracer.iter[:]:
+                ...             members = tracer.group
+                ...             h = model.transformer.h[8].output
+                ...             h[[m.start + m.size - 1 for m in members]] += v
+                ...             layouts.append(members)
+        """
+        mediator = Mediator.current("tracer.group")
+        if not hasattr(mediator, "layout"):
+            raise ValueError(
+                "tracer.group is a group's layout, and this block has one prompt; a "
+                "group is a list of prompts in one tracer.invoke([...])"
+            )
+        # Pinned to a step whose start the model has not reached: the block is
+        # ahead of it, at the top of a `tracer.iter` iteration, and that step's
+        # members are not chosen yet. Anywhere else the step is under way.
+        iteration = mediator.iteration
+        if iteration is not None and mediator.occurrence(GROUP) <= iteration:
+            Mediator.value(GROUP)
+        return mediator.layout
 
     def prepare(self, code: CodeType) -> tuple:
         """Build the trace's workers and combined call input, without running the model.

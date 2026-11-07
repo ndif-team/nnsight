@@ -135,6 +135,20 @@ class Batcher:
             return view
         return tensor
 
+    def copies(self, group: BatchGroup) -> bool:
+        """Whether `narrow` serves ``group`` a copy rather than a view of the batch.
+
+        A copy aliases nothing in the model, so an in-place edit to it lands only
+        once it is widened back, which
+        [`Mediator.handle`][nnsight.intervention.interleaver.Mediator.handle] does
+        as soon as the worker moves on from it. Base default: ``False`` — a
+        narrowed value is a view, and an edit to it is already in place.
+        [`VLLMBatcher`][nnsight.modeling.vllm.batching.VLLMBatcher] answers ``True``
+        for a group of prompts, whose rows it gathers from spans scattered across
+        the step.
+        """
+        return False
+
     def widen(self, full: Any, group: BatchGroup, edited: Any) -> Any:
         """Splice ``edited`` (a block's rows) back into ``full`` (the whole batch).
 

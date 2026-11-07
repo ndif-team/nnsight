@@ -44,7 +44,7 @@ print(last.saves["logits"].shape)       # `logits` itself is still unbound
 
 ## Async notes
 
-- Async tracing takes a **single prompt** (one invoke or a direct input) — several invokes raise `NotImplementedError` (`async_backend.py`).
+- Async tracing takes a **single prompt** (one invoke or a direct input) — several invokes, or a group of several prompts, raise `NotImplementedError` (`async_backend.py`).
 - The stream is consumed once. A second `await tracer.backend` returns `None` rather than raising, and the `AttributeError` lands wherever you use it; fire a new trace per generation.
 - A stream closed before it finishes aborts the request and frees its worker (`async_backend.py`).
 - Errors in the block surface when you iterate the stream (a `1/0` raises `RuntimeError: ...ZeroDivisionError`).

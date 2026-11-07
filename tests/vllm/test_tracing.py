@@ -405,9 +405,10 @@ class TestInputForms:
         assert vllm_gpt2.tokenizer.decode(msg_logits.argmax(dim=-1)) == " New"
 
     @torch.no_grad()
-    def test_rejects_multiple_prompts_per_invoke(self, vllm_gpt2, ET_prompt, MSG_prompt):
-        with pytest.raises(ValueError):
-            with vllm_gpt2.trace([ET_prompt, MSG_prompt], temperature=0.0):
+    def test_rejects_two_prompts_given_positionally(self, vllm_gpt2, ET_prompt, MSG_prompt):
+        # A list of prompts is a group (see test_groups.py); two arguments are not.
+        with pytest.raises(ValueError, match="exactly one prompt"):
+            with vllm_gpt2.trace(ET_prompt, MSG_prompt, temperature=0.0):
                 vllm_gpt2.logits.save()
 
     @torch.no_grad()

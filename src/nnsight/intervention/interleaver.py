@@ -504,6 +504,11 @@ class Mediator:
             if pending.event is Event.VALUE:  # serve this worker only its rows
                 served = value if batcher is None else batcher.narrow(value, self.batch_group)
                 self.pending = self.switch(served)
+                # A copy aliases nothing in the model, so what the worker did to it
+                # goes back the way a swap does, now that it has moved on — edited
+                # or not, since an in-place edit leaves no trace to test for.
+                if batcher is not None and batcher.copies(self.batch_group):
+                    value = batcher.widen(value, self.batch_group, served)
             elif pending.event is Event.SWAP:  # splice its edit back into the batch
                 if batcher is None:
                     value = pending.value

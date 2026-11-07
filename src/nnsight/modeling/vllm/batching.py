@@ -20,6 +20,12 @@ fused kernels overwrite activation buffers in place, so a tensor kept past the
 point it was read holds whatever was written over it (see `NNSIGHT_VLLM_CLONE_READS`
 and the "clone what you keep" rule in ``docs/models/vllm.md``).
 
+A *group* — one block over several prompts (see
+[`groups`][nnsight.modeling.vllm.groups]) — is the exception. Its group is a
+[`Spans`][nnsight.modeling.vllm.groups.Spans], one span per member in the step,
+which need not be contiguous or in member order in the slab, so it is served the
+spans gathered into a copy and its edits are scattered back over them.
+
 Gathering a sharded value is *not* here — see
 [`fragments`][nnsight.modeling.vllm.fragments]. The split is the point: narrowing
 happens once per parked worker, while a collective must happen once per value
@@ -35,6 +41,7 @@ import torch
 
 from ...intervention.batching import Batcher, BatchGroup
 from ...util import apply
+from .groups import Spans
 
 #: Env var: serve every read a private copy instead of a view into the slab.
 CLONE_READS = "NNSIGHT_VLLM_CLONE_READS"
@@ -93,9 +100,29 @@ class VLLMBatcher(Batcher):
         it is still one allocation per module read per step.
         """
         served = super().narrow(value, group)
-        if not self.clone_reads:
+        # A group's rows are gathered, so already a copy of their own.
+        if not self.clone_reads or isinstance(group, Spans):
             return served
         return apply(served, lambda tensor: tensor.clone(), torch.Tensor)
+
+    def copies(self, group: BatchGroup) -> bool:
+        """Whether ``group`` is a group's, whose rows `narrow` gathers into a copy."""
+        return isinstance(group, Spans)
+
+    def gather_skip(self, running: Any, group: BatchGroup, replacement: Any) -> Any:
+        """Refuse a group's skip; collect a single invoke's as the base does.
+
+        A skip is assembled from replacements that tile the step row range by row
+        range, which a group's scattered spans cannot. Raised inside the worker's
+        handoff, so it is the group's error rather than the engine's.
+        """
+        if isinstance(group, Spans):
+            raise ValueError(
+                "`.skip()` is not supported in a group (a list of prompts in one "
+                "invoke): its members' rows are not one span of the step. Write "
+                "the module's output instead (`module.output[:] = 0`)."
+            )
+        return super().gather_skip(running, group, replacement)
 
     @property
     def batching(self) -> bool:
@@ -134,26 +161,34 @@ class VLLMBatcher(Batcher):
         return None
 
     def _narrow_tensor(self, tensor: torch.Tensor, group: list) -> torch.Tensor:
-        """Slice one slab down to ``group``'s token span.
+        """Slice one slab down to ``group``'s token span, or gather a group's spans.
 
         A view, so an in-place edit by the block lands in the slab the model goes
         on to read. The base marks its view ``_nnsight_batch`` for the backward
         pass to redirect through; nothing does that here, because backward isn't
-        supported on the vLLM path at all.
+        supported on the vLLM path at all. A group's spans are gathered in member
+        order, which is a copy whatever the slab's order (see `copies`).
         """
         dim = self._token_dim(tensor)
         if dim is None:
             return tensor
+        if isinstance(group, Spans):
+            return tensor.index_select(dim, group.index(tensor.device))
         start, size = group
         return tensor.narrow(dim, start, size)
 
     def _widen_tensor(
         self, full: torch.Tensor, group: list, edited: torch.Tensor
     ) -> torch.Tensor:
-        """Splice ``edited`` back over ``group``'s span of ``full``."""
+        """Splice ``edited`` back over ``group``'s span of ``full``, or scatter it over a group's spans."""
         dim = self._token_dim(full)
         if dim is None:
             return full
+        if isinstance(group, Spans):
+            # In place, where a span is spliced with `cat`: a group's write-back
+            # runs after every read, and `edited` is a gathered copy or a value the
+            # block built, never a view of `full`, so there is nothing to alias.
+            return full.index_copy_(dim, group.index(full.device), edited)
         start, size = group
         # cat rather than an in-place write: `edited` is often a narrowed view of
         # `full`, and writing a tensor into a slice of itself aliases.

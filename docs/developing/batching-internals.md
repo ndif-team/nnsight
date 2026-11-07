@@ -98,6 +98,13 @@ return torch.cat([pre, edited, post], dim=0)
 tensors and avoids aliasing when `edited` is itself a narrowed view of `full`.
 Called from `Mediator.handle` for every `Event.SWAP` (`interleaver.py`).
 
+A layout whose `narrow` serves a **copy** rather than a view answers
+`Batcher.copies(group)` with `True` (base: `False`), and `Mediator.handle` then
+widens the served value back as soon as the worker moves on from it, edited or not —
+without it an in-place edit to the copy would be dropped. vLLM's group (one block
+over several prompts) is the user: its members' rows are gathered from spans
+scattered across the step (`modeling/vllm/batching.py`).
+
 **A replacement has to keep the group's row count.** `_widen_tensor` does not
 check it: a `cat` of the wrong height succeeds — it just builds a batch that is
 no longer the model's, and the mismatch surfaces, if at all, inside some later
