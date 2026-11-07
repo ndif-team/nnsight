@@ -127,3 +127,5 @@ A renamed `ModuleList` entry is indexable by its alias string:
   rather than picking one; `*` is for a component whose name varies
   (`"*.h"`), not for naming every entry. To give every entry's child a name,
   key the child (`{"attn": "self_attn"}`).
+
+On a remote run an alias travels with the envoy it is bound on: that envoy and the envoys above it go by value, and the rest go by path. See [serialization.md](../developing/serialization.md#envoys-by-reference).

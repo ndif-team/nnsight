@@ -451,6 +451,7 @@ False ...}`.
 - **One prompt per invoke** — no `tracer.invoke(["a", "b"])`.
 - **`.skip()` is effectively unsupported** — see [`.skip()` needs the whole step](#skip-needs-the-whole-step).
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
+- **No mounting a module inside a block** (`model.sae = module`): the worker runs every request's block against one tree it built at load, so the module would reach every later request. The worker raises `AttributeError`, which arrives as a `RuntimeError` carrying it (see [Where an error comes from](#where-an-error-comes-from)). Keep per-request values in the block's own variables.
 - **No speculative decoding** — a speculative step scores several draft tokens per request, and a block is scoped to one logits row and one sampled token per request. `VLLM(..., speculative_config=...)` raises `NotImplementedError` before anything is built.
 - **No data parallelism** — vLLM answers the call that brings a request's saved values back from its first engine only, so `VLLM(..., data_parallel_size=N)` with `N > 1` raises `NotImplementedError` before anything is built. Use `tensor_parallel_size`, or one `VLLM` per GPU.
 - **No backward / gradients, and no source tracing inside a fused CUDA kernel** — the kernel's

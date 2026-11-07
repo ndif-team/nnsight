@@ -8,6 +8,10 @@ requests of different lengths, generations that finish at different steps, and t
 worker-side state left behind once a request is done.
 """
 
+import subprocess
+import sys
+import textwrap
+
 import pytest
 import torch
 
@@ -577,3 +581,84 @@ def test_a_trace_needs_no_insecure_serialization():
     env = {k: v for k, v in os.environ.items() if k != "VLLM_ALLOW_INSECURE_SERIALIZATION"}
     proc = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=900)
     assert proc.returncode == 0 and "TRACE_OK" in proc.stdout, proc.stderr[-4000:]
+
+
+class TestEnvoysByReference:
+    """A request names the model's envoys by path; the worker resolves each to a copy
+    made for that request, and a block cannot mount a module on the shared tree."""
+
+    def test_a_request_carries_no_envoy_state(self, vllm_gpt2, ET_prompt):
+        from nnsight.modeling.vllm import vllm as vmod
+
+        captured = []
+        attach = vmod.VLLM._attach_mediators
+
+        def capture(self, params, **kwargs):
+            result = attach(self, params, **kwargs)
+            captured.extend(p.extra_args["nnsight_mediator"] for p in params)
+            return result
+
+        vmod.VLLM._attach_mediators = capture
+        try:
+            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+                hidden = vllm_gpt2.transformer.h[3].output[-1].clone().save()
+        finally:
+            vmod.VLLM._attach_mediators = attach
+        (payload,) = captured
+        assert b"Envoy:model" in payload and b"Module:" not in payload
+        assert len(payload) < 3000, len(payload)
+        assert hidden.shape[-1] == 768
+
+    def test_a_block_cannot_mount_on_the_shared_tree(self, vllm_gpt2, ET_prompt):
+        with pytest.raises(RuntimeError, match="shared by every request"):
+            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+                vllm_gpt2.transformer.sae = torch.nn.Linear(2, 2)
+        # The refused write left nothing behind for the next request.
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.save()
+        assert logits.shape[-1] == 50257
+
+    def test_a_stateful_root_runs_on_a_worker(self, tmp_path):
+        # An alias and a wrapper class send the root by value, and the worker
+        # rebuilds it inside the run on the tree every request shares.
+        if torch.cuda.device_count() < 1:
+            pytest.skip("vLLM tests need a GPU")
+        script = tmp_path / "stateful_root.py"
+        script.write_text(
+            textwrap.dedent(
+                """
+                import torch
+                from nnsight.modeling.vllm import VLLM
+
+                def main():
+                    class Wrapped(VLLM):
+                        def last_block(self):
+                            return self.blocks[-1]
+
+                    model = Wrapped(
+                        "gpt2",
+                        rename={"transformer.h": "blocks"},
+                        tensor_parallel_size=1,
+                        gpu_memory_utilization=0.1,
+                        dispatch=True,
+                    )
+                    kwargs = dict(temperature=0.0, top_p=1.0, max_tokens=1)
+                    with model.trace("The Eiffel Tower is in", **kwargs):
+                        named = model.transformer.h[-1].output.clone().save()
+                    with model.trace("The Eiffel Tower is in", **kwargs):
+                        aliased = model.blocks[-1].output.clone().save()
+                    with model.trace("The Eiffel Tower is in", **kwargs):
+                        through_method = model.last_block().output.clone().save()
+                    assert torch.allclose(aliased.float(), named.float())
+                    assert torch.allclose(through_method.float(), named.float())
+                    print("TRACE_OK", flush=True)
+
+                if __name__ == "__main__":
+                    main()
+                """
+            )
+        )
+        proc = subprocess.run(
+            [sys.executable, str(script)], capture_output=True, text=True, timeout=900
+        )
+        assert proc.returncode == 0 and "TRACE_OK" in proc.stdout, proc.stderr[-4000:]

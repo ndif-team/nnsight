@@ -73,11 +73,11 @@ if TYPE_CHECKING:
 
 _PREPROCESSORS = ("tokenizer", "image_processor", "feature_extractor", "processor")
 
-# Attribute -> persistent id: for a remote request these are referenced by id
-# rather than serialized, and resolved to the actor's live object server-side (see
-# _remoteable_persistent_objects / __getstate__). The pipeline is included so a
-# deserialized model's `self.pipeline` (used by generate) resolves to the server's
-# real pipeline instead of being dropped.
+# Attribute -> persistent id: for a remote request these travel as the name and
+# resolve to the actor's live object server-side (see
+# _persistent_attachments). The pipeline is included so a deserialized model's
+# `self.pipeline` (used by generate) resolves to the server's real pipeline
+# instead of being dropped.
 _PERSISTENT = {
     "tokenizer": "Tokenizer",
     "processor": "Processor",
@@ -680,8 +680,8 @@ class TransformersModel(HuggingFaceModel):
         data["task"] = TASK_ALIASES.get(self.task, self.task)
         return json.dumps(data)
 
-    def _remoteable_persistent_objects(self) -> dict:
-        objects = super()._remoteable_persistent_objects()
+    def _persistent_attachments(self) -> dict[str, Any]:
+        objects = super()._persistent_attachments()
         for attr, pid in _PERSISTENT.items():
             value = getattr(self, attr)
             if value is not None:
@@ -872,17 +872,6 @@ class TransformersModel(HuggingFaceModel):
                 "one with `peft=` or `model.load_adapter(...)`."
             )
         peft.set_enabled(self._module, enabled)
-
-    def __getstate__(self) -> dict:
-        state = super().__getstate__()
-        # Reference the pipeline and preprocessors by persistent id instead of
-        # serializing them; the server resolves each to its live object. The
-        # pipeline stays in state (tagged) so generate's `self.pipeline` resolves.
-        for attr, pid in _PERSISTENT.items():
-            value = getattr(self, attr)
-            if value is not None:
-                value._persistent_id = pid
-        return state
 
     # -- forward -------------------------------------------------------------
 
