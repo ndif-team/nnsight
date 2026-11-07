@@ -3,14 +3,28 @@
 """
 
 import asyncio
+import gc
 import linecache
 import sys
 import textwrap
 
+import pickle
+import pickletools
+import weakref
+
 import pytest
 import torch
 
-from nnsight.intervention.serialization import code_reduce, dumps, loads
+from envoy_classes import Doubled, WrappedModel, script_class
+from nnsight.intervention.envoy import Envoy
+from nnsight.intervention.eproperty import eproperty
+from nnsight.intervention.serialization import (
+    CustomCloudUnpickler,
+    UnknownPersistentIdError,
+    code_reduce,
+    dumps,
+    loads,
+)
 from nnsight.ndif import get_local_env
 from nnsight.schema.request import RequestModel
 from nnsight.tracing.backend import Backend
@@ -627,6 +641,56 @@ class TestLocalSimulation:
         assert isinstance(out, torch.Tensor)
 
 
+@pytest.fixture(scope="module")
+def server_gpt2():
+    """A second gpt2, the receiver's: a name in a payload resolves to its tree, so a
+    test can tell the receiver's envoy from the sender's."""
+    from nnsight.modeling.transformers import TransformersModel
+
+    return TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
+
+
+@pytest.fixture(scope="module")
+def block_renamed_gpt2():
+    """A gpt2 with an alias bound on every block (`self_attn`), and nothing on the
+    root: the root reaches the alias by attribute access, so it goes by value for
+    the blocks' sake."""
+    from nnsight.modeling.transformers import TransformersModel
+
+    return TransformersModel(
+        "openai-community/gpt2",
+        task="text-generation",
+        dispatch=True,
+        rename={"attn": "self_attn"},
+    )
+
+
+@pytest.fixture(scope="module")
+def classed_gpt2():
+    from nnsight.modeling.transformers import TransformersModel
+
+    return TransformersModel(
+        "openai-community/gpt2",
+        task="text-generation",
+        dispatch=True,
+        envoys={"mlp": Doubled},
+    )
+
+
+@pytest.fixture(scope="module")
+def renamed_gpt2():
+    """A gpt2 with an alias bound on the root (`layers`) and one on `transformer`
+    (`blocks`): both go by value, and everything below `transformer` by reference."""
+    from nnsight.modeling.transformers import TransformersModel
+
+    return TransformersModel(
+        "openai-community/gpt2",
+        task="text-generation",
+        dispatch=True,
+        rename={"transformer.h": "layers", "h": "blocks"},
+    )
+
+
 class _ServerRoundTrip(Backend):
     """Serialize a trace and run the *deserialized* tracer, as an NDIF server does.
 
@@ -634,6 +698,7 @@ class _ServerRoundTrip(Backend):
     AST node) so results push back into the caller's frame; a real server runs the
     tracer rebuilt from the payload, whose node was dropped in transit. This backend
     exercises that server path so the node fallback is covered where it matters.
+    ``model`` is the server's: the payload's names resolve on its tree.
     """
 
     def __init__(self, model):
@@ -642,12 +707,45 @@ class _ServerRoundTrip(Backend):
         self.node_after = "unset"
 
     def __call__(self, tracer):
-        blob = RequestModel.serialize(tracer, compress=False)
+        blob = self.blob = RequestModel.serialize(tracer, compress=False)
         persistent = self.model._remoteable_persistent_objects()
         server_tracer = RequestModel.deserialize(blob, persistent, compress=False)
         self.node_after = server_tracer.node
         server_tracer.execute(server_tracer.info.code)
+        # What the block saved, as the server's frame holds it after the run.
+        self.saved = dict(server_tracer.info.frame.f_locals)
         self.ran = True
+
+
+PROMPT = "The Eiffel Tower is in"
+
+
+def _matches(a, b):
+    # CPU forward passes have differed by 1.75e-3 with no serialization involved
+    # (cause not determined), and a wrong value differs by far more.
+    return torch.allclose(a.detach().float(), b.detach().float(), atol=1e-2)
+
+
+def _names_in(blob):
+    """The persistent ids a payload writes."""
+    names, last = set(), None
+    for opcode, argument, _ in pickletools.genops(blob):
+        if isinstance(argument, str):
+            last = argument
+        elif opcode.name == "BINPERSID":
+            names.add(last)
+    return names
+
+
+def _copy_of(copy, envoy):
+    """``copy`` is the payload's copy of the receiver's ``envoy``: same class, same
+    path, the receiver's module, distinct object."""
+    return (
+        copy is not envoy
+        and copy.path == envoy.path
+        and type(copy) is type(envoy)
+        and copy._module is envoy._module
+    )
 
 
 class TestServerExecution:
@@ -692,18 +790,26 @@ class TestParentLinks:
             for child in node._children:
                 assert child.parent is node, child.path
 
-    def test_a_shipped_tree_relinks_itself(self, gpt2):
-        copy = loads(dumps(gpt2), gpt2._remoteable_persistent_objects())
-        assert copy is not gpt2 and copy.parent is None
-        self._assert_parents(copy)
+    def test_a_by_value_envoy_relinks_the_children_that_came_with_it(self, renamed_gpt2, server_gpt2):
+        # The root and `transformer` go by value (each has an alias bound on it);
+        # `h` below them is the receiver's own and keeps the receiver's parent.
+        copy = loads(dumps(renamed_gpt2, tree=renamed_gpt2), server_gpt2._remoteable_persistent_objects())
+        assert copy is not server_gpt2 and copy.parent is None
+        assert copy.transformer is not server_gpt2.transformer
+        assert copy.transformer.parent is copy
+        assert _copy_of(copy.transformer.h, server_gpt2.transformer.h)
+        assert copy.transformer.h.parent is copy.transformer
         assert copy.transformer.h[2].mlp.root is copy
 
-    def test_a_shipped_subtree_is_its_own_root(self, gpt2):
-        # Shipped without its parent, the top envoy has none; below it, the copies link to each other.
-        block = loads(dumps(gpt2.transformer.h[2]), gpt2._remoteable_persistent_objects())
-        assert block is not gpt2.transformer.h[2]
-        assert block.parent is None and block.root is block
-        assert block.mlp.parent is block
+    def test_a_shipped_subtree_is_its_own_root(self, renamed_gpt2, server_gpt2):
+        # Shipped without its parent, the top envoy has none; below it, the receiver's own.
+        transformer = loads(
+            dumps(renamed_gpt2.transformer, tree=renamed_gpt2),
+            server_gpt2._remoteable_persistent_objects(),
+        )
+        assert transformer is not server_gpt2.transformer
+        assert transformer.parent is None and transformer.root is transformer
+        assert transformer.h.parent is transformer
 
     @torch.no_grad()
     def test_a_deserialized_trace_reads_through_parent(self, gpt2):
@@ -809,3 +915,518 @@ class TestModelKey:
         )
         suffix = json.loads(aliased.to_model_key().split(":", 1)[1])
         assert suffix["task"] == "text-classification"
+
+
+class TestEnvoysByReference:
+    """A payload names the model's envoys by path; the receiver resolves them to its
+    own tree. State the receiver's tree lacks (an edit, a rename alias) still goes
+    by value, and an envoy of any other tree is refused."""
+
+    def test_a_trace_payload_carries_envoys_by_reference(self, gpt2, server_gpt2):
+        with server_gpt2.trace(PROMPT):
+            want = server_gpt2.transformer.h[0].output.save()
+        backend = _ServerRoundTrip(server_gpt2)
+        with gpt2.trace(PROMPT, backend=backend):
+            out = gpt2.transformer.h[0].output.save()
+        assert _matches(backend.saved["out"], want)
+        # The tree by value is about 24 KB.
+        assert len(backend.blob) < 2000, len(backend.blob)
+        # The block loads `gpt2`, the root; `.transformer.h[0]` is attribute access
+        # at run time on the receiver's own tree.
+        assert b"Envoy:model" in backend.blob
+        assert b"Module:" not in backend.blob
+
+    def test_a_referenced_envoy_is_a_copy_of_the_receivers(self, gpt2, server_gpt2):
+        objects = server_gpt2._remoteable_persistent_objects()
+        block = loads(dumps(gpt2.transformer.h[2], tree=gpt2), objects)
+        assert _copy_of(block, server_gpt2.transformer.h[2])
+
+    def test_an_envoy_with_no_tree_to_name_it_is_refused(self, gpt2):
+        with pytest.raises(pickle.PicklingError, match="no model to name it from"):
+            dumps(gpt2.transformer.h[2])
+
+    def test_an_envoy_of_another_tree_is_refused(self, gpt2, server_gpt2):
+        other = Envoy(torch.nn.Sequential(torch.nn.Linear(2, 2)), path="other")
+        with pytest.raises(pickle.PicklingError, match="'other' belongs to a different model"):
+            dumps(other, tree=gpt2)
+        # Captured by a block too: the receiver resolves `gpt2` to its own tree and
+        # cannot resolve `other`, so the trace is refused when sent.
+        with pytest.raises(pickle.PicklingError, match="'other' belongs to a different model"):
+            with gpt2.trace("The Eiffel Tower is in", backend=_ServerRoundTrip(server_gpt2)):
+                where = other.path
+                gpt2.transformer.h[0].output.save()
+
+    def test_a_captured_module_and_tokenizer_resolve_to_the_receivers(self, gpt2, server_gpt2):
+        objects = server_gpt2._remoteable_persistent_objects()
+        attn = gpt2.transformer.h[0].attn._module
+        blob = dumps(attn, tree=gpt2)
+        assert len(blob) < 2000, len(blob)
+        assert loads(blob, objects) is server_gpt2.transformer.h[0].attn._module
+        assert loads(dumps(gpt2.tokenizer, tree=gpt2), objects) is server_gpt2.tokenizer
+        # In a block: a tokenizer captured above the trace travels as its name.
+        backend = _ServerRoundTrip(server_gpt2)
+        tok = gpt2.tokenizer
+        with gpt2.trace(PROMPT, backend=backend):
+            n = len(tok(PROMPT)["input_ids"])
+            out = gpt2.transformer.h[0].output.save()
+        assert backend.saved["out"].shape[1] == len(server_gpt2.tokenizer(PROMPT)["input_ids"])
+        assert b"Tokenizer" in backend.blob and len(backend.blob) < 3000, len(backend.blob)
+
+    def test_a_rename_alias_travels_with_the_envoy_it_is_bound_on(self, renamed_gpt2, server_gpt2):
+        # `layers` is bound on the root and `blocks` on `transformer`: those two go
+        # by value, and a block below them is its path.
+        assert b"Envoy:model.transformer.h.0" in dumps(renamed_gpt2.transformer.h[0], tree=renamed_gpt2)
+        blob = dumps(renamed_gpt2, tree=renamed_gpt2)
+        copy = loads(blob, server_gpt2._remoteable_persistent_objects())
+        assert copy is not server_gpt2
+        assert _copy_of(copy.layers, server_gpt2.transformer.h)
+        assert copy.transformer.blocks is copy.layers
+        # The block's source names the alias, and the receiver's tree was built
+        # without it: the alias arrives with the envoy it is bound on.
+        with server_gpt2.trace(PROMPT):
+            want = server_gpt2.transformer.h[0].output.save()
+        backend = _ServerRoundTrip(server_gpt2)
+        with renamed_gpt2.trace(PROMPT, backend=backend):
+            out = renamed_gpt2.layers[0].output.save()
+        assert _matches(backend.saved["out"], want)
+
+    def test_an_alias_bound_below_the_root_takes_the_root_by_value(self, block_renamed_gpt2, server_gpt2):
+        # `self_attn` is bound on each block. The block's source reaches it from
+        # the root by attribute access, so the root, `transformer`, `h` and each
+        # block go by value; a block's children are still their paths.
+        client = block_renamed_gpt2
+        copy = loads(dumps(client, tree=client), server_gpt2._remoteable_persistent_objects())
+        assert copy is not server_gpt2
+        assert _copy_of(copy.transformer.h[0].self_attn, server_gpt2.transformer.h[0].attn)
+        assert _copy_of(copy.transformer.h[0].mlp, server_gpt2.transformer.h[0].mlp)
+        assert _copy_of(copy.transformer.ln_f, server_gpt2.transformer.ln_f)
+        with server_gpt2.trace(PROMPT):
+            want = server_gpt2.transformer.h[0].attn.output[0].save()
+        backend = _ServerRoundTrip(server_gpt2)
+        with client.trace(PROMPT, backend=backend):
+            out = client.transformer.h[0].self_attn.output[0].save()
+        assert _matches(backend.saved["out"], want)
+
+    def test_a_received_payload_re_serializes_with_its_aliases(self, block_renamed_gpt2, server_gpt2, gpt2):
+        # An nnsight-serve server deserializes the client's payload and writes it
+        # again for its worker, against its own tree. The client's root is not
+        # registered on that tree, and it still carries the aliases below it.
+        first = loads(dumps(block_renamed_gpt2, tree=block_renamed_gpt2), server_gpt2._remoteable_persistent_objects())
+        second = loads(dumps(first, tree=server_gpt2), gpt2._remoteable_persistent_objects())
+        assert second is not gpt2 and second is not first
+        assert _copy_of(second.transformer.h[0].self_attn, gpt2.transformer.h[0].attn)
+
+    def test_a_class_a_caller_chose_travels_with_the_envoy(self, classed_gpt2, server_gpt2):
+        client = classed_gpt2
+        assert client.transformer.h[0].mlp._carries_state()
+        assert not client.transformer.h[0]._carries_state() and not client._carries_state()
+        copy = loads(dumps(client, tree=client), server_gpt2._remoteable_persistent_objects())
+        assert type(copy.transformer.h[0].mlp) is Doubled
+        assert _copy_of(copy.transformer.h[0].attn, server_gpt2.transformer.h[0].attn)
+        backend = _ServerRoundTrip(server_gpt2)
+        with client.trace("The Eiffel Tower is in", backend=backend):
+            plain = client.transformer.h[0].mlp.output.save()
+            doubled = client.transformer.h[0].mlp.doubled.save()
+        assert backend.ran
+        assert torch.equal(backend.saved["doubled"], backend.saved["plain"] * 2)
+
+    def test_a_class_defined_in_a_script_travels_by_source(self):
+        # A notebook's `envoys=` class is one the receiver cannot import: it is
+        # rebuilt from its source, eproperties included.
+        received = loads(dumps(script_class()))
+        prop = received.__dict__["tripled"]
+        assert isinstance(prop, eproperty) and prop.key == "output" and prop.name == "tripled"
+        assert prop._preprocess(None, 2) == 6
+
+    def test_a_runtime_default_class_map_is_not_state(self, server_gpt2):
+        from nnsight.intervention.envoy import RuntimeEnvoys
+        from nnsight.modeling.transformers import TransformersModel
+
+        model = TransformersModel(
+            "openai-community/gpt2",
+            task="text-generation",
+            dispatch=True,
+            envoys=RuntimeEnvoys({"mlp": Doubled}),
+        )
+        assert type(model.transformer.h[0].mlp) is Doubled
+        assert not model.transformer.h[0].mlp._carries_state()
+        assert _names_in(dumps(model, tree=model)) == {"Envoy:model", "Interleaver"}
+
+    def test_a_trace_on_a_block_still_names_the_tokenizer(self, gpt2, server_gpt2):
+        hidden = torch.randn(1, 1, 768)
+        with server_gpt2.transformer.h[3].trace(hidden):
+            want = server_gpt2.transformer.h[3].mlp.output.save()
+        backend = _ServerRoundTrip(server_gpt2)
+        tok = gpt2.tokenizer
+        with gpt2.transformer.h[3].trace(hidden, backend=backend):
+            n = len(tok(PROMPT)["input_ids"])
+            out = gpt2.transformer.h[3].mlp.output.save()
+        assert _matches(backend.saved["out"], want)
+        # The input tensor is 3 KB of it; the tokenizer by value would be 2.9 MB.
+        assert b"Tokenizer" in backend.blob and len(backend.blob) < 6000, len(backend.blob)
+
+    def test_an_edited_root_goes_by_value_with_its_children_by_reference(self, gpt2, server_gpt2):
+        with gpt2.edit() as (_, edited):
+            edited.transformer.h[0].output[:] = 0
+        copy = loads(dumps(edited, tree=gpt2), server_gpt2._remoteable_persistent_objects())
+        assert copy is not server_gpt2 and copy is not edited
+        assert len(copy._edits) == 1
+        # The children are the receiver's own, copied for this payload.
+        assert _copy_of(copy.transformer, server_gpt2.transformer)
+        assert copy.transformer.parent is copy
+        with edited.trace(PROMPT):
+            want = edited.lm_head.output.save()
+        with gpt2.trace(PROMPT):
+            clean = gpt2.lm_head.output.save()
+        assert not _matches(want, clean)
+        backend = _ServerRoundTrip(server_gpt2)
+        with edited.trace(PROMPT, backend=backend):
+            out = edited.lm_head.output.save()
+        assert _matches(backend.saved["out"], want)
+
+    def test_a_child_edit_goes_by_value_with_its_children_by_reference(self, gpt2, server_gpt2):
+        block = gpt2.transformer.h[1]
+        with block.edit(inplace=True):
+            block.mlp.output.save()
+        try:
+            copy = loads(dumps(block, tree=gpt2), server_gpt2._remoteable_persistent_objects())
+            assert copy is not server_gpt2.transformer.h[1] and len(copy._edits) == 1
+            assert _copy_of(copy.mlp, server_gpt2.transformer.h[1].mlp)
+            # The root reaches the edited block by attribute access, so it goes
+            # by value too; the blocks beside it are still their paths.
+            root = loads(dumps(gpt2, tree=gpt2), server_gpt2._remoteable_persistent_objects())
+            assert root is not server_gpt2
+            assert _copy_of(root.transformer.h[0], server_gpt2.transformer.h[0])
+            assert len(root.transformer.h[1]._edits) == 1
+        finally:
+            block.clear_edits()
+
+    def test_a_new_attribute_on_an_envoy_is_refused(self, gpt2):
+        # A receiver that wraps the same model holds no such attribute, so the
+        # write is refused where it is made.
+        with pytest.raises(AttributeError, match="takes no new attributes"):
+            gpt2.transformer.h[0].alpha = 0.5
+        assert "alpha" not in gpt2.transformer.h[0].__dict__
+
+    def test_a_shared_tree_refuses_a_block_write(self, gpt2):
+        interleaver = gpt2.interleaver
+        interleaver.shared = True
+        try:
+            with pytest.raises(AttributeError, match="shared by every request"):
+                with gpt2.trace("The Eiffel Tower is in"):
+                    gpt2.transformer.sae = torch.nn.Linear(2, 2)
+            assert "sae" not in gpt2.transformer.__dict__
+            assert "sae" not in gpt2.transformer._module._modules
+            # An intervention is a write a descriptor takes, and still passes.
+            with gpt2.trace("The Eiffel Tower is in"):
+                block = gpt2.transformer.h[0]
+                block.output = block.output * 0
+                out = gpt2.transformer.h[0].output.save()
+            assert not out.any()
+        finally:
+            interleaver.shared = False
+
+    def test_a_referenced_envoy_is_a_copy_holding_the_receivers_module_entry(self, gpt2, server_gpt2):
+        # The copy's module is what the receiver's map holds under `Module:<path>`:
+        # the entry a server may have wrapped to guard its model.
+        objects = server_gpt2._remoteable_persistent_objects()
+        guard = torch.nn.Identity()
+        objects["Module:model.transformer.h.2"] = guard
+        root = loads(dumps(gpt2, tree=gpt2), objects)
+        assert root.transformer.h[2]._module is guard
+        assert root.transformer.h[3]._module is server_gpt2.transformer.h[3]._module
+        # Reached by any spelling, one copy per payload.
+        assert root.transformer.h[2] is root.transformer.h._child_map["2"]
+        assert root.transformer.h[2] in root.transformer.h._children
+        assert root.transformer.h[2].parent is root.transformer.h
+
+    def test_what_a_block_does_to_a_copy_stays_with_its_payload(self, gpt2, server_gpt2):
+        objects = server_gpt2._remoteable_persistent_objects()
+        root = loads(dumps(gpt2, tree=gpt2), objects)
+        with root.edit(inplace=True):
+            root.transformer.h[0].output[0][:] = 0
+        assert len(root._edits) == 1 and server_gpt2._edits == []
+        root.clear_edits()
+        assert root._edits == [] and server_gpt2._edits == []
+        tokenizer = server_gpt2.tokenizer
+        root.tokenizer = None
+        assert server_gpt2.tokenizer is tokenizer
+        # Another payload gets its own copies.
+        again = loads(dumps(gpt2, tree=gpt2), objects)
+        assert again is not root and again.transformer is not root.transformer
+
+    def test_a_copy_edited_in_place_re_serializes_by_value(self, gpt2, server_gpt2):
+        # A copy that gained an edit and is written again goes by value with the
+        # edit, and its children by path.
+        first = loads(dumps(gpt2, tree=gpt2), server_gpt2._remoteable_persistent_objects())
+        with first.edit(inplace=True):
+            first.transformer.h[0].output[0][:] = 0
+        blob = dumps(first, tree=server_gpt2)
+        assert b"Envoy:model.transformer" in blob
+        second = loads(blob, gpt2._remoteable_persistent_objects())
+        assert second is not first and second is not gpt2
+        assert len(second._edits) == 1
+        assert _copy_of(second.transformer, gpt2.transformer)
+        assert second.transformer.root is second
+
+    def test_a_copy_written_again_carries_only_what_the_block_gave_it(self, gpt2, renamed_gpt2):
+        # An nnsight-serve server whose tree has aliases on the root and on
+        # `transformer` gives a payload a copy with those aliases. Written again
+        # for the worker, the copy goes by value with `h` below it by path.
+        objects = renamed_gpt2._remoteable_persistent_objects()
+        first = loads(dumps(gpt2, tree=gpt2), objects)
+        assert first.transformer.h[0].parent is first.transformer.h
+        blob = dumps(first, tree=renamed_gpt2)
+        assert "Envoy:model" not in _names_in(blob)
+        assert "Envoy:model.transformer.h" in _names_in(blob)
+        second = loads(blob, gpt2._remoteable_persistent_objects())
+        assert second.layers is second.transformer.h and second.transformer.blocks is second.layers
+        # A copy of a tree without state is still its path.
+        plain = loads(dumps(gpt2, tree=gpt2), gpt2._remoteable_persistent_objects())
+        assert _names_in(dumps(plain, tree=gpt2)) == {"Envoy:model"}
+
+    def test_replacing_a_child_on_a_copy_replaces_its_entry(self, gpt2):
+        # Mounting reaches the receiver's module, so this receiver is its own.
+        sender, receiver = Envoy(_Stack()), Envoy(_Stack())
+        root = loads(dumps(sender, tree=sender), _objects(receiver))
+        before = len(list(root.decoder_blocks[0]))
+        root.decoder_blocks[0].mixer = torch.nn.Identity()
+        assert len(list(root.decoder_blocks[0])) == before
+        assert root.decoder_blocks[0]._child_map["mixer"] is root.decoder_blocks[0].mixer
+
+    def test_a_session_carries_its_model_by_reference(self, gpt2, server_gpt2):
+        with server_gpt2.trace(PROMPT):
+            want = server_gpt2.transformer.h[0].output.save()
+        backend = _ServerRoundTrip(server_gpt2)
+        with gpt2.session(backend=backend):
+            with gpt2.trace(PROMPT):
+                hidden = gpt2.transformer.h[0].output
+            with gpt2.trace(PROMPT):
+                out = (hidden[0] * 2).save()
+        assert _matches(backend.saved["out"], want[0] * 2)
+        assert len(backend.blob) < 2000, len(backend.blob)
+        assert b"Envoy:model" in backend.blob and b"Module:" not in backend.blob
+
+
+class _Stage(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mixer = torch.nn.Linear(4, 4)
+        self.gate = torch.nn.Linear(4, 4)
+
+    def forward(self, x):
+        return self.gate(self.mixer(x))
+
+
+class _Stack(torch.nn.Module):
+    """Module names no transformer checkpoint uses, for a tree built on the spot."""
+
+    def __init__(self):
+        super().__init__()
+        self.decoder_blocks = torch.nn.ModuleList([_Stage(), _Stage()])
+        self.output_projection = torch.nn.Linear(4, 2)
+
+    def forward(self, x):
+        for block in self.decoder_blocks:
+            x = block(x)
+        return self.output_projection(x)
+
+
+class _Loop(torch.nn.Module):
+    """A child module holding its parent as a registered submodule."""
+
+    def __init__(self):
+        super().__init__()
+        self.inner = _Stage()
+        self.inner.owner = self
+
+    def forward(self, x):
+        return self.inner(x)
+
+
+def _objects(root):
+    table = {"Interleaver": root.interleaver}
+    for node in root.modules():
+        table[f"Module:{node.path}"] = node._module
+        table[f"Envoy:{node.path}"] = node
+    return table
+
+
+class TestPayloadCopies:
+    """What a receiver's copy of an envoy reaches, keeps and frees, and which roots
+    go by value."""
+
+    def test_a_wrapper_subclass_travels_with_its_members(self, server_gpt2):
+        client = WrappedModel("openai-community/gpt2", task="text-generation", dispatch=True)
+        with server_gpt2.trace(PROMPT):
+            first = server_gpt2.transformer.h[0].output.save()
+            last = server_gpt2.transformer.h[-1].output.save()
+            logits = server_gpt2.lm_head.output.save()
+        backend = _ServerRoundTrip(server_gpt2)
+        with client.trace(PROMPT, backend=backend):
+            by_attribute = client.stack[0].output.save()
+            by_method = client.last_block().output.save()
+            doubled = client.doubled_logits.save()
+        assert _matches(backend.saved["by_attribute"], first)
+        assert _matches(backend.saved["by_method"], last)
+        assert _matches(backend.saved["doubled"], logits * 2)
+        # The root by value with its children by path; the whole tree is about 24 KB.
+        assert len(backend.blob) < 6000, len(backend.blob)
+
+    def test_a_stock_root_class_goes_by_path(self):
+        from nnsight import LanguageModel
+        from nnsight.modeling.transformers import TransformersModel
+
+        for model in (
+            LanguageModel("openai-community/gpt2"),
+            TransformersModel("openai-community/gpt2", task="text-generation"),
+            Envoy(_Stack()),
+        ):
+            assert _names_in(dumps(model, tree=model)) == {"Envoy:model", "Interleaver"}
+
+    def test_a_stock_root_is_set_up_by_a_receiver_that_resolves_names_directly(self):
+        # NDIF's sandbox runner resolves `Envoy:model` to its undispatched meta model
+        # with no copy, and `Interleaver` to one made for the request.
+        from nnsight.modeling.transformers import TransformersModel
+
+        request_interleaver = object()
+
+        class Runner(CustomCloudUnpickler):
+            def persistent_load(self, pid):
+                if pid == "Interleaver":
+                    return request_interleaver
+                return self.persistent_objects[pid]
+
+        sender = TransformersModel("openai-community/gpt2", task="text-generation")
+        meta_model = TransformersModel("openai-community/gpt2", task="text-generation")
+        received = loads(
+            dumps(sender, tree=sender), meta_model._remoteable_persistent_objects(), Runner
+        )
+        assert received is meta_model
+        assert received.interleaver is request_interleaver
+        assert received.dispatched
+
+    def test_a_by_value_root_loads_during_a_run_on_a_shared_tree(self, renamed_gpt2, server_gpt2):
+        # A vLLM worker loads a request inside the run, on the tree every request
+        # shares, and rebuilding a by-value model writes `dispatched` on it.
+        blob = dumps(renamed_gpt2, tree=renamed_gpt2)
+        objects = server_gpt2._remoteable_persistent_objects()
+        interleaver = server_gpt2.interleaver
+        interleaver.shared = True
+        try:
+            with interleaver:
+                copy = loads(blob, objects)
+        finally:
+            interleaver.shared = False
+        assert copy.dispatched and _copy_of(copy.layers, server_gpt2.transformer.h)
+
+    def test_a_child_edit_naming_the_root_round_trips(self):
+        # Pickle reaches the child first, then the root its edit names, and the root
+        # is rebuilt while the child is still empty.
+        sender, receiver = Envoy(_Stack()), Envoy(_Stack())
+        stage = sender.decoder_blocks[0]
+        root = sender
+        with stage.edit(inplace=True):
+            root.decoder_blocks[0].mixer.output.save()
+        copy = loads(dumps(stage, tree=sender), _objects(receiver))
+        assert len(copy._edits) == 1
+
+    def test_a_payload_is_freed_without_a_gc_pass(self):
+        sender, receiver = Envoy(_Stack()), Envoy(_Stack())
+        table = _objects(receiver)
+        tensor = torch.zeros(4)
+        gc.collect()
+        gc.disable()
+        try:
+            copy, carried = loads(dumps((sender, tensor), tree=sender), table)
+            child = copy.decoder_blocks[0].mixer
+            refs = weakref.ref(copy), weakref.ref(child), weakref.ref(carried)
+            del copy, child, carried
+            assert all(ref() is None for ref in refs)
+        finally:
+            gc.enable()
+
+    def test_a_child_captured_above_the_block_reaches_its_parent_and_root(self, gpt2, server_gpt2):
+        with server_gpt2.trace(PROMPT):
+            want = server_gpt2.lm_head.output.save()
+        layer = gpt2.transformer.h[3]
+        backend = _ServerRoundTrip(server_gpt2)
+        with gpt2.trace(PROMPT, backend=backend):
+            out = layer.root.lm_head.output.save()
+        assert _matches(backend.saved["out"], want)
+        # Nothing else holds the parent's copy, here or in a GC-free process.
+        gc.disable()
+        try:
+            copy = loads(dumps(layer, tree=gpt2), server_gpt2._remoteable_persistent_objects())
+            assert copy.parent is copy.parent and copy.parent.path == "model.transformer.h"
+            assert copy.root.path == "model"
+        finally:
+            gc.enable()
+
+    def test_parent_and_root_reach_the_by_value_envoy_above(self, renamed_gpt2, server_gpt2):
+        copy = loads(dumps(renamed_gpt2, tree=renamed_gpt2), server_gpt2._remoteable_persistent_objects())
+        assert copy.transformer.ln_f.parent is copy.transformer
+        assert copy.transformer.ln_f.root is copy
+        assert copy.transformer.ln_f.root.layers is copy.transformer.h
+
+    def test_a_receivers_edit_stays_out_of_a_payload(self, gpt2, server_gpt2):
+        with gpt2.trace(PROMPT):
+            clean = gpt2.lm_head.output.save()
+        with server_gpt2.edit(inplace=True):
+            server_gpt2.transformer.h[0].output[:] = 0
+        try:
+            backend = _ServerRoundTrip(server_gpt2)
+            with gpt2.trace(PROMPT, backend=backend):
+                out = gpt2.lm_head.output.save()
+            assert _matches(backend.saved["out"], clean)
+        finally:
+            server_gpt2.clear_edits()
+
+    def test_an_edit_copy_made_before_dispatch_names_the_current_objects(self, server_gpt2):
+        from nnsight.modeling.transformers import TransformersModel
+
+        client = TransformersModel("openai-community/gpt2", task="text-generation")
+        with client.edit() as (_, edited):
+            edited.transformer.h[0].output[:] = 0
+        before = len(dumps(edited, tree=client))
+        client.dispatch()
+        blob = dumps(edited, tree=client)
+        assert len(blob) == before
+        copy = loads(blob, server_gpt2._remoteable_persistent_objects())
+        assert copy._module is server_gpt2._module and len(copy._edits) == 1
+
+    def test_a_copy_keeps_its_own_dicts(self, gpt2, server_gpt2):
+        objects = server_gpt2._remoteable_persistent_objects()
+        copy = loads(dumps(gpt2, tree=gpt2), objects)
+        copy.kwargs["planted"] = True
+        copy._aliases["planted"] = "x.y"
+        again = loads(dumps(gpt2, tree=gpt2), objects)
+        assert "planted" not in again.kwargs and "planted" not in again._aliases
+        assert "planted" not in server_gpt2.kwargs and "planted" not in server_gpt2._aliases
+
+    def test_base_model_on_a_copy_stays_with_the_payload(self, gpt2, server_gpt2):
+        before = dict(server_gpt2._aliases)
+        copy = loads(dumps(gpt2, tree=gpt2), server_gpt2._remoteable_persistent_objects())
+        assert _copy_of(copy.base_model, server_gpt2.transformer)
+        assert server_gpt2._aliases == before
+
+    def test_a_module_missing_from_the_map_raises_the_id_error(self):
+        sender, receiver = Envoy(_Stack()), Envoy(_Stack())
+        table = _objects(receiver)
+        del table["Module:model.output_projection"]
+        # Loading links the root's direct children, which needs their modules.
+        with pytest.raises(UnknownPersistentIdError, match="Module:model.output_projection"):
+            loads(dumps(sender, tree=sender), table)
+
+    def test_a_module_cycle_ends_the_walk(self):
+        sender = Envoy(_Loop())
+        with sender.inner.edit(inplace=True):
+            sender.inner.mixer.output.save()
+        assert "Envoy:model" not in _names_in(dumps(sender, tree=sender))
+
+    def test_a_tensor_parallel_class_map_is_not_state(self):
+        from nnsight.modeling.tp.envoys import TPEnvoy, tp_envoys
+
+        sender = Envoy(_Stack(), envoys=tp_envoys())
+        assert type(sender.output_projection) is TPEnvoy
+        assert _names_in(dumps(sender, tree=sender)) == {"Envoy:model", "Interleaver"}

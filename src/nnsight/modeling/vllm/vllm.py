@@ -1059,7 +1059,9 @@ class VLLM(Remotable):
                 )
 
         for index, (mediator, param) in enumerate(zip(attached, params)):
-            param.extra_args = {"nnsight_mediator": dumps(mediator)}
+            # The block names envoys by path, and the worker wraps the same model
+            # at the same paths, so each resolves to a copy made for this request.
+            param.extra_args = {"nnsight_mediator": dumps(mediator, tree=self)}
             named = getattr(param, "nnsight_named", frozenset())
             if "lora_request" not in named:
                 lora_requests[index] = trace_adapter
@@ -1105,15 +1107,14 @@ class VLLM(Remotable):
     def _remoteable_from_model_key(cls, model_key: str, **kwargs: Any) -> "VLLM":
         return cls(model_key, **kwargs)
 
-    def _remoteable_persistent_objects(self) -> dict:
-        objects = super()._remoteable_persistent_objects()
-        objects["Tokenizer"] = self.tokenizer
+    def _persistent_attachments(self) -> dict[str, Any]:
+        objects = super()._persistent_attachments()
+        if self.tokenizer is not None:
+            objects["Tokenizer"] = self.tokenizer
         return objects
 
     def __getstate__(self) -> dict:
         state = super().__getstate__()
         # The engine is a live process handle; the far side has its own.
         state["vllm_entrypoint"] = None
-        if self.tokenizer is not None:
-            self.tokenizer._persistent_id = "Tokenizer"
         return state

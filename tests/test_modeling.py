@@ -627,14 +627,15 @@ class TestTransformers:
         assert objects["Interleaver"] is model.interleaver
         assert "Module:model" in objects
 
-    def test_getstate_tags_pipeline_and_tokenizer(self):
+    def test_persistent_ids_name_pipeline_and_tokenizer(self):
         model = FakeTransformers("some/repo")
-        state = model.__getstate__()
-        # The pipeline is kept (referenced by persistent id), not dropped, so a
-        # deserialized model's `self.pipeline` resolves to the server's live one.
-        assert state["pipeline"] is model.pipeline
-        assert model.pipeline._persistent_id == "Pipeline"
-        assert model.tokenizer._persistent_id == "Tokenizer"
+        # What the pickler writes as a name, by identity: the same names the
+        # server's map resolves, so a deserialized model's `self.pipeline` (and a
+        # tokenizer a block captured) is the server's live one.
+        names = model._persistent_attachments()
+        assert names["Pipeline"] is model.pipeline
+        assert names["Tokenizer"] is model.tokenizer
+        assert names["Interleaver"] is model.interleaver
 
 
 class TestStatusDisplay:
@@ -844,16 +845,21 @@ class TestSerialization:
         objects = {"Interleaver": envoy.interleaver}
         for node in envoy.modules():
             objects[f"Module:{node.path}"] = node._module
+            objects[f"Envoy:{node.path}"] = node
         return objects
 
     def test_modules_referenced_not_serialized(self):
         from nnsight.intervention.serialization import dumps, loads
 
-        envoy = Envoy(Model())
-        restored = loads(dumps(envoy), self._persistent_map(envoy))
-        # modules and interleaver resolve to the same server-side objects
+        # An alias bound on the root is state the receiver's tree lacks, so the
+        # root goes by value; its module, interleaver and children are names,
+        # and a child named resolves to the receiver's own, copied for the payload.
+        envoy = Envoy(Model(), rename={"layers": "blocks"})
+        restored = loads(dumps(envoy, tree=envoy), self._persistent_map(envoy))
+        assert restored is not envoy and restored.blocks is restored.layers
         assert restored._module is envoy._module
-        assert getattr(restored.layers, "0").attn._module is getattr(envoy.layers, "0").attn._module
+        assert restored.layers is not envoy.layers and restored.layers.path == envoy.layers.path
+        assert restored.layers._module is envoy.layers._module
         assert restored.interleaver is envoy.interleaver
         assert [n.path for n in restored] == [n.path for n in envoy]
 
@@ -861,10 +867,10 @@ class TestSerialization:
         from nnsight.intervention.serialization import dumps
 
         # Same structure, vastly different weight sizes -> identical blob size,
-        # because the modules are referenced by id, not serialized.
+        # because an envoy of the tree travels as its path.
         small = Envoy(nn.Linear(2, 2))
         big = Envoy(nn.Linear(2000, 2000))
-        assert len(dumps(small)) == len(dumps(big))
+        assert len(dumps(small, tree=small)) == len(dumps(big, tree=big))
 
     def test_unknown_persistent_id_raises(self):
         from nnsight.intervention.serialization import (
@@ -875,7 +881,16 @@ class TestSerialization:
 
         envoy = Envoy(Model())
         with pytest.raises(UnknownPersistentIdError):
-            loads(dumps(envoy), {})  # no persistent objects provided
+            loads(dumps(envoy, tree=envoy), {})  # no persistent objects provided
+
+    def test_an_envoy_with_no_tree_to_name_it_is_refused(self):
+        import pickle
+
+        from nnsight.intervention.serialization import dumps
+
+        envoy = Envoy(Model())
+        with pytest.raises(pickle.PicklingError, match="no model to name it from"):
+            dumps(envoy)
 
     def test_dump_load_file_round_trip(self):
         import io
@@ -884,10 +899,12 @@ class TestSerialization:
 
         envoy = Envoy(Model(n_layers=1))
         buffer = io.BytesIO()
-        dump(envoy, buffer)
+        dump(envoy, buffer, tree=envoy)
         buffer.seek(0)
         restored = load(buffer, self._persistent_map(envoy))
-        assert restored._module is envoy._module
+        # The receiver's own, copied for the payload.
+        assert restored is not envoy and restored.path == envoy.path
+        assert type(restored) is type(envoy) and restored._module is envoy._module
 
 
 class TestRemoteBackend:

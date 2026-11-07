@@ -38,7 +38,7 @@ tags: [reference, glossary]
 
 **OutOfOrderError** — a location was requested after the model ran past it, or was never reached. [errors/out-of-order-error.md](../errors/out-of-order-error.md)
 
-**Persistent object** — an object pickled as an id the receiver resolves to its own copy (how remote requests reference modules without shipping weights). [developing/serialization.md](../developing/serialization.md)
+**Persistent object**: an object pickled as an id the receiver resolves to its own copy (how remote requests reference modules and envoys without shipping weights or the tree). [developing/serialization.md](../developing/serialization.md)
 
 **Scope** — the namespace a captured block runs in: a snapshot of the frame's locals, locals shared with sibling blocks, and globals. [concepts/deferred-execution.md](../concepts/deferred-execution.md)
 

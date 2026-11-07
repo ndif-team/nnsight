@@ -115,7 +115,7 @@ paths in `test_language.py` (`skipif(not peft_installed)`).
 | `test_backward.py` | `with tensor.backward():` gradient access |
 | `test_saving.py` | `save()` / `.save()` (function and method forms), nested saves, thread safety |
 | `test_editing.py` | `model.edit(...)`, edit-with-attachment, edit serialization |
-| `test_serialization.py` | source-based `dumps`/`loads`, lambdas, recursion, local env, linecache, `remote="local"` simulation, server execution, model keys |
+| `test_serialization.py` | source-based `dumps`/`loads`, lambdas, recursion, local env, linecache, `remote="local"` simulation, server execution, model keys, envoys by reference, payload copies |
 | `test_remote_backend.py` | `AsyncRemoteBackend` websocket status stream consumption |
 | `test_ndif.py` | `nnsight.ndif` helpers (register, status, env comparison, `pull_env`) offline |
 | `test_modeling.py` | `_update`/meta device/loadable/meta/scan/import path/remotable/remote env, HF + Transformers construction, status display, backend threading |

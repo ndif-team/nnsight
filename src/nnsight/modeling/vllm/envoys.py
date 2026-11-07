@@ -25,7 +25,7 @@ from typing import Any
 
 import torch
 
-from ...intervention.envoy import Envoy
+from ...intervention.envoy import Envoy, RuntimeEnvoys
 
 
 def parallel_envoys() -> dict:
@@ -46,12 +46,14 @@ def parallel_envoys() -> dict:
         VocabParallelEmbedding,
     )
 
-    return {
-        ColumnParallelLinear: ParallelEnvoy,
-        RowParallelLinear: ParallelEnvoy,
-        VocabParallelEmbedding: ParallelEnvoy,
-        BaseLinearLayerWithLoRA: ParallelEnvoy,
-    }
+    return RuntimeEnvoys(
+        {
+            ColumnParallelLinear: ParallelEnvoy,
+            RowParallelLinear: ParallelEnvoy,
+            VocabParallelEmbedding: ParallelEnvoy,
+            BaseLinearLayerWithLoRA: ParallelEnvoy,
+        }
+    )
 
 
 class ParallelEnvoy(Envoy):

@@ -13,9 +13,16 @@ Two mechanisms layer on top of cloudpickle:
   these tuples, and the function reducer runs a dynamic ``def``'s source/globals
   through it too; `_load_function` compiles the source back to a code
   object on the far side.
-* Persistent ids — objects carrying a ``_persistent_id`` in their ``__dict__``
-  are written as that id and resolved on the other side from a
-  ``persistent_objects`` map (keeps the model out of the payload).
+* Persistent ids: given any envoy of a model (``tree=``), the pickler writes what
+  both sides hold as a name, and the receiver resolves the name from its
+  ``persistent_objects`` map (see ``Remotable._remoteable_persistent_objects``).
+  The names cover the interleaver and the wrapper's attachments (a tokenizer, a
+  pipeline) by identity, a module of the tree as ``Module:<path>``, and an envoy
+  of the tree as ``Envoy:<path>``. Both sides wrap the same model in the same
+  tree, so the receiver already has every envoy a block can name. An envoy
+  holding state the receiver lacks (an edit, a ``rename=`` alias, a caller's
+  class) goes by value, with its stateless children by name. An envoy of any
+  other tree is refused, since the receiver cannot resolve it.
 """
 
 from __future__ import annotations
@@ -27,10 +34,13 @@ import linecache
 import pickle
 import textwrap
 import types
-from typing import Any, Optional
+import weakref
+from typing import Any, Callable, Optional
 
 import cloudpickle
 from cloudpickle.cloudpickle import _get_cell_contents
+
+from .envoy import Envoy
 
 DEFAULT_PROTOCOL = 4
 
@@ -336,8 +346,54 @@ def _fill(func: types.FunctionType, globals: dict) -> None:
     func.__globals__.update(globals)
 
 
+# Exact types the pickler never names. A payload is mostly these, so
+# `persistent_id` returns early for them.
+_ATOMS = frozenset(
+    {type(None), bool, int, float, complex, str, bytes, list, tuple, dict, set, frozenset}
+)
+
+
+class _EnvoyName:
+    """The name of an envoy, written where a reduce needs the name and not the envoy."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+
+def _named_envoy(envoy: Envoy) -> Envoy:
+    """Return the envoy a payload names; pickle then applies its state to it."""
+    return envoy
+
+
 class CustomCloudPickler(cloudpickle.CloudPickler):
-    """Pickler that serializes dynamic ``def`` functions by source, not bytecode."""
+    """Pickler that serializes dynamic ``def`` functions by source, not bytecode.
+
+    ``tree`` is any envoy of the model the payload is written against, or ``None``.
+    With it, the model's objects are written as names the receiver resolves from
+    its own tree; see the module docstring and `persistent_id`. Without it, writing
+    an envoy raises `pickle.PicklingError`.
+    """
+
+    def __init__(self, file: Any, protocol: int = DEFAULT_PROTOCOL, tree: Any = None) -> None:
+        super().__init__(file, protocol=protocol)
+        # A trace on a block still captures the tokenizer, and the root holds the
+        # tree's named objects.
+        root = tree.root if tree is not None else None
+        self._tree = tree
+        self._interleaver = root.interleaver if root is not None else None
+        # The model's objects a block may have captured on its own (``tok =
+        # model.tokenizer`` above the trace), by identity.
+        self._ids = (
+            {id(obj): name for name, obj in root._persistent_attachments().items()}
+            if root is not None
+            else {}
+        )
+        # Which envoys carry state below them, by identity (see `Envoy._state_below`).
+        self._stateful: dict[int, bool] = {}
+        # A tree with no state anywhere: every envoy registered on it is its path.
+        self._clean = self._interleaver is not None and not any(
+            envoy._carries_state() for envoy in self._interleaver.envoys.values()
+        )
 
     def _dynamic_function_reduce(self, func: types.FunctionType) -> tuple:
         code = func.__code__
@@ -383,40 +439,149 @@ class CustomCloudPickler(cloudpickle.CloudPickler):
         )
         return (_load_function, args, globals, None, None, _fill)
 
+    def _goes_by_name(self, envoy: Envoy) -> bool:
+        if self._clean and self._interleaver.envoys.get(id(envoy._module)) is envoy:
+            return True
+        return not envoy._state_below(self._stateful)
+
+    def reducer_override(self, obj: Any) -> Any:
+        # The envoy running the payload goes as its name when it holds no state, and
+        # pickle applies this state to what the name resolves to. That is the step a
+        # by-value envoy gets: `__setstate__` runs and the interleaver is the
+        # receiver's for this request.
+        if obj is self._tree and self._goes_by_name(obj):
+            return _named_envoy, (_EnvoyName(obj.path),), {"interleaver": self._interleaver}
+        return super().reducer_override(obj)
+
     def persistent_id(self, obj: Any) -> Optional[Any]:
-        # Reference (don't serialize) anything tagged with a _persistent_id.
-        try:
-            return obj.__dict__["_persistent_id"]
-        except (AttributeError, KeyError, TypeError):
+        # Called for every object pickled, so the common types return first.
+        if type(obj) in _ATOMS:
             return None
+        pid = self._ids.get(id(obj))
+        if pid is not None:
+            return pid
+        if type(obj) is _EnvoyName:
+            return f"Envoy:{obj.path}"
+        if self._interleaver is not None:
+            # The tree's module for `obj`, if it is one: the interleaver registers
+            # every module it wraps, by identity.
+            envoy = self._interleaver.envoys.get(id(obj))
+            if envoy is not None and envoy._module is obj:
+                return f"Module:{envoy.path}"
+            # The interleaver identifies the tree. An envoy of the tree goes as its
+            # path, unless it or an envoy under it holds state the receiver lacks;
+            # then it goes by value and its children are checked in turn.
+            if isinstance(obj, Envoy) and obj.interleaver is self._interleaver:
+                # The envoy running the payload; see `reducer_override`.
+                if obj is self._tree:
+                    return None
+                return f"Envoy:{obj.path}" if self._goes_by_name(obj) else None
+        if isinstance(obj, Envoy):
+            if self._interleaver is None:
+                raise pickle.PicklingError(
+                    f"Cannot write envoy {obj.path!r} with no model to name it from; "
+                    "pass `tree=<the model>` to `dumps`"
+                )
+            raise pickle.PicklingError(
+                f"Envoy {obj.path!r} belongs to a different model than the payload "
+                "is written against; the receiver cannot resolve it"
+            )
+        return None
 
 
 class UnknownPersistentIdError(pickle.UnpicklingError):
     """A persistent id was encountered with no entry in persistent_objects."""
 
 
+def _resolve(persistent_objects: dict, pid: Any) -> Any:
+    if pid not in persistent_objects:
+        raise UnknownPersistentIdError(
+            f"{pid!r}: the receiver has no object under this id; a different model, "
+            "a module added after the map was built, or an older nnsight on the receiver"
+        )
+    return persistent_objects[pid]
+
+
+class _PayloadCopies:
+    """One payload's copies of a receiver's envoys, by the id of the envoy each was made from.
+
+    A receiver serves many payloads against one tree, so what a block does to an
+    envoy (an edit, an attribute) stays with its payload's copy. A copy has the same
+    class and path, so it reads the same values, and holds the receiver's
+    ``Module:<path>`` entry, which a server may have wrapped to guard the model. The
+    table's values are weak: an unmaterialized copy holds the table, and a strong
+    table would make a reference cycle that keeps the receiver's tree alive until a
+    GC pass.
+    """
+
+    def __init__(self, persistent_objects: dict) -> None:
+        self.objects = persistent_objects
+        self.copies: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+    def __call__(self, origin: Envoy) -> Envoy:
+        copy = self.copies.get(id(origin))
+        if copy is None:
+            copy = object.__new__(type(origin))
+            state = copy.__dict__
+            state.update(
+                (name, dict(value) if type(value) is dict else value)
+                for name, value in origin.__dict__.items()
+                if not isinstance(value, Envoy) and name not in ("_parent", "_children", "_child_map")
+            )
+            state["_module"] = _resolve(self.objects, f"Module:{origin.path}")
+            state["_edits"] = []
+            state["_origin"] = origin
+            state["_copies"] = self
+            self.copies[id(origin)] = copy
+        return copy
+
+    def parent_link(self, parent: Optional[Envoy]) -> Optional[Callable[[], Envoy]]:
+        """The `_parent` value of a copy whose origin's parent is ``parent``."""
+        if parent is None:
+            return None
+        above = self.copies.get(id(parent))
+        if above is not None:
+            return weakref.ref(above)
+        # A copy reached without its parent: this link is all that keeps the parent's
+        # copy. Walking back down from it makes a cycle of envoys, freed by a GC pass.
+        above = self(parent)
+        return lambda: above
+
+
 class CustomCloudUnpickler(pickle.Unpickler):
-    """Unpickler that resolves persistent ids from a ``persistent_objects`` map."""
+    """Unpickler that resolves persistent ids from a ``persistent_objects`` map.
+
+    An envoy named by path (``Envoy:<path>``) resolves to a copy of the receiver's,
+    made for this payload (see `_PayloadCopies`). The receiver's tree serves every
+    payload, and what a block does to an envoy stays with that payload. While a copy
+    is alive, every name for its envoy in the payload resolves to it.
+    """
 
     def __init__(self, file: io.BufferedIOBase, persistent_objects: Optional[dict]):
         super().__init__(file)
         self.persistent_objects = persistent_objects or {}
+        self._copies = _PayloadCopies(self.persistent_objects)
 
     def persistent_load(self, pid: Any) -> Any:
-        if pid in self.persistent_objects:
-            return self.persistent_objects[pid]
-        raise UnknownPersistentIdError(pid)
+        obj = _resolve(self.persistent_objects, pid)
+        if isinstance(obj, Envoy):
+            return self._copies(obj)
+        return obj
 
 
-def dump(obj: Any, file: Any, protocol: int = DEFAULT_PROTOCOL) -> None:
-    """Serialize ``obj`` to an open binary file (``pickle.dump`` semantics)."""
-    CustomCloudPickler(file, protocol=protocol).dump(obj)
+def dump(obj: Any, file: Any, protocol: int = DEFAULT_PROTOCOL, tree: Any = None) -> None:
+    """Serialize ``obj`` to an open binary file (``pickle.dump`` semantics).
+
+    ``tree`` is any envoy of the model whose objects travel as names (see
+    [`CustomCloudPickler`][nnsight.intervention.serialization.CustomCloudPickler]).
+    """
+    CustomCloudPickler(file, protocol=protocol, tree=tree).dump(obj)
 
 
-def dumps(obj: Any, protocol: int = DEFAULT_PROTOCOL) -> bytes:
-    """Serialize ``obj`` to bytes (``pickle.dumps`` semantics)."""
+def dumps(obj: Any, protocol: int = DEFAULT_PROTOCOL, tree: Any = None) -> bytes:
+    """Serialize ``obj`` to bytes (``pickle.dumps`` semantics); ``tree`` as in `dump`."""
     buffer = io.BytesIO()
-    dump(obj, buffer, protocol=protocol)
+    dump(obj, buffer, protocol=protocol, tree=tree)
     return buffer.getvalue()
 
 

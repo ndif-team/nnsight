@@ -425,18 +425,10 @@ class DiffusionModel(HuggingFaceModel):
 
     # -- remote --------------------------------------------------------------
 
-    def _remoteable_persistent_objects(self) -> dict:
-        objects = super()._remoteable_persistent_objects()
+    def _persistent_attachments(self) -> dict[str, Any]:
+        objects = super()._persistent_attachments()
         # The pipeline (and its light components) resolve to the server's live one;
-        # its module components are already tagged by Envoy.__getstate__.
+        # its module components are modules of the tree, named by path.
         if self.pipeline is not None:
             objects["Pipeline"] = self.pipeline
         return objects
-
-    def __getstate__(self) -> dict:
-        state = super().__getstate__()
-        # Reference the pipeline by persistent id instead of serializing it; the
-        # server resolves it to its live object (see _remoteable_persistent_objects).
-        if self.pipeline is not None:
-            self.pipeline._persistent_id = "Pipeline"
-        return state

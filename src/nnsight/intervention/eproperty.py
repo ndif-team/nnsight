@@ -204,6 +204,12 @@ class eproperty(property):
         self._transform = func
         return self
 
+    def __reduce__(self) -> tuple:
+        # A host class defined in a script, or in a module registered to travel
+        # by value, is rebuilt on the receiver from its namespace, this
+        # descriptor included; `property` has no pickle support of its own.
+        return (type(self), (), vars(self).copy())
+
     def __str__(self) -> str:
         """The line an envoy's repr shows for this value: ``(name) -> ReturnType: description``.
 

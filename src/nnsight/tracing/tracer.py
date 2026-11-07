@@ -368,6 +368,9 @@ class Tracer:
         self.info: Tracer.Info | None = None
         self.node: ast.With | ast.AsyncWith | None = None
         self.backend = backend if backend is not None else Backend()
+        # The model this block runs against, when there is one: a trace's and a
+        # session's. A serialized payload writes that model's objects as names.
+        self.envoy: Any = None
 
     def __getstate__(self) -> dict:
         """Serialize the tracer, minus what can't or shouldn't travel.
@@ -625,5 +628,8 @@ class Tracer:
                 # caller returns, with no cyclic GC pass.
                 if self.info is not None:
                     self.info.frame = None
+                # Likewise the model a session was opened on: `with
+                # model.session() as s:` leaves `s` bound after the block.
+                self.envoy = None
             return True
         return False
