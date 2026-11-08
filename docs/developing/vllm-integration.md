@@ -332,21 +332,22 @@ the meta model, and a server holds one dispatched async `VLLM`.
   mode="async", dispatch=True, ...)`, optionally guards requests with an
   `ndif-api-key` header, and `uvicorn.run`s the app. Default host is loopback; it
   warns on `0.0.0.0` since it runs client-sent code.
-- `serve/server.py` — a FastAPI app. `POST /v1/nnsight/generate` takes a
-  `RequestModel.serialize(tracer)` blob, `_build_tracer` deserializes it
-  (`RequestModel.deserialize`, plus restoring `tracer.node`), calls `prepare` +
-  `_attach_mediators`, runs each invoke through the engine, collects saves via
-  `collect_nnsight`, and `torch.save`s `{"saves", "error"}` back (saved values only;
-  a build or runtime error rides `error` with its real type + traceback). Worker
-  building is synchronous (all before the first `await`), so concurrent requests
-  never interleave on the shared interleaver. `POST /v1/nnsight/register/{id}` and
+- `serve/server.py` — a FastAPI app. `POST /v1/nnsight/generate` takes a pickle of
+  `(prompts, params, lora_requests)`, one entry per invoke, runs each through the
+  engine, collects saves via `collect_nnsight`, and `torch.save`s `{"saves", "error"}`
+  back (saved values only; a runtime error rides `error` with its real type +
+  traceback). Each invoke's block arrives serialized in its `SamplingParams.extra_args`
+  and goes to the workers unopened, so the server never rebuilds a tracer and never
+  touches its own interleaver. `POST /v1/nnsight/register/{id}` and
   `.../clear` install and drop a block on the server's engine — the HTTP form of the
   `collective_rpc` an in-process `model.edit()` makes. `GET /health` reports
   readiness, and `_ready()` is what every endpoint calls first.
 - `serve/http.py` — the headers, timeouts, and non-200 handling both client halves
   share: `LocalServeBackend` sending a trace and `ServeRegistration` sending a block.
 - `serve/backend.py` — `LocalServeBackend(Backend)`, the client side of `serve=url`:
-  serializes the trace, POSTs it, `torch.load`s the result, `raise_deferred`s any
+  runs `tracer.prepare` and `_attach_mediators` on the meta model (what `VLLM._call`
+  does before its engine call, so an error building the requests raises here),
+  pickles the requests, POSTs them, `torch.load`s the result, `raise_deferred`s any
   error, `mark`s the saves, and `push`es them into the caller's frame — so reading a
   `.save()`d variable after the block works exactly as locally.
 

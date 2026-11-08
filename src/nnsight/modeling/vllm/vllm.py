@@ -810,7 +810,7 @@ class VLLM(Remotable):
         the mistake can be reported at the call rather than as the request's
         deferred error.
         """
-        if edits is None or getattr(self, "_serving", False):
+        if edits is None or self.vllm_entrypoint is None:
             return
         installed = {edit.name for edit in self._installed_edits if edit.name is not None}
         unknown = [name for name in edits if name not in installed]
@@ -1090,12 +1090,9 @@ class VLLM(Remotable):
         # the check below and rides `extra_args` beside the block.
         kwargs = dict(kwargs)
         trace_edits = self._edit_names(kwargs.pop("edits", None))
-        # Not on an nnsight-serve server: its edits arrive over HTTP, unseen by
-        # this list, and the worker checks every request anyway.
-        if not getattr(self, "_serving", False):
-            self._check_edit_names(trace_edits)
-            for param in params:
-                self._check_edit_names(getattr(param, "nnsight_edits", None))
+        self._check_edit_names(trace_edits)
+        for param in params:
+            self._check_edit_names(getattr(param, "nnsight_edits", None))
 
         default = SamplingParams()
         for attr in kwargs:

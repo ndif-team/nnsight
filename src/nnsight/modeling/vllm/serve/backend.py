@@ -1,10 +1,12 @@
 """Run a trace on a remote nnsight-serve engine.
 
 The backend for ``model.trace(..., serve=url)``. The trace is written against a
-meta model — no GPU, no weights — serialized in the same form the remote (NDIF)
-path uses, and sent to a running nnsight-serve instance. The server runs it and
-returns the saved values, which are pushed back into the caller's frame exactly as
-a local run would, so reading a ``.save()``d value after the block just works::
+meta model (no GPU, no weights). This backend builds the trace's requests here, one
+per invoke with that invoke's serialized block in its ``SamplingParams``, the same
+requests an in-process engine is given, and sends them to a running nnsight-serve
+instance. The server submits them to its engine and returns the saved values, which
+are pushed back into the caller's frame exactly as a local run would, so reading a
+``.save()``d value after the block just works::
 
     model = VLLM("gpt2")                                       # no GPU needed
     with model.trace("Hello", serve="http://host:8000", api_key="..."):
@@ -13,14 +15,16 @@ a local run would, so reading a ``.save()``d value after the block just works::
 
 ``api_key`` (optional) is sent as the ``ndif-api-key`` header. The server's response
 is a ``torch.save`` of ``{"saves": {name: value}, "error": <deferred or None>}`` —
-saved values only, so read generated tokens by saving ``tracer.result``. A build or
-runtime error comes back as ``error`` and is re-raised at the client with its real type and traceback; a
+saved values only, so read generated tokens by saving ``tracer.result``. An error
+building the requests raises here, before anything is sent. A runtime error comes
+back as ``error`` and is re-raised at the client with its real type and traceback; a
 transport/service failure (e.g. the engine not ready) surfaces as ``ConnectionError``.
 """
 
 from __future__ import annotations
 
 import io
+import pickle
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -40,10 +44,21 @@ class LocalServeBackend(Backend):
         self.api_key = api_key
 
     def __call__(self, tracer: "Tracer") -> None:
-        from ....schema.request import RequestModel
+        from ....intervention.util import clear_shared_locals
 
-        blob = RequestModel.serialize(tracer, compress=False)
-        saves = self._send(blob)
+        model = self.model
+        try:
+            # What `VLLM._call` does before it hands the requests to its engine;
+            # the meta model has none, so the server's engine takes them.
+            _, (prompts, params, lora_requests), forward_kwargs = tracer.prepare(
+                tracer.info.code
+            )
+            model._attach_mediators(params, **forward_kwargs)
+        finally:
+            # The workers are serialized onto the requests now; the live ones are done.
+            model.interleaver.cancel()
+            clear_shared_locals()
+        saves = self._send(pickle.dumps((prompts, params, lora_requests)))
         self._push(saves, tracer)
 
     def _send(self, blob: bytes) -> dict:
