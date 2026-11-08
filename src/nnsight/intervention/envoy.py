@@ -370,7 +370,6 @@ class Envoy:
         # Only reached when this envoy is pickled by value (it or a descendant
         # carries state; see `_carries_state`). The pickler still replaces
         # `_module` and `interleaver` in the returned dict with persistent IDs.
-        self._materialize()
         # If `self` is a shallow copy created by `.edit()` before dispatch,
         # a later dispatch updated the live tree's `_module` and `pipeline` in
         # `interleaver.envoys` while leaving `self._module` pointing at the old
@@ -382,7 +381,6 @@ class Envoy:
             current = next((envoy for envoy in registry.values() if envoy.path == self.path), self)
         state = {**current.__dict__, "_edits": self._edits}
         state.pop("_parent", None)
-        state.pop("_copies", None)
         return state
 
     def _materialize(self) -> None:
@@ -453,12 +451,7 @@ class Envoy:
         known = memo.get(key)
         if known is not None:
             return known
-        if "_origin" in self.__dict__:
-            # An unmaterialized receiver copy has not created child copies yet;
-            # delegate the subtree check to the origin envoy it wraps.
-            children = [self._origin]
-        else:
-            children = [child for _, child in self._named_children()]
+        children = [child for _, child in self._named_children()]
         # Seed `False` before recursing to break cycles in the module graph.
         memo[key] = False
         memo[key] = self._carries_state() or any(child._state_below(memo) for child in children)

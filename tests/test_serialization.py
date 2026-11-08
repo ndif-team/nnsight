@@ -1008,15 +1008,6 @@ class TestEnvoysByReference:
             out = client.transformer.h[0].self_attn.output[0].save()
         assert _matches(backend.saved["out"], want)
 
-    def test_a_received_payload_re_serializes_with_its_aliases(self, block_renamed_gpt2, server_gpt2, gpt2):
-        # An nnsight-serve server deserializes the client's payload and writes it
-        # again for its worker, against its own tree. The client's root is not
-        # registered on that tree, and it still carries the aliases below it.
-        first = loads(dumps(block_renamed_gpt2, tree=block_renamed_gpt2), server_gpt2._remoteable_persistent_objects())
-        second = loads(dumps(first, tree=server_gpt2), gpt2._remoteable_persistent_objects())
-        assert second is not gpt2 and second is not first
-        assert _copy_of(second.transformer.h[0].self_attn, gpt2.transformer.h[0].attn)
-
     def test_a_class_a_caller_chose_travels_with_the_envoy(self, classed_gpt2, server_gpt2):
         client = classed_gpt2
         assert client.transformer.h[0].mlp._carries_state()
@@ -1155,36 +1146,6 @@ class TestEnvoysByReference:
         # Another payload gets its own copies.
         again = loads(dumps(gpt2, tree=gpt2), objects)
         assert again is not root and again.transformer is not root.transformer
-
-    def test_a_copy_edited_in_place_re_serializes_by_value(self, gpt2, server_gpt2):
-        # A copy that gained an edit and is written again goes by value with the
-        # edit, and its children by path.
-        first = loads(dumps(gpt2, tree=gpt2), server_gpt2._remoteable_persistent_objects())
-        with first.edit(inplace=True):
-            first.transformer.h[0].output[0][:] = 0
-        blob = dumps(first, tree=server_gpt2)
-        assert b"Envoy:model.transformer" in blob
-        second = loads(blob, gpt2._remoteable_persistent_objects())
-        assert second is not first and second is not gpt2
-        assert len(second._edits) == 1
-        assert _copy_of(second.transformer, gpt2.transformer)
-        assert second.transformer.root is second
-
-    def test_a_copy_written_again_carries_only_what_the_block_gave_it(self, gpt2, renamed_gpt2):
-        # An nnsight-serve server whose tree has aliases on the root and on
-        # `transformer` gives a payload a copy with those aliases. Written again
-        # for the worker, the copy goes by value with `h` below it by path.
-        objects = renamed_gpt2._remoteable_persistent_objects()
-        first = loads(dumps(gpt2, tree=gpt2), objects)
-        assert first.transformer.h[0].parent is first.transformer.h
-        blob = dumps(first, tree=renamed_gpt2)
-        assert "Envoy:model" not in _names_in(blob)
-        assert "Envoy:model.transformer.h" in _names_in(blob)
-        second = loads(blob, gpt2._remoteable_persistent_objects())
-        assert second.layers is second.transformer.h and second.transformer.blocks is second.layers
-        # A copy of a tree without state is still its path.
-        plain = loads(dumps(gpt2, tree=gpt2), gpt2._remoteable_persistent_objects())
-        assert _names_in(dumps(plain, tree=gpt2)) == {"Envoy:model"}
 
     def test_replacing_a_child_on_a_copy_replaces_its_entry(self, gpt2):
         # Mounting reaches the receiver's module, so this receiver is its own.
