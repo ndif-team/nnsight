@@ -239,6 +239,36 @@ when you want the reconstruction to replace the layer; otherwise keep `.features
 read-only and reconstruct with a plain `.output =` (Pattern A). The full surface is
 in [extending-envoy.md](../developing/extending-envoy.md).
 
+## Collecting one expert's activations
+
+An SAE trained inside a mixture-of-experts layer sees the activation between an
+expert's two projections, for the tokens routed to that expert. Under transformers'
+fused experts those rows live in the kernel's pair buffers, and
+`experts.kernel.expert_activation(expert=e)` returns them per token
+([kernel](../usage/kernel.md#per-expert-rows-of-a-grouped-mixture-of-experts-kernel)):
+`[batch, seq, intermediate]`, zero at tokens the router did not send to `e`. The
+router's `top_k_index` is the module's input, flat over the padded batch, so reshape
+it to pick the routed rows:
+
+```python
+experts = model.model.layers[0].mlp.experts
+experts.kernel
+with model.trace() as tracer:
+    with tracer.invoke(short_prompt):
+        index = experts.inputs[0][1].save()                           # [batch * seq, top_k], whole batch
+        a = experts.kernel.expert_activation(expert=2).save()         # [1, seq, intermediate], left-padded
+    with tracer.invoke(long_prompts):
+        b = experts.kernel.expert_activation(expert=2).save()         # [2, seq, intermediate]
+
+routed = (index.view(3, -1, index.shape[-1]) == 2).any(-1)            # [batch, seq]
+rows = torch.cat([a[routed[:1]], b[routed[1:]]])                      # the routed rows, in token order
+```
+
+Pad positions are routed like any token and appear in `rows`; drop them with the
+attention mask from `model.inputs` before training. Masking a whole-batch
+`expert_activation()` (`[batch, seq, top_k, intermediate]`) by `top_k_index == 2`
+yields the same rows (`tests/test_kernel.py::TestWorkloads`).
+
 ## Interpretation tips
 
 - **Check reconstruction faithfulness first.** Replacing a layer's residual with
@@ -270,5 +300,6 @@ in [extending-envoy.md](../developing/extending-envoy.md).
 - [skip](../usage/skip.md) — replacing a module's output.
 - [extending-envoy](../developing/extending-envoy.md) — custom served values and the `envoys=` wiring.
 - [per-head-attention](per-head-attention.md) — another `eproperty` derived view.
+- [kernel](../usage/kernel.md) — the per-expert activation rows of a fused MoE layer.
 - `tests/test_editing.py` — `TestEditingWithAttachment` worked adapter/SAE examples.
 - `tests/test_language.py` — `TestCustomEnvoys`, the `envoys=` + `eproperty` matrix.

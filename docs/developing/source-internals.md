@@ -160,6 +160,16 @@ Two consequences:
   so the `handle` on `{base}.fn` is a no-op and the cached copy is reused. That is
   what makes a drill survive generation steps.
 
+`run_op` also serves kernel sites (`intervention/kernel.py`). A call whose callable is
+registered there (`F.scaled_dot_product_attention`) runs through its serve function,
+which returns the same output and a `Sites` reader of the kernel's inputs and
+exported statistics; the reader is handed to `{module}.kernel`, counted as
+`{module}.output` so a `tracer.iter` step lines up with the module's call. A call to
+a wrapper in the through set (transformers' attention interfaces) is drilled into
+on the model side, without the `.fn` handoff, when a worker is parked on that
+module's kernel location, so the kernel call inside it is bracketed with the
+arguments the kernel sees.
+
 A function that refers to its own name in its body is not drillable: the shell makes
 that name a local of the shell, so the self-reference compiles as a free variable
 with no matching cell, and `instrument`'s by-name lookup raises `KeyError`. Every

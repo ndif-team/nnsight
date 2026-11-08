@@ -66,6 +66,7 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `.input` | first positional arg (or first kwarg) | Read or overwrite the first input. |
 | `.inputs` | `(args, kwargs)` | All inputs to the module's forward. |
 | `.source` | `Source` | Operation-level access to the module's forward internals (see below). |
+| `.kernel` | `Kernel` | Sites inside the fused kernel the module's forward calls (see below). |
 | `.device` / `.devices` | `torch.device` / `set` | Device(s) of the module's parameters. |
 | `._module` | `torch.nn.Module` | The wrapped module itself (not a copy) — for `config`, your own PyTorch hooks, `named_parameters()`, `requires_grad_(False)`. |
 
@@ -82,6 +83,9 @@ Available on `model` and every wrapped submodule (`model.transformer.h[0].mlp`, 
 | `envoy.clear_edits` | `envoy.clear_edits()` | Drop all edits accumulated by `edit(inplace=True)`. |
 | `envoy[i]` / `for c in envoy` / `len(envoy)` | — | Index / iterate direct children (e.g. a `ModuleList`'s blocks). |
 | `envoy.source.<op>_<n>` | e.g. `.source.relu_0`, `.source.h_0` | A `SourceEnvoy` for the n-th call of `<op>` (or assignment to `<name>`, whose `.output` is the assigned value); same `.input`/`.output`/`.skip`/`.source` interface. `print(envoy.source)` lists them; naming in [source.md](../usage/source.md#operation-naming). |
+| `envoy.kernel.<site>(...)` | `.kernel.probs(heads=, query=, key=)`, `.kernel.scores(...)`, `.kernel.lse(heads=, query=)` | Attention probabilities / fp32 scores / the kernel's logsumexp from the SDPA kernel that ran, as a tensor carrying `.provenance`; an `int` index drops its axis, a slice/list keeps it. Read-only; in forward order like any location. [kernel.md](../usage/kernel.md). |
+| `envoy.kernel.chunk_states(...)` / `.states(...)` | `.kernel.chunk_states(chunks=, heads=)`, `.kernel.states(tokens=, heads=)` | On a gated-delta-rule or Mamba2 mixer: the recurrent state entering each chunk (exact export) and the state after a token (exact at chunk ends, otherwise derived by stepping the recurrence in fp32, drift in `.provenance.note`); fp32, served at prefill and at every decode step. [kernel.md](../usage/kernel.md#recurrent-states-of-a-chunked-kernel). |
+| `envoy.kernel.expert_output(...)` / `.expert_activation(...)` / `.expert_input(...)` | `.kernel.expert_output(tokens=, slot=)`, `.kernel.expert_output(expert=e)` | On a `grouped_mm` or `batched_mm` experts module: each (token, slot) pair's input, activation and down projection, `[batch, seq, top_k, dim]`, or one expert's rows per token before the routing weight (`0` where not routed); exact exports in token order, in the forward's dtype. [kernel.md](../usage/kernel.md#per-expert-rows-of-a-grouped-mixture-of-experts-kernel). |
 
 `model.iter` / `model.all()` are deprecated for `tracer.iter` / `tracer.all()`; every deprecated and removed name is in [migrating-to-0.8.md](./migrating-to-0.8.md).
 

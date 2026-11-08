@@ -165,6 +165,34 @@ dataset too large for one batch, chunk the texts and concatenate — one forward
 per chunk, never one per layer. To collect many modules at once, see
 [cache](../usage/cache.md).
 
+On a gated delta, Kimi delta attention, Mamba2 or Mamba layer the probe site is the recurrent state at a token,
+`mixer.kernel.states(tokens=..., heads=...)`, `[batch, tokens, heads, K, V]`
+([kernel](../usage/kernel.md#recurrent-states-of-a-chunked-kernel)). Most positions
+come out `derived` (the chunk boundary advanced to the token by the kernel's own
+intra-chunk formula) and the provenance note carries its check against the next boundary. The readout the state supports is the
+delta rule's own: `k_t @ S_s` is what the state after token `s` returns for token
+`t`'s key, so the distance to `v_t` says how much of token `t` the state still holds.
+A check worth running before training a probe on it:
+
+```python
+mixer = model.model.layers[0].linear_attn
+with model.trace(ids):
+    inputs = mixer.source.torch_chunk_gated_delta_rule_0.inputs.save()
+    states = mixer.kernel.states(tokens=slice(None)).save()      # [batch, T, heads, K, V]
+
+(_, key, value, *_), _ = inputs
+k = torch.nn.functional.normalize(key.float(), dim=-1).repeat_interleave(value.shape[2] // key.shape[2], 2)
+read = torch.einsum("bshkv,bthk->bsthv", states, k)              # state s read with token t's key
+err = (read - value.float()[:, None]).norm(dim=-1)              # [batch, state, token, heads]
+t = torch.arange(1, states.shape[1])
+assert (err[:, t, t] < err[:, t - 1, t]).all()                  # the write at t lowers token t's error
+# thirty tokens later the error is larger at 99.6% of (token, head) pairs on the test model
+```
+
+The keys are normalized and repeated per value head because that is what the kernel
+does with them; `tests/test_kernel.py::TestWorkloads` runs this on a two-layer
+Qwen3-Next.
+
 ## Causal validation
 
 A probe is correlational. To claim the model *uses* the direction, add it to the
@@ -254,3 +282,4 @@ which band to sweep, see [steering](steering.md).
 - [sae-and-auxiliary-modules](sae-and-auxiliary-modules.md) — unsupervised
   features instead of supervised probes.
 - [cache](../usage/cache.md) — collecting many modules at once.
+- [kernel](../usage/kernel.md) — recurrent states as a probe site.

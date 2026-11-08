@@ -48,6 +48,9 @@ module wrapped by several envoys routes to whichever interleaver is running
 
 An [`Envoy`][nnsight.intervention.envoy.Envoy] exposes operations as ``envoy.source.{name}_{n}``, whose
 ``.input``/``.inputs``/``.output``/``.skip`` mirror an Envoy's own, one level finer.
+The same bracket serves ``envoy.kernel.{site}(...)``: a call to a registered fused
+kernel runs through its serve function (intervention/kernel.py), so values the
+kernel computes but never writes reach a worker with the kernel's own statistics.
 """
 
 from __future__ import annotations
@@ -64,6 +67,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple
 
 import torch
 
+from . import kernel
 from .eproperty import eproperty
 from .interleaver import Mediator
 from .util import first_input, replace_first_input
@@ -490,12 +494,45 @@ def run_op(interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict)
     the worker can hand back a source-instrumented copy (cached in
     [`Interleaver.sourced`][nnsight.intervention.interleaver.Interleaver.sourced] for later fires); that copy runs in place of ``fn``,
     making *its* operations addressable under ``{base}.source.*`` — recursively.
+    A callable registered in intervention/kernel.py runs through its serve
+    function, and its reader is handed to the enclosing module's kernel location,
+    unless a worker is drilling into that callable with ``.source``; a registered
+    wrapper on the way to one is drilled into while a worker waits there.
     """
     args, kwargs = interleaver.handle(f"{base}.input", (args, kwargs))
     skipped = interleaver.handle(f"{base}.skip", NO_SKIP)
     if skipped is not NO_SKIP:
         # Skip: don't call fn; report the replacement as this op's output too.
         return interleaver.handle(f"{base}.output", skipped)
+    # A registered fused kernel runs through its serve function, which returns the
+    # same output and a reader of the kernel's statistics; the reader goes to the
+    # enclosing module's kernel location (see intervention/kernel.py). A wrapper
+    # on the way to one is drilled into when a worker waits on that location, as
+    # a worker's `.source` would drill, so the kernel call inside it reaches this
+    # bracket with the arguments the kernel sees. The serve runs only while a
+    # worker waits on the module's kernel location (occurrences are counted on the
+    # module's output, so a fire nobody reads costs nothing). A kernel a worker is
+    # drilling into with `.source` runs as the drilled copy instead, so its
+    # operations stay addressable; a kernel request on that fire is told so.
+    serve = kernel.serving(fn)
+    if serve is not None:
+        module = base.split(".source.", 1)[0]
+        if base not in interleaver.sourced:
+            if kernel.requested(interleaver, module):
+                value, sites = serve(fn, args, kwargs)
+                interleaver.handle(f"{module}{kernel.SUFFIX}", sites)
+                return interleaver.handle(f"{base}.output", value)
+        elif kernel.requested(interleaver, module):
+            interleaver.handle(
+                f"{module}{kernel.SUFFIX}",
+                kernel.Unavailable(f"{base!r} is drilled with .source in this trace; its kernel sites are not served on that call"),
+            )
+    if (
+        base not in interleaver.sourced
+        and kernel.passes_through(fn)
+        and kernel.requested(interleaver, base.split(".source.", 1)[0])
+    ):
+        interleaver.sourced[base] = drill(interleaver, base, fn)
     if base in interleaver.sourced:
         # First fire: the entry is still None (requested, not built) — serve the
         # live callable to the parked worker, which builds and caches the
@@ -507,6 +544,47 @@ def run_op(interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict)
             fn = entry[0]
     value = fn(*args, **kwargs)
     return interleaver.handle(f"{base}.output", value)
+
+
+def record(fn: Callable, args: tuple, kwargs: dict, prefixes: tuple[str, ...]) -> tuple[Any, dict[str, list[torch.Tensor]]]:
+    """Run ``fn`` instrumented; return its output and, per prefix, every tensor bound to a name starting with it.
+
+    A kernel serve function (intervention/recurrent.py, intervention/experts.py)
+    uses this to read a Python kernel's locals without changing its arithmetic:
+    the instrumented copy runs the same operations in the same order. A prefix
+    matches the binding names ``{prefix}_{n}``, so ``"state"`` collects every
+    rebinding of ``state`` and ``"state_2"`` the third one. A subscript assignment
+    (``x[i] = v``) is recorded as a binding of ``v`` under ``x``'s name; the tensor
+    bound to ``x`` before it is filled in place. Consecutive bindings of the same
+    tensor object (``x = None if ... else x``) are recorded once, so each list is
+    the sequence of distinct values the name held.
+    """
+    bound: dict[str, list[torch.Tensor]] = {prefix: [] for prefix in prefixes}
+
+    def op(location: str, callee: Callable, *op_args: Any, **op_kwargs: Any) -> Any:
+        value = callee(*op_args, **op_kwargs)
+        if callee is bind and isinstance(value, torch.Tensor):
+            name = location.removeprefix("source.")
+            for prefix, values in bound.items():
+                if (name == prefix or name.rsplit("_", 1)[0] == prefix) and (not values or value is not values[-1]):
+                    values.append(value)
+        return value
+
+    instrumented, _ = instrument(fn, op)
+    return instrumented(*args, **kwargs), bound
+
+
+def arguments(fn: Callable, args: tuple, kwargs: dict) -> dict[str, Any]:
+    """``fn``'s parameters bound to this call, defaults applied."""
+    signature = inspect.signature(fn).bind(*args, **kwargs)
+    signature.apply_defaults()
+    return signature.arguments
+
+
+def drill(interleaver: Any, path: str, fn: Callable) -> tuple[Callable, Compiled]:
+    """An instrumented ``fn`` whose operations are addressable under ``{path}.source.*``
+    while ``interleaver`` is interleaving; raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable]."""
+    return instrument(fn, make_op(lambda: (interleaver, path) if interleaver.interleaving else (None, None)))
 
 
 def make_op(locate: Callable[[], tuple]) -> Callable:
@@ -840,9 +918,7 @@ class SourceEnvoy:
                     f"function to drill into"
                 )
             if interleaver.sourced[self.path] is None:
-                interleaver.sourced[self.path] = instrument(  # raises SourceNotAvailable if it can't
-                    fn, make_op(lambda: (interleaver, self.path) if interleaver.interleaving else (None, None))
-                )
+                interleaver.sourced[self.path] = drill(interleaver, self.path, fn)
         return Source(self.envoy, prefix=self.path, compiled=interleaver.sourced[self.path][1])
 
     @eproperty

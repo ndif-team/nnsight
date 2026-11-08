@@ -31,7 +31,8 @@ Up: [docs/index.md](../index.md) — all sections.
 
 - [save](save.md) — `nnsight.save(...)` / `obj.save()`: persist a value across the trace boundary.
 - [access-and-modify](access-and-modify.md) — `.output` / `.input` / `.inputs`: reading values and writing them back (in-place vs replacement, tuple outputs).
-- [source](source.md) — `module.source.<op>.output`: operations inside a module's forward, e.g. attention scores before softmax.
+- [source](source.md) — `module.source.<op>.output`: operations inside a module's forward, e.g. attention scores before softmax under eager attention.
+- [kernel](kernel.md) — `module.kernel.probs(heads=, query=)`, `module.kernel.states(tokens=)`, `experts.kernel.expert_output(expert=)`: attention probabilities, recurrent states and per-expert rows from the fused kernel that ran, no eager switch.
 - [cache](cache.md) — `tracer.cache(modules=..., include_inputs=...)`: bulk activation cache that accumulates across generation steps.
 
 ## Generation control

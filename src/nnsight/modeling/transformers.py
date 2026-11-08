@@ -50,6 +50,8 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
+from types import FunctionType, ModuleType
 from typing import TYPE_CHECKING, Any, Optional
 
 import warnings
@@ -58,6 +60,8 @@ import torch
 
 from .. import NNsightDeprecationWarning
 from ..intervention.envoy import Envoy, traceable
+from ..intervention import experts, recurrent
+from ..intervention.kernel import register, through
 from . import peft, processing
 from .huggingface import HuggingFaceModel
 
@@ -106,6 +110,30 @@ _ARCH_TASK = {
     "ForImageClassification": "image-classification",
     "ForImageTextToText": "image-text-to-text",
 }
+
+
+def _hub_wrappers(module: ModuleType) -> list[dict[str, Any]]:
+    """The closures of every ``use_kernel_func_from_hub_with_fallback`` wrapper in ``module``'s globals.
+
+    The wrapper is the ``wrapped`` function that decorator defines; it is told
+    apart by its code object's origin, and its closure (``func_name``, ``package``,
+    ``torch_function``, ``implementation``, ...) is read by name, with the
+    wrapper itself under ``"wrapper"``.
+    """
+    from transformers.integrations import hub_kernels
+
+    found = []
+    for value in vars(module).values():
+        if not (
+            isinstance(value, FunctionType)
+            and value.__code__.co_name == "wrapped"
+            and value.__code__.co_filename == hub_kernels.__file__
+        ):
+            continue
+        closure = {name: cell.cell_contents for name, cell in zip(value.__code__.co_freevars, value.__closure__)}
+        closure["wrapper"] = value
+        found.append(closure)
+    return found
 
 
 def _infer_task(module: torch.nn.Module) -> str:
@@ -315,6 +343,46 @@ class TransformersModel(HuggingFaceModel):
             parent=self,
         )
         self._children.append(self.generator)
+        self._register_kernels()
+
+    def _register_kernels(self) -> None:
+        # transformers reaches the attention kernel through one of these
+        # interfaces; `attn.kernel.probs(...)` drills through them to the call.
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        through(*ALL_ATTENTION_FUNCTIONS.values())
+        # A mixture-of-experts forward is the callee of every experts module's
+        # dispatching `forward`; its per-pair buffers are sites. `generate` switches
+        # grouped_mm to batched_mm for decoding on an accelerator, so both are
+        # entries. The interface module and its second forward arrived in
+        # transformers 5; an older transformers has no MoE sites.
+        try:
+            from transformers.integrations import moe
+        except ImportError:
+            moe = None
+        if moe is not None:
+            for name, serve in (("grouped_mm_experts_forward", experts.serve_grouped_mm), ("batched_mm_experts_forward", experts.serve_batched_mm)):
+                forward = vars(moe).get(name)
+                if forward is not None:
+                    register(forward, serve)
+        # A chunked recurrent kernel (gated delta rule, Mamba2 scan) is reached
+        # through the wrapper `use_kernel_func_from_hub_with_fallback` builds, a
+        # closure over the hub kernel's name, the reference implementation and the
+        # library one when installed. Each modeling file holds its own copy, so
+        # the wrappers are found on the modules this model's classes come from
+        # (a class built by `exec` may name a module that was never imported),
+        # drilled through, and their callees registered by the kernel's name.
+        modules = {sys.modules.get(type(sub).__module__) for sub in self._module.modules()} - {None}
+        for module in modules:
+            for closure in _hub_wrappers(module):
+                name = closure["func_name"]
+                if name not in recurrent.REFERENCE:
+                    continue
+                through(closure["wrapper"])
+                register(closure["torch_function"], recurrent.REFERENCE[name])
+                library = recurrent.LIBRARY.get((closure["package"], name))
+                if library is not None and closure["implementation"] is not closure["torch_function"]:
+                    register(closure["implementation"], library)
 
     # -- loading -------------------------------------------------------------
 

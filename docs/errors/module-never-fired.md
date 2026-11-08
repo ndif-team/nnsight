@@ -43,6 +43,7 @@ this input, so nothing ever delivered its value. Common cases:
 - **Modules not reached by this input** — auxiliary heads, MoE experts not routed to, a vision encoder on a text-only query.
 - **Children of a skipped module** — after `module.skip(value)`, that module's submodules don't run.
 - **A switched-off PEFT adapter** — after `model.disable_adapters()`, the adapter's own modules (`lora_A`, `lora_B`) don't run; `.base_layer` does. See [PEFT adapters](../models/transformers-model.md#base-and-adapted-runs-on-one-model).
+- **A kernel site on a module that calls no registered fused kernel** — `<path>.kernel.i0` for an MLP, a whole decoder block (ask its attention submodule), a whole MoE block (ask its `experts` submodule), a model under `attn_implementation="eager"` or `flash_attention_2`, experts under `experts_implementation="eager"` (or `deepgemm`, `sonicmoe`, FP8), a recurrent layer whose kernel has no entry (RWKV, `mamba_ssm`'s fused scan), or a vLLM model. The message ends with ``a `.kernel` site is served only when the module's forward reaches a registered fused kernel``. See [kernel.md](../usage/kernel.md#ordering) and its [limits](../usage/kernel.md#limits).
 
 ### 2. A loop asked for more steps than the run made
 

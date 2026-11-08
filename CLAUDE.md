@@ -18,6 +18,7 @@
 | Run several prompts at once, or share values between them | [usage/invoke-and-batching.md](docs/usage/invoke-and-batching.md), [usage/barrier.md](docs/usage/barrier.md) |
 | Bundle several traces / share values across them | [usage/session.md](docs/usage/session.md) |
 | Reach operations inside a module's forward | [usage/source.md](docs/usage/source.md) |
+| Read attention probabilities under `sdpa` / flash, a gated-delta / Mamba2 state at a token, or what one MoE expert computed for a token (no eager switch) | [usage/kernel.md](docs/usage/kernel.md) |
 | Cache activations from many modules | [usage/cache.md](docs/usage/cache.md) |
 | Take gradients | [usage/backward-and-grad.md](docs/usage/backward-and-grad.md) |
 | Check shapes without running the model | [usage/scan.md](docs/usage/scan.md) |

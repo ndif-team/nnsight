@@ -97,6 +97,20 @@ class Pending(NamedTuple):
         return f"{self.provider}.i{self.iteration}"
 
 
+def counted(location: str) -> str:
+    """The location whose visits give ``location`` its occurrence.
+
+    A module's kernel sites (``"{path}.kernel"``, see intervention/kernel.py) fire
+    inside the module's call, and only when its forward is instrumented, so their
+    own visit count would lag the module's. They are counted as the module's
+    ``.output``, which the controller counts on every call: a request pinned to
+    step ``n`` is the kernel fire inside the module's ``n``-th call.
+    """
+    if location.endswith(".kernel"):
+        return location[: -len(".kernel")] + ".output"
+    return location
+
+
 class EarlyStopException(Exception):
     """Raised by an intervention to halt the model run early.
 
@@ -346,6 +360,7 @@ class Mediator:
 
     def occurrence(self, location: str) -> int:
         """How many times the model has reached ``location`` since this worker started."""
+        location = counted(location)
         counts = {} if self.interleaver is None else self.interleaver.counts
         return counts.get(location, 0) - self.counts_at_start.get(location, 0)
 
@@ -560,10 +575,16 @@ def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]
             ),
             None,
         )
+    detail = ""
+    if requester.provider is not None and requester.provider.endswith(".kernel"):
+        detail = (
+            "; a `.kernel` site is served only when the module's forward reaches a "
+            "registered fused kernel (see docs/usage/kernel.md)"
+        )
     if mediator.iteration == 0:
         return (
             OutOfOrderError(
-                f"'{requester}' was requested but the model already ran past it"
+                f"'{requester}' was requested but the model already ran past it{detail}"
             ),
             None,
         )
@@ -926,4 +947,7 @@ class Interleaver:
         # place they would tie the model to its own interleaver in a cycle.
         self.observers = {}
         self.batcher = None
+        # A drilled wrapper's globals hold the op closure, which holds this
+        # interleaver; left in place after the run they would keep it alive.
+        self.sourced.clear()
 

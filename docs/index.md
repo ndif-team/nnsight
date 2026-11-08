@@ -27,6 +27,7 @@ Find the section that answers your question, then the one page inside it. Read t
 - [usage/generate.md](usage/generate.md) — multi-token generation; `generate` vs `pipe`
 - [usage/iteration.md](usage/iteration.md) — `tracer.iter[...]` per-step interventions and their pitfalls
 - [usage/source.md](usage/source.md) — operations inside a module's forward
+- [usage/kernel.md](usage/kernel.md) — attention probabilities, recurrent states and per-expert MoE rows from the fused kernel
 - [remote/remote-trace.md](remote/remote-trace.md) — running a trace on NDIF
 - [errors/symptom-index.md](errors/symptom-index.md) — something broke
 - [reference/api-quick-reference.md](reference/api-quick-reference.md) — every public method and property

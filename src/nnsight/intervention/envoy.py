@@ -66,7 +66,8 @@ from . import aliasing
 from .batching import Batcher
 from .editing import EditingTracer
 from .eproperty import eproperty
-from .source import Source, install_source
+from .kernel import Kernel
+from .source import STATE, Source, install_source
 from .tracer import InterleavingTracer
 from .util import first_input, replace_first_input
 
@@ -645,6 +646,29 @@ class Envoy:
         # it permanently source-instruments the module (inert outside a trace).
         return Source(self, self.path, install_source(self))  # raises SourceNotAvailable
 
+    @property
+    def kernel(self) -> Kernel:
+        """Values a fused kernel inside this module's forward computes but never writes out.
+
+        Each attribute is a site; calling it with the slice to read returns the
+        value, a tensor carrying its [`Provenance`][nnsight.intervention.kernel.Provenance]
+        as ``.provenance``. For attention through
+        ``scaled_dot_product_attention`` the sites are ``probs``, ``scores`` and
+        ``lse``, indexed by ``heads=``, ``query=`` and ``key=``.
+
+        Examples:
+            >>> with model.trace("Hello World"):
+            ...     p = model.model.layers[6].self_attn.kernel.probs(heads=4, query=-1).save()
+
+        Returns:
+            A [`Kernel`][nnsight.intervention.kernel.Kernel] accessor over this module.
+        """
+        # Instrumenting here, like `.source`, is in time unless the module is
+        # already mid-call; the accessor is told so it can say so on a request.
+        state = self._module.__dict__.get(STATE)
+        instrumented = state is not None and state.sourced
+        install_source(self)  # raises SourceNotAvailable
+        return Kernel(self, instrumented)
 
     def to(self, device: torch.device) -> Envoy:
         """Move the wrapped module to ``device`` (in place).

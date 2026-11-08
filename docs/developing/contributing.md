@@ -87,7 +87,8 @@ laid out one file per concept:
 | If you touched... | Run at least |
 |-------------------|--------------|
 | `intervention/serialization.py`, `schema/request.py` | `tests/test_serialization.py` |
-| `intervention/source.py` | `tests/test_source.py`, `tests/test_interleaving.py` |
+| `intervention/source.py` | `tests/test_source.py`, `tests/test_interleaving.py`, `tests/test_kernel.py` |
+| `intervention/kernel.py`, `intervention/attention.py`, `intervention/recurrent.py`, `intervention/experts.py` | `tests/test_kernel.py` (its `TestCuda` class needs a GPU) |
 | `intervention/interleaver.py`, the controller | `tests/test_interleaving.py`, `tests/test_memory.py`, `tests/test_multiple_wrappers.py` |
 | `tracing/` | `tests/test_tracing.py` |
 | `intervention/batching.py` | `tests/test_batching.py` |

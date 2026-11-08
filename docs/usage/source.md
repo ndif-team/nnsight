@@ -12,8 +12,9 @@ sources: [src/nnsight/intervention/source.py, src/nnsight/intervention/envoy.py]
 `forward` as an addressable operation with the same handles a module has —
 `.input` / `.inputs` / `.output`, `.skip` — one level finer. Use it when the value
 you need lives *between* two operations of a forward (an activation inside an MLP,
-attention scores before softmax) and no child module exposes it; when one does,
-`module.output` is cheaper. Instrumentation is installed on first `.source` access
+attention scores before softmax under eager attention) and no child module exposes
+it; when one does, `module.output` is cheaper, and when a fused kernel computes it,
+[`module.kernel`](kernel.md) reads it. Instrumentation is installed on first `.source` access
 and stays on the module for the life of the process; outside a trace each
 operation calls straight through, at a small cost.
 
@@ -131,8 +132,9 @@ variables), so outside a trace it raises
 
 Drill only when you have to: each drill adds an ordering constraint (see Gotchas)
 and depends on the inner function's variable names. For attention probabilities,
-`attention_interface_1.output[1]` under `attn_implementation="eager"` needs no
-drill; see [attention-patterns](../patterns/attention-patterns.md).
+`attn.kernel.probs(...)` reads them from the fused kernel with no drill and no
+eager switch ([kernel](kernel.md)); see
+[attention-patterns](../patterns/attention-patterns.md).
 
 ## Iteration support
 
@@ -150,11 +152,19 @@ location fired per loop iteration, and `tracer.iter` selects the fire:
 
 ```python
 with model.trace(prompt) as tracer:
-    kernel = linear_attn.source.torch_chunk_gated_delta_rule_0.source
+    # `torch_chunk_gated_delta_rule_0` is transformers' hub-kernel wrapper; the
+    # reference kernel is the `implementation_0` call inside it.
+    kernel = linear_attn.source.torch_chunk_gated_delta_rule_0.source.implementation_0.source
     states = nnsight.save([])
     for _ in tracer.iter[:3]:                                # chunks 0, 1, 2
-        states.append(kernel.last_recurrent_state_1.output)  # _0 is the init
+        states.append(kernel.last_recurrent_state_2.output)  # _0/_1 are the two init forms
 ```
+
+The same states, and the state at any token inside a chunk, come out of
+`linear_attn.kernel.chunk_states()` and `linear_attn.kernel.states(tokens=...)`
+without naming the loop variable, under `fla`'s kernel as well ([kernel](kernel.md)).
+Drilling into the kernel function as above and requesting its `.kernel` sites in
+the same trace are exclusive: the drill wins on that fire.
 
 ## Decorated forwards and dispatchers
 
@@ -261,8 +271,12 @@ unaffected.
 
 A value can also be out of reach because it is never computed in Python: a fused
 attention kernel (`sdpa`, flash) builds no attention pattern, and a Triton
-linear-attention kernel (`fla`) has no per-step state. Choose the eager
-implementation when you need those. Otherwise target a real submodule: a
+linear-attention kernel (`fla`) has no per-step state. For the attention pattern,
+`attn.kernel.probs(...)` reconstructs it from the kernel's own statistics, and on
+a gated delta rule or Mamba2 layer `mixer.kernel.states(tokens=...)` derives the
+state at any token from the kernel's chunk-boundary states ([kernel](kernel.md));
+for other values, choose the eager implementation. Otherwise
+target a real submodule: a
 projection's output (`q_proj`, `v_proj`) is flat `(batch, seq, features)` because
 the head split happens in the `forward`, so per-head `[batch, heads, seq,
 head_dim]` tensors are operations (`query_states_0` / `key_states_0` /

@@ -135,6 +135,8 @@ with model.trace("Hello World"):
 
 `named_modules()` still lists the submodule as `...attention.output`, but `get(...)` and `rename={...}` use `...attention.E_output`.
 
+`.source` and `.kernel` are reserved the same way: the wav2vec2 family's TDNN layers have a submodule named `kernel` (`nn.Linear`), reached as `.E_kernel`, while `.kernel` stays the [kernel sites](kernel.md) accessor.
+
 ## Weight edits are permanent
 
 `.output` is a value handed to you for the run; `.weight` is the module's real `nn.Parameter`, so a write to it mutates the loaded model for every later trace, with no warning:
