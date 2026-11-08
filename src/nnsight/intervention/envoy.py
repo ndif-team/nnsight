@@ -111,13 +111,15 @@ _PACKAGE = __name__.partition(".")[0]
 
 
 class RuntimeEnvoys(dict):
-    """An ``envoys`` class map a runtime sets itself, on both sides of a payload.
+    """Marker dict for an ``envoys`` class map that a runtime installs on both sender and receiver.
 
-    vLLM pairs its parallel layers with `ParallelEnvoy`, and tensor parallelism
-    pairs its shardable modules with `TPEnvoy`, on the sender and the receiver
-    alike, so an envoy whose class came from such a map goes by path. The
-    receiver's tree is built without a map the caller passed, so a class from
-    that map travels (see `Envoy._carries_state`).
+    When a caller passes a custom ``envoys={...}`` map, only the sender's tree
+    is built with those subclasses, so matching child envoys must be pickled by
+    value. Runtimes such as vLLM (`ParallelEnvoy`) and tensor parallelism
+    (`TPEnvoy`) install their own class map on both the sender and the receiver;
+    wrapping that map in `RuntimeEnvoys` tells `_carries_state` that the
+    receiver already built the same subclass at each path, so those child envoys
+    can still be pickled by reference.
     """
 
 
@@ -200,11 +202,13 @@ class Envoy:
         # Children exist now, so multi-component alias paths (e.g. "h.0") resolve.
         aliasing.bind(self)
 
-    #: True on a child once `_wrap_envoy` has built it. A model wrapper sets
-    #: attributes on its root after construction (`_load`), so the root stays False.
+    #: True on a child envoy after `_wrap_envoy` finishes constructing it. Once True,
+    #: `__setattr__` refuses new public non-Module attributes. Remains False on the
+    #: root envoy so model subclasses can set attributes on `self` during loading.
     _built = False
 
-    #: On a payload's copy, the table that made it (`serialization._PayloadCopies`).
+    #: For a per-payload envoy copy on the receiver, the `_PayloadCopies` table that
+    #: created it (`None` on normal envoys).
     _copies = None
 
     #: Prefix for a submodule mounted under a name nnsight already serves.
@@ -247,8 +251,8 @@ class Envoy:
         # `_child_map` still records the name, so the entry keeps its index.
         shared = self.interleaver.envoys.get(id(module))
         if shared is not None:
-            # The registry holds the receiver's envoys, so a payload's copy takes a
-            # copy of this one too.
+            # `interleaver.envoys` stores the receiver's shared envoys; when `self`
+            # is a per-payload copy, wrap `shared` in its per-payload copy too.
             envoy = shared = self._copies(shared) if self._copies is not None else shared
             if shared is not self:
                 self._aliases[attribute] = shared.path
@@ -298,9 +302,10 @@ class Envoy:
         return named
 
     def _add_envoy(self, name: str, module: torch.nn.Module) -> Envoy:
-        # Register a (possibly new) module on self._module, then mirror it. A
-        # payload's copy holds the receiver's module, so on a tree serving many
-        # requests this would reach every later request.
+        # Register a submodule on `self._module`, then wrap it in a child envoy.
+        # Even when `self` is a per-payload envoy copy, `self._module` is the
+        # receiver's live `nn.Module`, so `add_module` would mutate the model
+        # across all concurrent and future requests on a shared worker tree.
         if self.interleaver.shared:
             raise AttributeError(
                 f"Cannot attach {name!r} to {self.path!r}; this envoy tree is shared "
@@ -355,18 +360,22 @@ class Envoy:
         self.__dict__.update(state)
         # The parent link is not pickled (a weakref does not pickle). A parent in
         # the same payload re-links its children here, which also covers a child
-        # whose parent was rebuilt first; the payload's top envoy has none.
-        self.__dict__.setdefault("_parent", None)
+        # whose parent was rebuilt first. Reading `_children` materializes a
+        # payload's copy, which links its parent; a by-value top envoy has none.
         for child in self._children:
             child._parent = weakref.ref(self)
+        self.__dict__.setdefault("_parent", None)
 
     def __getstate__(self) -> dict:
-        # Only reached for an envoy that goes by value: one holding state the
-        # receiver's tree lacks (see `_carries_state`). Its module and
-        # interleaver still travel as names (see serialization.CustomCloudPickler).
+        # Only reached when this envoy is pickled by value (it or a descendant
+        # carries state; see `_carries_state`). The pickler still replaces
+        # `_module` and `interleaver` in the returned dict with persistent IDs.
         self._materialize()
-        # An `edit()` copy made before dispatch holds what dispatch replaced (the
-        # module, a pipeline); the envoy registered at its path holds the current ones.
+        # If `self` is a shallow copy created by `.edit()` before dispatch,
+        # a later dispatch updated the live tree's `_module` and `pipeline` in
+        # `interleaver.envoys` while leaving `self._module` pointing at the old
+        # meta module. Pull the updated attributes from the registered envoy at
+        # `self.path` and keep `self._edits`.
         registry = self.interleaver.envoys
         current = self
         if id(self._module) not in registry:
@@ -377,11 +386,11 @@ class Envoy:
         return state
 
     def _materialize(self) -> None:
-        """Give a payload's copy its children and parent, each one more copy.
+        """Populate a lazy per-payload envoy copy with copies of its children and parent.
 
-        Runs on the first access to an envoy above or below the copy, so a block
-        touching one layer copies only the envoys on its path. See
-        `serialization._PayloadCopies`.
+        `_PayloadCopies` creates each copy without `_children`, `_child_map`,
+        `_parent`, or child envoy attributes. This method fills them in on first
+        access so a trace block only copies the envoys along the paths it touches.
         """
         state = self.__dict__
         if "_origin" not in state:
@@ -396,60 +405,61 @@ class Envoy:
             state["_parent"] = copies.parent_link(origin.parent)
 
     def _persistent_attachments(self) -> dict[str, Any]:
-        """Objects a payload writes as names, ``{name: object}``, apart from modules and envoys.
+        """Return non-module, non-envoy objects pickled by persistent ID as ``{id_str: obj}``.
 
-        One definition serves both sides: the sender writes each object as its name
-        and the receiver resolves the name. Subclasses add theirs (a tokenizer, a pipeline).
+        Both sides call this method: the sender's pickler maps ``id(obj)`` to ``id_str``,
+        and the receiver's unpickler maps ``id_str`` back to its local ``obj``. Model
+        subclasses add attachments such as ``Tokenizer`` and ``Pipeline``.
         """
         return {"Interleaver": self.interleaver}
 
     def _carries_state(self) -> bool:
-        """Return whether this envoy holds something the receiver's envoy at its path lacks.
+        """Return whether this envoy holds client-side state absent from the receiver's envoy at ``self.path``.
 
-        The receiver wraps the same model in the same tree, so a path identifies
-        an envoy. A path cannot convey three things: an edit registered on this
-        envoy, an alias ``rename=`` bound on it (the block's source names the
-        alias), and a class the receiver does not build here, which is one a
-        caller's ``envoys=`` map chose for a child or a root class from outside
-        this package. An envoy holding any of these is pickled by value, and each
-        of its children is checked the same way. A class map a runtime sets on
-        both sides (`RuntimeEnvoys`) is not state.
+        A persistent ID ``Envoy:<path>`` only carries the module path, so this envoy
+        must be pickled by value when it has any of:
+        1. Persistent edits in ``_edits`` (from ``model.edit()``).
+        2. User-defined path aliases in ``_aliases`` from ``rename=``.
+        3. A custom envoy subclass that the receiver did not build at this path:
+           either a child subclass selected by a user-supplied ``envoys=`` map
+           (excluding `RuntimeEnvoys`), or a root wrapper subclass defined outside
+           the ``nnsight`` package.
         """
         if "." in self.path:
-            # A child's class came from `_envoys`.
+            # Child envoy: custom only when a caller-supplied `_envoys` map gave it a
+            # subclass of `Envoy`.
             chosen = (
                 self._envoys is not None
                 and not isinstance(self._envoys, RuntimeEnvoys)
                 and type(self) is not Envoy
             )
         else:
-            # A receiver builds its root from this package's classes. A third-party
-            # class a receiver also builds goes by value too, at the cost of a
-            # larger payload.
+            # Root envoy: custom when its class is defined outside `nnsight` (e.g. a
+            # user subclass of `LanguageModel`).
             chosen = type(self).__module__.partition(".")[0] != _PACKAGE
         return bool(self._edits) or bool(self._rename and self._aliases) or chosen
 
     def _state_below(self, memo: dict[int, bool]) -> bool:
-        """Return whether this envoy or any envoy under it carries state.
+        """Return whether this envoy or any descendant under it carries state.
 
-        A block reaches an envoy by attribute access from the one it names. An
-        envoy sent by path resolves its descendants on the receiver's tree, which
-        lacks the state a descendant carries, so such an envoy goes by value. Each
-        child is checked in turn, so a stateless sibling subtree still goes by path.
-
-        ``memo`` belongs to one pickler and is keyed by identity.
+        A trace block reaches a descendant by attribute access starting from an
+        ancestor (such as ``model.transformer.h[1]``). If ``model`` were sent by
+        reference, attribute lookup on the receiver would walk the receiver's tree
+        and miss state on the sender's ``h[1]``. Any ancestor of a stateful envoy
+        is therefore pickled by value, while stateless sibling subtrees still go by
+        reference. ``memo`` caches results per pickler, keyed by ``id(envoy)``.
         """
         key = id(self)
         known = memo.get(key)
         if known is not None:
             return known
         if "_origin" in self.__dict__:
-            # An unmaterialized copy has no children yet; its origin's are the ones
-            # it would take.
+            # An unmaterialized receiver copy has not created child copies yet;
+            # delegate the subtree check to the origin envoy it wraps.
             children = [self._origin]
         else:
             children = [child for _, child in self._named_children()]
-        # Recorded before the walk, so a module reachable from itself ends it.
+        # Seed `False` before recursing to break cycles in the module graph.
         memo[key] = False
         memo[key] = self._carries_state() or any(child._state_below(memo) for child in children)
         return memo[key]
@@ -642,9 +652,8 @@ class Envoy:
         """
         # A plain Tracer already captures the block, execs it as real Python (so
         # nested traces run as reached), and gates saves at its own — outermost —
-        # boundary. That is exactly a session. It carries this model for the
-        # payload a remote session sends: the model's envoys travel as names the
-        # receiver resolves on its tree (see serialization.CustomCloudPickler).
+        # boundary. That is exactly a session. Attach `self` to `tracer.envoy` so
+        # serializing a remote session passes this model as `tree=` to `dumps`.
         if tracer_cls is None:
             tracer_cls = Tracer
         tracer = tracer_cls(backend=backend)
@@ -1013,10 +1022,10 @@ class Envoy:
         if not name.startswith("_") and not inspect.isdatadescriptor(
             getattr(type(self), name, None)
         ):
-            # A data descriptor takes a write like `.output = x`, which is the
-            # block's own intervention. A new name on a built child is refused: a
-            # payload names that child by path, and the receiver's envoy at that
-            # path has no such attribute.
+            # Data descriptors (such as `.output = x` and `.input = x`) handle
+            # intervention writes. Refuse setting a new public attribute on a
+            # constructed child envoy: child envoys are pickled by path, so an
+            # ad-hoc attribute set on a child would be lost on the receiver.
             if (
                 self._built
                 and name not in self.__dict__

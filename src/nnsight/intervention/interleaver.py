@@ -654,9 +654,10 @@ class Interleaver:
         # it for its row scoping. Cleared by cancel().
         self.batcher: Any = None
         self.interleaving = False
-        # Whether this tree serves blocks from many requests (vLLM's model runner).
-        # `Envoy._add_envoy` refuses a mount on such a tree: a payload's copy holds
-        # the receiver's module, and every later request would see it.
+        # True when one envoy tree serves many requests at once; only
+        # `NNsightGPUModelRunner` sets it. When True,
+        # `Envoy._add_envoy` refuses attaching new `nn.Module` attributes so one
+        # request cannot mutate the shared `nn.Module` tree seen by other requests.
         self.shared = False
         # Whether a module's handoff has anything to reach: recomputed with the
         # worker list (`reindex`), and the gate every module checks before handing

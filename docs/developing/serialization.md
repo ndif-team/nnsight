@@ -125,7 +125,7 @@ model itself is never carried — it is identified by `model_key`. Fields:
 - `serialize(tracer, compress=False)` (`request.py`, classmethod) builds the
   binary execution payload: `variables = dict(tracer.info.frame.f_locals)`,
   `interventions = reduce_block(tracer.node, glbls, variables)`, then
-  `dumps((tracer, interventions))`, zstd level 6 if `compress`.
+  `dumps((tracer, interventions), tree=tracer.envoy)`, zstd level 6 if `compress`.
 - `deserialize(blob, persistent_objects=None, compress=False, ...)`
   (`request.py`, staticmethod) is the inverse: `tracer, (source, glbls, vars) =
   loads(...)`, recompiles the block into `tracer.info.code`, registers it in
@@ -160,8 +160,8 @@ and re-inits.
 
 ## Persistent objects — model/tokenizer by reference
 
-Heavy server-side objects (the model, its tokenizer, the module tree, the
-interleaver) are never serialized: they're written as names and re-bound to the
+Heavy server-side objects (the model's modules, its tokenizer and other attachments,
+the interleaver) are never serialized: they're written as names and re-bound to the
 server actor's live objects.
 
 - **Naming (client):** the pickler is built with `tree=<any envoy of the model>`
@@ -219,13 +219,17 @@ A by-value envoy's `__getstate__` is its `__dict__` minus the parent link, and
 `__setstate__` links every child to it, so `.parent` and `.root` from a child reach
 the by-value envoy above it. An `edit()` copy made before dispatch writes the current
 state of the envoy registered at its path, with its own edits, because dispatch
-replaced its module and pipeline. A class the receiver cannot import travels by
-source, `eproperty` descriptors included (`eproperty.__reduce__`).
+replaced its module and pipeline. A class defined in a script, or in a module
+registered for by-value pickling (`nnsight.register`, or `pull_env()` for local
+modules), travels by source, `eproperty` descriptors included (`eproperty.__reduce__`).
+A class from any other module is written by import path, and a receiver without that
+module raises `ModuleNotFoundError`.
 
 **What a payload receives.** `Envoy:<path>` resolves to a copy made for that payload
 (`CustomCloudUnpickler.persistent_load`, `_PayloadCopies`). The receiver's tree serves
-every payload, and what a block does to an envoy, such as an edit or an attribute
-write, stays with that payload. A copy has the same class and path, so it reads the
+every payload, and an edit or a plain attribute write through an envoy stays with that
+payload. A mounted `torch.nn.Module` goes on the receiver's module and reaches later
+payloads, unless the tree refuses it (below). A copy has the same class and path, so it reads the
 same values (an eproperty locates a value by path). Its `_module` is the receiver's
 `Module:<path>` entry, which a server may have wrapped to guard its model. Its
 `_edits` start empty, so an edit
@@ -244,7 +248,7 @@ cycle of envoys that a GC pass frees; the payload's tensors are outside it.
 `reducer_override` when it holds no state: the callable `_named_envoy`, the argument
 `Envoy:<path>`, and the state `{"interleaver": ...}`, whose value is written as the
 name `Interleaver`. Pickle resolves the envoy and then calls `__setstate__` with that
-state. The receiver's class then does its setup (`MetaMixin.__setstate__` sets
+state. The receiver's class then does its setup (`Meta.__setstate__` sets
 `dispatched`), and the envoy uses the interleaver the receiver resolves for this
 request. A wrapper's `interleave` depends on both.
 
@@ -258,7 +262,10 @@ missing from the map raises `UnknownPersistentIdError` during load.
 
 **Attributes.** A child envoy takes no new public attribute (`Envoy.__setattr__`),
 because the receiver's envoy at that path would not have it. A value a block needs
-goes in a variable of the block, and a `torch.nn.Module` may still be attached. A root
+goes in a variable of the block. A `torch.nn.Module` may still be attached, and one
+attached above the block does not travel: by path the receiver's envoy lacks it
+(`AttributeError` when the block reads it), and by value its name is missing from the
+map (`UnknownPersistentIdError` at load). A root
 accepts new attributes, since a model wrapper sets its own in `_load`. A new attribute
 on a stock root is not sent, so reading it on a receiver raises `AttributeError`.
 
@@ -267,8 +274,10 @@ On gpt2 (166 envoys) the root is 118 B by path and a whole trace payload is abou
 
 A tree that serves many requests at once (vLLM's model runner) marks its interleaver
 `shared = True`, and `Envoy._add_envoy` refuses a mount on it, because a copy holds the
-receiver's module and every later request would see the new one. A plain attribute
-write lands on the payload's copy and needs no refusal.
+receiver's module and every later request would see the new one. A plain value written
+on a root, or on an attribute the envoy already has, lands on the payload's copy, so
+`shared` does not refuse it. `Envoy.__setattr__` refuses a new public attribute on a
+child on every tree.
 
 ### Model identity — `to_model_key`
 
@@ -301,12 +310,13 @@ backends use to push a result home after a trace has already exited.
 
 1. **Client.** `model.trace(..., remote=True)` builds a `RemoteBackend`
    (`remotable.py`). On `__exit__`, `RequestModel.serialize(tracer)` reduces the
-   block (`reduce_block`) and `dumps((tracer, interventions))`.
+   block (`reduce_block`) and `dumps((tracer, interventions), tree=tracer.envoy)`.
 2. **Wire.** `RemoteBackend._post` POSTs the JSON envelope (`request.metadata()`)
    plus the payload blob (optionally zstd-compressed) to `{host}/request`.
 3. **Server.** `RequestModel.deserialize(blob, persistent_objects)` runs `loads`;
    `_load_function` recompiles each captured function against the server's Python;
-   persistent IDs resolve to the server's live model/tokenizer/module tree.
+   persistent IDs resolve to the server's live modules and tokenizer, and each
+   `Envoy:<path>` to a copy of the server's envoy made for this payload.
 4. **Execute.** The reconstructed tracer runs against the server-side model; saved
    values are collected.
 5. **Return.** Saves are `torch.save`-pickled, zstd-compressed, and returned with

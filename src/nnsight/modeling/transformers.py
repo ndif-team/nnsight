@@ -73,11 +73,10 @@ if TYPE_CHECKING:
 
 _PREPROCESSORS = ("tokenizer", "image_processor", "feature_extractor", "processor")
 
-# Attribute -> persistent id: for a remote request these travel as the name and
-# resolve to the actor's live object server-side (see
-# _persistent_attachments). The pipeline is included so a deserialized model's
-# `self.pipeline` (used by generate) resolves to the server's real pipeline
-# instead of being dropped.
+# Attribute name -> persistent ID for model attachments pickled by reference
+# and resolved to the receiver's live objects (see `_persistent_attachments`).
+# Including `pipeline` ensures a by-value root's `self.pipeline` (used by
+# `generate`) resolves to the receiver's live pipeline.
 _PERSISTENT = {
     "tokenizer": "Tokenizer",
     "processor": "Processor",
