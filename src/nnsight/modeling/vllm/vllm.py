@@ -1059,8 +1059,8 @@ class VLLM(Remotable):
                 )
 
         for index, (mediator, param) in enumerate(zip(attached, params)):
-            # The block names envoys by path, and the worker wraps the same model
-            # at the same paths, so each resolves to a copy made for this request.
+            # Pass `tree=self` so envoys captured by each invoke's mediator serialize
+            # as `Envoy:<path>` persistent IDs resolved on the worker's model tree.
             param.extra_args = {"nnsight_mediator": dumps(mediator, tree=self)}
             named = getattr(param, "nnsight_named", frozenset())
             if "lora_request" not in named:

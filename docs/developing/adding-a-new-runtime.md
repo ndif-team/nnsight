@@ -124,8 +124,9 @@ If the runtime should run on NDIF, extend `Remotable` and implement:
 - `_remoteable_model_key() -> str` (`remotable.py`) and classmethod
   `_remoteable_from_model_key(cls, key, **kwargs)` — the server-side identity.
   `to_model_key()` combines them with the class import path.
-- `_persistent_attachments() -> dict[str, Any]`: your tokenizer/preprocessors
-  as `{name: object}`. One definition serves both sides: the client writes each
+- `_persistent_attachments() -> dict[str, Any]`: extend
+  `super()._persistent_attachments()`, which names the interleaver, with your
+  tokenizer/preprocessors as `{name: object}`. One definition serves both sides: the client writes each
   as its name instead of pickling it, and the server resolves the name from
   `_remoteable_persistent_objects()` (these plus a `Module:<path>` and an
   `Envoy:<path>` per envoy; `TransformersModel`, `transformers.py`; `VLLM`,

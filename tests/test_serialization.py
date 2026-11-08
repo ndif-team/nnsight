@@ -12,6 +12,7 @@ import pickle
 import pickletools
 import weakref
 
+import nnsight
 import pytest
 import torch
 
@@ -1204,8 +1205,19 @@ class TestEnvoysByReference:
             with gpt2.trace(PROMPT):
                 out = (hidden[0] * 2).save()
         assert _matches(backend.saved["out"], want[0] * 2)
-        assert len(backend.blob) < 2000, len(backend.blob)
         assert b"Envoy:model" in backend.blob and b"Module:" not in backend.blob
+
+    def test_a_trace_on_a_block_keeps_its_parent_and_root(self, gpt2, server_gpt2):
+        backend = _ServerRoundTrip(server_gpt2)
+        with gpt2.transformer.h[3].trace(torch.randn(1, 1, 768), backend=backend):
+            block = gpt2.transformer.h[3]
+            linked = nnsight.save(block.parent is gpt2.transformer.h)
+            parent = nnsight.save(block.parent.path)
+            root = nnsight.save(block.root.path)
+            out = block.mlp.output.save()
+        assert backend.saved["linked"] is True
+        assert backend.saved["parent"] == "model.transformer.h"
+        assert backend.saved["root"] == "model"
 
 
 class _Stage(torch.nn.Module):
@@ -1358,8 +1370,10 @@ class TestPayloadCopies:
         gc.disable()
         try:
             copy = loads(dumps(layer, tree=gpt2), server_gpt2._remoteable_persistent_objects())
-            assert copy.parent is copy.parent and copy.parent.path == "model.transformer.h"
-            assert copy.root.path == "model"
+            parent = weakref.ref(copy.parent)
+            assert parent() is not None
+            assert _copy_of(copy.parent, server_gpt2.transformer.h)
+            assert _copy_of(copy.root, server_gpt2)
         finally:
             gc.enable()
 

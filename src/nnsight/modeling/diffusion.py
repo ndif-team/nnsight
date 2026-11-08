@@ -427,8 +427,8 @@ class DiffusionModel(HuggingFaceModel):
 
     def _persistent_attachments(self) -> dict[str, Any]:
         objects = super()._persistent_attachments()
-        # The pipeline (and its light components) resolve to the server's live one;
-        # its module components are modules of the tree, named by path.
+        # The pipeline resolves to the receiver's live pipeline via `"Pipeline"`;
+        # its `nn.Module` components are wrapped in envoys and resolve via `Module:<path>`.
         if self.pipeline is not None:
             objects["Pipeline"] = self.pipeline
         return objects

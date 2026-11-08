@@ -205,9 +205,10 @@ class eproperty(property):
         return self
 
     def __reduce__(self) -> tuple:
-        # A host class defined in a script, or in a module registered to travel
-        # by value, is rebuilt on the receiver from its namespace, this
-        # descriptor included; `property` has no pickle support of its own.
+        # When a custom `Envoy` subclass defined in a user script is pickled by
+        # value, cloudpickle serializes its class dict, including any `eproperty`
+        # descriptors on the class. `property` cannot be pickled by default, so
+        # reconstruct the `eproperty` instance from its `vars` dict.
         return (type(self), (), vars(self).copy())
 
     def __str__(self) -> str:
