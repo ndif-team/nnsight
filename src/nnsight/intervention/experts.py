@@ -1,33 +1,42 @@
-"""Per-(token, expert) rows of transformers' mixture-of-experts forwards.
+"""Per-(token, expert) rows from transformers' mixture-of-experts forwards.
 
-A mixture-of-experts layer routes every token to ``top_k`` experts and sums their
-weighted outputs. transformers' ``grouped_mm`` experts implementation runs all the
-(token, expert) pairs of a forward as two grouped matrix multiplications over rows
-sorted by expert: up projection, gate, down projection, routing weight, sum per
-token. Its ``batched_mm`` implementation, which ``generate`` switches to for
-decoding on an accelerator, does the same over the pairs in token order with one
-weight matrix gathered per pair. The per-pair input, activation and down
-projection are locals of those forwards; the module returns the sum.
+A mixture-of-experts (MoE) layer routes each token to ``top_k`` experts and sums
+their weighted outputs. In transformers, ``grouped_mm_experts_forward`` runs all
+routed ``(token, expert)`` pairs across the forward pass using two grouped matrix
+multiplications over rows sorted by expert ID (up/gate projection, activation,
+down projection, routing-weight multiplication, and per-token sum). During
+autoregressive decoding on an accelerator, ``generate`` switches to
+``batched_mm_experts_forward``, which performs the same steps in token order by
+gathering each pair's weight matrices. In both implementations, the per-pair
+inputs, activations, and down-projected outputs exist only as local variables
+inside the forward function, while the module returns only the weighted sum.
 
-Three sites on the experts module, each over the pairs in the token's own order,
-in the dtype the forward computed them in:
+Each experts module exposes three sites over the routed pairs in token order,
+returned in the dtype used by the forward pass:
 
-* ``expert_input(tokens=, slot=)``: the row the pair's expert received.
-* ``expert_activation(tokens=, slot=)``: the activation between the two
-  projections (``act(gate) * up``, or ``act(up)`` for experts without a gate).
-* ``expert_output(tokens=, slot=)``: the pair's down projection before its routing
-  weight; the module's output is the sum over slots of these rows times the
-  routing weights, cast to the input dtype.
+* ``expert_input(tokens=, slot=)``: the input row received by each routed pair's
+  expert.
+* ``expert_activation(tokens=, slot=)``: the intermediate activation between the
+  two projections (``act(gate) * up``, or ``act(up)`` for experts without a gate).
+* ``expert_output(tokens=, slot=)``: the down-projected row before multiplying
+  by the routing weight. Summing these rows multiplied by ``top_k_weights`` across
+  the ``slot`` axis (and casting to the input dtype) reproduces the module's output.
 
-Shapes are ``[batch, sequence, top_k, dim]``. ``expert=e`` (one int) in place of
-``slot=`` gives the expert's rows per token, ``[batch, sequence, dim]``, ``0`` for a
-token not routed to it. All three are exact exports: the forward's own rows, put
-back in token order with its own inverse permutation where it sorted them. The
-experts module computes over the flattened batch x sequence axis, as its
-``.input`` and ``.output`` show; the reader folds that axis by the trace's batch
-rows and hands each invoke its own, so ``tokens=`` indexes sequence positions
-(a plain `Envoy` of the experts module counts its whole input as one row, so its
-shapes are ``[1, tokens, ...]``; without any batcher the rows stay flat).
+Unsliced tensors have shape ``[batch, sequence, top_k, dim]``. Passing
+``expert=e`` (a single integer) instead of ``slot=`` returns that expert's row
+for each token of shape ``[batch, sequence, dim]``, filled with ``0`` at tokens
+not routed to expert ``e``. All three sites are served as ``"exact export"``
+tensors: when the forward sorted the pairs by expert ID, the site reorders them
+back to token order using the forward's own inverse permutation ``inv_perm``.
+
+Although the experts module itself operates on a flattened ``batch * sequence``
+token axis (as seen on ``experts.input`` and ``experts.output``), the site reader
+uses the trace's batch metadata to reshape the token axis into
+``(batch, sequence)`` and slice out the requesting invoke's batch rows. As a
+result, ``tokens=`` indexes sequence positions within each invoke. (When an
+experts module is wrapped directly in a standalone `Envoy` without a batcher, or
+when the module is the root of a single-row batch, shapes are
+``[1, tokens, ...]`` or flat over tokens.)
 
 .. code-block:: python
 
@@ -49,21 +58,22 @@ from . import kernel
 from .kernel import Batch, Provenance, Sites, Unavailable
 from .source import STATE, arguments, record
 
-#: Per forward: the bindings holding the per-pair input, the activation (the gated
-#: branch, or the plain one for experts without a gate) and the down projection.
-#: `proj_out` is rebound at each stage, so the index is the stage's position in the
-#: source; under expert parallelism the grouped forward also rebinds it masked, at
-#: indices 1 and 5, which are not read.
+#: Local variable binding names in `grouped_mm_experts_forward` and
+#: `batched_mm_experts_forward` for the per-pair input, the gated or ungated
+#: activation, and the down projection. Because `proj_out` is rebound at each
+#: stage, the numeric suffix selects the stage's binding index in the AST.
+#: Under expert parallelism, `grouped_mm_experts_forward` adds masked rebindings
+#: at indices 1 and 5, which are unused because parallel experts return `Unavailable`.
 _GROUPED = {"input": "selected_hidden_states_g", "gated": "proj_out_2", "ungated": "proj_out_3", "output": "proj_out_4"}
 _BATCHED = {"input": "selected_hidden_states", "gated": "proj_out_1", "ungated": "proj_out_2", "output": "proj_out_3"}
-#: Site name -> what its rows are, for provenance notes.
+#: Human-readable description of each site's rows for provenance notes.
 _ROWS = {"expert_input": "input rows", "expert_activation": "activation rows", "expert_output": "down-projection rows"}
-#: Names transformers' tensor- and expert-parallel plans give the forward they install on an experts module.
+#: Function names installed on `experts.forward` by transformers' tensor-parallel and expert-parallel plans.
 _PARALLEL_FORWARDS = ("tp_forward", "ep_forward")
 
 
 class Experts(Sites):
-    """The per-pair rows of one experts forward, and the permutation back to token order when it sorted them."""
+    """Site reader holding the captured per-pair buffers of one experts forward pass."""
 
     names = tuple(_ROWS)
 
@@ -91,8 +101,8 @@ class Experts(Sites):
         if "slot" in spec and "expert" in spec:
             raise ValueError(f"kernel site {name!r} takes slot= or expert=, not both")
         tokens, top_k = self.top_k_index.shape
-        # Pair (t, k) is row t * top_k + k of the forward's token-order rows; select
-        # on these integer indices first, then gather only the rows asked for.
+        # Pair (t, k) sits at linear index `t * top_k + k` in token order. Slice
+        # this integer index table first so we only gather the requested rows from the buffer.
         pairs = torch.arange(tokens * top_k, device=self.top_k_index.device).view(tokens, top_k)
         index = self.top_k_index
         axis = 0
@@ -132,11 +142,12 @@ class Experts(Sites):
 
 
 def _parallel(module: torch.nn.Module) -> bool:
-    """Whether transformers' tensor or expert parallelism installed its forward on ``module``.
+    """Return whether tensor parallelism or expert parallelism is active on ``module``.
 
-    Under either, this rank's rows are its share (an intermediate shard and a
-    partial down projection, or other ranks' pairs as sentinels). nnsight's
-    controller sits in the instance ``forward`` and keeps the one it found there.
+    Under tensor or expert parallelism, each rank computes only a shard of the
+    intermediate dimension and a partial down projection, or fills unowned pairs
+    with sentinel indices. Because nnsight's controller wraps ``module.forward``,
+    check the underlying ``state.original`` callable when present.
     """
     state = vars(module).get(STATE)
     original = state.original if state is not None else vars(module).get("forward")
@@ -152,7 +163,7 @@ def _serve(fn: Callable, args: tuple, kwargs: dict, layout: dict[str, str], sort
             f"{fn.__name__} ran under tensor or expert parallelism; this rank's rows are its share of the experts, "
             f"so the per-pair sites are not served"
         )
-    # Added to the forwards after transformers 5.19; the down projection is then not the last stage.
+    # Guard against future transformers versions that add a post-expert norm after the down projection.
     if vars(module).get("has_post_expert_norm", False):
         return output, Unavailable(f"{fn.__name__} applies a post-expert norm; this reader covers the forward without one")
     index = bound_arguments["top_k_index"]
@@ -174,11 +185,12 @@ def _serve(fn: Callable, args: tuple, kwargs: dict, layout: dict[str, str], sort
             )
     inv_perm = None
     if sorted_rows:
-        # `inv_perm` is bound empty and filled in place by a subscript assignment,
-        # which the instrumentation records as a second binding of the assigned
-        # value (the arange); the first binding is the filled permutation. Checked:
-        # ordering the pairs by it must sort them by expert, as the forward's rows
-        # are. Under `scan` the tensors are fake and carry no values to check.
+        # `inv_perm` is allocated empty and populated in place via subscript
+        # assignment (`inv_perm[perm] = torch.arange(...)`). AST instrumentation
+        # records the initial tensor at index 0 and the assigned `arange` at
+        # index 1, so `bound["inv_perm"][0]` holds the completed inverse
+        # permutation. Verify that sorting by its inverse orders pairs by expert ID
+        # (skipped under `.scan()`, where FakeTensors have no concrete values).
         inv_perm = bound["inv_perm"][0] if bound["inv_perm"] else None
         if inv_perm is None or inv_perm.shape != (pairs,):
             return output, Unavailable(f"{fn.__name__} bound no inverse permutation over its {pairs} pairs")
@@ -189,19 +201,10 @@ def _serve(fn: Callable, args: tuple, kwargs: dict, layout: dict[str, str], sort
 
 
 def serve_grouped_mm(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """transformers' ``grouped_mm_experts_forward``: its expert-sorted per-pair rows and inverse permutation.
-
-    The forward binds the sorted input as ``selected_hidden_states_g``, the
-    activation and the down projection as rebindings of ``proj_out`` (see
-    `_GROUPED`), and the inverse permutation as ``inv_perm``.
-    """
+    """Serve ``grouped_mm_experts_forward`` by capturing its expert-sorted pair buffers and ``inv_perm`` (see `_GROUPED`)."""
     return _serve(fn, args, kwargs, _GROUPED, sorted_rows=True)
 
 
 def serve_batched_mm(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """transformers' ``batched_mm_experts_forward``: its per-pair rows, already in token order.
-
-    The forward binds the per-pair input as ``selected_hidden_states`` and the
-    activation and down projection as rebindings of ``proj_out`` (see `_BATCHED`).
-    """
+    """Serve ``batched_mm_experts_forward`` by capturing its token-ordered pair buffers (see `_BATCHED`)."""
     return _serve(fn, args, kwargs, _BATCHED, sorted_rows=False)

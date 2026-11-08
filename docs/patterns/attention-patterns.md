@@ -1,6 +1,6 @@
 ---
 title: Attention Patterns
-one_liner: Read attention probability matrices from the fused kernel with `attn.kernel.probs(...)`, or from `attn.output[1]` under eager, to see what each head attends to.
+one_liner: Read attention probability matrices from the fused kernel with `attn.kernel.probs(...)`, or from `attn.output[1]` under eager execution, to see what each head attends to.
 tags: [pattern, interpretability, attention, kernel, source-tracing]
 related: [docs/usage/kernel.md, docs/usage/source.md, docs/patterns/per-head-attention.md, docs/patterns/logit-lens.md]
 sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/attention.py, src/nnsight/intervention/source.py, tests/test_kernel.py, tests/test_source.py]
@@ -16,12 +16,13 @@ use it to find induction, copy, previous-token or name-mover heads, to compute
 per-head metrics (entropy, attention to a position), or to check a hypothesis from
 another method.
 
-The default attention implementation (`sdpa`, which runs FlashAttention, cuDNN
-or the memory-efficient kernel on GPU) never materializes the matrix, so
-`attn.output[1]` is `None` and `model.output.attentions` is the empty tuple. The
-kernel does keep its per-row logsumexp, and `attn.kernel.probs(...)` reconstructs
-the probabilities the kernel used from it, in fp32, with the model's output
-unchanged ([kernel](../usage/kernel.md)).
+Under the default attention implementation (`sdpa`, which runs FlashAttention,
+cuDNN, or memory-efficient attention on GPU), the kernel never materializes the
+full probability matrix, so `attn.output[1]` is `None` and
+`model.output.attentions` is an empty tuple. However, the kernel retains its
+per-row logsumexp, and `attn.kernel.probs(...)` reconstructs the probabilities
+used by the kernel in fp32 while leaving the model's output unchanged
+([kernel](../usage/kernel.md)).
 
 ## Canonical pattern
 
@@ -44,20 +45,22 @@ assert torch.allclose(weights.sum(-1), torch.ones_like(weights.sum(-1)))   # row
 assert (torch.triu(weights, diagonal=1) == 0).all()      # causal mask, exactly zero
 ```
 
-Ask for the slice you need rather than the whole matrix: `probs(heads=4, query=-1)`
-is one head's last row, `[batch, k_seq]`; the full matrix at long context is
-`batch x heads x L x L` floats. Grouped-query models (Llama, Qwen) work the same
-way; `heads=` indexes query heads.
+Request only the slice you need: `probs(heads=4, query=-1)` returns the last
+query row of head 4 with shape `[batch, k_seq]`, whereas requesting the full
+matrix at long context materializes `batch x heads x L x L` floats.
+Grouped-query models (such as Llama and Qwen) work the same way, with `heads=`
+indexing query heads.
 
 ## Head scores from the kernel
 
-Each score below is one method's own number, computed from the slice of the matrix
-it needs. Every layer is a separate request, made in forward order inside one trace
-(these are `tests/test_kernel.py::TestWorkloads`).
+The examples below compute standard head metrics from targeted slices of the
+attention matrix. Each layer is requested in forward order inside a single
+trace (matching `tests/test_kernel.py::TestWorkloads`).
 
-**Induction score.** Feed a random sequence twice. Query `L + i` is the second copy
-of token `i`; an induction head puts its mass on key `i + 1`, the token that followed
-the first occurrence. The score is the mean of that diagonal over the second half.
+**Induction score.** Repeat a random token sequence twice. Query `L + i` sits
+at the second occurrence of token `i`, and an induction head places its
+attention mass on key `i + 1` (the token that followed the first occurrence).
+The induction score is the mean of that diagonal across the second half.
 
 ```python
 import nnsight
@@ -74,8 +77,9 @@ scores = torch.stack([row[0][:, queries, keys].mean(-1) for row in rows])   # [l
 # scores[5, 5] = 0.93, scores[7, 10] = 0.87, scores[6, 9] = 0.82; layers 0 and 1 stay under 0.04
 ```
 
-**Attention sink.** The mass on the first key, per head and layer, is one column of
-the matrix: `probs(key=0)` is `[batch, heads, queries]` and costs nothing more.
+**Attention sink.** The attention mass placed on the first key per head and
+layer is a single column of the probability matrix: `probs(key=0)` returns
+`[batch, heads, queries]` directly without materializing the other key columns.
 
 ```python
 with model.trace(prompt):
@@ -87,11 +91,12 @@ mass = torch.stack([sink[0, :, 1:].mean(-1) for sink in sinks])   # [layers, hea
 # on a 20-token prompt: layer 0 averages 0.19, layers 5 to 10 put between 0.69 and 0.77 of a row on key 0
 ```
 
-**Retrieval head during generation.** Start the second copy of a random sequence and
-let greedy decoding continue it. At each step the kernel sees one query against the
-cache, so `probs(heads=h, query=-1)` is `[batch, prompt + step]`; the head's top key
-is the position after the previous occurrence, and the token there is the one
-generated.
+**Retrieval head during generation.** Feed the start of a repeated random
+sequence and let greedy decoding continue it. At each decode step, the kernel
+runs a single query row against the KV cache, so `probs(heads=h, query=-1)` has
+shape `[batch, prompt + step]`. The retrieval head's highest-probability key
+points to the token following the previous occurrence, which matches the token
+generated at that step.
 
 ```python
 half = torch.randint(1000, 20000, (1, 12))
@@ -107,11 +112,13 @@ for step, row in enumerate(rows):
     assert out[0, row[0].argmax()] == out[0, 15 + step]   # holds at all six steps
 ```
 
-**Knockout.** The sites are reads; to forbid one `(query, key)` pair, edit the mask
-the module hands to the kernel. For an unpadded prompt GPT-2 passes `None` (the
-kernel runs causal), so build a causal bias with the pair set to `-inf` and assign it
-to the attention interface's inputs. The site then shows the knocked key at exactly
-`0` with the rest of the row renormalized, and the logits move.
+**Knockout.** Kernel sites are read-only; to block a specific `(query, key)`
+pair, modify the attention mask passed to the kernel. For an unpadded prompt,
+GPT-2 passes `None` as the mask and relies on causal masking, so you can
+construct an explicit causal bias with `-inf` at the blocked `(query, key)`
+entry and assign it to the attention interface's inputs. Reading `probs` then
+confirms that the blocked key receives `0` probability with the remaining keys
+renormalized.
 
 ```python
 attn = model.transformer.h[5].attn
@@ -127,18 +134,21 @@ with model.trace(prompt):
 # knocked[0] = [0.418, 0.0, 0.349, 0.218, 0.015]; before the edit the row was [0.272, 0.349, 0.227, 0.142, 0.01]
 ```
 
-A reduction over the key axis (entropy, maximum) needs the full rows, so it costs
-`heads x L x L` per layer; at long context ask for the heads you need.
+Reductions across the full key axis (such as entropy or row maximum) require
+all keys and materialize `heads x L x L` floats per layer; at long context,
+slice `heads=` to the subset of heads you need.
 
 ## Under `attn_implementation="eager"`
 
-Eager attention computes the softmax in Python and returns the matrix alongside its
-output, so `attn.output[1]` is the pattern and `model.output.attentions` is every
-layer's at once. It is a different arithmetic from the kernel's: on Qwen3-8B in
-bf16 the two differ by a median of 0.6% and up to 20% at the top key (56-token
-prompt, layers 0 to 9), so prefer the kernel read when the question is about the
-model as it runs. Eager is the route when the kernel is not SDPA, or when a module
-does not go through `scaled_dot_product_attention` at all.
+Under eager execution, the attention module computes the softmax in Python and
+returns the probability matrix alongside its output, so `attn.output[1]` gives
+that layer's pattern and `model.output.attentions` collects all layers at once.
+Because eager attention uses different floating-point arithmetic from fused
+kernels (on Qwen3-8B in bf16 across a 56-token prompt and layers 0 to 9, eager
+probabilities differ from the kernel's by a median of 0.6% and up to 20% at the
+top key), prefer `attn.kernel.probs(...)` when analyzing the default model. Use
+eager execution when the model uses a non-SDPA kernel or custom Python
+attention logic.
 
 ```python
 model = TransformersModel("openai-community/gpt2", dispatch=True, attn_implementation="eager")
@@ -166,8 +176,8 @@ For GPT-2, the operation inside the attention forward that returns
 `(attn_output, attn_weights)` is `attention_interface_1` (`attention_interface_0` is
 the assignment that picks the implementation). Under `attn_implementation="eager"`
 it resolves at run time to `eager_attention_forward`, so you can chain `.source`
-again to reach the softmax (under `sdpa` no softmax runs in Python, and the drill
-raises that `nn_functional_softmax_0` is not an operation):
+again to reach the softmax (under `sdpa`, no softmax runs in Python, and drilling
+raises an error that `nn_functional_softmax_0` is not an operation):
 
 ```python
 with model.trace(prompt):

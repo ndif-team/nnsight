@@ -77,7 +77,7 @@ def deprecated(message: str):
 # submodule runs this, so the patches are always in place.
 from .intervention import backward  # noqa: F401
 
-# Registers the fused attention kernel's sites (`envoy.kernel.probs(...)`).
+# Register SDPA kernel sites (`envoy.kernel.probs(...)`, `scores(...)`, `lse(...)`) on import.
 from .intervention import attention  # noqa: F401
 
 # nnsight.save(value): mark a value to return from the outermost trace.

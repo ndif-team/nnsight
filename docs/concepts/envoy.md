@@ -21,7 +21,7 @@ forward pass runs:
 - `.inputs` — the full `(args, kwargs)` pair
 - `.skip(value)` — don't run this module's forward; use `value` as its output
 - `.source` — the operations inside the forward ([source-tracing.md](source-tracing.md))
-- `.kernel` — sites inside the fused kernel the forward calls ([usage/kernel.md](../usage/kernel.md))
+- `.kernel`: intermediate sites inside the fused kernel called by the forward ([usage/kernel.md](../usage/kernel.md))
 
 Each property names a location (`{path}.output`, …). **Reading** it parks the worker
 until the model gets there and returns the real object; **assigning** it replaces the

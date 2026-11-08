@@ -1,49 +1,63 @@
-"""Attention probabilities, scores and logsumexp from the fused SDPA kernel.
+"""Attention probabilities, scores, and logsumexp from PyTorch's fused SDPA kernels.
 
 ``torch.nn.functional.scaled_dot_product_attention`` dispatches to one of several
-fused kernels (FlashAttention, the memory-efficient kernel, cuDNN, a CPU flash
-kernel) or to an fp32 math fallback. None of them writes the probability matrix;
-every fused one computes a per-row logsumexp for its backward pass, and the public
-call drops it. The probabilities the kernel used are then ``exp(S - lse)`` with
-``S`` the fp32 scores, which is the formula FlashAttention's own backward
-recomputes them by. The reconstruction is exact up to fp32 rounding of ``S`` and
-``lse`` (rows sum to 1 within a few ulps of the row's largest ``|S|``: 5e-7 on
-GPT-2, 8e-4 on a Qwen2.5-0.5B layer whose scores reach 1700), where an eager
-re-implementation under bf16 is off by up to 19% at the top key.
+fused backends (FlashAttention, memory-efficient attention, cuDNN, or CPU flash
+attention) or to an fp32 math fallback. The fused backends never write the
+attention probability matrix to global memory, but each one computes the per-row
+logsumexp (``lse``) in fp32 for its backward pass before the high-level wrapper
+discards it. Using ``lse`` and the fp32 scores ``S``, the attention probabilities
+computed by the kernel can be reconstructed as ``exp(S - lse)``, which is the
+same formula FlashAttention uses in its backward pass. This reconstruction is
+accurate up to fp32 rounding of ``S`` and ``lse`` (rows sum to 1 within a few
+ulps of the row's largest ``|S|``: 5e-7 on GPT-2, and 8e-4 on a Qwen2.5-0.5B
+layer whose scores reach 1700). By contrast, switching the model to eager
+attention in bf16 changes the probabilities by up to 19% at the top key.
 
-The public call runs under a dispatch mode (`_Capture`) that sees the fused op the
-dispatcher chose and its arguments as preprocessed (mask conversion, stride
-padding, the GQA expansion), and keeps them. The op runs exactly as the model
-called it, so the output is the model's own. The two kernels that write the
-logsumexp only on request (efficient, cuDNN) are launched a second time with the
-flag on, when a worker asks and only then; the second output is compared with the
-first, and if the two differ (observed on the efficient kernel under ``no_grad``
-with a stride-0 key head and a bias, at a few sequence lengths) the logsumexp is
-recomputed in fp32 instead and the provenance says so. When no fused op fires the
-math fallback ran, which computes in fp32 throughout, and the logsumexp is
-computed here in fp32 and labelled a replay.
+When a worker waits on an attention module's kernel location, `serve` runs the
+SDPA call inside a `TorchDispatchMode` (`_Capture`) that records the low-level
+ATen operator selected by the dispatcher along with its preprocessed arguments
+(after mask conversion, stride padding, and GQA expansion) and its return tuple.
+The operator runs with the exact arguments the model passed, leaving the model's
+output unchanged.
 
-Sites, each taking ``heads=``, ``query=`` and (except ``lse``) ``key=`` as an int,
-slice, list or tensor of indices, with torch indexing semantics:
+Two backends (memory-efficient attention and cuDNN) only populate the logsumexp
+buffer when their ``compute_log_sumexp`` flag is set. When a worker requests
+``lse`` or ``probs`` on one of those backends and the flag was ``False`` during the
+forward pass, the operator is called a second time under ``torch.no_grad()`` with
+``compute_log_sumexp=True``. Its attention output is checked for bitwise equality
+against the first launch; if the two outputs differ (which can happen on the
+memory-efficient kernel under ``no_grad`` with a stride-0 key head and an
+additive bias at certain sequence lengths), the second launch is discarded,
+``lse`` is recomputed in fp32 from the scores, and the provenance kind is marked
+as ``"replay"``. When no fused backend fires, the fp32 math fallback ran, so
+``lse`` is computed in fp32 and also marked as ``"replay"``.
 
-* ``lse``: the kernel's normalizer, ``[batch, heads, queries]``, an exact export.
-* ``scores``: ``q . k * scale`` in fp32 with the mask added: ``-inf`` under a
-  causal or boolean mask, the mask's own value under a float mask,
-  ``[batch, heads, queries, keys]``.
-* ``probs``: ``exp(scores - lse)``, exactly ``0`` where masked; a row with every
-  key masked (a pad query) is all ``0``; other rows sum to 1.
+Available sites (each accepting ``heads=``, ``query=``, and, for ``scores`` and
+``probs``, ``key=`` as an int, slice, list, or tensor of indices with PyTorch
+indexing semantics):
+
+* ``lse``: per-row logsumexp normalizer of shape ``[batch, heads, queries]``,
+  served as an ``"exact export"``.
+* ``scores``: ``q . k * scale`` in fp32 plus the attention mask (``-inf`` for
+  masked positions under a causal or boolean mask, or the float mask values
+  directly), of shape ``[batch, heads, queries, keys]``.
+* ``probs``: ``exp(scores - lse)``, of shape ``[batch, heads, queries, keys]``.
+  Masked positions are ``0``, rows where every key is masked (such as padding
+  queries) are all ``0``, and all other rows sum to 1.
 
 .. code-block:: python
 
     with model.trace(prompt):
         p = model.model.layers[6].self_attn.kernel.probs(heads=4, query=-1).save()
 
-Grouped-query attention is read off the shapes: query head ``h`` reads key head
-``h // (Hq // Hkv)``, the layout both ``enable_gqa`` and transformers' ``repeat_kv``
-use. A causal call is top-left aligned (query ``i`` sees keys ``0..i``), as
-``is_causal`` is in torch. The served tensors are detached: the kernel's logsumexp
-is taken below autograd, so a gradient through them would treat it as a constant.
-Dropout, when on, is applied after these probabilities; the provenance says so.
+Grouped-query attention (GQA) is handled directly from the input shapes: query
+head ``h`` maps to key head ``h // (Hq // Hkv)``, matching both ``enable_gqa``
+and transformers' ``repeat_kv``. Causal masking uses top-left alignment (query
+``i`` attends to keys ``0..i``), matching PyTorch's ``is_causal=True``. Returned
+tensors are detached from autograd because the kernel's ``lse`` is captured below
+autograd, where differentiating through ``exp(S - lse)`` would treat ``lse`` as a
+constant. When ``dropout_p > 0``, dropout is applied after these probabilities,
+and the provenance note records that ``dropout_p`` value.
 """
 
 from __future__ import annotations
@@ -61,8 +75,8 @@ from .kernel import Provenance, Sites, Unavailable
 
 aten = torch.ops.aten
 
-#: The fused ops the dispatcher may choose, mapped to the position of their
-#: ``compute_log_sumexp`` argument, or ``None`` for the ones that always write it.
+#: Fused SDPA ATen operators mapped to the positional index of their
+#: ``compute_log_sumexp`` argument, or ``None`` for operators that always return ``lse``.
 _FUSED: dict[OpOverload, int | None] = {
     aten._scaled_dot_product_flash_attention.default: None,
     aten._scaled_dot_product_flash_attention_for_cpu.default: None,
@@ -71,17 +85,18 @@ _FUSED: dict[OpOverload, int | None] = {
     aten._scaled_dot_product_fused_attention_overrideable.default: None,
 }
 
-#: ``scaled_dot_product_attention``'s parameters in order, for binding positionals;
-#: the function is a builtin, so ``inspect.signature`` has none to give.
+#: Parameter names of ``scaled_dot_product_attention`` in positional order
+#: (needed because the C++ builtin has no Python ``inspect.signature``).
 _PARAMETERS = ("query", "key", "value", "attn_mask", "dropout_p", "is_causal", "scale", "enable_gqa")
 
-#: A float mask at or below this is a masked position: transformers builds additive
-#: masks at the model dtype's minimum, and float16's is the largest of those.
+#: Threshold at or below which a float mask entry is treated as completely masked.
+#: Transformers constructs additive masks using the minimum representable value of
+#: the model dtype, and ``float16`` has the largest minimum among supported dtypes.
 _MASKED = torch.finfo(torch.float16).min
 
 
 class _Capture(TorchDispatchMode):
-    """Record the fused op the dispatcher chose, its arguments and its result."""
+    """Dispatch mode that records the fused SDPA operator, its arguments, and its output."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -99,7 +114,7 @@ class _Capture(TorchDispatchMode):
 
 
 def serve(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """Run the public SDPA call as the model made it; return its output and a reader."""
+    """Run ``scaled_dot_product_attention`` under `_Capture` and return its output and an `Attention` reader."""
     bound = dict(zip(_PARAMETERS, args))
     bound.update(kwargs)
     with _Capture() as capture:
@@ -111,7 +126,7 @@ def serve(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
 
 @contextmanager
 def _exact_fp32() -> Iterator[None]:
-    """fp32 matmuls at full precision, whatever TF32 setting the user runs under."""
+    """Run fp32 matrix multiplications at full IEEE precision regardless of the caller's TF32 setting."""
     precision = torch.get_float32_matmul_precision()
     torch.set_float32_matmul_precision("highest")
     try:
@@ -121,7 +136,7 @@ def _exact_fp32() -> Iterator[None]:
 
 
 class Attention(Sites):
-    """The three sites over one captured call, computed per requested slice."""
+    """Site reader for a captured `scaled_dot_product_attention` call."""
 
     names = ("lse", "scores", "probs")
 
@@ -135,7 +150,7 @@ class Attention(Sites):
         self.scale = self.q.shape[-1] ** -0.5 if scale is None else scale
         self.dropout = bound.get("dropout_p", 0.0)
         self.capture = capture
-        # Set when the kernel's second launch did not reproduce the model's output.
+        # Set to True if a second launch with compute_log_sumexp=True produced a different output from the first launch.
         self.disagreed = False
 
     @property
@@ -144,15 +159,16 @@ class Attention(Sites):
 
     @cached_property
     def exported(self) -> torch.Tensor | None:
-        """The kernel's logsumexp, fp32, ``[B, H, Lq]``, or ``None`` when it wrote none."""
+        """Return the kernel's exported fp32 logsumexp of shape ``[B, H, Lq]``, or ``None`` if unavailable."""
         capture = self.capture
         if capture.op is None:
             return None
         flag = _FUSED[capture.op]
         result = capture.result
         if flag is not None and not capture.args[flag]:
-            # Written only on request: launch once more with the flag on, and
-            # trust the logsumexp only if that launch reproduces the model's output.
+            # This backend only writes logsumexp when requested. Re-run with the
+            # flag enabled and use the result only if the attention output matches
+            # the original call bit for bit.
             args = (*capture.args[:flag], True, *capture.args[flag + 1 :])
             with torch.no_grad():
                 result = capture.op(*args, **capture.kwargs)
@@ -160,11 +176,11 @@ class Attention(Sites):
                 self.disagreed = True
                 return None
         if result[1].numel() == 0:
-            # The overrideable op (XPU, custom backends) may return an empty logsumexp.
+            # Custom or overrideable backends (such as XPU) may return an empty logsumexp tensor.
             return None
         lse = result[1].float()
-        # cuDNN writes ``[B, H, Lq, 1]``; the efficient kernel pads the last dim to
-        # a multiple of 32. Both are the same statistic.
+        # cuDNN returns shape [B, H, Lq, 1], and the memory-efficient kernel pads
+        # the query dimension to a multiple of 32. Trim both to [B, H, Lq].
         if lse.dim() == 4:
             lse = lse.squeeze(-1)
         return lse[..., : self.q.shape[2]]
@@ -175,7 +191,7 @@ class Attention(Sites):
         return formula
 
     def _axes(self, spec: dict[str, Any], site: str, allowed: tuple[str, ...]) -> tuple:
-        """Query heads, their key heads, query rows and key columns the spec selects."""
+        """Resolve query heads, corresponding KV heads, query row indices, and key column indices from ``spec``."""
         kernel.check_axes(spec, site, allowed)
         device = self.q.device
         heads = kernel.positions(kernel.indices(spec.get("heads"), self.q.shape[1], device), self.q.shape[1], device)
@@ -185,12 +201,12 @@ class Attention(Sites):
         return heads, kv_heads, rows, cols
 
     def _mask(self, heads: torch.Tensor, rows: slice | torch.Tensor, cols: slice | torch.Tensor) -> torch.Tensor | None:
-        """The explicit mask over the requested slice as a float bias, or ``None``."""
+        """Return the explicit ``attn_mask`` sliced to ``(heads, rows, cols)`` as an additive fp32 bias, or ``None``."""
         if self.mask is None:
             return None
         mask = self.mask.reshape((1,) * (4 - self.mask.dim()) + tuple(self.mask.shape))
-        # Select before converting, so a one-row request never copies the whole mask.
-        # A size-1 dim broadcasts over the slice and is left alone.
+        # Slice before casting to float32 so requesting a small slice does not copy the full mask.
+        # Dimensions of size 1 broadcast across the axis and are left unsliced.
         for dim, index in ((1, heads), (2, rows), (3, cols)):
             if mask.shape[dim] > 1:
                 mask = kernel.select(mask, dim, index)
@@ -199,7 +215,7 @@ class Attention(Sites):
         return mask.float()
 
     def _bias(self, heads: torch.Tensor, rows: slice | torch.Tensor, cols: slice | torch.Tensor) -> torch.Tensor | None:
-        """The additive mask for the requested slice, or ``None`` when nothing is masked."""
+        """Return the combined explicit and causal additive mask for the slice, or ``None`` if unmasked."""
         bias = self._mask(heads, rows, cols)
         if self.is_causal:
             row = kernel.positions(rows, self.q.shape[2], self.q.device)
@@ -250,8 +266,9 @@ class Attention(Sites):
         lse, lse_provenance = self._lse(heads, kv_heads, rows)
         probs = torch.exp(self._scores(heads, kv_heads, rows, cols) - lse.unsqueeze(-1))
         if self.mask is not None:
-            # A row with every key masked (a pad query): the kernels disagree on
-            # what they write there, and no key received any attention.
+            # When every key in a query row is masked (for example, a padding
+            # query), different backends write different values into lse. Zero
+            # those rows explicitly since no key received attention.
             whole = self._mask(heads, rows, slice(None))
             probs = probs.masked_fill((whole <= _MASKED).all(-1, keepdim=True), 0.0)
         kind = "exact reconstruction" if lse_provenance.kind == "exact export" else "replay"

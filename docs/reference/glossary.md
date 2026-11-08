@@ -16,7 +16,7 @@ tags: [reference, glossary]
 
 **Envoy** — the wrapper around one `nn.Module`, mirroring the module tree; exposes `.input`, `.inputs`, `.output`, `.skip()`, `.source`, `.kernel`. `NNsight` and the model classes are Envoys. [concepts/envoy.md](../concepts/envoy.md)
 
-**Kernel site** — a value a fused kernel or fused forward computes and does not return (attention probabilities under `sdpa`, a chunked recurrence's state at a token, one expert's rows in a grouped MoE), read through `module.kernel.<site>(...)` from the kernel's own exported statistics or locals. [usage/kernel.md](../usage/kernel.md)
+**Kernel site**: an intermediate value inside a fused kernel or fused forward pass (such as attention probabilities under `sdpa`, recurrent states at interior tokens of a chunked scan, or per-expert rows in a grouped MoE forward), read through `module.kernel.<site>(...)` from the kernel's exported statistics or local buffers. [usage/kernel.md](../usage/kernel.md)
 
 **eproperty** — the descriptor behind a served value (`.output`, `tracer.result`, `VLLM.logits`): reading parks until the location is reached, writing swaps it. [developing/extending-envoy.md](../developing/extending-envoy.md)
 

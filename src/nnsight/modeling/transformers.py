@@ -113,12 +113,13 @@ _ARCH_TASK = {
 
 
 def _hub_wrappers(module: ModuleType) -> list[dict[str, Any]]:
-    """The closures of every ``use_kernel_func_from_hub_with_fallback`` wrapper in ``module``'s globals.
+    """Inspect all ``use_kernel_func_from_hub_with_fallback`` wrapper closures defined in ``module``.
 
-    The wrapper is the ``wrapped`` function that decorator defines; it is told
-    apart by its code object's origin, and its closure (``func_name``, ``package``,
-    ``torch_function``, ``implementation``, ...) is read by name, with the
-    wrapper itself under ``"wrapper"``.
+    Each wrapper is identified by its code object's name (``"wrapped"``) and file
+    (``transformers.integrations.hub_kernels``). Returns a list of dicts mapping
+    each closure variable name (``func_name``, ``package``, ``torch_function``,
+    ``implementation``, etc.) to its value, plus ``"wrapper"`` for the wrapper
+    function itself.
     """
     from transformers.integrations import hub_kernels
 
@@ -346,16 +347,15 @@ class TransformersModel(HuggingFaceModel):
         self._register_kernels()
 
     def _register_kernels(self) -> None:
-        # transformers reaches the attention kernel through one of these
-        # interfaces; `attn.kernel.probs(...)` drills through them to the call.
+        # Mark all transformers attention interface wrappers so `attn.kernel`
+        # drills through them to the inner `scaled_dot_product_attention` call.
         from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
         through(*ALL_ATTENTION_FUNCTIONS.values())
-        # A mixture-of-experts forward is the callee of every experts module's
-        # dispatching `forward`; its per-pair buffers are sites. `generate` switches
-        # grouped_mm to batched_mm for decoding on an accelerator, so both are
-        # entries. The interface module and its second forward arrived in
-        # transformers 5; an older transformers has no MoE sites.
+        # Register the fused mixture-of-experts forwards introduced in
+        # transformers 5 (`grouped_mm_experts_forward` for prefill and
+        # `batched_mm_experts_forward`, which `generate` uses during accelerator
+        # decoding). Older transformers releases do not have `transformers.integrations.moe`.
         try:
             from transformers.integrations import moe
         except ImportError:
@@ -365,13 +365,13 @@ class TransformersModel(HuggingFaceModel):
                 forward = vars(moe).get(name)
                 if forward is not None:
                     register(forward, serve)
-        # A chunked recurrent kernel (gated delta rule, Mamba2 scan) is reached
-        # through the wrapper `use_kernel_func_from_hub_with_fallback` builds, a
-        # closure over the hub kernel's name, the reference implementation and the
-        # library one when installed. Each modeling file holds its own copy, so
-        # the wrappers are found on the modules this model's classes come from
-        # (a class built by `exec` may name a module that was never imported),
-        # drilled through, and their callees registered by the kernel's name.
+        # Chunked recurrent kernels (gated delta rule, Kimi delta attention,
+        # Mamba2, Mamba1) are called through `use_kernel_func_from_hub_with_fallback`
+        # wrappers defined in each model's modeling module. Inspect the modules
+        # belonging to this model's submodules (ignoring any `None` entries from
+        # dynamically exec'd classes), mark each wrapper as pass-through, and
+        # register both its PyTorch reference function and any installed library
+        # implementation (`fla`).
         modules = {sys.modules.get(type(sub).__module__) for sub in self._module.modules()} - {None}
         for module in modules:
             for closure in _hub_wrappers(module):

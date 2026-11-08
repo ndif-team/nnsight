@@ -1,42 +1,49 @@
-"""Read values a fused kernel computes but never writes out.
+"""Expose intermediate values from fused kernels during a trace.
 
-A fused kernel takes its inputs from memory and writes its output back, and
-everything in between lives in registers: FlashAttention never materializes the
-attention probabilities, a chunked state-space kernel never forms the state at a
-token inside a chunk. Those values are what interpretability methods read, and the
-usual way to get them, swapping the kernel for an eager implementation, changes
-the arithmetic: under bf16 an eager attention's probabilities differ from the
-kernel's by up to 19% at the top key (Qwen3-8B, 56-token prompt; see
-docs/usage/kernel.md), while the model's logits move by a KL of 1e-3. The eager
-value belongs to a different computation from the one the model runs.
+Fused kernels read their inputs from global memory, compute intermediate values
+in registers or shared memory, and write only the final output back. For example,
+FlashAttention computes attention probabilities on the fly without writing the
+full probability matrix to memory, and chunked state-space kernels only form
+recurrent states at chunk boundaries. Standard interpretability methods often
+switch the model to an eager implementation to read these intermediates, which
+changes the floating-point arithmetic. In bf16 on Qwen3-8B (56-token prompt; see
+docs/usage/kernel.md), eager attention probabilities differ from the fused
+kernel's probabilities by up to 19% at the top key, and the output logits shift
+by a KL divergence of 1e-3.
 
-The kernel's own backward pass already solves this. It saves a small *sufficient
-statistic* (attention saves the per-row logsumexp, a chunked scan saves its
-chunk-boundary states) and recomputes the intermediate from the inputs and that
-statistic. This module lets a trace do the same: run the kernel the model would
-have run, keep the statistic the wrapper drops, and reconstruct only the slice the
-user asked for. A *site* is one such reconstructible value (``probs``, ``lse``).
+Fused kernels already save compact summary statistics for their backward pass:
+attention kernels save the per-row logsumexp, and chunked scans save the state at
+each chunk boundary. During the backward pass, the kernel recomputes the needed
+intermediates from the inputs and those saved statistics. This module applies the
+same idea during a trace: it runs the exact kernel the model is configured to use,
+retains the statistics that the high-level wrapper normally discards, and
+reconstructs only the slice requested by the user. Each reconstructible quantity
+(such as ``probs`` or ``lse``) is exposed as a kernel *site*.
 
-Mechanism, on the one primitive the interleaver has (a location string and
-[`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle]):
+How it works with the interleaver's location and
+[`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle] mechanism:
 
-* A registry maps a fused callable to a *serve function*. `run_op` (see
-  intervention/source.py) looks the callable of every instrumented call up here;
-  a match runs the serve function instead of the plain call. It returns the same
-  output the call would have and a [`Sites`][nnsight.intervention.kernel.Sites]
-  reader holding the kernel's inputs and statistics, which `run_op` hands to
-  ``"{module}.kernel"``, one location per module, on every fire. The reader
-  computes a site when a worker asks, so a fire nobody reads costs the capture
-  and nothing else.
-* A through set names Python wrappers (transformers' attention interfaces) to
-  drill into on the way down when a worker is parked on the module's kernel
-  location, so the kernel call inside them reaches `run_op` with the arguments the
-  kernel sees: after RoPE, after the cache update, in the kernel's layout.
-* The worker side is [`Envoy.kernel`][nnsight.intervention.envoy.Envoy.kernel]: a
-  [`Kernel`][nnsight.intervention.kernel.Kernel] accessor whose attributes are
-  sites. A call parks the worker on the module's kernel location, receives the
-  reader, computes its slice there, in the worker, and narrows it to its own
-  batch rows. Index errors and unknown sites therefore raise on the user's line.
+* A global registry maps each fused callable to a *serve function*. When `run_op`
+  (in intervention/source.py) intercepts a call to a registered callable and a
+  worker is waiting on the enclosing module's kernel location, it runs the serve
+  function. The serve function returns the kernel's normal output along with a
+  [`Sites`][nnsight.intervention.kernel.Sites] reader that holds the captured
+  inputs and statistics. `run_op` then passes this reader to the location
+  ``"{module}.kernel"``. The reader only computes a site when a worker requests
+  it.
+* A pass-through set (`_THROUGH`) lists Python wrapper functions (such as
+  transformers' attention interfaces) that `run_op` automatically instruments on
+  the fly when a worker is waiting on the module's kernel location. This ensures
+  that the inner kernel call is intercepted after preprocessing steps like RoPE,
+  KV-cache updates, and tensor layout transpositions.
+* On the user side, [`Envoy.kernel`][nnsight.intervention.envoy.Envoy.kernel]
+  returns a [`Kernel`][nnsight.intervention.kernel.Kernel] accessor whose
+  attributes correspond to site names. Calling a site parks the worker on
+  ``"{module}.kernel"``, receives the `Sites` reader when the kernel runs,
+  computes the requested slice on the worker thread, and narrows the result to
+  the worker's batch rows. Because slicing happens on the worker thread, invalid
+  site names or out-of-bounds indices raise directly on the user's line inside
+  the trace block.
 
 .. code-block:: python
 
@@ -45,30 +52,41 @@ Mechanism, on the one primitive the interleaver has (a location string and
 
     p.provenance   # Provenance(kind='exact reconstruction', kernel='aten._scaled_dot_product_flash_attention', ...)
 
-Every served value carries a [`Provenance`][nnsight.intervention.kernel.Provenance]
-naming what kind of value it is: an *exact export* the kernel wrote (the
-logsumexp, a chunk-boundary state), an *exact reconstruction* from exported
-statistics (probabilities as ``exp(S - lse)`` in fp32, the formula the kernel's
-backward uses), a *replay* when the kernel exported nothing and the value was
-recomputed in fp32 beside it, or *derived* when the value is absent from the
-kernel's algorithm and is stepped from an exported statistic by the layer's own
-recurrence (the state at a token inside a chunk; see intervention/recurrent.py).
-The site classes live beside this module: intervention/attention.py (SDPA),
-intervention/recurrent.py (gated delta rule, Mamba2), intervention/experts.py
-(grouped mixture-of-experts).
+Every tensor returned by a site has a
+[`Provenance`][nnsight.intervention.kernel.Provenance] attached at ``.provenance``
+that records how the value was obtained:
 
-The kernel fires inside the module's call, so the kernel location's occurrence
-is the module's: the interleaver counts ``"{module}.kernel"`` as
-``"{module}.output"`` (see `Mediator.occurrence`), which advances on every call of
-the module whether or not its forward is instrumented. A ``tracer.iter`` request
-pinned to step ``n`` is therefore served at step ``n``.
+* ``"exact export"``: a tensor written directly by the kernel (such as ``lse`` or
+  a chunk-boundary state).
+* ``"exact reconstruction"``: a value computed in fp32 from the kernel's inputs
+  and exported statistics using the same mathematical identity the kernel uses in
+  its backward pass (such as attention probabilities via ``exp(S - lse)``).
+* ``"replay"``: a value recomputed in fp32 alongside a kernel that did not export
+  usable statistics.
+* ``"derived"``: a quantity that the chunked algorithm never forms directly,
+  computed by advancing an exported boundary state using the layer's intra-chunk
+  recurrence (such as a per-token state inside a chunk; see
+  intervention/recurrent.py).
 
-Constraints: reads only, and the served tensors carry no gradient; a site is
-served when the kernel fires, so it must be requested before anything later in
-the forward is read, like every other location; the module's forward is
-instrumented by the first access to ``envoy.kernel``, which is in time unless the
-module is already running (a read inside it earlier in the same block), in which
-case the request raises and says so.
+Site implementations are organized by kernel family in sibling modules:
+intervention/attention.py (SDPA), intervention/recurrent.py (gated delta rule,
+Kimi delta attention, Mamba2, Mamba1), and intervention/experts.py (grouped
+mixture-of-experts).
+
+Because a kernel executes inside its module's forward pass, the interleaver tracks
+the occurrence count of ``"{module}.kernel"`` using ``"{module}.output"`` (see
+`Mediator.occurrence`). That counter advances on every call to the module even on
+steps where the module's forward was uninstrumented, so a request scoped to step
+``n`` via ``tracer.iter`` always matches step ``n``.
+
+Limitations:
+* Sites are read-only, and returned tensors are detached from autograd.
+* Because sites are served when the kernel executes, a site must be requested
+  before reading any value produced later in the forward pass.
+* Accessing ``envoy.kernel`` instruments the module's forward pass. If ``.kernel``
+  is accessed for the first time while the module is already in the middle of an
+  uninstrumented forward call (for example, after reading a submodule inside the
+  same parent module), the request raises `OutOfOrderError`.
 """
 
 from __future__ import annotations
@@ -80,67 +98,73 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensor
 
 from .interleaver import Event, Interleaver, Mediator, OutOfOrderError
 
 if TYPE_CHECKING:
     from .envoy import Envoy
 
-#: Fused callable -> serve function ``(fn, args, kwargs) -> (output, Sites)``.
+#: Maps each registered fused callable to its serve function ``(fn, args, kwargs) -> (output, Sites)``.
 _KERNELS: dict[Callable, Callable] = {}
 
-#: Python wrappers drilled into on the way down to a registered kernel.
+#: Python wrapper functions that `run_op` instruments on the fly to reach a registered kernel inside them.
 _THROUGH: set[Callable] = set()
 
-#: Location suffix of a module's kernel sites; counted as the module's ``.output``.
+#: Location suffix for a module's kernel sites, counted on the same schedule as the module's ``.output``.
 SUFFIX = ".kernel"
 
-#: A requested slice whose fp32 result would exceed this many bytes warns first.
+#: Threshold in bytes above which materializing a requested site slice emits a warning.
 _LARGE_SITE_BYTES = 1 << 30
 
 
 class Provenance(NamedTuple):
-    """What kind of value a kernel site served, and from which kernel."""
+    """Metadata describing how a kernel site value was computed and which kernel produced it."""
 
-    #: ``"exact export"`` for a tensor the kernel wrote, ``"exact reconstruction"``
-    #: for one computed from exported statistics by an identity, ``"replay"`` for
-    #: one recomputed in fp32 beside a kernel that exported nothing usable,
-    #: ``"derived"`` for one the kernel's algorithm never forms, stepped from an
-    #: exported statistic by the layer's own recurrence (the note carries the
-    #: measured drift of that stepping).
+    #: ``"exact export"`` for a tensor written directly by the kernel;
+    #: ``"exact reconstruction"`` for a tensor computed from exported statistics
+    #: via an exact identity; ``"replay"`` for a tensor recomputed in fp32
+    #: alongside a kernel that exported no usable statistics; ``"derived"`` for a
+    #: tensor that the kernel never forms directly, computed by advancing an
+    #: exported boundary state with the layer's intra-chunk recurrence (with the
+    #: measured boundary drift reported in ``note``).
     kind: str
-    #: The kernel that ran, by name.
+    #: Name of the kernel that ran.
     kernel: str
-    #: The formula or caveat a reader needs to interpret the value.
+    #: Formula or caveat needed to interpret the value.
     note: str
 
 
-# A saved site loads under ``torch.load``'s default ``weights_only=True``.
+# Allow saved site tensors carrying `.provenance` to load under `torch.load(..., weights_only=True)`.
 torch.serialization.add_safe_globals([Provenance])
 
 
 class Batch(NamedTuple):
-    """The requesting worker's rows in the trace's combined batch."""
+    """Row range belonging to the requesting worker within the trace's combined batch."""
 
-    #: Rows in the combined forward (every invoke's, stacked on dim 0).
+    #: Total batch rows across all invokes in the combined forward pass.
     total: int
-    #: The worker's first row.
+    #: Starting row index for the requesting worker.
     start: int
-    #: The worker's row count.
+    #: Number of rows belonging to the requesting worker.
     size: int
 
 
 class Sites:
-    """What a serve function hands the module's kernel location: one fire's reader.
+    """Reader for a single kernel execution, delivered to ``"{module}.kernel"``.
 
-    A subclass lists its site names in ``names`` and defines one method per site,
-    ``name(spec) -> (tensor, Provenance)``, taking the normalized slice spec. The
-    reader holds the kernel's inputs and statistics until the last worker served
-    on this fire lets go of it. ``batch`` is the worker's rows in the trace's
-    batch when the trace has a batcher (every `TransformersModel` trace does, with
-    one invoke too), else ``None``; a reader whose rows are batch-major ignores it
-    and leaves the narrowing to the worker, one whose rows are a flattened token
-    axis uses it to serve the worker's own rows.
+    Subclasses list their supported site names in ``names`` and implement one
+    method per site with signature ``name(spec) -> (tensor, Provenance)``, where
+    ``spec`` is a normalized slice dictionary. The reader retains the kernel's
+    captured inputs and exported statistics until all workers waiting on that
+    kernel execution have read their slices.
+
+    When the trace uses a batcher (which includes single-invoke
+    `TransformersModel` traces), ``batch`` describes the requesting worker's row
+    range in the combined batch; otherwise ``batch`` is ``None``. Readers whose
+    outputs have batch as dimension 0 ignore ``batch`` and let `Kernel._request`
+    narrow the result afterwards. Readers whose internal buffers flatten the batch
+    and sequence dimensions use ``batch`` to reshape and select the worker's rows.
     """
 
     names: tuple[str, ...] = ()
@@ -152,10 +176,10 @@ class Sites:
 
 
 class Unavailable(Sites):
-    """What a serve function hands over when this call's sites cannot be read.
+    """Placeholder reader returned when a kernel call's sites cannot be served.
 
-    The kernel ran as the model called it; the reason surfaces on the worker's
-    line, at the request, as a ``ValueError``.
+    The kernel itself still runs normally. If a worker requests a site from this
+    call, `read` raises ``ValueError`` with ``reason`` on the worker's line.
     """
 
     def __init__(self, reason: str) -> None:
@@ -166,22 +190,22 @@ class Unavailable(Sites):
 
 
 def register(fn: Callable, serve: Callable) -> None:
-    """Serve ``fn``'s sites with ``serve``.
+    """Register ``serve`` as the site handler for ``fn``.
 
-    ``serve(fn, args, kwargs)`` returns ``(output, sites)``: what ``fn(*args,
-    **kwargs)`` returns, unchanged, and a [`Sites`][nnsight.intervention.kernel.Sites].
+    ``serve(fn, args, kwargs)`` must return ``(output, sites)``, where ``output``
+    is the unmodified return value of ``fn(*args, **kwargs)`` and ``sites`` is a
+    [`Sites`][nnsight.intervention.kernel.Sites] instance.
     """
     _KERNELS[fn] = serve
 
 
 def through(*fns: Callable) -> None:
-    """Drill into ``fns`` on the way down when a worker waits on their module's kernel."""
+    """Mark wrapper functions ``fns`` to be instrumented on the fly when a worker waits on their module's kernel."""
     _THROUGH.update(fns)
 
 
 def _registered(fn: Callable, table: dict | set) -> Any:
-    # A callable that cannot be hashed is not a kernel; say so rather than raise
-    # in the middle of a forward.
+    # Unhashable callables cannot be in the registry; return None instead of raising TypeError during a forward pass.
     try:
         return table.get(fn) if isinstance(table, dict) else fn in table
     except TypeError:
@@ -189,22 +213,22 @@ def _registered(fn: Callable, table: dict | set) -> Any:
 
 
 def serving(fn: Callable) -> Callable | None:
-    """The serve function registered for ``fn``, or ``None``."""
+    """Return the serve function registered for ``fn``, or ``None``."""
     return _registered(fn, _KERNELS)
 
 
 def passes_through(fn: Callable) -> bool:
-    """Whether ``fn`` is a wrapper to drill into on the way to a kernel."""
+    """Return whether ``fn`` is a registered wrapper on the path to a kernel."""
     return bool(_registered(fn, _THROUGH))
 
 
 def requested(interleaver: Interleaver, module_path: str) -> bool:
-    """Whether a worker is parked on ``module_path``'s kernel location."""
+    """Return whether any worker is currently parked on ``module_path``'s kernel location."""
     return f"{module_path}{SUFFIX}" in interleaver.parked
 
 
 def warn_if_large(shape: tuple[int, ...], site: str, axes: str, dtype: torch.dtype = torch.float32) -> None:
-    """Warn before materializing a site whose result exceeds `_LARGE_SITE_BYTES`; ``axes`` names its slice arguments."""
+    """Emit a warning if materializing ``shape`` in ``dtype`` exceeds `_LARGE_SITE_BYTES`."""
     size = math.prod(shape) * dtype.itemsize
     if size > _LARGE_SITE_BYTES:
         warnings.warn(
@@ -214,14 +238,14 @@ def warn_if_large(shape: tuple[int, ...], site: str, axes: str, dtype: torch.dty
 
 
 def check_axes(spec: dict[str, Any], site: str, allowed: tuple[str, ...]) -> None:
-    """Raise ``ValueError`` for a spec key ``site`` does not take."""
+    """Raise ``ValueError`` if ``spec`` contains axis names outside ``allowed``."""
     unknown = set(spec) - set(allowed)
     if unknown:
         raise ValueError(f"kernel site {site!r} takes {', '.join(allowed)}; got {', '.join(sorted(unknown))}")
 
 
 def squeeze(value: torch.Tensor, spec: dict[str, Any], axes: dict[str, int]) -> torch.Tensor:
-    """Drop each axis in ``axes`` (name -> dim) whose spec entry is a single int, highest dim first."""
+    """Squeeze each axis in ``axes`` (mapping axis name to dimension) that was indexed by a single int, from highest dimension to lowest."""
     for name, axis in sorted(axes.items(), key=lambda item: -item[1]):
         if isinstance(spec.get(name), int):
             value = value.squeeze(axis)
@@ -229,23 +253,25 @@ def squeeze(value: torch.Tensor, spec: dict[str, Any], axes: dict[str, int]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Slice specs: what the worker asks for, in a form a site method can index by
+# Slice specification helpers
 # ---------------------------------------------------------------------------
 
 
 def _normalize(spec: dict[str, Any]) -> dict[str, Any]:
-    """The spec as plain Python values.
+    """Convert user-supplied axis indices in ``spec`` into canonical Python types.
 
-    An index (anything ``operator.index`` accepts, a 0-d integer tensor) stays a
-    single position and drops its axis, as torch indexing does; a ``slice`` stays a
-    slice; a list or tensor of indices becomes a tuple of ints, a boolean tensor
-    the positions where it is ``True``; ``None`` is the whole axis. A bool, a float
-    or a float tensor is refused: torch gives each a different meaning from an
-    index, and none of them is a slice of a head or a position.
+    Single integer indices (anything accepted by ``operator.index`` or a 0-d
+    integer tensor) become ``int`` and cause that axis to be squeezed later. A
+    ``slice`` is kept as a ``slice``. A list, tuple, or 1-D+ integer tensor
+    becomes a tuple of ``int``s, and a boolean tensor is converted to the
+    positions where it is ``True``. ``None`` selects the full axis. Booleans,
+    floats, and floating-point or complex tensors are rejected with ``TypeError``.
     """
     normalized: dict[str, Any] = {}
     for name, value in spec.items():
         if isinstance(value, torch.Tensor):
+            if isinstance(value, FakeTensor):
+                raise TypeError(f"kernel site index {name}= is a tensor created under scan, whose values are unknown; pass an int, slice or list")
             if value.dtype is torch.bool:
                 value = value.nonzero().flatten()
             if value.is_floating_point() or value.is_complex():
@@ -266,13 +292,14 @@ def _normalize(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def indices(value: Any, size: int, device: torch.device | None = None) -> slice | torch.Tensor:
-    """A normalized spec entry as something a tensor dim can be indexed by.
+    """Convert a normalized spec entry for an axis of length ``size`` into a ``slice`` or index tensor.
 
-    ``None`` is the whole axis, an int one position (a slice of length one, so the
-    axis is dropped afterwards, once every site is computed), a slice itself, and a
-    tuple of ints a ``LongTensor`` for ``index_select``, created on ``device`` (the
-    tensor it will index, so no host-to-device copy happens on the request). Positions
-    are bounds-checked here, where the request's traceback points at the user's line.
+    ``None`` becomes ``slice(None)``. A single ``int`` becomes a unit-length
+    ``slice`` so the dimension stays in place during computation and can be
+    removed at the end by `squeeze`. A ``slice`` is returned as-is. A tuple of
+    ``int``s becomes a ``torch.long`` tensor on ``device`` for ``index_select``.
+    Integer indices are bounds-checked here so that ``IndexError`` points to the
+    user's line in the trace.
     """
     if value is None:
         return slice(None)
@@ -288,40 +315,53 @@ def indices(value: Any, size: int, device: torch.device | None = None) -> slice 
 
 
 def select(tensor: torch.Tensor, dim: int, index: slice | torch.Tensor) -> torch.Tensor:
-    """``tensor`` narrowed along ``dim`` by a slice or gathered by an index tensor."""
+    """Slice ``tensor`` along ``dim`` when ``index`` is a ``slice``, or gather with ``index_select`` when it is a tensor."""
     if isinstance(index, slice):
         return tensor[(slice(None),) * dim + (index,)]
     return tensor.index_select(dim, index)
 
 
 def positions(index: slice | torch.Tensor, size: int, device: torch.device | None = None) -> torch.Tensor:
-    """The positions along an axis of ``size`` that ``index`` selects, as a tensor on ``device``."""
+    """Return the selected positions along an axis of length ``size`` as a 1-D tensor on ``device``."""
     return torch.arange(size, device=device)[index] if isinstance(index, slice) else index
 
 
+def offsets(value: Any, size: int) -> list[int]:
+    """The positions along an axis of ``size`` that a normalized spec entry selects, as Python ints.
+
+    Built without a tensor, so it also works under ``model.scan`` (fake tensors carry no values).
+    """
+    index = indices(value, size)
+    if isinstance(index, slice):
+        return list(range(size))[index]
+    return [position % size for position in value]
+
+
 # ---------------------------------------------------------------------------
-# The worker side
+# Worker-side accessor
 # ---------------------------------------------------------------------------
 
 
 class Kernel:
-    """The sites inside the kernel an envoy's module calls, reached as ``envoy.kernel``.
+    """Accessor for kernel sites inside a module, reached as ``envoy.kernel``.
 
-    An attribute is a site; calling it with the slice to read parks the worker
-    until the kernel fires and returns the value, a real tensor carrying a
-    [`Provenance`][nnsight.intervention.kernel.Provenance] as ``.provenance``::
+    Each attribute on `Kernel` names a site. Calling that attribute with optional
+    slice keyword arguments parks the worker until the kernel executes and returns
+    the requested tensor with a [`Provenance`][nnsight.intervention.kernel.Provenance]
+    at ``.provenance``::
 
         attn.kernel.probs(heads=4, query=-1)
         attn.kernel.lse()
 
-    Which sites exist depends on the kernel; asking for one it does not define
-    raises, naming the ones it has.
+    Available site names depend on the kernel that runs inside the module.
+    Requesting an unknown site raises ``ValueError`` listing the available sites.
     """
 
     def __init__(self, envoy: Envoy, instrumented: bool) -> None:
         self._envoy = envoy
-        # Whether the module's forward was instrumented before this access, so a
-        # call already in progress is running the instrumented body.
+        # Records whether the module's forward was already source-instrumented
+        # before this `.kernel` access, so `_request` can detect if the module was
+        # already mid-call in an uninstrumented forward pass.
         self._instrumented = instrumented
 
     def __getattr__(self, site: str) -> Callable[..., torch.Tensor]:
@@ -335,9 +375,9 @@ class Kernel:
         location = f"{path}{SUFFIX}"
         mediator = Mediator.current(location)
         if mediator.occurrence(f"{path}.input") > mediator.occurrence(f"{path}.output") and not self._instrumented:
-            # The module is mid-call (a value inside it, or its output, was read
-            # first) with the forward it had before this request instrumented it,
-            # so this call's kernel will not be seen.
+            # The module is already inside its forward pass (because a submodule
+            # inside it was read earlier in the same trace block), and it entered
+            # that call before `.kernel` instrumented the forward.
             raise OutOfOrderError(
                 f"'{location}' was requested while {path!r} is already running without an "
                 f"instrumented forward; request the site before reading the module's output "
@@ -352,7 +392,7 @@ class Kernel:
         value, provenance = sites.read(site, spec, batch)
         if batcher is not None:
             value = batcher.narrow(value, mediator.batch_group)
-        # Set here, on the worker's own view: a view carries no attributes over.
+        # Attach provenance after batch narrowing because slicing a tensor creates a view without custom attributes.
         value.provenance = provenance
         return value
 

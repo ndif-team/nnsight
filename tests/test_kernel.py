@@ -16,7 +16,7 @@ from nnsight.intervention.kernel import Provenance
 
 
 def _reference(q, k, mask=None, is_causal=False, scale=None):
-    """fp32 softmax over the kernel's own inputs; `k` is expanded for grouped queries."""
+    """Compute reference fp32 scores, softmax probabilities, and logsumexp over the kernel's inputs (expanding `k` for GQA)."""
     groups = q.shape[1] // k.shape[1]
     k = k.repeat_interleave(groups, 1) if groups > 1 else k
     scale = q.shape[-1] ** -0.5 if scale is None else scale
@@ -33,7 +33,7 @@ def _reference(q, k, mask=None, is_causal=False, scale=None):
 
 
 class Mixer(nn.Module):
-    """Attention that calls the fused kernel directly, with its own projection names."""
+    """Minimal attention module that calls `F.scaled_dot_product_attention` directly."""
 
     def __init__(self, width=16, q_heads=4, kv_heads=4, causal=True):
         super().__init__()
@@ -57,12 +57,12 @@ class Mixer(nn.Module):
 
 
 def attention_through(module, q, k, v, bias, **kwargs):
-    """A library-style attention interface the model picks at run time."""
+    """Wrapper function modeling a transformers attention interface selected at runtime."""
     return F.scaled_dot_product_attention(q, k, v, attn_mask=bias, is_causal=bias is None), None
 
 
 class Routed(nn.Module):
-    """Attention that reaches the kernel through an interface function chosen in the forward."""
+    """Attention module that calls SDPA through a wrapper function assigned to a local variable in `forward`."""
 
     def __init__(self, width=16, heads=2):
         super().__init__()
@@ -77,7 +77,7 @@ class Routed(nn.Module):
 
 
 class Twice(nn.Module):
-    """Two kernel calls in one forward: the second over the first's output."""
+    """Module containing two sequential attention submodules with distinct kernel configurations."""
 
     def __init__(self):
         super().__init__()
@@ -88,7 +88,7 @@ class Twice(nn.Module):
         return self.second(self.first(x))
 
 
-# Registered once, as a model class registers the interfaces its checkpoints use.
+# Register the test attention interface wrapper as pass-through once at import time.
 kernel.through(attention_through)
 
 
@@ -300,8 +300,8 @@ class TestOrdering:
             with envoy.trace(x):
                 envoy.to_q.output
                 envoy.kernel.probs(heads=0)
-        # Accessing `.kernel` before the trace instruments the forward, so the
-        # same block then works: this call runs the instrumented body.
+        # Touching `.kernel` before the trace instruments the module's forward pass
+        # ahead of time, allowing submodule reads before the kernel site request.
         envoy.kernel
         with envoy.trace(x):
             projected = nnsight.save(envoy.to_q.output)
@@ -325,7 +325,7 @@ class TestOrdering:
 
 class TestMasks:
     def test_float_mask_at_the_dtype_minimum_masks_exactly(self, x):
-        # transformers builds float masks at the dtype's minimum rather than -inf.
+        # Transformers constructs additive float masks using the dtype's minimum representable value.
         mixer = Mixer(causal=False)
         envoy = Envoy(mixer)
         allowed = torch.ones(6, 6, dtype=torch.bool).tril()
@@ -335,15 +335,15 @@ class TestMasks:
             scores = nnsight.save(envoy.kernel.scores(heads=0, query=0))
         assert (probs[..., ~allowed] == 0).all()
         assert torch.allclose(probs.sum(-1), torch.ones(2, 4, 6), atol=1e-6)
-        assert scores[1:].min() <= torch.finfo(torch.float32).min / 2  # the mask's own value, added
+        assert scores[1:].min() <= torch.finfo(torch.float32).min / 2  # the float mask value is added to scores
 
     @pytest.mark.parametrize("masked", [None, torch.finfo(torch.float16).min, torch.finfo(torch.float32).min])
     def test_a_row_with_every_key_masked_is_zero(self, x, masked):
-        # Boolean, or additive at the minimum of float16 / float32 as transformers builds them.
+        # Test boolean masks and additive masks using float16 or float32 minimums.
         mixer = Mixer(causal=False)
         envoy = Envoy(mixer)
         allowed = torch.ones(2, 1, 6, 6, dtype=torch.bool)
-        allowed[1, :, :2] = False  # the second row's first two queries see nothing (pad queries)
+        allowed[1, :, :2] = False  # mask out all keys for the first two queries of batch item 1 (padding queries)
         bias = allowed if masked is None else torch.zeros(2, 1, 6, 6).masked_fill(~allowed, masked)
         with envoy.trace(x, bias):
             probs = nnsight.save(envoy.kernel.probs())
@@ -384,8 +384,8 @@ class TestBatching:
         assert first.shape == second.shape == (1, width)
         assert torch.equal(second, again)
         assert first.provenance.kind == "exact reconstruction"
-        # The shorter prompt is left-padded: its rows put nothing on the pad keys
-        # and match a solo run on the real ones.
+        # The shorter prompt is left-padded: padding keys receive zero probability,
+        # and the unpadded suffix matches a standalone trace of the short prompt.
         assert (first[0, : width - solo.shape[1]] == 0).all()
         assert torch.allclose(first[0, width - solo.shape[1] :], solo[0], atol=1e-4)
 
@@ -428,7 +428,7 @@ class TestMemory:
 class TestTransformers:
     def test_drills_through_the_attention_interface(self, gpt2):
         attn = gpt2.transformer.h[2].attn
-        attn.kernel  # instrumented before the trace, so a read inside the module may come first
+        attn.kernel  # instrument before the trace so reading `c_attn.output` first is allowed
         with gpt2.trace("The quick brown fox"):
             qkv = attn.c_attn.output.save()
             probs = attn.kernel.probs(heads=5, query=-1).save()
@@ -448,10 +448,10 @@ class TestTransformers:
             rows = nnsight.save([])
             for step in tracer.iter[0:4]:
                 if step % 2 == 0:
-                    gpt2.lm_head.output  # a step with no kernel request
+                    gpt2.lm_head.output  # step without a kernel site request
                 else:
                     rows.append(attn.kernel.probs(heads=0, query=-1))
-        # Step n sees the prompt plus n generated keys.
+        # Step n attends over the prompt plus n previously generated keys.
         assert [row.shape[-1] for row in rows] == [width + 1, width + 3]
         assert all(row.shape[:-1] == (1,) for row in rows)
 
@@ -471,8 +471,8 @@ def _wrap(module):
 
     from nnsight.modeling.transformers import TransformersModel
 
-    # gpt2's tokenizer, with a pad token inside the tiny vocabulary (id 0), so
-    # invokes of different lengths can be batched.
+    # Use GPT-2's tokenizer with "!" (token ID 0, inside the small test vocab) as
+    # the pad token so invokes of different lengths can be batched.
     tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
     tokenizer.pad_token = "!"
     return TransformersModel(module.eval(), task="text-generation", tokenizer=tokenizer)
@@ -490,14 +490,15 @@ def _gated_delta_config():
 
 
 def _gated_delta_module(**to):
-    """A two-layer Qwen3-Next whose first layer is a gated delta rule over 6 value heads, 3 key heads, K=8, V=12."""
+    """Build a two-layer Qwen3-Next model whose first layer uses gated delta rule over 6 value heads and 3 key heads (K=8, V=12)."""
     from transformers import Qwen3NextForCausalLM
 
     torch.manual_seed(0)
     module = Qwen3NextForCausalLM(_gated_delta_config()).to(**to)
-    # The random A_log gives a decay near 1e-5 per token, which erases a chunk's
-    # boundary state within a few tokens; a decay near 0.97 keeps the boundary
-    # visible in every derived state, so a wrong boundary fails the comparison.
+    # Default random initialization of `A_log` produces a per-token decay near
+    # 1e-5, which zeroes out the entering chunk boundary within a few tokens.
+    # Setting `A_log` to `log(0.05)` gives a per-token decay near 0.97 so the
+    # entering boundary state contributes noticeably to every derived state in the chunk.
     module.model.layers[0].linear_attn.A_log.data.fill_(math.log(0.05))
     return module
 
@@ -509,7 +510,7 @@ def gated_delta():
 
 @pytest.fixture(scope="module")
 def mamba2():
-    """A two-layer Mamba2 with 16-token chunks, random weights."""
+    """Build a two-layer Mamba2 model with 16-token chunks and random weights."""
     from transformers import Mamba2Config, Mamba2ForCausalLM
 
     config = Mamba2Config(
@@ -522,7 +523,7 @@ def mamba2():
 
 @pytest.fixture(scope="module")
 def mamba1():
-    """A two-layer Mamba (the per-token selective scan) with 24 channels and an 8-wide state, random weights."""
+    """Build a two-layer Mamba1 model (per-token selective scan) with 24 channels, state size 8, and random weights."""
     from transformers import MambaConfig, MambaForCausalLM
 
     config = MambaConfig(hidden_size=12, state_size=8, num_hidden_layers=2, conv_kernel=4, time_step_rank=4, vocab_size=256)
@@ -532,7 +533,7 @@ def mamba1():
 
 @pytest.fixture(scope="module")
 def kimi():
-    """A two-layer Kimi Linear whose first layer is a Kimi delta attention over 4 heads of K = V = 8, random weights."""
+    """Build a two-layer Kimi Linear model whose first layer runs Kimi delta attention over 4 heads (K = V = 8)."""
     from transformers import KimiLinearConfig, KimiLinearForCausalLM
 
     config = KimiLinearConfig(
@@ -543,8 +544,7 @@ def kimi():
     )
     torch.manual_seed(0)
     module = KimiLinearForCausalLM(config)
-    # As on the gated delta rule fixture: a decay near 0.95 per channel keeps the
-    # chunk boundary visible in every derived state.
+    # Keep per-channel decay near 0.95 so the chunk boundary state remains visible across the chunk.
     module.model.layers[0].self_attn.forget_gate.A_log.data.fill_(math.log(0.05))
     return _wrap(module)
 
@@ -555,7 +555,7 @@ def _ids(length, batch=3):
 
 
 def _hf_state_after(inputs, token):
-    """transformers' per-token reference run over the first ``token + 1`` positions; the state it ends in."""
+    """Run transformers' per-token gated delta reference over the first ``token + 1`` tokens and return its final state."""
     import transformers.models.qwen3_next.modeling_qwen3_next as modeling
 
     args, kwargs = inputs
@@ -585,7 +585,7 @@ class Scan(nn.Module):
 class TestRecurrent:
     def test_gated_delta_chunk_states_match_the_per_token_reference(self, gated_delta):
         mixer = gated_delta.model.layers[0].linear_attn
-        ids = _ids(150)  # three chunks of 64, the last partial
+        ids = _ids(150)  # two full 64-token chunks followed by a partial chunk
         with gated_delta.trace(ids):
             plain = gated_delta.output.logits.save()
         with gated_delta.trace(ids):
@@ -629,7 +629,7 @@ class TestRecurrent:
             "torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule", "torch_recurrent_gated_delta_rule"
         ]
         assert all(step.provenance.kind == "exact export" for step in steps)
-        # The state after decode step 1 is the state a prefill over the same 71 tokens ends in.
+        # The state after decode step 1 matches the final state of a 71-token prefill over the same tokens.
         with gated_delta.trace(generated[:, :71]):
             final = mixer.kernel.chunk_states(chunks=-1).save()
         assert torch.allclose(steps[1], final, atol=1e-6)
@@ -704,6 +704,18 @@ class TestRecurrent:
             final = mixer.kernel.chunk_states(chunks=-1).save()
         assert torch.allclose(steps[1], final, atol=1e-6)
 
+    def test_a_scan_serves_shapes(self, mamba2):
+        mixer = mamba2.backbone.layers[0].mixer
+        with mamba2.scan(_ids(37)):
+            boundaries = mixer.kernel.chunk_states(chunks=slice(1, 3)).save()
+            states = mixer.kernel.states(tokens=[0, 20, 36], heads=1).save()
+        assert boundaries.shape == (3, 2, 4, 16, 8)
+        assert states.shape == (3, 3, 16, 8)
+        assert states.provenance.kind == "derived"
+        with pytest.raises(TypeError, match="created under scan"):
+            with mamba2.scan(_ids(37)):
+                mixer.kernel.states(tokens=torch.tensor([0, 20]))
+
     def test_mamba1_states_are_the_loop_states_and_match_an_fp64_scan(self, mamba1):
         mixer = mamba1.backbone.layers[0].mixer
         ids = _ids(37)
@@ -750,7 +762,7 @@ class TestRecurrent:
         import transformers.models.kimi_linear.modeling_kimi_linear as modeling
 
         mixer = kimi.model.layers[0].self_attn
-        ids = _ids(150)  # three chunks of 64, the last partial
+        ids = _ids(150)  # two full 64-token chunks followed by a partial chunk
         with kimi.trace(ids):
             plain = kimi.output.logits.save()
         with kimi.trace(ids):
@@ -808,7 +820,7 @@ class TestRecurrent:
 
 @pytest.fixture(scope="module", params=["grouped_mm", "batched_mm"])
 def moe(request):
-    """A one-layer Qwen2-MoE with 5 experts, 2 per token, random weights, on each of transformers' two fused experts paths."""
+    """Build a one-layer Qwen2-MoE model (5 experts, top-2 routing) parameterized over `grouped_mm` and `batched_mm`."""
     from transformers import Qwen2MoeConfig, Qwen2MoeForCausalLM
 
     config = Qwen2MoeConfig(
@@ -823,11 +835,11 @@ def moe(request):
 
 
 class Pool(nn.Module):
-    """Experts without a gate on transformers' experts interface: ``act(up @ x)`` then ``down``, 3 experts, hidden 8, intermediate 12."""
+    """Minimal ungated MoE experts module (`act(up @ x)` followed by `down`) with 3 experts, hidden size 8, and intermediate size 12."""
 
     def __init__(self, config):
         super().__init__()
-        # Row widths are multiples of 16 bytes, as torch's grouped matmul requires.
+        # Row dimensions are multiples of 16 bytes as required by PyTorch's grouped matmul.
         self.num_experts, self.hidden_dim, self.intermediate_dim = 3, 8, 12
         self.up_proj = nn.Parameter(torch.randn(3, 12, 8))
         self.down_proj = nn.Parameter(torch.randn(3, 8, 12))
@@ -845,14 +857,14 @@ def _pool():
 
     from nnsight.intervention import experts
 
-    # What `TransformersModel` registers at construction, for a module traced through a plain Envoy.
+    # Explicitly register `grouped_mm_experts_forward` for standalone `Envoy` tests that do not construct a `TransformersModel`.
     kernel.register(moe.grouped_mm_experts_forward, experts.serve_grouped_mm)
     torch.manual_seed(2)
     return Envoy(use_experts_implementation(Pool, has_gate=False)(SimpleNamespace(_experts_implementation="grouped_mm")))
 
 
 def _per_pair(experts_module, x, index):
-    """Each (token, slot) pair's activation and down projection, computed one pair at a time in fp64 on the CPU."""
+    """Compute each `(token, slot)` pair's intermediate activation and down projection sequentially in fp64 on CPU."""
     x, index = x.double().cpu(), index.cpu()
     gate_up, down = experts_module.gate_up_proj.double().cpu(), experts_module.down_proj.double().cpu()
     act = torch.zeros(*index.shape, experts_module.intermediate_dim, dtype=torch.float64)
@@ -869,7 +881,7 @@ def _per_pair(experts_module, x, index):
 class TestExperts:
     def test_pair_buffers_match_a_per_pair_computation(self, moe):
         experts = moe.model.layers[0].mlp.experts
-        experts.kernel  # instrument before the trace, so the module's inputs may be read first
+        experts.kernel  # instrument before the trace so reading `experts.inputs` first is allowed
         ids = _ids(7)
         with moe.trace(ids):
             plain = moe.output.logits.save()
@@ -889,7 +901,7 @@ class TestExperts:
         ref_act, ref_out = _per_pair(moe._module.model.layers[0].mlp.experts, x, index)
         assert torch.allclose(act.reshape(21, 2, 24).double().cpu(), ref_act, rtol=1e-5, atol=1e-7)
         assert torch.allclose(out.reshape(21, 2, 32).double().cpu(), ref_out, rtol=1e-5, atol=1e-7)
-        # The module's output is the routing-weighted sum of these rows.
+        # Summing the down-projected rows weighted by `top_k_weights` reproduces `experts.output`.
         assert torch.allclose((out.reshape(21, 2, 32) * weights.unsqueeze(-1)).sum(1), routed, atol=1e-6)
 
     def test_expert_and_slot_selections(self, moe):
@@ -931,7 +943,7 @@ class TestExperts:
             act = pool.kernel.expert_activation().save()
             out = pool.kernel.expert_output(expert=2).save()
             routed = pool.output.save()
-        # A plain Envoy's batcher counts its input as one row.
+        # A standalone `Envoy` treats its entire input as a single batch row.
         assert act.shape == (1, 6, 2, 12) and out.shape == (1, 6, 8)
         act, out = act[0], out[0]
         module = pool._module
@@ -976,8 +988,7 @@ class TestExperts:
         with moe.trace(short):
             a_alone = experts.kernel.expert_output().save()
         assert a.shape == (1, 7, 2, 32) and b.shape == (2, 7, 2, 32)
-        # A matmul over 3 rows and over 2 rows may block differently on a GPU; the
-        # short invoke is left-padded, so its own tokens are the last four positions.
+        # Because the short invoke is left-padded to length 7, its 4 real tokens sit at the end of the sequence axis.
         assert torch.allclose(b, b_alone, atol=1e-6)
         assert torch.allclose(a[:, -4:], a_alone, atol=1e-6)
         with moe.generate(long, max_new_tokens=2, min_new_tokens=2, do_sample=False) as tracer:
@@ -988,7 +999,7 @@ class TestExperts:
 
 
 class TestWorkloads:
-    """One interpretability method per test, run through the sites and checked by the method's own invariant."""
+    """End-to-end interpretability workloads executed through `.kernel` sites."""
 
     def test_induction_heads_score_high_on_a_repeated_sequence(self, gpt2):
         torch.manual_seed(0)
@@ -997,12 +1008,12 @@ class TestWorkloads:
             rows = nnsight.save([])
             for block in gpt2.transformer.h:
                 rows.append(block.attn.kernel.probs(query=slice(24, None)))  # [1, heads, 24, 48]
-        # Query 24 + i is the second copy of token i; an induction head puts its mass on key i + 1.
+        # Query `24 + i` is the second copy of token `i`; an induction head attends to key `i + 1`.
         queries, keys = torch.arange(24), torch.arange(24) + 1
         scores = torch.stack([row[0][:, queries, keys].mean(-1) for row in rows])  # [layers, heads]
         assert scores.shape == (12, 12)
-        assert scores[5, 5] > 0.9 and scores[7, 10] > 0.8  # gpt2's induction heads
-        assert scores[:2].max() < 0.05  # none in the first two layers
+        assert scores[5, 5] > 0.9 and scores[7, 10] > 0.8  # known induction heads in GPT-2
+        assert scores[:2].max() < 0.05  # no induction heads in the first two layers
 
     def test_attention_sink_mass_sits_on_the_first_key(self, gpt2):
         prompt = "The quick brown fox jumps over the lazy dog because it wanted to reach the other side of the river"
@@ -1012,7 +1023,7 @@ class TestWorkloads:
                 sinks.append(block.attn.kernel.probs(key=0))  # [1, heads, queries]
                 if i == 10:
                     full = block.attn.kernel.probs().save()
-        mass = torch.stack([sink[0, :, 1:].mean(-1) for sink in sinks])  # [layers, heads], queries after the first
+        mass = torch.stack([sink[0, :, 1:].mean(-1) for sink in sinks])  # [layers, heads], queries after position 0
         assert torch.allclose(sinks[10][0], full[0, :, :, 0], atol=1e-6)
         assert (mass[10] > 0.5).all()
         assert mass[0].mean() < 0.3
@@ -1020,7 +1031,7 @@ class TestWorkloads:
     def test_a_retrieval_head_copies_during_generation(self, gpt2):
         torch.manual_seed(0)
         half = torch.randint(1000, 20000, (1, 12))
-        ids = torch.cat([half, half[:, :3]], 1)  # the second copy has begun; greedy decoding continues it
+        ids = torch.cat([half, half[:, :3]], 1)  # prompt ends with the start of the second copy
         attn = gpt2.transformer.h[5].attn
         with gpt2.generate(ids, max_new_tokens=6, do_sample=False) as tracer:
             rows = nnsight.save([])
@@ -1028,7 +1039,7 @@ class TestWorkloads:
                 rows.append(attn.kernel.probs(heads=5, query=-1))  # [1, prompt + step]
             out = tracer.result.save()
         assert torch.equal(out[0, 15:].cpu(), half[0, 3:9])
-        # At each step the head's top key is the position after the previous occurrence, whose token is the one generated.
+        # At each decode step, head 5's top key points to the token after the earlier match, which is the token generated.
         for step, row in enumerate(rows):
             assert row.shape == (1, 15 + step)
             assert out[0, row[0].argmax()] == out[0, 15 + step]
@@ -1041,8 +1052,8 @@ class TestWorkloads:
             plain = gpt2.output.logits.save()
         head = base[0, :, 1].argmax()
         with gpt2.trace(prompt):
-            # gpt2 hands the interface no mask for an unpadded prompt (the kernel runs causal);
-            # give it a causal bias with key 1 forbidden for the last query.
+            # For an unpadded prompt, GPT-2 passes `None` as the mask and relies on causal masking.
+            # Replace it with an explicit causal bias that also sets key 1 to `-inf` on the last query row.
             args, kwargs = attn.source.attention_interface_1.inputs
             q = args[1]
             n = q.shape[2]
@@ -1064,22 +1075,22 @@ class TestWorkloads:
             states = mixer.kernel.states(tokens=slice(None)).save()  # [batch, 100, heads, K, V]
         (_, key, value, *_), _ = inputs
         key, value = key.float(), value.float()
-        # The kernel's keys: l2-normalized, one key head shared by two value heads.
+        # Preprocess keys as the kernel does: L2-normalize and repeat each key head across its two value heads.
         k = F.normalize(key, dim=-1).repeat_interleave(value.shape[2] // key.shape[2], 2)
-        read = torch.einsum("bshkv,bthk->bsthv", states, k)  # what the state after token s returns for token t's key
+        read = torch.einsum("bshkv,bthk->bsthv", states, k)  # readout of token t's key from the state after token s
         err = (read - value[:, None]).norm(dim=-1)  # [batch, state, token, heads]
         t = torch.arange(1, 100)
-        assert (err[:, t, t] < err[:, t - 1, t]).all()  # the write at t lowers the error on token t
+        assert (err[:, t, t] < err[:, t - 1, t]).all()  # writing token t at step t reduces its readout error
         now, later = err[:, torch.arange(70), torch.arange(70)], err[:, torch.arange(30, 100), torch.arange(70)]
-        assert (later > now).float().mean() > 0.95  # thirty tokens on, the state has mostly forgotten it
+        assert (later > now).float().mean() > 0.95  # 30 tokens later, readout error has increased for over 95% of pairs
 
     def test_ablating_one_expert_from_its_rows_matches_zeroing_its_weights(self, moe):
         experts = moe.model.layers[0].mlp.experts
-        experts.kernel  # instrument before the trace, so the module's inputs may be read first
+        experts.kernel  # instrument before the trace so reading `experts.inputs` first is allowed
         ids = _ids(7)
         with moe.trace(ids):
             index, weights = experts.inputs[0][1], experts.inputs[0][2]  # [tokens, top_k]
-            rows = experts.kernel.expert_output(expert=3)  # [batch, seq, hidden], 0 where the token is not routed to 3
+            rows = experts.kernel.expert_output(expert=3)  # [batch, seq, hidden], 0 where not routed to expert 3
             weight = (weights * (index == 3)).sum(-1)  # [tokens]
             experts.output[:] = experts.output - weight[:, None] * rows.flatten(0, 1)
             ablated = moe.output.logits.save()
@@ -1102,7 +1113,7 @@ class TestWorkloads:
         short, long = _ids(4, batch=1), _ids(7, batch=2)
         with moe.trace() as tracer:
             with tracer.invoke(short):
-                index = experts.inputs[0][1].save()  # flat over the padded batch, [3 * 7, top_k]
+                index = experts.inputs[0][1].save()  # flattened over the padded batch: [3 * 7, top_k]
                 a = experts.kernel.expert_activation(expert=2).save()  # [1, 7, intermediate], left-padded
                 a_slots = experts.kernel.expert_activation().save()  # [1, 7, top_k, intermediate]
             with tracer.invoke(long):
@@ -1113,7 +1124,7 @@ class TestWorkloads:
             hit = mask.any(-1)
             assert act.shape == (*slots.shape[:2], slots.shape[3])
             assert hit.sum() > 0
-            assert torch.equal(act[hit], slots[mask])  # the dense form holds exactly the routed rows, in token order
+            assert torch.equal(act[hit], slots[mask])  # `expert=2` at routed tokens matches the corresponding slot rows
             assert (act[~hit] == 0).all()
 
 
@@ -1137,8 +1148,8 @@ class TestCuda:
 
     @pytest.mark.parametrize("backend", ["EFFICIENT_ATTENTION", "CUDNN_ATTENTION"])
     def test_kernels_that_write_lse_on_request_leave_the_output_unchanged(self, backend):
-        # These two take a compute_log_sumexp flag; the output the model gets is the
-        # one computed with the flag as the model passed it, under no_grad too.
+        # Memory-efficient and cuDNN attention only write `lse` when `compute_log_sumexp=True`;
+        # verify that requesting `probs` under `no_grad` leaves the module's output bit-identical.
         from torch.nn.attention import SDPBackend, sdpa_kernel
 
         torch.manual_seed(0)
@@ -1171,8 +1182,8 @@ class TestCuda:
         assert boundaries.provenance.kernel == "chunk_gated_delta_rule"
         assert boundaries.dtype is torch.float32 and "bfloat16" in boundaries.provenance.note
         assert boundaries.shape == (3, 4, 6, 8, 12)
-        # The kernel works in bf16 between chunks, so every boundary (the fp32
-        # final state included) sits within bf16 rounding of the fp32 recurrence.
+        # Because `fla` stores inter-chunk states in bf16, each exported boundary
+        # (and the fp32 final state derived from them) matches the fp32 reference within bf16 rounding.
         for index, token in ((1, 63), (2, 127), (3, 149)):
             reference = _hf_state_after(inputs, token)
             assert torch.allclose(boundaries[:, index], reference, atol=1e-2 * reference.abs().max().item())

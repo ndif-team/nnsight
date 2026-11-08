@@ -1,54 +1,66 @@
 """Recurrent states from chunked linear-attention and state-space kernels.
 
-A gated delta rule (Qwen3-Next, Qwen3.5), a Kimi delta attention (Kimi Linear,
-GLM-5-Next) or a Mamba2 scan runs in chunks: inside a chunk the kernel works with
-matrices over the chunk's tokens, and the recurrent state is formed only at chunk
-boundaries, as the one value the next chunk needs.
-The state at a token inside a chunk is never computed, by any implementation, so
-there is nothing to export for it. What the kernel does hold is the state at every
-chunk boundary, which is the sufficient statistic: the state at token ``t`` is the
-boundary state before its chunk advanced to ``t`` by the kernel's own intra-chunk
-formula, the one it applies over the whole chunk to reach the next boundary,
-truncated at ``t``.
+Gated delta rule layers (Qwen3-Next, Qwen3.5), Kimi delta attention layers
+(Kimi Linear, GLM-5-Next), and Mamba2 scans execute their recurrences in chunks.
+Within each chunk, the kernel computes over matrices spanning the chunk's tokens,
+and only materializes the recurrent state at chunk boundaries so the next chunk
+can consume it. Because no implementation computes the recurrent state at
+interior tokens of a chunk during the forward pass, those states cannot be
+exported directly. However, the chunk-boundary states and the intra-chunk
+intermediates act as sufficient statistics: the state after an interior token
+``t`` can be obtained by taking the preceding chunk's boundary state and
+applying the kernel's intra-chunk update formula truncated at ``t``.
 
-Two sites on the mixer module, both served in fp32:
+Each covered mixer module exposes two sites, both returned in fp32:
 
-* ``chunk_states(chunks=, heads=)``: the state entering each chunk, index ``0`` the
-  initial state, ``[batch, chunks, heads, ...]``, plus the final state as one more
-  entry when the kernel produced it. An *exact export*: the kernel's own buffer,
-  upcast when the kernel kept it in a narrower dtype (``fla``'s chunk buffer is in
-  the input dtype; its final state and transformers' buffers are fp32).
-* ``states(tokens=, heads=)``: the state after each requested token,
-  ``[batch, tokens, heads, ...]``. Exact where the token ends a chunk whose next
-  boundary was exported; otherwise *derived*: the preceding boundary advanced in
-  fp32 by the kernel's intra-chunk formula over its recorded intermediates (the
-  pairwise decays, keys and delta-corrected values of the gated delta rule, the
-  same with a per-channel decay for Kimi delta attention; the segment decays,
-  discretized inputs and ``B`` of Mamba2), one batched contraction per touched
-  chunk. Mamba1's selective scan (Mamba, FalconMamba, Jamba, Zamba) binds the state
-  after every token, so every token is an exact export there. The provenance note carries the check of that formula: taken
-  to the chunk's end it reproduces the kernel's next boundary, and the note says
-  how far off it lands (fp32 rounding).
+* ``chunk_states(chunks=, heads=)``: the recurrent state entering each chunk
+  (with index ``0`` as the initial state), of shape
+  ``[batch, chunks, heads, ...]``, plus the final state after the last chunk as
+  one additional entry when the kernel produced it. Served as an
+  ``"exact export"`` directly from the kernel's state buffer (upcast to fp32 if
+  the kernel stored it in a lower-precision dtype; ``fla`` stores its chunk
+  buffer in the input dtype and its final state in fp32, while transformers'
+  reference kernels store all states in fp32).
+* ``states(tokens=, heads=)``: the recurrent state after each requested token,
+  of shape ``[batch, tokens, heads, ...]``. When a token sits at the end of a
+  chunk whose following boundary state was exported, that boundary state is
+  returned as an ``"exact export"``. For tokens inside a chunk, the state is
+  ``"derived"`` by advancing the preceding chunk boundary in fp32 using the
+  kernel's intra-chunk formula over its recorded intermediates (pairwise decays,
+  keys, and delta-corrected values for the gated delta rule; the same with a
+  per-channel decay for Kimi delta attention; segment decays, discretized inputs,
+  and ``B`` for Mamba2), using one batched contraction per touched chunk.
+  Mamba1's selective scan (Mamba, FalconMamba, Jamba, Zamba) binds the state
+  after every token in its loop, so every token is an ``"exact export"``. When a
+  state is ``"derived"``, the provenance note verifies the intra-chunk formula
+  by running it to the end of each touched chunk and reporting the maximum
+  relative difference against the kernel's exported next boundary.
 
-transformers' reference implementations (``torch_chunk_gated_delta_rule``,
-``chunk_kimi_delta_attention``, ``mamba2_chunk_scan``, ``mamba_selective_scan``, and
-the per-token ``torch_recurrent_gated_delta_rule``, ``recurrent_kimi_delta_attention``
-and the two ``selective_state_update`` functions used in decoding) are Python. The chunked ones
-bind the boundary states and their intra-chunk intermediates to locals as they go;
-their serve functions run them instrumented (the same instrumentation ``.source``
-uses), record those bindings, and return the output of the instrumented run, which
-is the same arithmetic in the same order. The two ``selective_state_update``
-functions write the new state into the cache tensor they were handed, so their
-serve function copies that tensor before and after.
-``fla``'s chunked kernel computes the chunk states in its own Python forward
-(``chunk_gated_delta_rule_fwd_h``) and drops them after the output is formed; a
-recording stand-in for that function, installed once per process, hands them to
-the serve function that is active on the calling thread; its intra-chunk
-intermediates are not recorded, so a state inside one of its chunks is the boundary
-stepped token by token by the per-token recurrence. Its fused per-token kernel
-exports the final state only, which in decoding is the one state there is.
-The entries are registered by `TransformersModel` for the kernels its model's
-modeling file reaches (see `REFERENCE` and `LIBRARY`); the registry is
+How states and intermediates are captured across kernel implementations:
+
+* Transformers' Python reference kernels (``torch_chunk_gated_delta_rule``,
+  ``chunk_kimi_delta_attention``, ``mamba2_chunk_scan``, ``mamba_selective_scan``,
+  and the single-token decoding kernels ``torch_recurrent_gated_delta_rule`` and
+  ``recurrent_kimi_delta_attention``) assign their boundary states and
+  intra-chunk intermediates to local variables. Their serve functions run the
+  kernel under the same AST instrumentation used by ``.source``, record those
+  local variable bindings, and return the kernel's output without altering the
+  arithmetic or operation order.
+* The single-token decoding functions ``mamba2_selective_state_update`` and
+  ``mamba_selective_state_update`` update the passed-in ``state`` cache tensor
+  in place, so their serve function clones ``state`` before and after the call.
+* In ``fla``, the chunked kernel computes chunk-boundary states in a Python
+  helper (``chunk_gated_delta_rule_fwd_h``) and discards them after forming the
+  output. A thin wrapper installed once per process on that helper captures the
+  returned chunk states on the active thread. Because ``fla`` keeps its
+  intra-chunk intermediates inside Triton kernels, interior token states inside
+  an ``fla`` chunk are derived by stepping the preceding boundary token by token
+  with the fp32 per-token recurrence. ``fla``'s fused recurrent kernel exports
+  only the final state, which during single-token decoding is the only token's
+  state.
+
+`TransformersModel` registers the kernels referenced by its modeling module when
+the model is constructed (see `REFERENCE` and `LIBRARY`). The registry is
 process-wide.
 
 .. code-block:: python
@@ -71,37 +83,39 @@ from typing import Any, Callable
 
 import torch
 import torch.nn.functional as F
+from torch._subclasses.fake_tensor import FakeTensor
 
 from . import kernel
 from .kernel import Provenance, Sites, Unavailable
 from .source import arguments, record
 
-#: The epsilon transformers' and fla's ``l2norm`` add under the square root.
+#: Epsilon added inside the square root by transformers' and fla's ``l2norm``.
 _L2NORM_EPS = 1e-6
 
-#: ``advance(chunk, boundary, offsets)``: the fp32 ``[batch, heads, ...]`` state entering
-#: ``chunk`` taken to each of ``offsets`` (sorted positions inside the chunk), as
-#: ``[batch, len(offsets), heads, ...]``; ``None`` when the kernel exports the state
-#: after every token and nothing inside a chunk is ever asked for.
+#: Signature ``advance(chunk, boundary, offsets)``: advances the fp32
+#: ``[batch, heads, ...]`` state entering ``chunk`` to each sorted intra-chunk
+#: offset in ``offsets``, returning ``[batch, len(offsets), heads, ...]``.
+#: ``None`` when the kernel exports a state after every token.
 Advance = Callable[[int, torch.Tensor, list[int]], torch.Tensor] | None
 
-#: ``step(state, t)`` advances a ``[batch, heads, ...]`` fp32 state across token ``t``.
+#: Signature ``step(state, t)``: advances an fp32 ``[batch, heads, ...]`` state across token ``t``.
 Step = Callable[[torch.Tensor, int], torch.Tensor]
 
 
 def _states(fn: Callable, args: tuple, kwargs: dict, name: str) -> tuple[Any, list[torch.Tensor]]:
-    """Run ``fn`` instrumented; its output and the distinct tensors bound to ``name``."""
+    """Run ``fn`` under AST instrumentation and return its output along with the distinct tensors bound to ``name``."""
     output, bound = record(fn, args, kwargs, (name,))
     return output, bound[name]
 
 
 class Recurrence(Sites):
-    """Chunk-boundary states and the per-token states derived from them.
+    """Site reader for chunk-boundary states and per-token recurrent states.
 
-    ``boundaries`` is ``[batch, n, heads, ...]``: the state entering each of the
-    first ``n`` chunks of ``chunk_size`` tokens over ``length`` tokens, in the dtype
-    the kernel kept; ``final`` the state after the last chunk when the kernel
-    produced it, or ``None``. Build one through `recurrence`, which checks the count.
+    ``boundaries`` has shape ``[batch, n, heads, ...]`` and holds the state
+    entering each of the first ``n`` chunks of length ``chunk_size`` over a
+    sequence of ``length`` tokens, in the dtype used by the kernel. ``final``
+    holds the state after the last chunk when the kernel produced it, or ``None``.
+    Construct instances via `recurrence`, which validates the boundary count.
     """
 
     names = ("chunk_states", "states")
@@ -125,13 +139,13 @@ class Recurrence(Sites):
         self.count = boundaries.shape[1] + (final is not None)
 
     def _boundary(self, index: int) -> torch.Tensor:
-        """The state entering chunk ``index`` (``self.chunks`` for the final state), fp32."""
+        """Return the state entering chunk ``index`` (or ``self.chunks`` for the final state) in fp32."""
         if index == self.boundaries.shape[1]:
             return self.final.float()
         return self.boundaries[:, index].float()
 
     def _stack(self, states: list[torch.Tensor], spec: dict[str, Any], axis: str) -> torch.Tensor:
-        """``[batch, len(states), heads, ...]`` narrowed to the requested heads, a fresh tensor."""
+        """Stack ``states`` into ``[batch, len(states), heads, ...]``, slice along ``heads``, and squeeze integer-indexed axes."""
         shape = self.boundaries.shape
         if states:
             value = torch.stack(states, 1)
@@ -142,7 +156,7 @@ class Recurrence(Sites):
 
     def chunk_states(self, spec: dict[str, Any]) -> tuple[torch.Tensor, Provenance]:
         kernel.check_axes(spec, "chunk_states", ("chunks", "heads"))
-        positions = kernel.positions(kernel.indices(spec.get("chunks"), self.count), self.count).tolist()
+        positions = kernel.offsets(spec.get("chunks"), self.count)
         value = self._stack([self._boundary(i) for i in positions], spec, "chunks")
         kept = f"kept in {self.boundaries.dtype}" if self.boundaries.dtype is not torch.float32 else "fp32"
         final = f", index {self.chunks} final" if self.count > self.chunks else "; the kernel returned no final state"
@@ -154,7 +168,7 @@ class Recurrence(Sites):
 
     def states(self, spec: dict[str, Any]) -> tuple[torch.Tensor, Provenance]:
         kernel.check_axes(spec, "states", ("tokens", "heads"))
-        positions = kernel.positions(kernel.indices(spec.get("tokens"), self.length), self.length).tolist()
+        positions = kernel.offsets(spec.get("tokens"), self.length)
         kernel.warn_if_large((self.boundaries.shape[0], len(positions), *self.boundaries.shape[2:]), "states", "tokens=, heads=")
         by_chunk: dict[int, set[int]] = {}
         for token in positions:
@@ -177,8 +191,9 @@ class Recurrence(Sites):
                     f"{self.op_name} exports the state after its token only; "
                     f"tokens={sorted(tokens)} inside it cannot be derived"
                 )
-            # One contraction per touched chunk. The chunk's last position rides
-            # along when the kernel exported the boundary after it, as the check.
+            # Run a single batched contraction for all requested offsets in this
+            # chunk. When the kernel exported the next chunk boundary, include the
+            # chunk's final offset so we can measure the drift against that boundary.
             offsets = sorted(t - start for t in tokens)
             last = end - 1 - start
             if exported_next and last not in offsets:
@@ -187,7 +202,7 @@ class Recurrence(Sites):
             for i, offset in enumerate(offsets):
                 if start + offset in tokens:
                     computed[start + offset] = states[:, i]
-            if exported_next:
+            if exported_next and not isinstance(states, FakeTensor):
                 reference = self._boundary(chunk + 1)
                 scale = reference.abs().max().clamp_min(torch.finfo(torch.float32).tiny)
                 drifts.append(((states[:, -1] - reference).abs().max() / scale).item())
@@ -206,7 +221,7 @@ class Recurrence(Sites):
 def recurrence(
     boundaries: torch.Tensor, final: torch.Tensor | None, chunk_size: int, length: int, advance: Advance, op_name: str
 ) -> Sites:
-    """A `Recurrence` over what a kernel exported, or `Unavailable` when the count does not fit the call."""
+    """Return a `Recurrence` reader if the exported boundary count matches ``length`` and ``chunk_size``, or `Unavailable` otherwise."""
     chunks = -(-length // chunk_size)
     count = boundaries.shape[1] + (final is not None)
     if count not in (chunks, chunks + 1):
@@ -218,8 +233,8 @@ def recurrence(
 
 
 # ---------------------------------------------------------------------------
-# transformers' reference kernels: the gated delta rule (Qwen3-Next, Qwen3.5),
-# Kimi delta attention (Kimi Linear, GLM-5-Next), Mamba2's scan, Mamba1's scan
+# Transformers reference kernels: gated delta rule (Qwen3-Next, Qwen3.5),
+# Kimi delta attention (Kimi Linear, GLM-5-Next), Mamba2 scan, Mamba1 scan
 # ---------------------------------------------------------------------------
 
 
@@ -228,7 +243,7 @@ def _l2norm(x: torch.Tensor) -> torch.Tensor:
 
 
 def _chunked(x: torch.Tensor, dim: int, chunk_size: int) -> torch.Tensor:
-    """``x`` zero-padded along ``dim`` to a multiple of ``chunk_size`` and split there into ``[..., chunks, chunk_size, ...]``."""
+    """Zero-pad ``x`` along ``dim`` to a multiple of ``chunk_size`` and reshape that axis into ``(chunks, chunk_size)``."""
     length = x.shape[dim]
     pad = (chunk_size - length % chunk_size) % chunk_size
     if pad:
@@ -238,7 +253,7 @@ def _chunked(x: torch.Tensor, dim: int, chunk_size: int) -> torch.Tensor:
 
 
 def _walk(step: Step, chunk_size: int) -> Advance:
-    """An `Advance` that steps the boundary token by token with ``step``, for a kernel whose intra-chunk intermediates are not recorded."""
+    """Build an `Advance` function that steps the chunk boundary token by token using ``step``."""
 
     def advance(chunk: int, boundary: torch.Tensor, offsets: list[int]) -> torch.Tensor:
         state, states, start = boundary, [], chunk * chunk_size
@@ -254,16 +269,18 @@ def _walk(step: Step, chunk_size: int) -> Advance:
 def _gated_delta_advance(
     key: torch.Tensor, pairwise_decay: torch.Tensor, new_values: torch.Tensor, k_cumdecay: torch.Tensor, cum_decay: torch.Tensor
 ) -> Advance:
-    """The chunked gated delta rule's own intra-chunk formula, truncated at a position.
+    """Build the intra-chunk state advance function for the chunked gated delta rule.
 
-    Over a chunk the kernel forms ``v_new = new_values - k_cumdecay @ S_0`` (the
-    delta-corrected values given the boundary state) and reaches the next boundary
-    as ``exp(G_last) S_0 + sum_j exp(G_last - G_j) k_j^T v_new_j`` with ``G`` the
-    cumulative decay. The state after position ``p`` is the same sum stopped at
-    ``p``: ``exp(G_p) S_0 + sum_{j <= p} exp(G_p - G_j) k_j^T v_new_j``, and
-    ``exp(G_p - G_j)`` masked to ``j <= p`` is the kernel's ``pairwise_decay``.
-    ``key`` is the kernel's key as it used it (fp32, l2-normalized when it does
-    that), ``[batch, heads, chunks, chunk, K]``.
+    Across a chunk, the kernel forms ``v_new = new_values - k_cumdecay @ S_0``
+    (the delta-corrected values given the entering boundary state ``S_0``) and
+    computes the next boundary state as
+    ``exp(G_last) S_0 + sum_j exp(G_last - G_j) k_j^T v_new_j``, where ``G`` is
+    the cumulative decay. Truncating that sum at intra-chunk offset ``p`` gives
+    the state after position ``p``:
+    ``exp(G_p) S_0 + sum_{j <= p} exp(G_p - G_j) k_j^T v_new_j``. The lower-triangular
+    weights ``exp(G_p - G_j)`` for ``j <= p`` are already computed by the kernel as
+    ``pairwise_decay``. ``key`` is the kernel's fp32 (and optionally L2-normalized)
+    key tensor of shape ``[batch, heads, chunks, chunk, K]``.
     """
 
     def advance(chunk: int, boundary: torch.Tensor, offsets: list[int]) -> torch.Tensor:
@@ -279,13 +296,14 @@ def _gated_delta_advance(
 
 
 def _mamba2_advance(hidden_states: torch.Tensor, B: torch.Tensor, A_cumsum: torch.Tensor, L: torch.Tensor) -> Advance:
-    """Mamba2's chunk scan formula, truncated at a position.
+    """Build the intra-chunk state advance function for Mamba2's chunk scan.
 
-    The kernel reaches the next boundary as ``exp(A_p) S_0 + sum_j exp(A_last - A_j)
-    (x_j dt_j) B_j^T`` with ``A`` the cumulative discretized decay; the state after
-    position ``p`` is that sum stopped at ``p`` with ``exp(A_p - A_j)``, which masked
-    to ``j <= p`` is the kernel's ``L``. ``hidden_states`` is ``x * dt`` and ``B`` is
-    repeated to the heads, both ``[batch, chunks, chunk, heads, ...]``.
+    The kernel computes the next chunk boundary as
+    ``exp(A_last) S_0 + sum_j exp(A_last - A_j) (x_j dt_j) B_j^T``, where ``A`` is
+    the cumulative discretized decay. Truncating at offset ``p`` replaces
+    ``A_last`` with ``A_p`` and restricts the sum to ``j <= p`` using the kernel's
+    lower-triangular decay matrix ``L``. ``hidden_states`` is ``x * dt`` and ``B``
+    is expanded across heads, both of shape ``[batch, chunks, chunk, heads, ...]``.
     """
 
     def advance(chunk: int, boundary: torch.Tensor, offsets: list[int]) -> torch.Tensor:
@@ -302,16 +320,17 @@ def _mamba2_advance(hidden_states: torch.Tensor, B: torch.Tensor, A_cumsum: torc
 def _kda_advance(
     key: torch.Tensor, decay_mask: torch.Tensor, values: torch.Tensor, k_cumdecay: torch.Tensor, cum_decay: torch.Tensor
 ) -> Advance:
-    """Kimi delta attention's intra-chunk formula, truncated at a position.
+    """Build the intra-chunk state advance function for Kimi delta attention.
 
-    The gated delta rule with the decay a vector over the key channels: the kernel
-    reaches the next boundary as ``exp(G_last) * S_0 + sum_j (k_j * exp(G_last - G_j))^T
-    v_new_j`` with ``G`` the cumulative decay, ``[chunk, K]``, broadcast down the
-    rows of the state. The state after position ``p`` is that sum stopped at ``p``,
-    and ``exp(G_p - G_j)`` masked to ``j <= p`` is the kernel's ``decay_mask``,
-    ``[batch, heads, chunks, chunk, chunk, K]``. ``key`` is the kernel's key as it
-    used it, ``[batch, heads, chunks, chunk, K]``; ``values`` its ``value`` after the
-    WY transform, ``[batch, heads, chunks, chunk, V]``.
+    Kimi delta attention follows the gated delta rule with a per-key-channel
+    decay vector ``G`` of shape ``[chunk, K]`` broadcast across the state's value
+    columns. The kernel computes the next boundary as
+    ``exp(G_last) * S_0 + sum_j (k_j * exp(G_last - G_j))^T v_new_j``. Truncating
+    at offset ``p`` uses the lower-triangular channel decay tensor ``decay_mask``
+    (``exp(G_p - G_j)`` for ``j <= p``, shape
+    ``[batch, heads, chunks, chunk, chunk, K]``). ``key`` has shape
+    ``[batch, heads, chunks, chunk, K]`` and ``values`` is the WY-transformed
+    value tensor of shape ``[batch, heads, chunks, chunk, V]``.
     """
 
     def advance(chunk: int, boundary: torch.Tensor, offsets: list[int]) -> torch.Tensor:
@@ -327,14 +346,13 @@ def _kda_advance(
 
 
 def _gated_delta_step(key: torch.Tensor, value: torch.Tensor, decay: torch.Tensor, beta: torch.Tensor, l2norm: bool) -> Step:
-    """The gated delta rule's per-token recurrence in fp32, over ``[batch, tokens, heads, ...]`` inputs.
+    """Build an fp32 per-token recurrence step for the gated delta rule over ``[batch, tokens, heads, ...]`` inputs.
 
-    ``S_t = S' + k_t (beta_t (v_t - k_t^T S'))^T`` with ``S' = S_{t-1} exp(g_t)``, the
-    update ``torch_recurrent_gated_delta_rule`` performs; the query enters the
-    output only, so it is not needed here. ``beta`` is the gate as the kernel used
-    it (after its sigmoid, when the kernel applies one). A key with fewer heads
-    than the value (fla's grouped value heads) is repeated to the value's heads,
-    the layout the kernel uses.
+    Applies ``S_t = S' + k_t (beta_t (v_t - k_t^T S'))^T`` with
+    ``S' = S_{t-1} exp(g_t)``, matching ``torch_recurrent_gated_delta_rule``.
+    ``beta`` is the gate after any in-kernel sigmoid scaling. When ``key`` has
+    fewer heads than ``value`` (grouped value heads in ``fla``), ``key`` is
+    repeated across value heads to match the kernel's layout.
     """
     key = key.detach().transpose(1, 2).float()
     value = value.detach().transpose(1, 2).float()
@@ -356,7 +374,7 @@ def _gated_delta_step(key: torch.Tensor, value: torch.Tensor, decay: torch.Tenso
 
 
 def _shapes(fn: Callable, expected: dict[str, tuple[torch.Tensor | None, tuple[int, ...]]]) -> Unavailable | None:
-    """`Unavailable` naming the first recorded intermediate whose shape is not the expected one, else ``None``."""
+    """Return `Unavailable` if any recorded intermediate is missing or differs from its expected shape, or ``None`` if all match."""
     for name, (tensor, shape) in expected.items():
         if tensor is None or tuple(tensor.shape) != shape:
             found = "nothing" if tensor is None else f"shape {tuple(tensor.shape)}"
@@ -369,8 +387,7 @@ def _last(recorded: dict[str, list[torch.Tensor]], name: str) -> torch.Tensor | 
 
 
 def serve_gated_delta_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """transformers' ``torch_chunk_gated_delta_rule``: boundary states from its chunk loop, and the
-    intra-chunk intermediates it formed on the way (`_gated_delta_advance`)."""
+    """Serve ``torch_chunk_gated_delta_rule`` by recording its chunk-boundary states and intra-chunk intermediates."""
     output, recorded = record(fn, args, kwargs, ("last_recurrent_state", "key", "pairwise_decay", "new_values", "k_cumdecay", "cum_decay"))
     states = recorded["last_recurrent_state"]
     bound = arguments(fn, args, kwargs)
@@ -382,8 +399,8 @@ def serve_gated_delta_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[An
             f"its loop no longer has the shape this reader expects"
         )
     batch, heads, head_dim = states[0].shape[0], states[0].shape[1], states[0].shape[2]
-    # The first binding of ``key`` is the key as the kernel uses it, [batch, heads, length, K],
-    # fp32 and normalized when the kernel normalizes; the kernel pads and chunks it later.
+    # The first recorded binding of `key` is the fp32 (and optionally L2-normalized)
+    # key of shape [batch, heads, length, K], before the kernel pads and reshapes it into chunks.
     key = recorded["key"][0] if recorded["key"] else None
     expected = {
         "key": (key, (batch, heads, length, head_dim)),
@@ -402,11 +419,11 @@ def serve_gated_delta_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[An
 
 
 def serve_gated_delta_recurrent(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """transformers' ``torch_recurrent_gated_delta_rule`` and ``recurrent_kimi_delta_attention``
-    (decoding): every token is a chunk.
+    """Serve ``torch_recurrent_gated_delta_rule`` and ``recurrent_kimi_delta_attention`` (chunk size 1).
 
-    Both loops bind the state twice per token, decayed then updated; the updated
-    one is the state after the token.
+    In both functions, each loop iteration binds ``last_recurrent_state`` twice:
+    once after applying the decay and once after adding the delta update. Every
+    second binding after the initial state is the state completed for that token.
     """
     output, states = _states(fn, args, kwargs, "last_recurrent_state")
     bound = arguments(fn, args, kwargs)
@@ -420,8 +437,7 @@ def serve_gated_delta_recurrent(fn: Callable, args: tuple, kwargs: dict) -> tupl
 
 
 def serve_kda_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """transformers' ``chunk_kimi_delta_attention``: boundary states from its chunk loop, and the
-    intra-chunk intermediates it formed on the way (`_kda_advance`)."""
+    """Serve ``chunk_kimi_delta_attention`` by recording its chunk-boundary states and intra-chunk intermediates."""
     output, recorded = record(fn, args, kwargs, ("last_recurrent_state", "key", "value", "g", "decay_mask", "k_cumdecay"))
     states = recorded["last_recurrent_state"]
     bound = arguments(fn, args, kwargs)
@@ -434,9 +450,9 @@ def serve_kda_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites
         )
     batch, heads, head_dim, value_dim = states[0].shape
     padded = chunks * chunk_size
-    # The last bindings: ``key`` padded, fp32 and normalized when the kernel normalizes,
-    # [batch, heads, padded, K]; ``value`` after the WY transform and ``g`` after the
-    # cumulative sum, both chunked.
+    # Use the final bindings of each intermediate: `key` is padded and normalized
+    # ([batch, heads, padded, K]), `value` is WY-transformed, and `g` holds the
+    # chunked cumulative decay.
     expected = {
         "key": (_last(recorded, "key"), (batch, heads, padded, head_dim)),
         "value": (_last(recorded, "value"), (batch, heads, chunks, chunk_size, value_dim)),
@@ -454,11 +470,13 @@ def serve_kda_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites
 
 
 def serve_mamba1_scan(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """transformers' ``mamba_selective_scan`` (Mamba, FalconMamba, Jamba, Zamba): its loop binds the
-    state after every token, ``[batch, channels, state_size]``, so every token is a chunk of one
-    and an exact export. The ``heads`` axis of the sites is the channel axis.
+    """Serve ``mamba_selective_scan`` (Mamba, FalconMamba, Jamba, Zamba).
 
-    Its ``mambapy`` and associative-scan paths bind the state once, as the final one.
+    The sequential loop binds ``ssm_state`` (shape ``[batch, channels, state_size]``)
+    after every token, so each token is treated as a chunk of size 1 and served
+    as an ``"exact export"`` with ``heads=`` indexing the channel axis. The
+    ``mambapy`` and associative-scan code paths only bind the final state and
+    return `Unavailable`.
     """
     output, states = _states(fn, args, kwargs, "ssm_state")
     bound = arguments(fn, args, kwargs)
@@ -472,8 +490,7 @@ def serve_mamba1_scan(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sit
 
 
 def serve_mamba2_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """transformers' ``mamba2_chunk_scan``: the states entering each chunk, plus the final one, and the
-    intra-chunk intermediates it formed on the way (`_mamba2_advance`)."""
+    """Serve ``mamba2_chunk_scan`` by recording its chunk-boundary state tensor and intra-chunk intermediates."""
     output, recorded = record(fn, args, kwargs, ("new_states", "hidden_states", "B", "A_cumsum", "L"))
     states = recorded["new_states"]
     bound = arguments(fn, args, kwargs)
@@ -482,8 +499,8 @@ def serve_mamba2_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Si
         return output, Unavailable(f"{fn.__name__} bound new_states {len(states)} times; expected once")
     batch, heads, head_dim, state_dim = states[0].shape[0], states[0].shape[2], states[0].shape[3], states[0].shape[4]
     chunks = -(-length // chunk_size)
-    # The last bindings before the kernel chunks them: ``hidden_states`` is ``x * dt`` and
-    # ``B`` is repeated to the heads, both [batch, length, heads, ...].
+    # Before chunking, the final binding of `hidden_states` is `x * dt` and the
+    # final binding of `B` is expanded across heads, both of shape [batch, length, heads, ...].
     expected = {
         "hidden_states": (_last(recorded, "hidden_states"), (batch, length, heads, head_dim)),
         "B": (_last(recorded, "B"), (batch, length, heads, state_dim)),
@@ -502,11 +519,10 @@ def serve_mamba2_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Si
 
 
 def serve_mamba2_decode(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """transformers' ``mamba2_selective_state_update`` and ``mamba_selective_state_update`` (decoding):
-    the cache state before and after the token.
+    """Serve ``mamba2_selective_state_update`` and ``mamba_selective_state_update`` during single-token decoding.
 
-    Both write the new state into the ``state`` tensor they were handed, so both
-    states are copied out around the call.
+    Both functions update their ``state`` cache argument in place, so this handler
+    clones ``state`` before and after the call to capture the entering and updated states.
     """
     bound = arguments(fn, args, kwargs)
     before = bound["state"].detach().clone()
@@ -516,7 +532,7 @@ def serve_mamba2_decode(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, S
 
 
 # ---------------------------------------------------------------------------
-# fla's kernels
+# Flash-Linear-Attention (fla) kernels
 # ---------------------------------------------------------------------------
 
 _fla_capture = threading.local()
@@ -525,8 +541,7 @@ _fla_lock = threading.Lock()
 
 
 def _install_fla_recorder(module: ModuleType) -> None:
-    """Replace ``module.chunk_gated_delta_rule_fwd_h`` once with a stand-in that also hands
-    its result to the serve function active on the calling thread, if any."""
+    """Wrap ``module.chunk_gated_delta_rule_fwd_h`` once so its return value is appended to the active thread's capture list."""
     with _fla_lock:
         if module.__name__ in _fla_installed:
             return
@@ -544,7 +559,7 @@ def _install_fla_recorder(module: ModuleType) -> None:
 
 
 def _fla_gated_delta_step(bound: dict[str, Any]) -> Step:
-    """fla's per-token recurrence, for stepping inside a chunk whose intermediates its Triton kernels keep."""
+    """Build the fp32 per-token recurrence step matching `fla`'s chunked gated delta rule parameters."""
     beta = bound["beta"]
     if bound["use_beta_sigmoid_in_kernel"]:
         beta = torch.sigmoid(beta.float()) * (2.0 if bound["allow_neg_eigval"] else 1.0)
@@ -552,12 +567,14 @@ def _fla_gated_delta_step(bound: dict[str, Any]) -> Step:
 
 
 def serve_fla_gated_delta_chunk(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """``fla.ops.gated_delta_rule.chunk_gated_delta_rule``: the chunk-state buffer its forward drops.
+    """Serve ``fla.ops.gated_delta_rule.chunk_gated_delta_rule`` by capturing its inter-chunk state buffer.
 
-    ``chunk_gated_delta_rule_fwd_h`` returns ``(h, v_new, final_state)`` with ``h`` the
-    state entering each chunk, ``[batch, chunks, heads, K, V]`` in the input dtype,
-    and ``final_state`` fp32. It is looked up as a global of the forward's module at
-    call time, so the recording stand-in sees exactly what the kernel wrote.
+    ``chunk_gated_delta_rule_fwd_h`` returns ``(h, v_new, final_state)``, where
+    ``h`` holds the state entering each chunk (shape ``[batch, chunks, heads, K, V]``
+    in the input dtype) and ``final_state`` is in fp32. Because the forward pass
+    resolves ``chunk_gated_delta_rule_fwd_h`` as a module global at call time,
+    the wrapper installed by `_install_fla_recorder` intercepts the buffer before
+    the outer function discards it.
     """
     module = sys.modules[fn.__module__]
     _install_fla_recorder(module)
@@ -586,10 +603,12 @@ def serve_fla_gated_delta_chunk(fn: Callable, args: tuple, kwargs: dict) -> tupl
 
 
 def serve_fla_gated_delta_recurrent(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
-    """``fla.ops.gated_delta_rule.fused_recurrent_gated_delta_rule``: the final state it returns.
+    """Serve ``fla.ops.gated_delta_rule.fused_recurrent_gated_delta_rule`` for single-token decoding.
 
-    The fused per-token kernel keeps the state in registers; only the final one
-    comes back, when asked for. In decoding (one token) that is the token's state.
+    The fused recurrent Triton kernel keeps intermediate states in registers and
+    only writes out ``final_state`` when ``output_final_state=True``. For a
+    1-token decode call, the initial state and ``final_state`` give all boundary
+    and token states.
     """
     output = fn(*args, **kwargs)
     bound = arguments(fn, args, kwargs)
@@ -608,7 +627,7 @@ def serve_fla_gated_delta_recurrent(fn: Callable, args: tuple, kwargs: dict) -> 
     return output, Recurrence(torch.stack([initial, final], 1), None, 1, length, None, fn.__name__)
 
 
-#: transformers' hub-kernel name -> serve function for its reference implementation.
+#: Maps transformers hub-kernel names to the serve functions for their Python reference implementations.
 REFERENCE: dict[str, Callable] = {
     "chunk_gated_delta_rule": serve_gated_delta_chunk,
     "fused_recurrent_gated_delta_rule": serve_gated_delta_recurrent,
@@ -619,7 +638,7 @@ REFERENCE: dict[str, Callable] = {
     "selective_state_update": serve_mamba2_decode,
 }
 
-#: (package, hub-kernel name) -> serve function for the library's own kernel.
+#: Maps ``(package, hub_kernel_name)`` pairs to the serve functions for external kernel libraries.
 LIBRARY: dict[tuple[str, str], Callable] = {
     ("fla", "chunk_gated_delta_rule"): serve_fla_gated_delta_chunk,
     ("fla", "fused_recurrent_gated_delta_rule"): serve_fla_gated_delta_recurrent,

@@ -494,26 +494,29 @@ def run_op(interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict)
     the worker can hand back a source-instrumented copy (cached in
     [`Interleaver.sourced`][nnsight.intervention.interleaver.Interleaver.sourced] for later fires); that copy runs in place of ``fn``,
     making *its* operations addressable under ``{base}.source.*`` — recursively.
-    A callable registered in intervention/kernel.py runs through its serve
-    function, and its reader is handed to the enclosing module's kernel location,
-    unless a worker is drilling into that callable with ``.source``; a registered
-    wrapper on the way to one is drilled into while a worker waits there.
+    If ``fn`` is registered as a fused kernel in intervention/kernel.py and a
+    worker is waiting on the enclosing module's kernel location (without also
+    drilling into ``fn`` via ``.source``), ``fn`` runs through its serve function
+    and the resulting `Sites` reader is delivered to ``"{module}.kernel"``. If
+    ``fn`` is a registered wrapper on the path to a kernel, it is instrumented on
+    the fly while a worker waits on ``"{module}.kernel"``.
     """
     args, kwargs = interleaver.handle(f"{base}.input", (args, kwargs))
     skipped = interleaver.handle(f"{base}.skip", NO_SKIP)
     if skipped is not NO_SKIP:
         # Skip: don't call fn; report the replacement as this op's output too.
         return interleaver.handle(f"{base}.output", skipped)
-    # A registered fused kernel runs through its serve function, which returns the
-    # same output and a reader of the kernel's statistics; the reader goes to the
-    # enclosing module's kernel location (see intervention/kernel.py). A wrapper
-    # on the way to one is drilled into when a worker waits on that location, as
-    # a worker's `.source` would drill, so the kernel call inside it reaches this
-    # bracket with the arguments the kernel sees. The serve runs only while a
-    # worker waits on the module's kernel location (occurrences are counted on the
-    # module's output, so a fire nobody reads costs nothing). A kernel a worker is
-    # drilling into with `.source` runs as the drilled copy instead, so its
-    # operations stay addressable; a kernel request on that fire is told so.
+    # When `fn` is a registered fused kernel and a worker is parked on the
+    # enclosing module's `.kernel` location, execute `fn` through its serve
+    # function and pass the returned `Sites` reader to `{module}.kernel` (see
+    # intervention/kernel.py). Because occurrences of `{module}.kernel` are
+    # counted on `{module}.output`, calls where no worker is waiting skip the
+    # serve function completely. If the user is also drilling into this specific
+    # op with `.source` in the same trace, `.source` takes precedence so inner
+    # operations remain addressable, and `.kernel` receives `Unavailable`.
+    # Wrapper functions in the pass-through set are automatically drilled into
+    # when a worker waits on `{module}.kernel` so the inner kernel call reaches
+    # `run_op`.
     serve = kernel.serving(fn)
     if serve is not None:
         module = base.split(".source.", 1)[0]
@@ -547,17 +550,18 @@ def run_op(interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict)
 
 
 def record(fn: Callable, args: tuple, kwargs: dict, prefixes: tuple[str, ...]) -> tuple[Any, dict[str, list[torch.Tensor]]]:
-    """Run ``fn`` instrumented; return its output and, per prefix, every tensor bound to a name starting with it.
+    """Run ``fn`` under AST instrumentation and collect tensors bound to variable names matching ``prefixes``.
 
-    A kernel serve function (intervention/recurrent.py, intervention/experts.py)
-    uses this to read a Python kernel's locals without changing its arithmetic:
-    the instrumented copy runs the same operations in the same order. A prefix
-    matches the binding names ``{prefix}_{n}``, so ``"state"`` collects every
-    rebinding of ``state`` and ``"state_2"`` the third one. A subscript assignment
-    (``x[i] = v``) is recorded as a binding of ``v`` under ``x``'s name; the tensor
-    bound to ``x`` before it is filled in place. Consecutive bindings of the same
-    tensor object (``x = None if ... else x``) are recorded once, so each list is
-    the sequence of distinct values the name held.
+    Used by kernel serve functions (in intervention/recurrent.py and
+    intervention/experts.py) to capture local variables from Python kernel
+    implementations without changing their operations or execution order. A
+    prefix matches both ``"{prefix}"`` and indexed binding names ``"{prefix}_{n}"``,
+    so passing ``"state"`` collects all rebindings of ``state`` while ``"state_2"``
+    collects only that specific binding. Subscript assignments (``x[i] = v``)
+    record the assigned value ``v`` under ``x``'s binding name while mutating the
+    tensor previously bound to ``x`` in place. Consecutive bindings of the same
+    tensor object (such as ``x = None if ... else x``) are deduplicated so each
+    list records distinct tensor objects in order.
     """
     bound: dict[str, list[torch.Tensor]] = {prefix: [] for prefix in prefixes}
 
@@ -575,7 +579,7 @@ def record(fn: Callable, args: tuple, kwargs: dict, prefixes: tuple[str, ...]) -
 
 
 def arguments(fn: Callable, args: tuple, kwargs: dict) -> dict[str, Any]:
-    """``fn``'s parameters bound to this call, defaults applied."""
+    """Bind ``args`` and ``kwargs`` to ``fn``'s signature with default values applied."""
     signature = inspect.signature(fn).bind(*args, **kwargs)
     signature.apply_defaults()
     return signature.arguments

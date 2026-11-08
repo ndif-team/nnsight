@@ -1,6 +1,6 @@
 ---
 title: Kernel Sites
-one_liner: Read values a fused kernel never writes out, from the kernel that ran: attention probabilities, scores and logsumexp (`attn.kernel.probs(...)`), the recurrent states of a gated delta rule, Kimi delta attention, Mamba2 or Mamba layer (`mixer.kernel.states(...)`), and the per-expert rows of a grouped mixture-of-experts kernel (`experts.kernel.expert_output(...)`).
+one_liner: Read intermediate values from fused kernels without switching to eager execution: attention probabilities, scores, and logsumexp (`attn.kernel.probs(...)`), recurrent states from gated delta rule, Kimi delta attention, Mamba2, and Mamba layers (`mixer.kernel.states(...)`), and per-expert rows from grouped mixture-of-experts forwards (`experts.kernel.expert_output(...)`).
 tags: [usage, kernel, attention, intervention]
 related: [docs/usage/source.md, docs/patterns/attention-patterns.md, docs/patterns/per-head-attention.md, docs/usage/access-and-modify.md, docs/usage/iteration.md, docs/errors/module-never-fired.md]
 sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/attention.py, src/nnsight/intervention/recurrent.py, src/nnsight/intervention/experts.py, src/nnsight/intervention/source.py, src/nnsight/intervention/interleaver.py, src/nnsight/modeling/transformers.py, tests/test_kernel.py]
@@ -8,11 +8,11 @@ sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/attention
 
 # Kernel Sites
 
-A fused attention kernel (`sdpa`, which runs FlashAttention, cuDNN, the
-memory-efficient kernel or a CPU flash kernel) never writes the attention
-probabilities: they live in registers and are consumed on the spot. `module.kernel`
-reads them anyway, from the kernel that actually ran, with the model's output
-unchanged.
+Fused attention kernels (`sdpa`, which dispatches to FlashAttention, cuDNN,
+memory-efficient attention, or CPU flash attention) compute attention
+probabilities in registers and never write the full probability matrix to
+memory. `module.kernel` lets you read those values directly from the fused
+kernel that ran, while leaving the model's forward pass and output unchanged.
 
 ```python
 from nnsight.modeling.transformers import TransformersModel
@@ -28,45 +28,60 @@ print(probs.provenance)   # Provenance(kind='exact reconstruction', kernel='aten
 
 ## Kernel probabilities and eager probabilities
 
-Eager attention computes the softmax in Python, so `attn.output[1]` is available.
-It is a different arithmetic: on Qwen3-8B in bf16 (56-token prompt, layers 0 to
-9) the eager probabilities differ from the kernel's by a median of 0.6% and up to
-20% at the top key, while the logits differ by a KL of 1.3e-3. Probabilities read
-under eager belong to a different computation from the one the default model runs.
+Under `attn_implementation="eager"`, the attention module computes the softmax
+in Python and returns the probability matrix at `attn.output[1]`. However,
+switching from a fused kernel to eager execution changes the floating-point
+arithmetic. On Qwen3-8B in bf16 (56-token prompt, layers 0 to 9), eager
+attention probabilities differ from the fused kernel's probabilities by a median
+of 0.6% and by up to 20% at the top key, while the model's output logits shift
+by a KL divergence of 1.3e-3.
 
-Every fused kernel keeps one small statistic for its backward pass: the per-row
-logsumexp, `lse`. The probabilities the kernel used are `exp(S - lse)` with `S` the
-fp32 scores, which is the formula the kernel's own backward recomputes them by.
-`module.kernel` runs the model's SDPA call under a dispatch mode that records
-which fused op the dispatcher chose and what it wrote, then reconstructs only the
-slice requested, in fp32. The op runs exactly as the model called it.
+Every fused SDPA backend computes one small summary statistic per query row for
+its backward pass: the logsumexp (`lse`). From the fp32 scores `S` and `lse`,
+the attention probabilities used by the kernel are given by `exp(S - lse)`,
+which is the same formula the kernel uses to recompute probabilities during its
+backward pass. When a trace requests an attention kernel site, `module.kernel`
+runs the model's SDPA call inside a dispatch mode that records which fused ATen
+operator ran and captures its `lse` output, then reconstructs only the requested
+slice in fp32.
 
-Measured: logits bit-equal with and without a request (GPT-2 on CPU; Qwen2.5-0.5B
-in bf16 on CUDA under flash, cuDNN and the math fallback). Probabilities against an
-fp32 softmax over the kernel's own inputs: within 5e-7 on GPT-2 (CPU, fp32) and
-2e-6 on Qwen2.5-0.5B (CUDA, bf16, layer 6). The reconstruction is exact up to fp32
-rounding of `S` and `lse`, so rows sum to 1 within a few fp32 ulps of the row's
-largest `|S|`: on a Qwen2.5-0.5B layer whose scores reach 1700, within 8e-4.
+Across tested configurations (GPT-2 on CPU; Qwen2.5-0.5B in bf16 on CUDA under
+FlashAttention, cuDNN, and the math fallback), model logits are bit-identical
+with and without a kernel site request. Compared against a reference fp32
+softmax over the kernel's inputs, the reconstructed probabilities match within
+5e-7 on GPT-2 (CPU, fp32) and within 2e-6 on Qwen2.5-0.5B (CUDA, bf16, layer 6).
+Because the reconstruction is exact up to fp32 rounding of `S` and `lse`, each
+unmasked row sums to 1 within a few fp32 ulps of the row's largest `|S|` (within
+8e-4 on a Qwen2.5-0.5B layer whose scores reach 1700).
 
 ## Sites
 
-`module.kernel.<site>(heads=, query=, key=)` on any module whose forward reaches
-`torch.nn.functional.scaled_dot_product_attention`, directly or through one of
-transformers' attention interfaces.
+Call `module.kernel.<site>(heads=, query=, key=)` on any attention module whose
+forward calls `torch.nn.functional.scaled_dot_product_attention`, either
+directly or through one of transformers' attention interfaces.
 
 | Site | Value | Shape (unsliced) | Provenance |
 |---|---|---|---|
-| `lse` | the kernel's per-row logsumexp, fp32 | `[batch, heads, queries]` | `exact export` |
+| `lse` | the kernel's per-row logsumexp in fp32 | `[batch, heads, queries]` | `exact export` |
 | `scores` | `q . k * scale` in fp32 with the mask added | `[batch, heads, queries, keys]` | `exact reconstruction` |
 | `probs` | `exp(scores - lse)` | `[batch, heads, queries, keys]` | `exact reconstruction` |
 
-`lse` takes `heads=` and `query=` only. Each index follows torch indexing: an int
-(or a 0-d integer tensor) selects one position and drops the axis, negative counts
-from the end; a `slice`, a list or an integer tensor of indices keeps the axis; a
-boolean tensor selects where it is `True`. A bool, a float or a float tensor is
-refused with `TypeError`. An out-of-range index raises `IndexError` on the request's
-line. Asking for a whole `probs` matrix at long context materializes
-`batch x heads x L x L` floats; a request over 1 GiB warns first.
+`lse` accepts `heads=` and `query=` only. Axis indices follow standard PyTorch
+indexing semantics:
+
+- Passing a single `int` (or a 0-d integer tensor) selects that position and
+  squeezes the dimension from the returned tensor. Negative integers count from
+  the end.
+- Passing a `slice`, a `list` of ints, or a 1-D+ integer tensor selects those
+  positions and preserves the dimension.
+- Passing a boolean tensor selects the positions where the mask is `True`.
+- Passing a `bool`, `float`, or floating-point tensor raises `TypeError`.
+- Out-of-range integer indices raise `IndexError` on the line where the site was
+  requested.
+
+Requesting an unsliced `probs` or `scores` tensor at long context materializes
+`batch x heads x L x L` fp32 values; any request whose output would exceed 1 GiB
+emits a `UserWarning` before allocating.
 
 ```python
 attn = model.model.layers[6].self_attn
@@ -78,94 +93,122 @@ with model.trace(prompt):
     scores    = attn.kernel.scores(heads=0, key=0).save()                 # [batch, queries]
 ```
 
-Masks are what the kernel saw. Under a causal call or a boolean mask, `scores` is
-`-inf` where attention is forbidden and `probs` exactly `0`; under a float mask,
-`scores` carries the mask's own value (transformers uses the dtype minimum) and
-`probs` is exactly `0`. A row with every key masked, a pad query in a left-padded
-batch, is all `0`; every other row sums to 1.
+Masking reflects what the kernel received:
+
+- Under `is_causal=True` or a boolean mask, masked entries in `scores` are
+  `-inf` and masked entries in `probs` are `0`.
+- Under an additive float mask, `scores` includes the float mask's values (in
+  transformers, the minimum representable value of the model dtype) and `probs`
+  is `0` at masked positions.
+- If every key in a query row is masked (such as a left-padding query position),
+  that row in `probs` is set to all `0`. Every other row sums to 1.
 
 ## Provenance
 
-The returned tensor carries `.provenance`, a `Provenance(kind, kernel, note)`:
+Every tensor returned by a kernel site has a `.provenance` attribute holding a
+`Provenance(kind, kernel, note)` named tuple:
 
-- `kind="exact export"`: a tensor the kernel wrote (`lse`).
-- `kind="exact reconstruction"`: computed from the kernel's inputs and its exported
-  statistic by an identity (`scores`, `probs`).
-- `kind="replay"`: the statistic was recomputed in fp32 beside the kernel. This
-  happens when the math fallback ran (no fused op fired; it computes in fp32
-  throughout), and when a kernel that writes `lse` only on request (the efficient
-  and cuDNN kernels) is launched a second time for it and that launch does not
-  reproduce the model's output bit for bit. The model's output is the first launch
-  either way.
-- `kind="derived"`: a value the kernel's algorithm never forms, computed from an
-  exported statistic by the kernel's own formula truncated at the requested point
-  (the state at a token inside a chunk, [below](#recurrent-states-of-a-chunked-kernel)).
-  The note carries a check of that formula against the kernel's next export.
+- `kind="exact export"`: a tensor written directly by the kernel (`lse`).
+- `kind="exact reconstruction"`: a tensor computed from the kernel's inputs and
+  an exported statistic using an exact mathematical identity (`scores`, `probs`).
+- `kind="replay"`: a tensor computed in fp32 alongside the kernel because no
+  exported statistic was available. This occurs when the SDPA dispatcher falls
+  back to the fp32 math backend, or when a backend that only writes `lse` on
+  request (memory-efficient attention or cuDNN) is launched a second time with
+  `compute_log_sumexp=True` and that second launch does not produce bit-identical
+  attention outputs. In all cases, the model's forward pass uses the first
+  launch's output.
+- `kind="derived"`: a tensor that the chunked algorithm never forms directly,
+  computed by advancing an exported boundary state using the kernel's
+  intra-chunk formula truncated at the requested token (the state at a token
+  inside a chunk, [below](#recurrent-states-of-a-chunked-kernel)). The `note`
+  field reports the maximum relative difference between the formula at the end
+  of the chunk and the kernel's next exported boundary state.
 
-`kernel` names the op that ran (`aten._scaled_dot_product_flash_attention`,
-`aten._scaled_dot_product_cudnn_attention`, `math backend (fp32)`, ...). `note`
-carries the formula and, when `dropout_p > 0`, the reminder that dropout is applied
-after these probabilities.
+`kernel` records the name of the operator or function that ran (for example,
+`aten._scaled_dot_product_flash_attention`,
+`aten._scaled_dot_product_cudnn_attention`, or `math backend (fp32)`). `note`
+describes the formula used and, when `dropout_p > 0`, notes that dropout is
+applied after the returned probabilities.
 
-`.provenance` is an attribute of the returned tensor; a view or a copy of it
-(`probs[0]`, `probs.clone()`) has none. A saved tensor keeps it through `torch.save`
-and `torch.load`.
+`.provenance` is attached to the tensor returned by the site call. Creating a
+new view or copy (such as `probs[0]` or `probs.clone()`) does not copy the
+attribute, but saving the tensor preserves `.provenance` across `torch.save` and
+`torch.load`.
 
 ## Grouped-query attention, masks, decoding
 
-- **GQA** is read off the shapes: query head `h` uses key head `h // (Hq // Hkv)`,
-  the layout both `enable_gqa` and transformers' `repeat_kv` use. `heads=` always
+- **GQA:** Query head `h` maps to key head `h // (Hq // Hkv)`, matching both
+  `enable_gqa=True` and transformers' `repeat_kv`. The `heads=` argument always
   indexes query heads.
-- **Causal** calls are top-left aligned (query `i` sees keys `0..i`), as
-  `is_causal` is in torch. transformers passes an explicit mask whenever the
-  queries and keys differ in length.
-- **Decoding**: during `generate` the kernel sees one query row against the cache,
-  so `probs()` at step `n` is `[batch, heads, 1, prompt + n]` with a dynamic cache.
-  Collect per step with `tracer.iter` ([iteration](iteration.md)); a request pinned
-  to step `n` is served at step `n` whether or not earlier steps requested anything.
-- **Gradients**: the served tensors are detached. The kernel's `lse` is taken below
-  autograd, so a gradient through `exp(S - lse)` would treat it as a constant and
-  come out wrong; none is offered.
+- **Causal:** Causal calls use top-left alignment (query `i` attends to keys
+  `0..i`), matching PyTorch's `is_causal=True`. Whenever query and key lengths
+  differ, transformers passes an explicit attention mask.
+- **Decoding:** During `generate`, each decode step calls the kernel with a
+  single query row against the KV cache, so `probs()` at step `n` has shape
+  `[batch, heads, 1, prompt + n]` under a dynamic cache. You can collect sites
+  across generation steps using `tracer.iter` ([iteration](iteration.md)); a
+  request at step `n` is served on the `n`-th call even if earlier steps did not
+  request a site.
+- **Gradients:** Returned tensors are detached from autograd. Because the
+  kernel's `lse` is captured below autograd, differentiating through
+  `exp(S - lse)` would treat `lse` as a constant and produce incorrect
+  gradients.
 
 ## Ordering
 
-A site is served when the kernel fires, so request it before reading anything that
-runs later in the forward. A request after `attn.output` raises
-`OutOfOrderError` ([out-of-order-error](../errors/out-of-order-error.md)); outside a
-trace it raises `ValueError("Cannot access ... outside of interleaving")`.
+A kernel site is served when the kernel executes inside the module's forward
+pass, so you must request it before reading any value produced later in the
+forward pass. Requesting `attn.kernel.probs(...)` after reading `attn.output`
+raises `OutOfOrderError`
+([out-of-order-error](../errors/out-of-order-error.md)). Calling a kernel site
+outside a trace raises `ValueError("Cannot access ... outside of interleaving")`.
 
-Accessing `envoy.kernel` instruments the module's forward, the same instrumentation
-`.source` installs, and stays on the module. Inside a trace that is in time unless
-the module is already running: a read inside the module earlier in the same block
-(`attn.c_attn.output`, then `attn.kernel.probs(...)`) resumes the block while the
-uninstrumented forward is mid-call, and the request raises `OutOfOrderError: '...kernel'
-was requested while '...' is already running without an instrumented forward`. Access
-`attn.kernel` once before the trace and the same block works.
+Accessing `envoy.kernel` instruments the module's forward pass using the same
+AST instrumentation as `.source`. Inside a trace, this happens in time as long
+as the module is not already in the middle of an uninstrumented forward call. If
+you read a submodule inside `attn` first (for example, reading
+`attn.c_attn.output` and then requesting `attn.kernel.probs(...)` in the same
+block), the parent module's uninstrumented forward is already running when
+`.kernel` is first touched, raising `OutOfOrderError: '...kernel' was requested
+while '...' is already running without an instrumented forward`. Accessing
+`attn.kernel` once before entering the trace avoids this.
 
-A request on a module whose forward reaches no registered kernel is never served:
-the MLP, a whole decoder block (ask its attention submodule), a whole MoE block
-(ask its `experts` submodule), a model loaded with `attn_implementation="eager"` or
-`flash_attention_2`, experts under `experts_implementation="eager"` (or
-`deepgemm`, `sonicmoe`, an FP8 or `kernels` implementation), and a vLLM model,
-whose attention runs through its own paged-attention op. The trace then ends with
-`OutOfOrderError: '<path>.kernel.i0' was requested but the model already ran past it`
-([module-never-fired](../errors/module-never-fired.md)).
+If you request a site on a module whose forward pass never calls a registered
+kernel, the location never fires and the trace ends with `OutOfOrderError:
+'<path>.kernel.i0' was requested but the model already ran past it`
+([module-never-fired](../errors/module-never-fired.md)). Common cases include:
+
+- An MLP module, a full decoder block (request `.kernel` on its attention
+  submodule instead), or a full MoE block (request `.kernel` on its `experts`
+  submodule instead).
+- A model loaded with `attn_implementation="eager"` or `"flash_attention_2"`.
+- An MoE layer running under `experts_implementation="eager"` (or `deepgemm`,
+  `sonicmoe`, FP8, or `kernels`).
+- A vLLM model, where attention and state-space layers run through vLLM's own
+  custom ops.
 
 ## Recurrent states of a chunked kernel
 
-A gated delta rule layer (Qwen3-Next, Qwen3.5), a Kimi delta attention layer
-(Kimi Linear, GLM-5-Next) or a Mamba2 mixer runs its recurrence in chunks: inside a
-chunk the kernel works with matrices over the chunk's tokens, and the recurrent
-state exists only at chunk boundaries. No implementation computes the state at a
-token inside a chunk. The kernel does hold the boundary states and the intra-chunk
-quantities it forms on the way (for the gated delta rule its pairwise decays, keys
-and delta-corrected values; for Kimi delta attention the same with the decay a
-vector over the key channels; for Mamba2 its segment decays, discretized inputs and
-`B`), and the state after any token is the boundary before its chunk advanced to
-that token by the kernel's own formula, the one it applies over the whole chunk to
-reach the next boundary, stopped early. A Mamba mixer (Mamba, FalconMamba, Jamba,
-Zamba) runs its selective scan token by token, so there every token's state is the
-kernel's own.
+Gated delta rule layers (Qwen3-Next, Qwen3.5), Kimi delta attention layers
+(Kimi Linear, GLM-5-Next), and Mamba2 mixers run their recurrences in chunks.
+Inside a chunk, the kernel operates on matrices across the chunk's tokens and
+only materializes the recurrent state at chunk boundaries. No implementation
+forms the recurrent state at interior tokens of a chunk during the forward pass.
+
+However, the kernel holds the chunk-boundary states and the intra-chunk
+intermediates computed along the way:
+
+- For the gated delta rule: pairwise decays, keys, and delta-corrected values.
+- For Kimi delta attention: the same quantities with a per-key-channel decay
+  vector.
+- For Mamba2: segment decays, discretized inputs, and `B`.
+
+Using those quantities, the state after any interior token can be computed by
+taking the preceding chunk's boundary state and applying the kernel's own
+intra-chunk update formula truncated at that token. By contrast, Mamba mixers
+(Mamba, FalconMamba, Jamba, Zamba) run their selective scan sequentially token
+by token, so every token's state is exported directly from the loop.
 
 ```python
 mixer = model.model.layers[0].linear_attn          # Qwen3-Next; `backbone.layers[0].mixer` on Mamba2 and Mamba, `model.layers[0].self_attn` on Kimi Linear
@@ -176,72 +219,86 @@ with model.trace(prompt):
     tail = mixer.kernel.states(tokens=slice(-5, None)).save()  # [batch, 5, heads, K, V]
 ```
 
-The state is `[K, V]` per head on a gated delta rule or Kimi delta attention
-layer, `[head_dim, state_size]` per head on Mamba2 and `[state_size]` per channel on
-Mamba, whose `heads=` axis is the channel axis. Both sites return fp32.
+Per head, each state has shape `[K, V]` on gated delta rule and Kimi delta
+attention layers and `[head_dim, state_size]` on Mamba2. On Mamba, each channel
+has state shape `[state_size]` and the `heads=` argument indexes the channel
+axis. Both sites always return fp32 tensors.
 
 | Site | Value | Provenance |
 |---|---|---|
-| `chunk_states(chunks=, heads=)` | the state entering each chunk; index `0` the initial state, index `C` the final state when the kernel produced one (`output_final_state`, which transformers sets when a cache is in use) | `exact export`; the note names the dtype the kernel kept it in (fp32 for transformers' reference implementations and `fla`'s final state; the input dtype for `fla`'s chunk buffer, so those entries carry one bf16 rounding) |
-| `states(tokens=, heads=)` | the state after each requested token | `exact export` where the token ends a chunk whose next boundary was exported; otherwise `derived`: the preceding boundary advanced in fp32 by the kernel's intra-chunk formula over its recorded intermediates, one contraction per touched chunk |
+| `chunk_states(chunks=, heads=)` | the state entering each chunk; index `0` is the initial state, and index `C` is the final state when the kernel produced one (`output_final_state`, which transformers sets when a cache is in use) | `exact export`; the note names the dtype the kernel stored the state in (fp32 for transformers' reference implementations and `fla`'s final state; the input dtype for `fla`'s chunk buffer, which carries one bf16 rounding) |
+| `states(tokens=, heads=)` | the state after each requested token | `exact export` where the token ends a chunk whose next boundary was exported; otherwise `derived`: the preceding boundary advanced in fp32 by the kernel's intra-chunk formula over its recorded intermediates, using one contraction per touched chunk |
 
-`chunks=-1` is the final state only when the kernel produced one; the note says
-`the kernel returned no final state` otherwise. For the state after the last token
-use `states(tokens=-1)`, which is served either way.
+Note that `chunks=-1` selects the final state only when the kernel produced one;
+the note says `the kernel returned no final state` otherwise. To read the state
+after the last token regardless of whether a final boundary state was exported,
+use `states(tokens=-1)`.
 
-A `derived` note carries the check of that formula: taken to each touched chunk's
-end it must land on the kernel's next boundary, and the note says how far off it
-is, over the whole batch. On transformers' fp32 reference implementations in the
-test models that is 0 for the gated delta rule and Kimi delta attention and about
-1e-6 relative for Mamba2 (the contraction sums in a different order). Against an
-fp64 per-token recurrence over the same inputs, the derived states of all three
-and Mamba's exported states are within 2e-6 absolute. `fla`'s Triton kernels keep their
-intra-chunk quantities, so a state inside one of their chunks is the boundary
-stepped token by token by the per-token recurrence; in bf16 the note then reads
-about 5e-3, which is the bf16 rounding of the boundary it is compared against, and
-the states themselves are within 2e-5 of transformers' fp32 recurrence, the same
-distance as the exported boundaries. During `generate`, each decode step runs the per-token
-kernel, so `states(tokens=-1)` at a step is the kernel's own state after that
-token: `torch_recurrent_gated_delta_rule` or `fla`'s fused recurrent kernel on a
-gated delta rule layer, `recurrent_kimi_delta_attention` on Kimi delta attention,
-`mamba2_selective_state_update` on Mamba2, `mamba_selective_state_update` on Mamba.
+When `states` returns a `derived` tensor, its provenance note checks the
+intra-chunk formula by running it to the end of each touched chunk and reporting
+the maximum relative difference against the kernel's next exported boundary
+state across the batch:
 
-In a batch of invokes of different lengths, `tokens=` and `chunks=` index
-positions of the left-padded batch: `tokens=-1` is every invoke's last token, and
-the state at a pad position is `0`.
+- On transformers' fp32 reference implementations in the test models, this
+  relative difference is 0 for the gated delta rule and Kimi delta attention,
+  and about 1e-6 relative for Mamba2 (because the contraction sums in a
+  different order). Compared against a sequential fp64 per-token recurrence over
+  the same inputs, the derived states of all three chunked families and Mamba's
+  exported states agree within 2e-6 absolute error.
+- On `fla`, the intra-chunk intermediates remain inside Triton kernels, so
+  interior token states are derived by stepping the preceding chunk boundary
+  token by token with the fp32 per-token recurrence. In bf16, the provenance
+  note reports a relative drift of about 5e-3 against the next boundary, which
+  reflects the bf16 rounding of `fla`'s exported chunk boundary; the derived
+  states themselves match transformers' fp32 recurrence within 2e-5, matching
+  the accuracy of the exported boundaries.
+- During `generate`, each decode step calls a single-token recurrent kernel, so
+  `states(tokens=-1)` is an `exact export` of the state after that token
+  (`torch_recurrent_gated_delta_rule` or `fla`'s fused recurrent kernel on gated
+  delta rule layers, `recurrent_kimi_delta_attention` on Kimi delta attention,
+  `mamba2_selective_state_update` on Mamba2, and `mamba_selective_state_update`
+  on Mamba).
 
-Which kernels: transformers' reference implementations (`torch_chunk_gated_delta_rule`,
+When a trace batches multiple invokes of different lengths, `tokens=` and
+`chunks=` index positions in the left-padded batch: `tokens=-1` is each invoke's
+final token, and states at left-padding positions are `0`.
+
+Supported recurrent kernels include transformers' Python reference
+implementations (`torch_chunk_gated_delta_rule`,
 `torch_recurrent_gated_delta_rule`, `chunk_kimi_delta_attention`,
-`recurrent_kimi_delta_attention`, `mamba2_chunk_scan`, `mamba_selective_scan` and
-the two `selective_state_update` functions), which every model in these families
-reaches when `fla` or `mamba_ssm` is not installed, and `fla`'s
-`chunk_gated_delta_rule` and `fused_recurrent_gated_delta_rule` when it is. The reference implementations are
-instrumented for the fire (the same instrumentation `.source` uses) and their
-boundary-state bindings recorded; `fla`'s chunk-state buffer is recorded on its way
-from `chunk_gated_delta_rule_fwd_h` to the output kernel. The model's output is
-unchanged either way. Registration happens when a `TransformersModel` is built,
-from the kernels its modeling file reaches, and is process-wide: a plain
-`NNsight(module)` of the same family is served once such a model has been built
-in the process, and never before.
+`recurrent_kimi_delta_attention`, `mamba2_chunk_scan`, `mamba_selective_scan`,
+and the two `selective_state_update` functions), which every model in these
+families uses when `fla` or `mamba_ssm` is not installed, along with `fla`'s
+`chunk_gated_delta_rule` and `fused_recurrent_gated_delta_rule` when `fla` is
+installed. For the Python reference kernels, the serve function runs the kernel
+under AST instrumentation (the same mechanism `.source` uses) to record its
+boundary-state and intermediate bindings. For `fla`, a wrapper on
+`chunk_gated_delta_rule_fwd_h` captures the chunk-state buffer before the forward
+pass discards it. In both cases, the model's output is unchanged. Kernels are
+registered process-wide when a `TransformersModel` is built from the hub
+wrappers in its modeling module; a standalone `NNsight(module)` wrapper for one
+of these architectures can serve recurrent sites only after a corresponding
+`TransformersModel` has been built in the same process.
 
-A `.source` drill into the kernel function itself
-(`mixer.source.torch_chunk_gated_delta_rule_0.source.implementation_0.source`)
-takes precedence on that fire: its operations stay addressable, and a `.kernel`
-request on the module in the same trace is not served. Use one or the other per
-trace.
+If a trace drills into the kernel function itself via `.source`
+(`mixer.source.torch_chunk_gated_delta_rule_0.source.implementation_0.source`),
+`.source` takes precedence on that call so its inner operations remain
+addressable, and a `.kernel` request on the module in the same trace is not
+served. Use either `.source` on the kernel or `.kernel` in a given trace.
 
 ## Per-expert rows of a grouped mixture-of-experts kernel
 
-A mixture-of-experts layer routes each token to `top_k` experts and sums their
-weighted outputs. transformers' `grouped_mm` experts implementation (the default
-when torch's grouped matmul can run; otherwise transformers falls back to `eager`)
-runs all the (token, expert) pairs of a forward as two grouped matrix
-multiplications over rows sorted by expert, up and down; the `batched_mm`
-implementation `generate` switches to for decoding off the CPU runs them in token
-order with one weight matrix gathered per pair. What each expert received,
-computed and returned for a token exists only as rows inside those forwards, and
-the module returns the sum. The sites hand back the forward's own rows in token
-order, in the dtype it computed them in.
+A mixture-of-experts (MoE) layer routes each token to `top_k` experts and sums
+their weighted outputs. In transformers, the `grouped_mm` experts implementation
+(the default when PyTorch's grouped matmul is supported, falling back to `eager`
+otherwise) executes all routed (token, expert) pairs across the forward pass as
+two grouped matrix multiplications over rows sorted by expert ID. During
+autoregressive decoding off the CPU, `generate` switches to `batched_mm`, which
+runs the pairs in token order by gathering one weight matrix per pair. In both
+implementations, the per-pair inputs, activations, and down-projected outputs
+exist only as internal row buffers before the module returns their sum. The
+`.kernel` sites on the `experts` submodule return those rows in token order in
+the dtype the forward pass used.
 
 ```python
 experts = model.model.layers[3].mlp.experts          # Qwen2-MoE, Qwen3-MoE, Mixtral, OLMoE, ...
@@ -259,70 +316,78 @@ with model.trace(prompt):
 | `expert_activation(tokens=, slot=)` | the activation between the two projections, `act(gate) * up` (or `act(up)` for experts without a gate), `[.., top_k, intermediate]` | `exact export` |
 | `expert_output(tokens=, slot=)` | the pair's down projection before its routing weight, `[.., top_k, hidden]`; the module's output is the sum over slots of these rows times `top_k_weights`, cast to the input dtype | `exact export` |
 
-Slot `k` is the token's k-th routed expert, `top_k_index[token, k]`. `expert=e`
-(one int) replaces `slot=` and gives the expert's rows per token, before the
-routing weight, `0` for a token not routed to it.
+Slot `k` is the token's k-th routed expert, `top_k_index[token, k]`. Passing
+`expert=e` (one int) replaces `slot=` and gives the expert's rows per token
+before the routing weight, with `0` for a token not routed to it.
 
-The experts module computes over the flattened batch x sequence axis, as its
-`.input` and `.output` show. The sites fold that axis by the trace's batch rows
-and hand each invoke its own, so `tokens=` indexes sequence positions and a decode
-step under `generate` serves `[batch, 1, ...]`. Three consequences:
+Although the `experts` module itself operates on a flattened batch x sequence
+axis (as seen on `.input` and `.output`), the sites fold that axis by the
+trace's batch rows and return only the requesting invoke's rows. As a result,
+`tokens=` indexes sequence positions and a decode step under `generate` serves
+`[batch, 1, ...]`. Keep three consequences in mind:
 
-- In a batch of invokes of different lengths `tokens=` indexes the left-padded
-  positions, and a pad position holds the pad token's rows. `experts.inputs` read
-  in an invoke is the whole batch's, as for any module input.
-- `generate` with `num_return_sequences=n` or `num_beams=n` expands each prompt to
-  `n` rows, which the fold concatenates along the sequence axis: `[batch, n x seq, ...]`
-  at prefill and `[batch, n, ...]` at a decode step, each invoke still reading only
-  its own rows.
-- A token count the batch rows do not divide raises `ValueError` at the request; a
-  plain `Envoy` of the experts module counts its whole input as one row, so its
-  shapes are `[1, tokens, ...]`.
+- In a batch of invokes of different lengths, `tokens=` indexes the left-padded
+  positions, and a pad position holds the pad token's rows. Reading
+  `experts.inputs` directly inside an invoke returns the whole batch's input, as
+  for any module input.
+- Calling `generate` with `num_return_sequences=n` or `num_beams=n` expands each
+  prompt to `n` rows, which the fold concatenates along the sequence axis:
+  `[batch, n x seq, ...]` at prefill and `[batch, n, ...]` at a decode step,
+  while each invoke still reads only its own rows.
+- A token count that the batch rows do not divide raises `ValueError` at the
+  request. A plain `Envoy` wrapping the `experts` module directly counts its
+  entire input as one row, giving shapes `[1, tokens, ...]`.
 
-Measured on a tiny Qwen2-MoE (CPU, fp32): the rows equal a one-pair-at-a-time
-fp64 computation within fp32 rounding (6e-9 on activations of size 3e-2), the
-weighted sum over slots equals the module's output exactly, and the logits are
-bit-equal with and without a request; the same holds for six MoE families
-(Mixtral, OLMoE, Qwen3-MoE, DeepSeek-V3, Nemotron-H without a gate, GPT-OSS with
-transposed weights and biases) and for Qwen1.5-MoE-A2.7B in bf16 on a GPU. Served
-for the `grouped_mm` and `batched_mm` implementations. Under
-`experts_implementation="eager"` the per-expert loop is Python and `.source`
-reaches it (`experts.source.experts_forward_1.source`); `.source` also reaches the
-fused forwards' locals, in expert order
-(`experts.source.experts_forward_1.source.proj_out_2.output`), which the sites put
-back in token order.
+Measured on a tiny Qwen2-MoE (CPU, fp32): the exported rows match a
+one-pair-at-a-time fp64 computation within fp32 rounding (6e-9 on activations of
+size 3e-2), the weighted sum over slots matches the module's output exactly, and
+the logits are bit-equal with and without a request. The same invariants hold
+across six MoE families (Mixtral, OLMoE, Qwen3-MoE, DeepSeek-V3, Nemotron-H
+without a gate, and GPT-OSS with transposed weights and biases) and on
+Qwen1.5-MoE-A2.7B in bf16 on a GPU.
+
+Sites are served for the `grouped_mm` and `batched_mm` implementations. Under
+`experts_implementation="eager"`, the per-expert loop runs in Python and can be
+reached with `.source` (`experts.source.experts_forward_1.source`). `.source`
+also reaches the local variables of the fused forwards in expert-sorted order
+(`experts.source.experts_forward_1.source.proj_out_2.output`), whereas the
+`.kernel` sites reorder them back into token order.
 
 ## Limits
 
-- Reads only: a site cannot be assigned. To modify attention scores, add a bias to
-  the mask the module passes to the kernel, or edit `q`/`k` before it
-  ([access-and-modify](access-and-modify.md)).
-- Under tensor parallelism each rank holds `heads / tp` query heads, and `heads=`
-  indexes the rank's own heads; the result on rank 0 is its share, with no gather
-  ([tensor-parallel](../models/tensor-parallel.md#what-is-not-supported)). The
-  recurrent sites are whole on every rank (transformers gathers the projections
-  before the kernel).
-- `mamba_ssm`'s fused `mamba_chunk_scan_combined`, `selective_scan_fn` and
-  `selective_state_update` have no entry, and neither do `fla`'s `chunk_kda` and
-  `fused_recurrent_kda`; the reference implementations are covered. Mamba's
-  `mambapy` and associative-scan paths keep the final state only and are served as
-  `Unavailable`. LFM2's short convolution has no recurrent state to read; RWKV's
-  linear attention has no entry. `fla`'s packed layout (`cu_seqlens`), its
-  `use_gate_in_kernel` form, and a `fla` backend that bypasses
-  `chunk_gated_delta_rule_fwd_h` (FlashQLA on SM90 and later) are served as
-  `Unavailable`: the request raises a `ValueError` naming the reason. A model
-  whose hub wrapper is replaced by the `kernels` library has no recurrent entry.
-  Paged attention has no sites. vLLM's fused MoE has no entry: its `FusedMoE` layer
-  runs the experts inside the custom op `torch.ops.vllm.moe_forward`, whose Triton
-  experts keep their per-pair rows in workspace buffers local to the op, so
-  neither the instrumentation nor a dispatch mode sees them (and with `taps` the
-  engine also replays recorded graphs).
-- Experts under transformers' tensor or expert parallelism are served as
-  `Unavailable`: each rank holds a shard of the intermediate axis and a partial
-  down projection, or other ranks' pairs as sentinels, so there are no whole rows
-  to serve. A transformers newer than 5.19 that adds a post-expert norm to these
-  forwards is served as `Unavailable` too.
-- A submodule named `kernel` is reached as `E_kernel`
-  ([access-and-modify](access-and-modify.md#overloaded-names)).
-- Gemma 2's attention softcap does not reach SDPA (transformers drops it on this
-  path); the served values match what the kernel computed.
+- **Reads only:** A site cannot be assigned to. To modify attention scores, add
+  a bias to the mask the module passes to the kernel, or edit `q` and `k` before
+  the call ([access-and-modify](access-and-modify.md)).
+- **Tensor parallelism:** Under tensor parallelism, each rank holds `heads / tp`
+  query heads, and `heads=` indexes the local rank's heads; rank 0 returns its
+  own share without a gather
+  ([tensor-parallel](../models/tensor-parallel.md#what-is-not-supported)).
+  Recurrent sites are full on every rank because transformers gathers the
+  projections before calling the kernel.
+- **Unsupported recurrent and attention kernels:** `mamba_ssm`'s fused
+  `mamba_chunk_scan_combined`, `selective_scan_fn`, and `selective_state_update`
+  are not registered, and neither are `fla`'s `chunk_kda` and
+  `fused_recurrent_kda`; only the transformers reference implementations (and
+  `fla`'s gated delta rule kernels) are covered. Mamba's `mambapy` and
+  associative-scan paths keep only the final state and are served as
+  `Unavailable`. LFM2's short convolution has no recurrent state, and RWKV's
+  linear attention has no registered entry. `fla`'s packed layout
+  (`cu_seqlens`), its `use_gate_in_kernel` mode, and `fla` backends that bypass
+  `chunk_gated_delta_rule_fwd_h` (such as FlashQLA on SM90 and later) are served
+  as `Unavailable`, raising a `ValueError` with the reason at the request. A
+  model whose hub wrapper is replaced by the `kernels` library has no recurrent
+  entry. Paged attention has no sites. vLLM's fused MoE has no entry: its
+  `FusedMoE` layer runs experts inside the custom op
+  `torch.ops.vllm.moe_forward`, whose Triton kernels keep per-pair rows in
+  op-local workspace buffers that neither AST instrumentation nor a dispatch mode
+  can see (and under `taps`, the engine also replays recorded CUDA graphs).
+- **Parallel and post-norm experts:** Experts under transformers' tensor or
+  expert parallelism are served as `Unavailable`, because each rank holds only a
+  shard of the intermediate axis and a partial down projection, or holds other
+  ranks' pairs as sentinels. Transformers versions newer than 5.19 that add a
+  post-expert norm to these forwards are also served as `Unavailable`.
+- **Submodule name collisions:** A submodule named `kernel` is accessed as
+  `E_kernel` ([access-and-modify](access-and-modify.md#overloaded-names)).
+- **Gemma 2 attention softcap:** Gemma 2's attention logit softcap is dropped by
+  transformers on the SDPA path, and the served values match what the SDPA
+  kernel computed.

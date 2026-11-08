@@ -160,15 +160,17 @@ Two consequences:
   so the `handle` on `{base}.fn` is a no-op and the cached copy is reused. That is
   what makes a drill survive generation steps.
 
-`run_op` also serves kernel sites (`intervention/kernel.py`). A call whose callable is
-registered there (`F.scaled_dot_product_attention`) runs through its serve function,
-which returns the same output and a `Sites` reader of the kernel's inputs and
-exported statistics; the reader is handed to `{module}.kernel`, counted as
-`{module}.output` so a `tracer.iter` step lines up with the module's call. A call to
-a wrapper in the through set (transformers' attention interfaces) is drilled into
-on the model side, without the `.fn` handoff, when a worker is parked on that
-module's kernel location, so the kernel call inside it is bracketed with the
-arguments the kernel sees.
+`run_op` also serves kernel sites (`intervention/kernel.py`). When the called
+function is registered in `_KERNELS` (such as `F.scaled_dot_product_attention`)
+and a worker is waiting on `{module}.kernel`, `run_op` invokes its serve
+function, which returns the original output alongside a `Sites` reader holding
+the kernel's inputs and exported statistics. `run_op` then passes that reader to
+`{module}.kernel`, whose occurrence count is tracked via `{module}.output` so
+that `tracer.iter` steps align with module calls. When `run_op` encounters a
+wrapper function registered in `_THROUGH` (such as transformers' attention
+interfaces) while a worker is waiting on `{module}.kernel`, it instruments the
+wrapper on the model side without a `.fn` handoff so the inner kernel call is
+intercepted with its preprocessed arguments.
 
 A function that refers to its own name in its body is not drillable: the shell makes
 that name a local of the shell, so the self-reference compiles as a free variable

@@ -98,13 +98,14 @@ class Pending(NamedTuple):
 
 
 def counted(location: str) -> str:
-    """The location whose visits give ``location`` its occurrence.
+    """Return the location key whose visit counter tracks occurrences of ``location``.
 
-    A module's kernel sites (``"{path}.kernel"``, see intervention/kernel.py) fire
-    inside the module's call, and only when its forward is instrumented, so their
-    own visit count would lag the module's. They are counted as the module's
-    ``.output``, which the controller counts on every call: a request pinned to
-    step ``n`` is the kernel fire inside the module's ``n``-th call.
+    A module's kernel location (``"{path}.kernel"``, see intervention/kernel.py)
+    only fires on calls where the module's forward is source-instrumented and a
+    worker is waiting on it. Counting it via ``"{path}.output"``, which the
+    module controller increments on every call, ensures that a ``tracer.iter``
+    request at step ``n`` targets the kernel call inside the module's ``n``-th
+    execution.
     """
     if location.endswith(".kernel"):
         return location[: -len(".kernel")] + ".output"

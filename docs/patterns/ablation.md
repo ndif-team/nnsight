@@ -174,12 +174,12 @@ below-median one; ablate by selection, not by weight. And the router's `.input` 
 `.output` have no batch axis (`(B*T, E)`), so per-token statistics over a padded batch
 quietly include the pad rows.
 
-Under transformers' fused experts (`grouped_mm`, `batched_mm`) the experts module's
-output is the sum over a token's routed slots of each expert's row times its routing
-weight, and the kernel site hands out those rows ([kernel](../usage/kernel.md)).
-Removing one expert's contribution is then a read followed by an edit of the module
-output, in forward order, with the other experts' weights left as the router set
-them:
+Under transformers' fused MoE implementations (`grouped_mm` and `batched_mm`),
+the `experts` module's output is the sum across each token's routed slots of the
+expert's output row multiplied by its routing weight. You can read those
+per-expert rows from `experts.kernel.expert_output(...)` ([kernel](../usage/kernel.md))
+and subtract a single expert's contribution from `experts.output` in forward
+order, leaving the remaining experts' routing weights untouched:
 
 ```python
 experts = model.model.layers[0].mlp.experts
@@ -192,9 +192,9 @@ with model.trace(prompt):
     logits = model.output.logits.save()
 ```
 
-The result equals a forward with expert 3's `down_proj` zeroed
-(`tests/test_kernel.py::TestWorkloads`). Projecting `weight[:, None] * rows` through
-the unembedding instead gives the expert's direct contribution to the logits.
+This produces the same output as zeroing expert 3's `down_proj` weights
+(`tests/test_kernel.py::TestWorkloads`). Passing `weight[:, None] * rows` through
+the unembedding instead gives that expert's direct contribution to the logits.
 
 ## Interpretation tips
 
@@ -216,6 +216,6 @@ the unembedding instead gives the expert's direct contribution to the logits.
 - [attribution-patching](attribution-patching.md)
 - [per-head-attention](per-head-attention.md)
 - [invoke-and-batching](../usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces)
-- [kernel](../usage/kernel.md) — the per-expert rows behind the fused experts ablation.
+- [kernel](../usage/kernel.md): reading per-expert rows from fused MoE forwards.
 - `docs/usage/access-and-modify.md`
 - `docs/usage/barrier.md`

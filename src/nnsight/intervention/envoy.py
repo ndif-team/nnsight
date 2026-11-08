@@ -648,23 +648,25 @@ class Envoy:
 
     @property
     def kernel(self) -> Kernel:
-        """Values a fused kernel inside this module's forward computes but never writes out.
+        """Access intermediate values from a fused kernel inside this module's forward pass.
 
-        Each attribute is a site; calling it with the slice to read returns the
-        value, a tensor carrying its [`Provenance`][nnsight.intervention.kernel.Provenance]
-        as ``.provenance``. For attention through
-        ``scaled_dot_product_attention`` the sites are ``probs``, ``scores`` and
-        ``lse``, indexed by ``heads=``, ``query=`` and ``key=``.
+        Each attribute on `.kernel` names a site. Calling a site with optional
+        slice keyword arguments returns the requested tensor with its
+        [`Provenance`][nnsight.intervention.kernel.Provenance] attached at
+        ``.provenance``. For attention modules calling
+        ``scaled_dot_product_attention``, the sites are ``probs``, ``scores``, and
+        ``lse``, indexed by ``heads=``, ``query=``, and ``key=``.
 
         Examples:
             >>> with model.trace("Hello World"):
             ...     p = model.model.layers[6].self_attn.kernel.probs(heads=4, query=-1).save()
 
         Returns:
-            A [`Kernel`][nnsight.intervention.kernel.Kernel] accessor over this module.
+            A [`Kernel`][nnsight.intervention.kernel.Kernel] accessor for this module.
         """
-        # Instrumenting here, like `.source`, is in time unless the module is
-        # already mid-call; the accessor is told so it can say so on a request.
+        # Instrument the module's forward pass just as `.source` does, and record
+        # whether it was already instrumented before this access so `Kernel` can
+        # raise `OutOfOrderError` if the module is already mid-call.
         state = self._module.__dict__.get(STATE)
         instrumented = state is not None and state.sourced
         install_source(self)  # raises SourceNotAvailable
