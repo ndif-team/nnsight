@@ -48,9 +48,10 @@ module wrapped by several envoys routes to whichever interleaver is running
 
 An [`Envoy`][nnsight.intervention.envoy.Envoy] exposes operations as ``envoy.source.{name}_{n}``, whose
 ``.input``/``.inputs``/``.output``/``.skip`` mirror an Envoy's own, one level finer.
-The same bracket serves ``envoy.kernel.{site}(...)``: a call to a registered fused
-kernel runs through its serve function (intervention/kernel.py), so values the
-kernel computes but never writes reach a worker with the kernel's own statistics.
+``envoy.kernel.{site}(...)`` is served by a shim installed on each registered fused
+kernel function (see intervention/kernel.py): `Controller.__call__` pushes the
+running module onto a per-thread stack around its body, and the shim serves the
+module at the top of that stack using the kernel's inputs and exported statistics.
 """
 
 from __future__ import annotations
@@ -426,7 +427,10 @@ def decorator_chain(func: Callable) -> tuple[Callable, list[tuple[Callable, int]
         if func in seen:  # a closure that calls itself
             break
         seen.add(func)
-    return func, chain
+    # When `func` is a kernel shim (intervention/kernel.py) wrapping a C++ builtin,
+    # `peel_index` stops at the shim because the builtin is not a Python function.
+    # Unwrapping the shim here hands the builtin to `compiled`, which raises `SourceNotAvailable`.
+    return kernel.unshimmed(func), chain
 
 
 def rewrap(chain: list[tuple[Callable, int]], innermost: Callable) -> Callable:
@@ -494,48 +498,12 @@ def run_op(interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict)
     the worker can hand back a source-instrumented copy (cached in
     [`Interleaver.sourced`][nnsight.intervention.interleaver.Interleaver.sourced] for later fires); that copy runs in place of ``fn``,
     making *its* operations addressable under ``{base}.source.*`` — recursively.
-    If ``fn`` is registered as a fused kernel in intervention/kernel.py and a
-    worker is waiting on the enclosing module's kernel location (without also
-    drilling into ``fn`` via ``.source``), ``fn`` runs through its serve function
-    and the resulting `Sites` reader is delivered to ``"{module}.kernel"``. If
-    ``fn`` is a registered wrapper on the path to a kernel, it is instrumented on
-    the fly while a worker waits on ``"{module}.kernel"``.
     """
     args, kwargs = interleaver.handle(f"{base}.input", (args, kwargs))
     skipped = interleaver.handle(f"{base}.skip", NO_SKIP)
     if skipped is not NO_SKIP:
         # Skip: don't call fn; report the replacement as this op's output too.
         return interleaver.handle(f"{base}.output", skipped)
-    # When `fn` is a registered fused kernel and a worker is parked on the
-    # enclosing module's `.kernel` location, execute `fn` through its serve
-    # function and pass the returned `Sites` reader to `{module}.kernel` (see
-    # intervention/kernel.py). Because occurrences of `{module}.kernel` are
-    # counted on `{module}.output`, calls where no worker is waiting skip the
-    # serve function completely. If the user is also drilling into this specific
-    # op with `.source` in the same trace, `.source` takes precedence so inner
-    # operations remain addressable, and `.kernel` receives `Unavailable`.
-    # Wrapper functions in the pass-through set are automatically drilled into
-    # when a worker waits on `{module}.kernel` so the inner kernel call reaches
-    # `run_op`.
-    serve = kernel.serving(fn)
-    if serve is not None:
-        module = base.split(".source.", 1)[0]
-        if base not in interleaver.sourced:
-            if kernel.requested(interleaver, module):
-                value, sites = serve(fn, args, kwargs)
-                interleaver.handle(f"{module}{kernel.SUFFIX}", sites)
-                return interleaver.handle(f"{base}.output", value)
-        elif kernel.requested(interleaver, module):
-            interleaver.handle(
-                f"{module}{kernel.SUFFIX}",
-                kernel.Unavailable(f"{base!r} is drilled with .source in this trace; its kernel sites are not served on that call"),
-            )
-    if (
-        base not in interleaver.sourced
-        and kernel.passes_through(fn)
-        and kernel.requested(interleaver, base.split(".source.", 1)[0])
-    ):
-        interleaver.sourced[base] = drill(interleaver, base, fn)
     if base in interleaver.sourced:
         # First fire: the entry is still None (requested, not built) — serve the
         # live callable to the parked worker, which builds and caches the
@@ -689,14 +657,23 @@ class Controller:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         state = self.state
         module = self.module_ref()
-        interleaver, _, locations = state.active()
+        interleaver, path, locations = state.active()
         if interleaver is None:
             return run_body(state, module, args, kwargs)
         handle = interleaver.handle
         args, kwargs = handle(locations[0], (args, kwargs))
         output = handle(locations[1], NO_SKIP)  # the skip gate
         if output is NO_SKIP:
-            return handle(locations[2], run_body(state, module, args, kwargs))
+            # Push the module onto the kernel stack only while `run_body` executes:
+            # fused kernels called inside the body attribute their `.kernel` handoff
+            # to this module, and workers resumed at `.output` below run after the
+            # module has been popped from the stack.
+            frame = kernel.push(interleaver, path)
+            try:
+                output = run_body(state, module, args, kwargs)
+            finally:
+                kernel.pop(frame)
+            return handle(locations[2], output)
         # A skipped module's output is the replacement the worker supplied.
         return handle(locations[2], _as_fragment(interleaver, locations[2], output))
 

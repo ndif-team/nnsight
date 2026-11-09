@@ -276,4 +276,7 @@ class Attention(Sites):
         return kernel.squeeze(probs, spec, {"heads": 1, "query": 2, "key": 3}), provenance
 
 
-kernel.register(torch.nn.functional.scaled_dot_product_attention, serve)
+# `sdpa_attention_forward` in transformers and standard PyTorch modules look up
+# `torch.nn.functional.scaled_dot_product_attention` at call time. The C++
+# builtin's own module (`torch._C._nn`) is PyTorch's dispatch table and is not patched.
+kernel.register(torch.nn.functional.scaled_dot_product_attention, serve, kernel.Attr(torch.nn.functional, "scaled_dot_product_attention"))

@@ -51,7 +51,7 @@ from __future__ import annotations
 import copy
 import json
 import sys
-from types import FunctionType, ModuleType
+from types import CellType, FunctionType, ModuleType
 from typing import TYPE_CHECKING, Any, Optional
 
 import warnings
@@ -61,7 +61,7 @@ import torch
 from .. import NNsightDeprecationWarning
 from ..intervention.envoy import Envoy, traceable
 from ..intervention import experts, recurrent
-from ..intervention.kernel import register, through
+from ..intervention.kernel import Attr, Item, register, unshimmed
 from . import peft, processing
 from .huggingface import HuggingFaceModel
 
@@ -112,14 +112,14 @@ _ARCH_TASK = {
 }
 
 
-def _hub_wrappers(module: ModuleType) -> list[dict[str, Any]]:
+def _hub_wrappers(module: ModuleType) -> list[dict[str, CellType]]:
     """Inspect all ``use_kernel_func_from_hub_with_fallback`` wrapper closures defined in ``module``.
 
     Each wrapper is identified by its code object's name (``"wrapped"``) and file
-    (``transformers.integrations.hub_kernels``). Returns a list of dicts mapping
-    each closure variable name (``func_name``, ``package``, ``torch_function``,
-    ``implementation``, etc.) to its value, plus ``"wrapper"`` for the wrapper
-    function itself.
+    (``transformers.integrations.hub_kernels``). Each entry in the returned list
+    maps a closure variable name (``func_name``, ``package``, ``torch_function``,
+    ``implementation``, etc.) to its closure cell, allowing callers to read
+    ``cell_contents`` or pass the cell as a holder to `register`.
     """
     from transformers.integrations import hub_kernels
 
@@ -131,9 +131,7 @@ def _hub_wrappers(module: ModuleType) -> list[dict[str, Any]]:
             and value.__code__.co_filename == hub_kernels.__file__
         ):
             continue
-        closure = {name: cell.cell_contents for name, cell in zip(value.__code__.co_freevars, value.__closure__)}
-        closure["wrapper"] = value
-        found.append(closure)
+        found.append(dict(zip(value.__code__.co_freevars, value.__closure__)))
     return found
 
 
@@ -347,42 +345,50 @@ class TransformersModel(HuggingFaceModel):
         self._register_kernels()
 
     def _register_kernels(self) -> None:
-        # Mark all transformers attention interface wrappers so `attn.kernel`
-        # drills through them to the inner `scaled_dot_product_attention` call.
-        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-
-        through(*ALL_ATTENTION_FUNCTIONS.values())
         # Register the fused mixture-of-experts forwards introduced in
         # transformers 5 (`grouped_mm_experts_forward` for prefill and
         # `batched_mm_experts_forward`, which `generate` uses during accelerator
-        # decoding). Older transformers releases do not have `transformers.integrations.moe`.
+        # decoding). The experts wrapper looks up its implementation in
+        # `ALL_EXPERTS_FUNCTIONS` on each call; because `ALL_EXPERTS_FUNCTIONS.__setitem__`
+        # writes a local override entry, the holder is the underlying entry in
+        # `_global_mapping`. Older transformers releases do not have
+        # `transformers.integrations.moe`. If a trace is already open when this
+        # model is constructed, the holders already contain shims, so `unshimmed`
+        # recovers the underlying function.
         try:
             from transformers.integrations import moe
         except ImportError:
             moe = None
         if moe is not None:
-            for name, serve in (("grouped_mm_experts_forward", experts.serve_grouped_mm), ("batched_mm_experts_forward", experts.serve_batched_mm)):
-                forward = vars(moe).get(name)
+            for name, key, serve in (
+                ("grouped_mm_experts_forward", "grouped_mm", experts.serve_grouped_mm),
+                ("batched_mm_experts_forward", "batched_mm", experts.serve_batched_mm),
+            ):
+                forward = unshimmed(vars(moe).get(name))
                 if forward is not None:
-                    register(forward, serve)
+                    register(forward, serve, Item(moe.ALL_EXPERTS_FUNCTIONS._global_mapping, key))
         # Chunked recurrent kernels (gated delta rule, Kimi delta attention,
         # Mamba2, Mamba1) are called through `use_kernel_func_from_hub_with_fallback`
-        # wrappers defined in each model's modeling module. Inspect the modules
-        # belonging to this model's submodules (ignoring any `None` entries from
-        # dynamically exec'd classes), mark each wrapper as pass-through, and
-        # register both its PyTorch reference function and any installed library
-        # implementation (`fla`).
+        # wrappers defined in each model's modeling module. The wrapper invokes
+        # the callable stored in its `implementation` closure cell on every call
+        # (the external library kernel when installed, or `torch_function`
+        # otherwise), so that cell is registered as the holder. Inspect the
+        # modules of this model's submodules, ignoring `None` entries from
+        # dynamically exec'd classes.
         modules = {sys.modules.get(type(sub).__module__) for sub in self._module.modules()} - {None}
         for module in modules:
-            for closure in _hub_wrappers(module):
-                name = closure["func_name"]
+            for cells in _hub_wrappers(module):
+                name = cells["func_name"].cell_contents
                 if name not in recurrent.REFERENCE:
                     continue
-                through(closure["wrapper"])
-                register(closure["torch_function"], recurrent.REFERENCE[name])
-                library = recurrent.LIBRARY.get((closure["package"], name))
-                if library is not None and closure["implementation"] is not closure["torch_function"]:
-                    register(closure["implementation"], library)
+                implementation = unshimmed(cells["implementation"].cell_contents)
+                if implementation is cells["torch_function"].cell_contents:
+                    serve = recurrent.REFERENCE[name]
+                else:
+                    serve = recurrent.LIBRARY.get((cells["package"].cell_contents, name))
+                    if serve is None:
+                        continue
+                register(implementation, serve, Attr(cells["implementation"], "cell_contents"))
 
     # -- loading -------------------------------------------------------------
 

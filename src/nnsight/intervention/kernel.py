@@ -23,19 +23,34 @@ reconstructs only the slice requested by the user. Each reconstructible quantity
 How it works with the interleaver's location and
 [`Interleaver.handle`][nnsight.intervention.interleaver.Interleaver.handle] mechanism:
 
-* A global registry maps each fused callable to a *serve function*. When `run_op`
-  (in intervention/source.py) intercepts a call to a registered callable and a
-  worker is waiting on the enclosing module's kernel location, it runs the serve
-  function. The serve function returns the kernel's normal output along with a
-  [`Sites`][nnsight.intervention.kernel.Sites] reader that holds the captured
-  inputs and statistics. `run_op` then passes this reader to the location
-  ``"{module}.kernel"``. The reader only computes a site when a worker requests
-  it.
-* A pass-through set (`_THROUGH`) lists Python wrapper functions (such as
-  transformers' attention interfaces) that `run_op` automatically instruments on
-  the fly when a worker is waiting on the module's kernel location. This ensures
-  that the inner kernel call is intercepted after preprocessing steps like RoPE,
-  KV-cache updates, and tensor layout transpositions.
+* A global registry maps each fused callable to a *serve function* and to the
+  places from which the model looks up the callable: a module attribute, a
+  closure cell, or a dictionary entry (see
+  [`register`][nnsight.intervention.kernel.register]). While at least one trace
+  is open, [`install`][nnsight.intervention.kernel.install] replaces the
+  callable at each of those places with a *shim*, and
+  [`uninstall`][nnsight.intervention.kernel.uninstall] restores the original
+  callable when the last open trace exits (refcounted across
+  [`Interleaver.__enter__`][nnsight.intervention.interleaver.Interleaver.__enter__]
+  and
+  [`Interleaver.__exit__`][nnsight.intervention.interleaver.Interleaver.__exit__]).
+  When the shim is called and a worker is waiting on the kernel location of the
+  innermost module currently executing on this thread, the shim invokes the
+  serve function. The serve function returns the kernel's normal output along
+  with a [`Sites`][nnsight.intervention.kernel.Sites] reader holding the
+  captured inputs and statistics, and the shim delivers that reader to
+  ``"{module}.kernel"``. When no worker is waiting on that module's kernel
+  location, the shim calls the underlying kernel directly. The reader computes a
+  site only when a worker requests it.
+* `Controller.__call__` (in intervention/source.py) pushes the running module
+  onto a per-thread stack for the duration of the module's body
+  ([`push`][nnsight.intervention.kernel.push] and
+  [`pop`][nnsight.intervention.kernel.pop]), which identifies the module that
+  owns the kernel call. Plain helper functions between a module's forward pass
+  and the kernel, such as transformers' attention interfaces, are not modules
+  and do not push onto the stack, so the shim receives the kernel call with its
+  preprocessed arguments (after RoPE, KV-cache updates, and layout
+  transpositions).
 * On the user side, [`Envoy.kernel`][nnsight.intervention.envoy.Envoy.kernel]
   returns a [`Kernel`][nnsight.intervention.kernel.Kernel] accessor whose
   attributes correspond to site names. Calling a site parks the worker on
@@ -75,41 +90,52 @@ mixture-of-experts).
 
 Because a kernel executes inside its module's forward pass, the interleaver tracks
 the occurrence count of ``"{module}.kernel"`` using ``"{module}.output"`` (see
-`Mediator.occurrence`). That counter advances on every call to the module even on
-steps where the module's forward was uninstrumented, so a request scoped to step
-``n`` via ``tracer.iter`` always matches step ``n``.
+`Mediator.occurrence`). That counter advances on every call to the module
+regardless of whether a site was requested on that call, so a request scoped to
+step ``n`` via ``tracer.iter`` always matches step ``n``.
 
 Limitations:
 * Sites are read-only, and returned tensors are detached from autograd.
 * Because sites are served when the kernel executes, a site must be requested
   before reading any value produced later in the forward pass.
-* Accessing ``envoy.kernel`` instruments the module's forward pass. If ``.kernel``
-  is accessed for the first time while the module is already in the middle of an
-  uninstrumented forward call (for example, after reading a submodule inside the
-  same parent module), the request raises `OutOfOrderError`.
+* The shim is reached through the storage locations listed at registration. A
+  module that bound the kernel function by value at import time (``from
+  torch.nn.functional import scaled_dot_product_attention``) and calls that local
+  binding does not reach the shim unless that module is passed to
+  [`register`][nnsight.intervention.kernel.register] as a holder. A forward pass
+  instrumented by ``.source`` runs with a copy of its module's globals dict
+  created at instrumentation time (`function_like` in intervention/source.py), so
+  a kernel called as a bare global of that same module is read from the copied
+  dict and does not reach the shim; a kernel looked up as a module attribute, a
+  dict entry, or a closure cell does reach the shim.
+* Inside a ``torch.compile`` region, the module stack is not updated and the shim
+  calls the kernel directly, so a site requested on a compiled module fails with
+  ``OutOfOrderError`` ("requested but the model already ran past it"). If the
+  kernel call itself runs eagerly inside a compiled module (for example, inside a
+  helper decorated with ``torch._dynamo.disable``), the call is attributed to the
+  innermost enclosing module that is running eagerly.
 """
 
 from __future__ import annotations
 
+import functools
 import math
 import operator
+import sys
+import threading
 import warnings
 from functools import partial
+from types import FunctionType
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 import torch
+from greenlet import getcurrent, greenlet
 from torch._subclasses.fake_tensor import FakeTensor
 
-from .interleaver import Event, Interleaver, Mediator, OutOfOrderError
+from .interleaver import Event, Interleaver, Mediator
 
 if TYPE_CHECKING:
     from .envoy import Envoy
-
-#: Maps each registered fused callable to its serve function ``(fn, args, kwargs) -> (output, Sites)``.
-_KERNELS: dict[Callable, Callable] = {}
-
-#: Python wrapper functions that `run_op` instruments on the fly to reach a registered kernel inside them.
-_THROUGH: set[Callable] = set()
 
 #: Location suffix for a module's kernel sites, counted on the same schedule as the module's ``.output``.
 SUFFIX = ".kernel"
@@ -189,42 +215,255 @@ class Unavailable(Sites):
         raise ValueError(self.reason)
 
 
-def register(fn: Callable, serve: Callable) -> None:
-    """Register ``serve`` as the site handler for ``fn``.
+# ---------------------------------------------------------------------------
+# Registry, shim, and the per-thread stack of running modules
+# ---------------------------------------------------------------------------
+
+
+class Attr:
+    """Storage location that holds a kernel function on an attribute, such as a module global or a closure cell (``Attr(cell, "cell_contents")``)."""
+
+    def __init__(self, obj: Any, key: str) -> None:
+        self.obj, self.key = obj, key
+
+    def get(self) -> Any:
+        return getattr(self.obj, self.key)
+
+    def set(self, value: Any) -> None:
+        setattr(self.obj, self.key, value)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.obj!r}, {self.key!r})"
+
+
+class Item(Attr):
+    """Storage location that holds a kernel function as a dictionary entry. Restoring writes the original value back without deleting the key."""
+
+    def get(self) -> Any:
+        return self.obj[self.key]
+
+    def set(self, value: Any) -> None:
+        self.obj[self.key] = value
+
+
+class Entry:
+    """Registry record pairing a kernel function with its serve function, its shim, and the holders where the model looks it up."""
+
+    def __init__(self, fn: Callable, serve: Callable) -> None:
+        self.fn = fn
+        self.serve = serve
+        self.holders: list[Attr] = []
+        #: Holders that `install` overwrote with `shim`, to be restored on `uninstall`.
+        self.patched: list[Attr] = []
+        self.shim = shim(self)
+
+    def add(self, holder: Attr) -> bool:
+        """Append ``holder`` if that storage location is not already present; return ``True`` when added."""
+        key = (type(holder), id(holder.obj), holder.key)
+        if any(key == (type(known), id(known.obj), known.key) for known in self.holders):
+            return False
+        self.holders.append(holder)
+        return True
+
+
+#: Maps each registered fused callable to its `Entry`.
+_KERNELS: dict[Callable, Entry] = {}
+
+#: Guards `_KERNELS` and `_open`.
+_lock = threading.Lock()
+
+#: Count of currently open interleavers; shims remain installed while this is greater than zero.
+_open = 0
+
+
+class Frame(NamedTuple):
+    """Active module execution frame pushed by `Controller.__call__` while the module's body runs."""
+
+    interleaver: Interleaver
+    path: str
+    #: Greenlet that entered the module. Kernel calls made from a different
+    #: greenlet while the module is on the stack belong to a worker block and
+    #: bypass the serve function.
+    greenlet: greenlet
+
+
+class _Frames(threading.local):
+    def __init__(self) -> None:
+        self.stack: list[Frame] = []
+
+
+_frames = _Frames()
+
+
+def push(interleaver: Interleaver, path: str) -> Frame | None:
+    """Push an active-module frame for ``path`` under ``interleaver`` onto this thread's stack; return the frame for `pop`.
+
+    When TorchDynamo is tracing, ``push`` records nothing and returns ``None``.
+    Dynamo defers Python list mutations until graph exit, so a shim invoked from
+    compiled code would observe an out-of-date stack. Compiled regions therefore
+    run without frame bookkeeping and call the underlying kernel directly.
+    """
+    if torch.compiler.is_compiling():
+        return None
+    frame = Frame(interleaver, path, getcurrent())
+    _frames.stack.append(frame)
+    return frame
+
+
+def pop(frame: Frame | None) -> None:
+    """Pop ``frame`` from this thread's active-module stack; do nothing when ``frame`` is ``None``."""
+    if frame is not None:
+        _frames.stack.pop()
+
+
+def requested(interleaver: Interleaver, module_path: str) -> bool:
+    """Return whether ``interleaver`` is active and a worker is parked on ``module_path``'s kernel location.
+
+    Calling an [`Envoy`][nnsight.intervention.envoy.Envoy] directly inside a
+    trace block (``envoy(x)`` with ``hook=False``) sets ``interleaving`` to
+    ``False`` for the duration of the call, so kernels executed inside that call
+    do not serve sites.
+    """
+    return interleaver.interleaving and f"{module_path}{SUFFIX}" in interleaver.parked
+
+
+def unshimmed(fn: Callable) -> Callable:
+    """Return the underlying kernel function if ``fn`` is a kernel shim, or ``fn`` unchanged."""
+    return getattr(fn, "__kernel_shim__", fn)
+
+
+def _serves(frame: Frame | None) -> bool:
+    """Return whether a kernel call with ``frame`` at the top of the stack should serve a parked worker."""
+    return frame is not None and requested(frame.interleaver, frame.path) and frame.greenlet is getcurrent()
+
+
+def shim(entry: Entry) -> Callable:
+    """Build the wrapper installed at ``entry``'s holders while a trace is open.
+
+    When called, the shim checks the innermost module frame on the current
+    thread. If a worker is parked on that module's ``.kernel`` location and the
+    current greenlet is the one that entered the module, the shim runs
+    ``entry.serve`` and delivers the resulting [`Sites`][nnsight.intervention.kernel.Sites]
+    reader to the location. Kernel calls made on another greenlet (such as a
+    worker calling a kernel function on saved tensors while a second worker waits
+    on the module's ``.kernel``) or with no parked waiter call ``entry.fn``
+    directly.
+
+    Because ``fn`` is the single free variable called by name inside the shim,
+    ``.source`` peels the shim like a standard decorator (`peel_index` in
+    intervention/source.py) to reach the underlying kernel function. For builtin
+    kernels, which are not Python functions and have no source, the
+    ``__kernel_shim__`` attribute allows `decorator_chain` to step onto the
+    builtin after peeling so `compiled` raises ``SourceNotAvailable``. When
+    ``.source`` drills into a Python kernel and `rewrap` rebuilds this shim
+    around the source-instrumented copy, ``fn`` holds that copy (`fn is not
+    entry.fn`); the shim executes the instrumented copy and delivers an
+    [`Unavailable`][nnsight.intervention.kernel.Unavailable] reader to the
+    module's kernel location. While TorchDynamo is compiling, the shim calls
+    ``fn`` directly (see [`push`][nnsight.intervention.kernel.push]).
+    """
+    fn = entry.fn
+
+    @functools.wraps(fn)
+    def kernel_shim(*args: Any, **kwargs: Any) -> Any:
+        if torch.compiler.is_compiling():
+            return fn(*args, **kwargs)
+        stack = _frames.stack
+        frame = stack[-1] if stack else None
+        if fn is not entry.fn:
+            # Execute the source-instrumented copy before checking for a waiter,
+            # because a worker reading inner `.source` operations only advances to
+            # the `.kernel` request while this call is running.
+            output = fn(*args, **kwargs)
+            if _serves(frame):
+                frame.interleaver.handle(
+                    f"{frame.path}{SUFFIX}",
+                    Unavailable(f"{fn.__name__!r} is drilled with .source in this trace; its kernel sites are not served on that call"),
+                )
+            return output
+        if not _serves(frame):
+            return fn(*args, **kwargs)
+        output, sites = entry.serve(fn, args, kwargs)
+        frame.interleaver.handle(f"{frame.path}{SUFFIX}", sites)
+        return output
+
+    kernel_shim.__kernel_shim__ = fn  # lets `decorator_chain` step from the shim onto a builtin kernel
+    return kernel_shim
+
+
+def register(fn: Callable, serve: Callable, *holders: Attr) -> None:
+    """Register ``serve`` as the site handler for ``fn`` at the storage locations ``holders``.
 
     ``serve(fn, args, kwargs)`` must return ``(output, sites)``, where ``output``
     is the unmodified return value of ``fn(*args, **kwargs)`` and ``sites`` is a
     [`Sites`][nnsight.intervention.kernel.Sites] instance.
+
+    Each entry in ``holders`` specifies a place from which the model looks up
+    ``fn``, given as [`Attr`][nnsight.intervention.kernel.Attr] (a module
+    attribute or closure cell) or [`Item`][nnsight.intervention.kernel.Item] (a
+    dictionary entry). When ``fn`` is a Python function whose own module global
+    currently holds ``fn``, that module attribute is added automatically. A
+    builtin's module (``torch._C._nn`` for SDPA) is PyTorch's dispatch table,
+    consulted by ``__torch_function__`` handling and by TorchDynamo, and is never
+    patched. Calling
+    ``register`` again for an already-registered ``fn`` adds any new holders to
+    the existing entry; if traces are currently open, the new holders are patched
+    immediately, and passing a shim read from an already-patched holder resolves
+    to the underlying kernel function via [`unshimmed`][nnsight.intervention.kernel.unshimmed].
     """
-    _KERNELS[fn] = serve
+    fn = unshimmed(fn)
+    with _lock:
+        entry = _KERNELS.get(fn)
+        if entry is None:
+            entry = _KERNELS[fn] = Entry(fn, serve)
+        entry.serve = serve
+        module = sys.modules.get(fn.__module__) if isinstance(fn, FunctionType) else None
+        if module is not None and unshimmed(vars(module).get(fn.__name__)) is fn:
+            holders = (Attr(module, fn.__name__), *holders)
+        added = [holder for holder in holders if entry.add(holder)]
+        if _open:
+            _patch(entry, added)
 
 
-def through(*fns: Callable) -> None:
-    """Mark wrapper functions ``fns`` to be instrumented on the fly when a worker waits on their module's kernel."""
-    _THROUGH.update(fns)
+def _patch(entry: Entry, holders: list[Attr]) -> None:
+    # Only overwrite holders that currently hold `entry.fn`; leave prior custom replacements untouched.
+    for holder in holders:
+        if holder.get() is entry.fn:
+            holder.set(entry.shim)
+            entry.patched.append(holder)
 
 
-def _registered(fn: Callable, table: dict | set) -> Any:
-    # Unhashable callables cannot be in the registry; return None instead of raising TypeError during a forward pass.
-    try:
-        return table.get(fn) if isinstance(table, dict) else fn in table
-    except TypeError:
-        return None
+def _restore(entry: Entry) -> None:
+    # Visit every patched holder even if restoring an earlier one raises, so no shim remains installed after the trace exits.
+    patched, entry.patched = entry.patched, []
+    for holder in patched:
+        try:
+            if holder.get() is entry.shim:
+                holder.set(entry.fn)
+            else:
+                warnings.warn(f"{holder!r} no longer holds the kernel shim of {entry.fn.__name__!r}; left as it is")
+        except Exception as error:
+            warnings.warn(f"{holder!r} could not be restored to {entry.fn.__name__!r}: {error!r}")
 
 
-def serving(fn: Callable) -> Callable | None:
-    """Return the serve function registered for ``fn``, or ``None``."""
-    return _registered(fn, _KERNELS)
+def install() -> None:
+    """Install kernel shims across all registered holders when the first interleaver opens."""
+    global _open
+    with _lock:
+        _open += 1
+        if _open == 1:
+            for entry in _KERNELS.values():
+                _patch(entry, entry.holders)
 
 
-def passes_through(fn: Callable) -> bool:
-    """Return whether ``fn`` is a registered wrapper on the path to a kernel."""
-    return bool(_registered(fn, _THROUGH))
-
-
-def requested(interleaver: Interleaver, module_path: str) -> bool:
-    """Return whether any worker is currently parked on ``module_path``'s kernel location."""
-    return f"{module_path}{SUFFIX}" in interleaver.parked
+def uninstall() -> None:
+    """Restore original kernel functions across all patched holders when the last open interleaver closes."""
+    global _open
+    with _lock:
+        _open -= 1
+        if _open == 0:
+            for entry in _KERNELS.values():
+                _restore(entry)
 
 
 def warn_if_large(shape: tuple[int, ...], site: str, axes: str, dtype: torch.dtype = torch.float32) -> None:
@@ -357,12 +596,8 @@ class Kernel:
     Requesting an unknown site raises ``ValueError`` listing the available sites.
     """
 
-    def __init__(self, envoy: Envoy, instrumented: bool) -> None:
+    def __init__(self, envoy: Envoy) -> None:
         self._envoy = envoy
-        # Records whether the module's forward was already source-instrumented
-        # before this `.kernel` access, so `_request` can detect if the module was
-        # already mid-call in an uninstrumented forward pass.
-        self._instrumented = instrumented
 
     def __getattr__(self, site: str) -> Callable[..., torch.Tensor]:
         if site.startswith("_"):
@@ -374,15 +609,6 @@ class Kernel:
         spec = _normalize(spec)
         location = f"{path}{SUFFIX}"
         mediator = Mediator.current(location)
-        if mediator.occurrence(f"{path}.input") > mediator.occurrence(f"{path}.output") and not self._instrumented:
-            # The module is already inside its forward pass (because a submodule
-            # inside it was read earlier in the same trace block), and it entered
-            # that call before `.kernel` instrumented the forward.
-            raise OutOfOrderError(
-                f"'{location}' was requested while {path!r} is already running without an "
-                f"instrumented forward; request the site before reading the module's output "
-                f"or anything inside it, or access `.kernel` once before the trace"
-            )
         sites = Mediator.event(Event.VALUE, location)
         batcher = mediator.interleaver.batcher
         batch = None

@@ -161,18 +161,11 @@ A kernel site is served when the kernel executes inside the module's forward
 pass, so you must request it before reading any value produced later in the
 forward pass. Requesting `attn.kernel.probs(...)` after reading `attn.output`
 raises `OutOfOrderError`
-([out-of-order-error](../errors/out-of-order-error.md)). Calling a kernel site
-outside a trace raises `ValueError("Cannot access ... outside of interleaving")`.
-
-Accessing `envoy.kernel` instruments the module's forward pass using the same
-AST instrumentation as `.source`. Inside a trace, this happens in time as long
-as the module is not already in the middle of an uninstrumented forward call. If
-you read a submodule inside `attn` first (for example, reading
-`attn.c_attn.output` and then requesting `attn.kernel.probs(...)` in the same
-block), the parent module's uninstrumented forward is already running when
-`.kernel` is first touched, raising `OutOfOrderError: '...kernel' was requested
-while '...' is already running without an instrumented forward`. Accessing
-`attn.kernel` once before entering the trace avoids this.
+([out-of-order-error](../errors/out-of-order-error.md)). Values produced
+earlier in the forward pass, such as `attn.inputs` or `attn.c_attn.output`, can
+be read before requesting `attn.kernel.probs(...)` in the same block. Calling a
+kernel site outside a trace raises `ValueError("Cannot access ... outside of
+interleaving")`.
 
 If you request a site on a module whose forward pass never calls a registered
 kernel, the location never fires and the trace ends with `OutOfOrderError:
@@ -280,11 +273,20 @@ wrappers in its modeling module; a standalone `NNsight(module)` wrapper for one
 of these architectures can serve recurrent sites only after a corresponding
 `TransformersModel` has been built in the same process.
 
-If a trace drills into the kernel function itself via `.source`
-(`mixer.source.torch_chunk_gated_delta_rule_0.source.implementation_0.source`),
-`.source` takes precedence on that call so its inner operations remain
-addressable, and a `.kernel` request on the module in the same trace is not
-served. Use either `.source` on the kernel or `.kernel` in a given trace.
+You can combine `.source` and `.kernel` in a single trace when `.source` stops
+at the kernel call. On GPT-2, `attn.source.attention_interface_1.source`
+exposes transformers' `sdpa_attention_forward`, where
+`torch_nn_functional_scaled_dot_product_attention_0` is the kernel call: its
+`.inputs` are served before the call, `attn.kernel.probs(...)` is served during
+the call, and its `.output` is served after the call, so request them in that
+order. If a trace drills into a Python kernel function's own body via `.source`
+(for example,
+`mixer.source.torch_chunk_gated_delta_rule_0.source.implementation_0.source`),
+the `.source` operations inside the kernel body are served on that call and any
+`.kernel` request on the module for the same call raises `ValueError("... is
+drilled with .source in this trace; its kernel sites are not served on that
+call")`. Use either `.source` into the kernel body or `.kernel` on a given
+call.
 
 ## Per-expert rows of a grouped mixture-of-experts kernel
 
@@ -388,6 +390,41 @@ also reaches the local variables of the fused forwards in expert-sorted order
   post-expert norm to these forwards are also served as `Unavailable`.
 - **Submodule name collisions:** A submodule named `kernel` is accessed as
   `E_kernel` ([access-and-modify](access-and-modify.md#overloaded-names)).
+- **Registering a custom kernel:**
+  `nnsight.intervention.kernel.register(fn, serve, *holders)` associates a
+  callable `fn` with a serve function `serve(fn, args, kwargs) -> (output,
+  sites)` and the storage locations from which the model looks up `fn`:
+  `Attr(module, name)` for a module attribute, `Attr(cell, "cell_contents")`
+  for a closure cell, and `Item(mapping, key)` for a dictionary entry. When
+  `fn` is a Python function whose own module global holds `fn`, that module
+  attribute is added automatically. While a trace is open, each holder is
+  patched with a shim that serves the innermost running module when a worker is
+  waiting on its `.kernel` location. A module that imported `fn` by value
+  (`from torch.nn.functional import scaled_dot_product_attention`) and calls
+  that local binding does not reach the shim unless that module is passed as a
+  holder. A forward pass instrumented by `.source` executes with a copy of its
+  module's globals dict created at instrumentation time, so a kernel called as
+  a bare global of that same module is read from the copied dict and is not
+  served; a kernel looked up through a module attribute, a dictionary entry, or
+  a closure cell is served. Any holder that already contains a different
+  callable before the trace opens (such as a custom attention function or a
+  local override in transformers' `ALL_EXPERTS_FUNCTIONS`) is not patched, and
+  a site request on it raises `OutOfOrderError`.
+- **Identity checks on the kernel function:** `torch._C._nn`, where the C++
+  SDPA builtin resides, is PyTorch's dispatch table and is not patched, so
+  `__torch_function__` dispatch and `torch.compile` observe the original
+  builtin. A `__torch_function__` handler that compares its `func` argument
+  against `torch.nn.functional.scaled_dot_product_attention` by object identity
+  (such as `CausalBias` in `torch.nn.attention.bias`) observes the shim while a
+  trace is open and falls back to its generic path.
 - **Gemma 2 attention softcap:** Gemma 2's attention logit softcap is dropped by
   transformers on the SDPA path, and the served values match what the SDPA
   kernel computed.
+- **`torch.compile`:** A module that executes inside a compiled region does not
+  push a frame onto the active-module stack and the shim calls the kernel
+  directly, so a site request on a compiled module raises `OutOfOrderError`
+  ("requested but the model already ran past it") and compilation introduces no
+  extra graph breaks. If the kernel call itself runs eagerly inside a compiled
+  module (for example, inside a helper decorated with `torch._dynamo.disable`),
+  the call is attributed to the innermost enclosing module that is running
+  eagerly. Keep modules from which you read kernel sites uncompiled.

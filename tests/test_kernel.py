@@ -1,5 +1,6 @@
 import gc
 import math
+import warnings
 import weakref
 
 import pytest
@@ -13,6 +14,7 @@ from nnsight.intervention import kernel
 from nnsight.intervention.envoy import Envoy
 from nnsight.intervention.interleaver import OutOfOrderError
 from nnsight.intervention.kernel import Provenance
+from nnsight.intervention.source import SourceNotAvailable
 
 
 def _reference(q, k, mask=None, is_causal=False, scale=None):
@@ -88,9 +90,6 @@ class Twice(nn.Module):
         return self.second(self.first(x))
 
 
-# Register the test attention interface wrapper as pass-through once at import time.
-kernel.through(attention_through)
-
 
 @pytest.fixture
 def x():
@@ -160,7 +159,7 @@ class TestSites:
         assert torch.allclose(probs, expected, atol=1e-6)
         assert (probs[~allowed.expand_as(probs)] == 0).all()
 
-    def test_interface_function_is_drilled_through(self, x):
+    def test_wrapper_function_between_module_and_kernel_is_transparent(self, x):
         routed = Routed()
         envoy = Envoy(routed)
         with envoy.trace(x):
@@ -293,21 +292,25 @@ class TestOrdering:
         with pytest.raises(ValueError, match="outside of interleaving"):
             envoy.kernel.probs()
 
-    def test_submodule_read_before_request_needs_the_module_instrumented_first(self, x):
+    def test_submodule_reads_around_the_request_on_a_fresh_module(self, x):
         mixer = Mixer()
         envoy = Envoy(mixer)
-        with pytest.raises(OutOfOrderError, match="already running without an instrumented forward"):
-            with envoy.trace(x):
-                envoy.to_q.output
-                envoy.kernel.probs(heads=0)
-        # Touching `.kernel` before the trace instruments the module's forward pass
-        # ahead of time, allowing submodule reads before the kernel site request.
-        envoy.kernel
+        # Reading a submodule that executes before the kernel, followed by the kernel site, works on the first trace.
         with envoy.trace(x):
             projected = nnsight.save(envoy.to_q.output)
             probs = nnsight.save(envoy.kernel.probs(heads=0))
         assert torch.allclose(projected, mixer.to_q(x))
         assert probs.shape == (2, 6, 6)
+        # Requesting the kernel site first, followed by a submodule that executes after the kernel, also works.
+        with envoy.trace(x):
+            probs = nnsight.save(envoy.kernel.probs(heads=0))
+            merged = nnsight.save(envoy.merge.output)
+        assert probs.shape == (2, 6, 6) and merged.shape == (2, 6, 16)
+        # Reading a submodule that executes after the kernel and then requesting the site raises `OutOfOrderError`.
+        with pytest.raises(OutOfOrderError, match="already ran past"):
+            with envoy.trace(x):
+                envoy.merge.output
+                envoy.kernel.probs(heads=0)
 
     def test_request_on_a_module_without_a_kernel_is_never_served(self, x):
         envoy = Envoy(nn.Sequential(nn.Linear(16, 16), nn.ReLU()))
@@ -425,10 +428,204 @@ class TestMemory:
         assert ref() is None
 
 
-class TestTransformers:
-    def test_drills_through_the_attention_interface(self, gpt2):
+class TestShims:
+    """Verify that kernel shims are installed at registered holders only while at least one trace is open."""
+
+    def test_kernel_function_is_shimmed_while_any_trace_is_open(self):
+        original = torch._C._nn.scaled_dot_product_attention
+        assert F.scaled_dot_product_attention is original
+        first, second = Envoy(Mixer()).interleaver, Envoy(Mixer()).interleaver
+        with first:
+            shim = F.scaled_dot_product_attention
+            assert shim is not original and shim.__kernel_shim__ is original
+            assert torch._C._nn.scaled_dot_product_attention is original  # PyTorch's C++ dispatch table is not patched
+            with second:
+                assert F.scaled_dot_product_attention is shim
+            assert F.scaled_dot_product_attention is shim  # outer trace is still open
+        assert F.scaled_dot_product_attention is original
+        assert torch._C._nn.scaled_dot_product_attention is original
+
+    def test_worker_error_before_first_park_leaves_shims_uninstalled(self, x):
+        original = F.scaled_dot_product_attention
+        envoy = Envoy(Mixer())
+        with pytest.raises(TypeError, match="not an int, slice, list or tensor"):
+            with envoy.trace(x):
+                envoy.kernel.probs(heads="all")  # raises during worker startup, before `Interleaver.__enter__` installs shims
+        assert F.scaled_dot_product_attention is original
+        assert kernel._open == 0
+
+    def test_register_patches_explicit_holders_only_while_a_trace_is_open(self):
+        def scan(t):
+            return t.cumsum(1)
+
+        original = scan
+        table = {"scan": scan}
+
+        def through_cell():
+            return scan
+
+        cell = through_cell.__closure__[0]  # closure cell holding `scan`
+        kernel.register(original, _no_sites, kernel.Item(table, "scan"), kernel.Attr(cell, "cell_contents"))
+        try:
+            kernel.register(original, _no_sites, kernel.Item(table, "scan"))  # duplicate holder is deduplicated
+            assert len(kernel._KERNELS[original].holders) == 2
+            with Envoy(Mixer()).interleaver:
+                assert table["scan"].__kernel_shim__ is original and cell.cell_contents is table["scan"]
+            assert table["scan"] is original and cell.cell_contents is original
+        finally:
+            kernel._KERNELS.pop(original)
+
+    def test_register_while_a_trace_is_open_patches_new_holders_immediately(self):
+        def scan(t):
+            return t.cumsum(1)
+
+        table = {"scan": scan}
+        kernel.register(scan, _no_sites)
+        try:
+            with Envoy(Mixer()).interleaver:
+                kernel.register(scan, _no_sites, kernel.Item(table, "scan"))
+                assert table["scan"] is kernel._KERNELS[scan].shim
+            assert table["scan"] is scan
+        finally:
+            kernel._KERNELS.pop(scan)
+
+    def test_holder_overwritten_externally_is_not_clobbered(self):
+        def scan(t):
+            return t.cumsum(1)
+
+        def other(t):
+            return t.cumsum(1)
+
+        table = {"before": other, "during": scan}
+        kernel.register(scan, _no_sites, kernel.Item(table, "before"), kernel.Item(table, "during"))
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                with Envoy(Mixer()).interleaver:  # holder already containing `other` is neither patched nor warned about
+                    assert table["before"] is other and table["during"] is kernel._KERNELS[scan].shim
+            with pytest.warns(UserWarning, match="no longer holds the kernel shim"):
+                with Envoy(Mixer()).interleaver:
+                    table["during"] = other  # overwritten while the trace is open
+            assert table["before"] is other and table["during"] is other
+        finally:
+            kernel._KERNELS.pop(scan)
+
+    def test_registering_while_a_trace_is_open_unwraps_the_shim(self):
+        original = torch._C._nn.scaled_dot_product_attention
+        entries = len(kernel._KERNELS)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with Envoy(Mixer()).interleaver:
+                kernel.register(F.scaled_dot_product_attention, kernel._KERNELS[original].serve)  # passes the installed shim
+                assert len(kernel._KERNELS) == entries and F.scaled_dot_product_attention.__kernel_shim__ is original
+        assert F.scaled_dot_product_attention is original
+
+    def test_envoy_called_with_hook_false_does_not_serve_sites(self, x):
+        class Caller(nn.Module):
+            """Calls a helper `Envoy` on the same interleaver with `hook=False` (the default) inside its forward pass."""
+
+            def __init__(self, helper):
+                super().__init__()
+                self.helper_envoy = [helper]  # stored in a list so `helper` is not registered as a submodule
+                self.proj = nn.Linear(16, 16)
+
+            def forward(self, x):
+                return self.proj(self.helper_envoy[0](x))
+
+        interleaver = Envoy(nn.Identity()).interleaver
+        helper = Envoy(Mixer(), path="helper", interleaver=interleaver)
+        caller = Envoy(Caller(helper), path="caller", interleaver=interleaver)
+        with pytest.raises(OutOfOrderError, match="already ran past"):
+            with caller.trace(x):
+                caller.kernel.probs(heads=0)
+
+    def test_worker_kernel_call_is_not_served_as_the_model_call(self, gpt2):
         attn = gpt2.transformer.h[2].attn
-        attn.kernel  # instrument before the trace so reading `c_attn.output` first is allowed
+        other = torch.randn(1, 3, 5, 4)
+        with gpt2.trace() as tracer:
+            with tracer.invoke("The quick brown fox"):
+                probs = attn.kernel.probs(heads=5, query=-1).save()
+            with tracer.invoke("The quick brown fox"):
+                attn.c_attn.output  # resumes inside `attn.forward` while the first invoke waits on `attn.kernel`
+                own = F.scaled_dot_product_attention(other, other, other).save()
+        with gpt2.trace("The quick brown fox"):
+            solo = attn.kernel.probs(heads=5, query=-1).save()
+        assert torch.allclose(probs, solo, atol=1e-6)
+        assert torch.allclose(own, F.scaled_dot_product_attention(other, other, other))
+
+    def test_module_called_by_a_worker_with_hook_true_serves_sites(self, gpt2):
+        # Module outside the model's forward pass, invoked from one worker with `hook=True` while another worker waits on its `.kernel`.
+        torch.manual_seed(0)
+        mixer = Mixer(width=gpt2.config.n_embd, q_heads=4, kv_heads=4).to(next(gpt2._module.parameters()).device)
+        adapter = Envoy(mixer, path="adapter", interleaver=gpt2.interleaver)
+        with gpt2.trace() as tracer:
+            with tracer.invoke("The quick brown fox"):
+                inputs = adapter.inputs.save()
+                probs = adapter.kernel.probs(heads=0).save()
+            with tracer.invoke("The quick brown fox"):
+                adapter(gpt2.transformer.h[0].output, hook=True)  # tensor output in transformers 5
+        hidden = inputs[0][0]
+        _, expected, _ = _reference(*_inputs(adapter._module, hidden), is_causal=True)
+        assert probs.shape == (1, hidden.shape[1], hidden.shape[1])
+        assert torch.allclose(probs, expected[:, 0], atol=1e-5)
+
+    def test_compiled_module_compiles_without_graph_breaks_and_serves_no_sites(self, x):
+        from torch._dynamo.utils import counters
+
+        mixer = Mixer()
+        plain = mixer(x)
+        envoy = Envoy(torch.compile(mixer))
+        torch._dynamo.reset()
+        counters.clear()
+        with envoy.trace(x):
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(out, plain, atol=1e-6)
+        assert dict(counters["graph_break"]) == {}
+        # Inside the compiled region the kernel runs without frame bookkeeping, so no site is served on either the
+        # inner module or the `OptimizedModule` wrapper returned by `torch.compile`.
+        for module in (envoy._orig_mod, envoy):
+            with pytest.raises(OutOfOrderError, match="already ran past"):
+                with envoy.trace(x):
+                    module.kernel.probs(heads=0)
+        with envoy.trace(x):
+            out = nnsight.save(envoy.output)
+        assert torch.allclose(out, plain, atol=1e-6)
+        assert dict(counters["graph_break"]) == {}
+
+    def test_eager_kernel_call_inside_compiled_module_serves_enclosing_eager_module(self, x):
+        @torch._dynamo.disable
+        def attend(q, k, v, causal):
+            return F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+
+        class Excluding(Mixer):
+            """Compiled module whose kernel call runs inside a `@torch._dynamo.disable` helper."""
+
+            def forward(self, x):
+                q = self.split(self.to_q(x), self.q_heads)
+                k, v = self.to_kv(x).chunk(2, -1)
+                out = attend(q, self.split(k, self.kv_heads), self.split(v, self.kv_heads), self.causal)
+                return self.merge(out.transpose(1, 2).flatten(2))
+
+        mixer = Excluding()
+        plain = mixer(x)
+        envoy = Envoy(torch.compile(mixer))
+        torch._dynamo.reset()
+        # The compiled inner module pushes no frame, so requesting `.kernel` on `_orig_mod` is not served.
+        with pytest.raises(OutOfOrderError, match="already ran past"):
+            with envoy.trace(x):
+                envoy._orig_mod.kernel.probs(heads=0)
+        # The call is attributed to the innermost module running eagerly, which is the outer `OptimizedModule` wrapper.
+        with envoy.trace(x):
+            probs = nnsight.save(envoy.kernel.probs(heads=0))
+            out = nnsight.save(envoy.output)
+        _, expected, _ = _reference(*_inputs(mixer, x), is_causal=True)
+        assert torch.allclose(probs, expected[:, 0], atol=1e-6)
+        assert torch.allclose(out, plain, atol=1e-6)
+
+
+class TestTransformers:
+    def test_submodule_read_then_site_on_first_trace(self, gpt2):
+        attn = gpt2.transformer.h[2].attn
         with gpt2.trace("The quick brown fox"):
             qkv = attn.c_attn.output.save()
             probs = attn.kernel.probs(heads=5, query=-1).save()
@@ -454,6 +651,24 @@ class TestTransformers:
         # Step n attends over the prompt plus n previously generated keys.
         assert [row.shape[-1] for row in rows] == [width + 1, width + 3]
         assert all(row.shape[:-1] == (1,) for row in rows)
+
+    def test_source_around_the_kernel_and_a_site_in_one_trace(self, gpt2):
+        attn = gpt2.transformer.h[2].attn
+        with gpt2.trace("The quick brown fox"):
+            inner = attn.source.attention_interface_1.source
+            inputs = inner.torch_nn_functional_scaled_dot_product_attention_0.inputs.save()  # before the kernel call
+            probs = attn.kernel.probs(heads=5, query=-1).save()  # during the kernel call
+            out = inner.torch_nn_functional_scaled_dot_product_attention_0.output.save()
+        q, k, _ = inputs[0][:3]
+        _, expected, _ = _reference(q, k, is_causal=inputs[1]["is_causal"], mask=inputs[1]["attn_mask"], scale=inputs[1]["scale"])
+        assert torch.allclose(probs, expected[:, 5, -1], atol=1e-6)
+        assert out.shape == q.shape
+
+    def test_source_on_shimmed_builtin_kernel_raises_source_not_available(self, gpt2):
+        attn = gpt2.transformer.h[2].attn
+        with pytest.raises(SourceNotAvailable, match="builtin"):
+            with gpt2.trace("The quick brown fox"):
+                attn.source.attention_interface_1.source.torch_nn_functional_scaled_dot_product_attention_0.source
 
     def test_matches_the_eager_implementation(self, gpt2):
         from nnsight.modeling.transformers import TransformersModel
@@ -661,6 +876,33 @@ class TestRecurrent:
             boundaries = mixer.kernel.chunk_states(chunks=[1, 2, 3]).save()
         assert torch.allclose(torch.stack(states, 1), boundaries, atol=1e-6)
 
+    def test_source_into_kernel_body_and_site_on_same_call_raises(self, gated_delta):
+        mixer = gated_delta.model.layers[0].linear_attn
+        with gated_delta.trace(_ids(150)):
+            loop = mixer.source.torch_chunk_gated_delta_rule_0.source.implementation_0.source
+            state = loop.last_recurrent_state_2.output.save()  # read an operation inside the kernel's body
+            with pytest.raises(ValueError, match="drilled with .source"):
+                mixer.kernel.chunk_states(chunks=-1)
+        assert state.shape == (3, 6, 8, 12)
+
+    def test_model_built_while_a_trace_is_open_unwraps_the_shim(self):
+        import transformers.models.qwen3_next.modeling_qwen3_next as modeling
+
+        from nnsight.intervention import recurrent
+
+        from nnsight.modeling.transformers import _hub_wrappers
+
+        cell = next(cells for cells in _hub_wrappers(modeling) if cells["func_name"].cell_contents == "chunk_gated_delta_rule")["implementation"]
+        torch_function = cell.cell_contents
+        with Envoy(Mixer()).interleaver:
+            model = _wrap(_gated_delta_module())  # `_register_kernels` runs while the cell contains the shim
+        assert cell.cell_contents is torch_function
+        assert kernel._KERNELS[torch_function].serve is recurrent.REFERENCE["chunk_gated_delta_rule"]
+        mixer = model.model.layers[0].linear_attn
+        with model.trace(_ids(150)):
+            states = mixer.kernel.chunk_states(chunks=-1).save()
+        assert states.shape == (3, 6, 8, 12)
+
     def test_mamba2_states_match_an_fp64_scan(self, mamba2):
         mixer = mamba2.backbone.layers[0].mixer
         ids = _ids(100)
@@ -857,8 +1099,11 @@ def _pool():
 
     from nnsight.intervention import experts
 
-    # Explicitly register `grouped_mm_experts_forward` for standalone `Envoy` tests that do not construct a `TransformersModel`.
-    kernel.register(moe.grouped_mm_experts_forward, experts.serve_grouped_mm)
+    # Register `grouped_mm_experts_forward` for standalone `Envoy` tests that do not construct a `TransformersModel`;
+    # `use_experts_implementation` looks up the implementation in `ALL_EXPERTS_FUNCTIONS`.
+    kernel.register(
+        moe.grouped_mm_experts_forward, experts.serve_grouped_mm, kernel.Item(moe.ALL_EXPERTS_FUNCTIONS._global_mapping, "grouped_mm")
+    )
     torch.manual_seed(2)
     return Envoy(use_experts_implementation(Pool, has_gate=False)(SimpleNamespace(_experts_implementation="grouped_mm")))
 
@@ -881,7 +1126,6 @@ def _per_pair(experts_module, x, index):
 class TestExperts:
     def test_pair_buffers_match_a_per_pair_computation(self, moe):
         experts = moe.model.layers[0].mlp.experts
-        experts.kernel  # instrument before the trace so reading `experts.inputs` first is allowed
         ids = _ids(7)
         with moe.trace(ids):
             plain = moe.output.logits.save()
@@ -906,7 +1150,6 @@ class TestExperts:
 
     def test_expert_and_slot_selections(self, moe):
         experts = moe.model.layers[0].mlp.experts
-        experts.kernel
         ids = _ids(7)
         with moe.trace(ids):
             index = experts.inputs[0][1].save()
@@ -1086,7 +1329,6 @@ class TestWorkloads:
 
     def test_ablating_one_expert_from_its_rows_matches_zeroing_its_weights(self, moe):
         experts = moe.model.layers[0].mlp.experts
-        experts.kernel  # instrument before the trace so reading `experts.inputs` first is allowed
         ids = _ids(7)
         with moe.trace(ids):
             index, weights = experts.inputs[0][1], experts.inputs[0][2]  # [tokens, top_k]
@@ -1109,7 +1351,6 @@ class TestWorkloads:
 
     def test_collecting_one_experts_activations_over_invokes_of_different_lengths(self, moe):
         experts = moe.model.layers[0].mlp.experts
-        experts.kernel
         short, long = _ids(4, batch=1), _ids(7, batch=2)
         with moe.trace() as tracer:
             with tracer.invoke(short):

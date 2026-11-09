@@ -183,7 +183,6 @@ order, leaving the remaining experts' routing weights untouched:
 
 ```python
 experts = model.model.layers[0].mlp.experts
-experts.kernel                                           # instrument before the trace
 with model.trace(prompt):
     index, weights = experts.inputs[0][1], experts.inputs[0][2]       # [tokens, top_k]
     rows = experts.kernel.expert_output(expert=3)        # [batch, seq, hidden]; 0 where not routed to 3

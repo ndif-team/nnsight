@@ -753,6 +753,13 @@ class Interleaver:
         # workers — including any registered by appending to the list rather than
         # replacing it, which is how the local path does it.
         self.reindex()
+        # Install kernel shims after starting all workers: a worker that raises
+        # before its first park makes `__enter__` re-raise from the `except` block
+        # above without `__exit__`, so an install placed earlier would leak the
+        # open-trace refcount.
+        from . import kernel  # lazy: kernel imports this module
+
+        kernel.install()
         return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
@@ -763,6 +770,9 @@ class Interleaver:
         it is not an error. Any other exception propagates.
         """
         self.interleaving = False
+        from . import kernel  # lazy: kernel imports this module
+
+        kernel.uninstall()
         # An EarlyStopException means an intervention asked to halt the run; it
         # has done its job unwinding the model, so swallow it here.
         return exc_type is EarlyStopException

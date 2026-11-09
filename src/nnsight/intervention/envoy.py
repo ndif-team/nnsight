@@ -67,7 +67,7 @@ from .batching import Batcher
 from .editing import EditingTracer
 from .eproperty import eproperty
 from .kernel import Kernel
-from .source import STATE, Source, install_source
+from .source import Source, install_source
 from .tracer import InterleavingTracer
 from .util import first_input, replace_first_input
 
@@ -664,13 +664,7 @@ class Envoy:
         Returns:
             A [`Kernel`][nnsight.intervention.kernel.Kernel] accessor for this module.
         """
-        # Instrument the module's forward pass just as `.source` does, and record
-        # whether it was already instrumented before this access so `Kernel` can
-        # raise `OutOfOrderError` if the module is already mid-call.
-        state = self._module.__dict__.get(STATE)
-        instrumented = state is not None and state.sourced
-        install_source(self)  # raises SourceNotAvailable
-        return Kernel(self, instrumented)
+        return Kernel(self)
 
     def to(self, device: torch.device) -> Envoy:
         """Move the wrapped module to ``device`` (in place).
