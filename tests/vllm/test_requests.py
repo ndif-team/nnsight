@@ -467,6 +467,32 @@ class TestSameNameAcrossInvokes:
         assert short is True and long is True
 
 
+class TestTracesInASession:
+    """A session's traces each send home what they saved, not what the session has."""
+
+    @torch.no_grad()
+    def test_a_name_an_earlier_trace_bound_is_not_saved_again(self, vllm_gpt2):
+        # The first trace's `mine` is still marked when the second captures it;
+        # travelling as saved, it would merge the second trace's 64 dicts into one.
+        model = vllm_gpt2
+        prompts = [f"Sample prompt number {i} is about" for i in range(64)]
+        batches = []
+        with model.session():
+            for _ in range(2):
+                with model.trace(temperature=0.0, max_tokens=1) as tracer:
+                    for prompt in prompts:
+                        row = {"model": model, "layer": model.transformer.h[0]}
+                        with tracer.invoke(prompt):
+                            mine = nnsight.save({})
+                            mine["logits"] = row["model"].logits
+                batches.append(mine)
+
+        assert len(batches) == 2
+        for mine in batches:
+            assert isinstance(mine, list) and len(mine) == len(prompts)
+            assert all(isinstance(entry, dict) and list(entry) == ["logits"] for entry in mine)
+
+
 class TestPerInvokeSampling:
     """An invoke's own sampling settings survive the trace-level ones.
 

@@ -723,6 +723,53 @@ class TestParentLinks:
         assert torch.equal(hidden, expected)
 
 
+class TestPresaved:
+    """A block's captured names that were saved travel with it by name (``presaved``)."""
+
+    @staticmethod
+    def _block(**scope):
+        import ast
+
+        from nnsight.intervention.interleaver import Mediator
+
+        node = ast.parse("with tracer:\n    earlier, ours\n").body[0]
+        code = compile(ast.Module(body=node.body, type_ignores=[]), "<block>", "exec")
+        return Mediator(code, {}, scope, node=node)
+
+    def test_only_what_the_trace_marked_travels_as_saved(self):
+        # `earlier` sits at the address of a value an earlier trace of the
+        # session saved and freed; its id is still in the thread's set.
+        from nnsight.tracing.tracer import _saves, dec, inc, mark
+
+        earlier, ours = {}, {}
+        inc()
+        try:
+            mark(earlier)
+            before = set(_saves())
+            mark(ours)
+            mediator = self._block(earlier=earlier, ours=ours)
+            mediator.saved_above = _saves() - before
+            shipped = loads(dumps(mediator))
+        finally:
+            dec()
+        assert shipped.presaved == {"ours"}
+
+    def test_without_a_recorded_window_every_marked_name_travels(self):
+        # A block whose tracer recorded nothing (an edit riding with the model)
+        # reads the thread's whole set.
+        from nnsight.tracing.tracer import dec, inc, mark
+
+        earlier, ours = {}, {}
+        inc()
+        try:
+            mark(earlier)
+            mark(ours)
+            shipped = loads(dumps(self._block(earlier=earlier, ours=ours)))
+        finally:
+            dec()
+        assert shipped.presaved == {"earlier", "ours"}
+
+
 def _seed_id_cache():
     # to_model_key canonicalizes the repo id via the Hub; pre-seed the cache so the
     # key builds without a network round-trip.
