@@ -453,6 +453,8 @@ def function_like(fn: Callable, code: CodeType, closure: tuple | None, **globals
     new = FunctionType(code, {**fn.__globals__, **globals_}, fn.__name__, fn.__defaults__, closure)
     new.__kwdefaults__ = fn.__kwdefaults__
     new.__qualname__ = fn.__qualname__
+    # Track the copied globals dict so bare-global kernel calls inside `new` reach their shims.
+    kernel.adopt(new)
     return new
 
 

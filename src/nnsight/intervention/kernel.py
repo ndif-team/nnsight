@@ -102,12 +102,13 @@ Limitations:
   module that bound the kernel function by value at import time (``from
   torch.nn.functional import scaled_dot_product_attention``) and calls that local
   binding does not reach the shim unless that module is passed to
-  [`register`][nnsight.intervention.kernel.register] as a holder. A forward pass
+  [`register`][nnsight.intervention.kernel.register] as a holder. A function
   instrumented by ``.source`` runs with a copy of its module's globals dict
-  created at instrumentation time (`function_like` in intervention/source.py), so
-  a kernel called as a bare global of that same module is read from the copied
-  dict and does not reach the shim; a kernel looked up as a module attribute, a
-  dict entry, or a closure cell does reach the shim.
+  (`function_like` in intervention/source.py); [`adopt`][nnsight.intervention.kernel.adopt]
+  registers every kernel found in that copy as a [`Global`][nnsight.intervention.kernel.Global]
+  holder for the lifetime of the copy, and [`register`][nnsight.intervention.kernel.register]
+  scans all live copies when a new kernel is registered, so a kernel called as a
+  bare global inside an instrumented function also reaches the shim.
 * Inside a ``torch.compile`` region, the module stack is not updated and the shim
   calls the kernel directly, so a site requested on a compiled module fails with
   ``OutOfOrderError`` ("requested but the model already ran past it"). If the
@@ -124,6 +125,7 @@ import operator
 import sys
 import threading
 import warnings
+import weakref
 from functools import partial
 from types import FunctionType
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
@@ -232,6 +234,10 @@ class Attr:
     def set(self, value: Any) -> None:
         setattr(self.obj, self.key, value)
 
+    @property
+    def alive(self) -> bool:
+        return True
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.obj!r}, {self.key!r})"
 
@@ -244,6 +250,44 @@ class Item(Attr):
 
     def set(self, value: Any) -> None:
         self.obj[self.key] = value
+
+
+class Global(Attr):
+    """Storage location for a global variable inside a function built by `function_like` (intervention/source.py).
+
+    The function is referenced weakly so the holder stays alive only as long as the
+    function and its copied globals dict remain referenced (for example, while an
+    instrumented forward is cached on a module, while a drilled function lives for
+    a single trace, or while `record` runs a single kernel call). Once the function
+    is garbage-collected, `get` returns ``None`` and `Entry.add` and `_restore`
+    skip the expired holder.
+    """
+
+    def __init__(self, fn: FunctionType, key: str) -> None:
+        self.ref = weakref.ref(fn)
+        self.key = key
+        self.name = fn.__qualname__
+
+    @property
+    def obj(self) -> dict[str, Any] | None:
+        fn = self.ref()
+        return None if fn is None else fn.__globals__
+
+    @property
+    def alive(self) -> bool:
+        return self.ref() is not None
+
+    def get(self) -> Any:
+        namespace = self.obj
+        return None if namespace is None else namespace.get(self.key)
+
+    def set(self, value: Any) -> None:
+        namespace = self.obj
+        if namespace is not None:
+            namespace[self.key] = value
+
+    def __repr__(self) -> str:
+        return f"Global({self.name!r}, {self.key!r})"
 
 
 class Entry:
@@ -259,6 +303,7 @@ class Entry:
 
     def add(self, holder: Attr) -> bool:
         """Append ``holder`` if that storage location is not already present; return ``True`` when added."""
+        self.holders = [known for known in self.holders if known.alive]
         key = (type(holder), id(holder.obj), holder.key)
         if any(key == (type(known), id(known.obj), known.key) for known in self.holders):
             return False
@@ -274,6 +319,9 @@ _lock = threading.Lock()
 
 #: Count of currently open interleavers; shims remain installed while this is greater than zero.
 _open = 0
+
+#: Live functions built by `function_like` over copied module globals (see `adopt`).
+_copies: weakref.WeakSet = weakref.WeakSet()
 
 
 class Frame(NamedTuple):
@@ -423,6 +471,48 @@ def register(fn: Callable, serve: Callable, *holders: Attr) -> None:
         added = [holder for holder in holders if entry.add(holder)]
         if _open:
             _patch(entry, added)
+        for copy in list(_copies):
+            for name, value in list(copy.__globals__.items()):
+                if _entry_of(value) is entry:
+                    _hold(entry, copy, name)
+
+
+def _entry_of(value: Any) -> Entry | None:
+    """Return the `Entry` registered for ``value`` (a kernel function or its shim), or ``None``."""
+    if not callable(value):
+        return None
+    try:
+        return _KERNELS.get(unshimmed(value))
+    except Exception:  # unhashable callable or custom `__getattr__` raising on `__kernel_shim__`
+        return None
+
+
+def _hold(entry: Entry, fn: FunctionType, name: str) -> None:
+    # Normalize the entry in the copied globals dict to `entry.fn` (in case the copy
+    # was taken while a trace had installed the shim), then patch it if traces are open.
+    # A copy that is already a holder is left as it is: it holds the shim while traces are open.
+    if not entry.add(Global(fn, name)):
+        return
+    fn.__globals__[name] = entry.fn
+    if _open:
+        _patch(entry, [entry.holders[-1]])
+
+
+def adopt(fn: FunctionType) -> None:
+    """Track ``fn`` (built by `function_like` with a copy of its module's globals) so kernels in its globals reach their shims.
+
+    Each registered kernel present in ``fn.__globals__`` is added to its entry as a
+    [`Global`][nnsight.intervention.kernel.Global] holder, and ``fn`` is recorded in
+    `_copies` so kernels registered later also add holders for ``fn``. Because both
+    `_copies` and `Global` reference ``fn`` weakly, the holders expire when ``fn``
+    is garbage-collected.
+    """
+    with _lock:
+        _copies.add(fn)
+        for name, value in list(fn.__globals__.items()):
+            entry = _entry_of(value)
+            if entry is not None:
+                _hold(entry, fn, name)
 
 
 def _patch(entry: Entry, holders: list[Attr]) -> None:
@@ -437,6 +527,8 @@ def _restore(entry: Entry) -> None:
     # Visit every patched holder even if restoring an earlier one raises, so no shim remains installed after the trace exits.
     patched, entry.patched = entry.patched, []
     for holder in patched:
+        if not holder.alive:
+            continue
         try:
             if holder.get() is entry.shim:
                 holder.set(entry.fn)

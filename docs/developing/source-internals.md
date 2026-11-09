@@ -162,8 +162,16 @@ Two consequences:
 
 Kernel sites (`intervention/kernel.py`) are served by a shim installed on each
 registered kernel function while an interleaver is open (`F.scaled_dot_product_attention`,
+the eager attention function of each modeling module loaded by a `TransformersModel`,
 the function in a hub wrapper's `implementation` cell, and the entries of the
-experts dispatch table). `Controller.__call__` pushes `(interleaver, path, greenlet)`
+experts dispatch table). `function_like` passes each function it builds to
+`kernel.adopt`, which registers every kernel found in that function's copied
+globals dict as a `Global` holder referencing the function weakly (so the holder
+lives only as long as the copy: while an instrumented forward is cached on a
+module, while a drilled function runs for one trace, or while `record` executes
+one kernel call), and `register` scans all live copies when a new kernel is
+registered, so an instrumented function that calls a kernel as a bare global
+reaches the shim. `Controller.__call__` pushes `(interleaver, path, greenlet)`
 onto a thread-local stack for the duration of each module call. When the shim
 runs on the top frame's greenlet and a worker is parked on that module's
 `.kernel` location, the shim calls the registered serve function, receives the

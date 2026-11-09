@@ -60,7 +60,7 @@ import torch
 
 from .. import NNsightDeprecationWarning
 from ..intervention.envoy import Envoy, traceable
-from ..intervention import experts, recurrent
+from ..intervention import attention, experts, recurrent
 from ..intervention.kernel import Attr, Item, register, unshimmed
 from . import peft, processing
 from .huggingface import HuggingFaceModel
@@ -377,6 +377,15 @@ class TransformersModel(HuggingFaceModel):
         # dynamically exec'd classes.
         modules = {sys.modules.get(type(sub).__module__) for sub in self._module.modules()} - {None}
         for module in modules:
+            # Under `attn_implementation="eager"`, an attention module passes its
+            # modeling module's eager attention function (`eager_attention_forward`,
+            # or a `simple_`, `vision_`, or `text_` variant) to
+            # `ALL_ATTENTION_FUNCTIONS.get_interface` on each call. Registering the
+            # function adds its own module global as the default holder.
+            for value in list(vars(module).values()):
+                eager = unshimmed(value)
+                if attention.is_eager_forward(eager):
+                    register(eager, attention.serve_eager)
             for cells in _hub_wrappers(module):
                 name = cells["func_name"].cell_contents
                 if name not in recurrent.REFERENCE:

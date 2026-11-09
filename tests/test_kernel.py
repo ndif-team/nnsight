@@ -1,5 +1,6 @@
 import gc
 import math
+import sys
 import warnings
 import weakref
 
@@ -670,15 +671,143 @@ class TestTransformers:
             with gpt2.trace("The quick brown fox"):
                 attn.source.attention_interface_1.source.torch_nn_functional_scaled_dot_product_attention_0.source
 
-    def test_matches_the_eager_implementation(self, gpt2):
-        from nnsight.modeling.transformers import TransformersModel
-
-        eager = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True, attn_implementation="eager")
-        with eager.trace("The quick brown fox"):
-            weights = eager.transformer.h[2].attn.output[1].save()
+    def test_matches_the_eager_implementation(self, gpt2, eager_gpt2):
+        with eager_gpt2.trace("The quick brown fox"):
+            weights = eager_gpt2.transformer.h[2].attn.output[1].save()
         with gpt2.trace("The quick brown fox"):
             probs = gpt2.transformer.h[2].attn.kernel.probs().save()
         assert torch.allclose(probs, weights, atol=1e-6)
+
+    def test_eager_attention_serves_the_weights_it_returned(self, eager_gpt2):
+        attn = eager_gpt2.transformer.h[2].attn
+        with eager_gpt2.trace("The quick brown fox"):
+            probs = attn.kernel.probs().save()
+            row = attn.kernel.probs(heads=5, query=-1).save()
+            lse = attn.kernel.lse().save()
+            scores = attn.kernel.scores(heads=[1, 7]).save()
+            weights = attn.output[1].save()
+            logits = eager_gpt2.output.logits.save()
+        with eager_gpt2.trace("The quick brown fox"):
+            plain = eager_gpt2.output.logits.save()
+        assert torch.equal(probs, weights) and torch.equal(row, weights[:, 5, -1])
+        assert probs.provenance.kind == "exact export" and probs.provenance.kernel == "modeling_gpt2.eager_attention_forward"
+        assert lse.provenance.kind == "replay" and scores.provenance.kind == "replay"
+        assert torch.allclose(torch.exp(scores - lse[:, [1, 7]].unsqueeze(-1)), weights[:, [1, 7]], atol=1e-6)
+        assert torch.equal(logits, plain)
+
+    def test_eager_sites_with_source_on_the_attention_module(self, eager_gpt2):
+        attn = eager_gpt2.transformer.h[2].attn
+        # `.source` on the module runs its forward with a copy of the modeling module's
+        # globals dict; `eager_attention_forward` is read from that copy and reaches the shim.
+        with eager_gpt2.trace("The quick brown fox"):
+            interface = attn.source.attention_interface_1  # instruments the forward before it runs
+            probs = attn.kernel.probs(heads=0).save()  # served inside the interface call
+            returned = interface.output[1].save()
+        assert torch.equal(probs, returned[:, 0])
+        # Drilling into the kernel function's body takes precedence on that call.
+        with eager_gpt2.trace("The quick brown fox"):
+            softmax = attn.source.attention_interface_1.source.nn_functional_softmax_0.output.save()
+            with pytest.raises(ValueError, match="drilled with .source"):
+                attn.kernel.probs()
+        assert torch.equal(softmax, returned)
+
+    def test_eager_grouped_query_scores_replay_the_returned_weights(self):
+        from transformers import Qwen3NextForCausalLM
+
+        torch.manual_seed(0)
+        config = _gated_delta_config()
+        config._attn_implementation = "eager"
+        model = _wrap(Qwen3NextForCausalLM(config))
+        attn = model.model.layers[1].self_attn  # 4 query heads over 2 key heads
+        with model.trace(_ids(9, batch=2)):
+            probs = attn.kernel.probs().save()
+            lse = attn.kernel.lse().save()
+            scores = attn.kernel.scores(heads=[1, 3]).save()
+            weights = attn.output[1].save()
+        assert torch.equal(probs, weights) and probs.shape == (2, 4, 9, 9)
+        assert probs.provenance.kernel == "modeling_qwen3_next.eager_attention_forward"
+        assert torch.allclose(torch.exp(scores - lse[:, [1, 3]].unsqueeze(-1)), weights[:, [1, 3]], atol=1e-6)
+
+    def test_eager_softcap_serves_the_weights_but_not_a_replay(self):
+        from transformers import Gemma2Config, Gemma2ForCausalLM
+
+        torch.manual_seed(0)
+        config = Gemma2Config(hidden_size=32, intermediate_size=64, num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2, head_dim=8, vocab_size=256)
+        config._attn_implementation = "eager"
+        model = _wrap(Gemma2ForCausalLM(config))
+        attn = model.model.layers[0].self_attn
+        with model.trace(_ids(7, batch=2)):
+            probs = attn.kernel.probs(heads=0).save()
+            with pytest.raises(ValueError, match="received softcap=50.0"):
+                attn.kernel.lse()
+            weights = attn.output[1].save()
+        assert torch.equal(probs, weights[:, 0]) and probs.provenance.kind == "exact export"
+
+    def test_eager_attention_sinks_serve_the_weights_but_not_a_replay(self):
+        from transformers import GptOssConfig, GptOssForCausalLM
+
+        torch.manual_seed(0)
+        config = GptOssConfig(
+            hidden_size=32, intermediate_size=64, num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2, head_dim=8,
+            vocab_size=256, num_local_experts=2, num_experts_per_tok=1, layer_types=["full_attention"],
+        )
+        config._attn_implementation = "eager"
+        model = _wrap(GptOssForCausalLM(config))
+        attn = model.model.layers[0].self_attn
+        with model.trace(_ids(7, batch=2)):
+            probs = attn.kernel.probs().save()
+            with pytest.raises(ValueError, match="attention sinks"):
+                attn.kernel.scores()
+            weights = attn.output[1].save()
+        assert torch.equal(probs, weights) and probs.sum(-1).max() < 1
+
+    def test_source_copies_are_held_only_while_they_live(self, eager_gpt2, gated_delta):
+        import transformers.models.gpt2.modeling_gpt2 as modeling
+
+        entry = kernel._KERNELS[modeling.eager_attention_forward]
+        attn = eager_gpt2.transformer.h[3].attn
+
+        def live():
+            return sum(holder.alive for holder in entry.holders)
+
+        def drill():
+            with eager_gpt2.trace("The quick brown fox"):
+                attn.source.attention_interface_1.source.nn_functional_softmax_0.output.save()
+
+        drill()
+        gc.collect()
+        settled = live()
+        for _ in range(5):
+            drill()
+        gc.collect()
+        assert live() == settled  # the copy created by each drill expires when the trace exits
+        # `record` builds a temporary function per kernel call; its holder expires after the call.
+        mixer = gated_delta.model.layers[0].linear_attn
+        qwen = kernel._KERNELS[sys.modules[type(mixer._module).__module__].eager_attention_forward]
+        for _ in range(3):
+            with gated_delta.trace(_ids(70)):
+                mixer.kernel.states(tokens=-1).save()
+        gc.collect()
+        assert sum(holder.alive for holder in qwen.holders) == 1
+
+    def test_a_kernel_registered_after_source_reaches_the_instrumented_copy(self, x):
+        envoy = Envoy(_LateUser())
+        with envoy.trace(x):
+            envoy.source._late_scan_0.output.save()  # instruments the forward before `_late_scan` is registered
+        kernel.register(_late_scan, _no_sites)
+        try:
+            with envoy.trace(x):
+                with pytest.raises(ValueError, match="keeps nothing to read"):
+                    envoy.kernel.anything()
+        finally:
+            kernel._KERNELS.pop(_late_scan)
+
+
+@pytest.fixture(scope="module")
+def eager_gpt2():
+    from nnsight.modeling.transformers import TransformersModel
+
+    return TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True, attn_implementation="eager")
 
 
 def _wrap(module):
@@ -779,6 +908,17 @@ def _hf_state_after(inputs, token):
         query, key, value, g, beta, output_final_state=True, use_qk_l2norm_in_kernel=kwargs["use_qk_l2norm_in_kernel"]
     )
     return final
+
+
+def _late_scan(t):
+    return t.cumsum(1)
+
+
+class _LateUser(nn.Module):
+    """Module whose forward calls `_late_scan` as a bare global of this test module."""
+
+    def forward(self, t):
+        return _late_scan(t)
 
 
 def _no_sites(fn, args, kwargs):

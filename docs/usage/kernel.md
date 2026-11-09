@@ -34,7 +34,10 @@ switching from a fused kernel to eager execution changes the floating-point
 arithmetic. On Qwen3-8B in bf16 (56-token prompt, layers 0 to 9), eager
 attention probabilities differ from the fused kernel's probabilities by a median
 of 0.6% and by up to 20% at the top key, while the model's output logits shift
-by a KL divergence of 1.3e-3.
+by a KL divergence of 1.3e-3. `module.kernel.probs(...)` is also served under
+`attn_implementation="eager"`, where it returns the weights tensor produced by
+the eager call, so the same site request reads the probabilities the loaded
+model computed under either implementation.
 
 Every fused SDPA backend computes one small summary statistic per query row for
 its backward pass: the logsumexp (`lse`). From the fp32 scores `S` and `lse`,
@@ -57,8 +60,9 @@ unmasked row sums to 1 within a few fp32 ulps of the row's largest `|S|` (within
 ## Sites
 
 Call `module.kernel.<site>(heads=, query=, key=)` on any attention module whose
-forward calls `torch.nn.functional.scaled_dot_product_attention`, either
-directly or through one of transformers' attention interfaces.
+forward calls `torch.nn.functional.scaled_dot_product_attention` (directly or
+through one of transformers' attention interfaces) or calls transformers'
+`eager_attention_forward` under `attn_implementation="eager"` ([below](#under-eager-attention)).
 
 | Site | Value | Shape (unsliced) | Provenance |
 |---|---|---|---|
@@ -102,6 +106,49 @@ Masking reflects what the kernel received:
   is `0` at masked positions.
 - If every key in a query row is masked (such as a left-padding query position),
   that row in `probs` is set to all `0`. Every other row sums to 1.
+
+### Under eager attention
+
+Under `attn_implementation="eager"`, the attention module calls the
+`eager_attention_forward` function of its modeling module, which builds the
+probability matrix in Python and returns it alongside the attention output.
+The same three sites are served from that call:
+
+| Site | Value under eager | Provenance |
+|---|---|---|
+| `probs` | the weights tensor the call returned and multiplied with the values, in the model dtype | `exact export` |
+| `scores` | `q . k * scale` in fp32 with the mask added, computed beside the call | `replay` |
+| `lse` | logsumexp of those fp32 scores | `replay` |
+
+`scores` and `lse` carry provenance kind `replay` because the eager function
+computes its own scores in the model dtype. `provenance.kernel` records the
+function name (for example, `modeling_gpt2.eager_attention_forward`). Because
+the eager mask is additive and already includes causal masking, `scores`
+contains the mask's values directly. On GPT-2 in fp32, `exp(scores - lse)`
+matches the returned weights within 1e-6 on every row that has at least one
+unmasked key. On a fully masked row (such as a left-padding query position),
+the eager call returns a uniform row and `probs` serves that uniform row; the
+replayed `lse` equals the mask's `finfo.min` value because `min + log(keys)`
+rounds back to `min` in fp32, so `exp(scores - lse)` does not match `probs` on
+that row.
+
+`probs` is always served from the returned weights, while `scores` and `lse`
+raise `ValueError` whenever the call modified or normalized the scores using
+terms outside `q . k * scale + mask`:
+- When the function receives a non-`None` argument beyond the seven shared
+  parameters (such as Gemma's `softcap`, T5's `position_bias`, or
+  ModernBERT-decoder's `sliding_window`), `scores` and `lse` raise
+  `ValueError("kernel site 'lse': modeling_gemma2.eager_attention_forward received softcap=50.0, which the replay of its scores from query, key and the mask does not model; ...")`.
+- When the returned rows sum to less than 1 without dropout (such as when
+  GPT-OSS concatenates `module.sinks` before the softmax and drops the sink
+  column afterwards), `scores` and `lse` raise
+  `ValueError("... the weights ... returned sum to 0.6210 on some rows, so the call normalised over more than the keys (attention sinks); ...")`.
+
+Modeling modules whose eager function is named `simple_`, `vision_`, or
+`text_eager_attention_forward` (TimesFM, Phi-4 multimodal, Llama 4 vision, and
+TIPS v2) are registered and served the same way. Drilling into the eager
+function's body with `.source` takes precedence on that call, as for every
+registered kernel ([below](#recurrent-states-of-a-chunked-kernel)).
 
 ## Provenance
 
@@ -175,7 +222,11 @@ kernel, the location never fires and the trace ends with `OutOfOrderError:
 - An MLP module, a full decoder block (request `.kernel` on its attention
   submodule instead), or a full MoE block (request `.kernel` on its `experts`
   submodule instead).
-- A model loaded with `attn_implementation="eager"` or `"flash_attention_2"`.
+- A model loaded with `attn_implementation="flash_attention_2"`.
+- An eager attention module whose forward pass computes attention inline
+  instead of calling a module-level `*eager_attention_forward` function, such
+  as GPT-2 with `reorder_and_upcast_attn=True` and older architectures (BLOOM,
+  CodeGen, GPT-J, DeBERTa).
 - An MoE layer running under `experts_implementation="eager"` (or `deepgemm`,
   `sonicmoe`, FP8, or `kernels`).
 - A vLLM model, where attention and state-space layers run through vLLM's own
@@ -402,11 +453,11 @@ also reaches the local variables of the fused forwards in expert-sorted order
   waiting on its `.kernel` location. A module that imported `fn` by value
   (`from torch.nn.functional import scaled_dot_product_attention`) and calls
   that local binding does not reach the shim unless that module is passed as a
-  holder. A forward pass instrumented by `.source` executes with a copy of its
-  module's globals dict created at instrumentation time, so a kernel called as
-  a bare global of that same module is read from the copied dict and is not
-  served; a kernel looked up through a module attribute, a dictionary entry, or
-  a closure cell is served. Any holder that already contains a different
+  holder. A function instrumented by `.source` executes with a copy of its
+  module's globals dict; `kernel.adopt` registers every kernel found in that
+  copy as a `Global` holder for the lifetime of the copy, and `register` scans
+  all live copies when a new kernel is registered, so a kernel called as a bare
+  global inside an instrumented function also reaches the shim. Any holder that already contains a different
   callable before the trace opens (such as a custom attention function or a
   local override in transformers' `ALL_EXPERTS_FUNCTIONS`) is not patched, and
   a site request on it raises `OutOfOrderError`.
@@ -419,7 +470,9 @@ also reaches the local variables of the fused forwards in expert-sorted order
   trace is open and falls back to its generic path.
 - **Gemma 2 attention softcap:** Gemma 2's attention logit softcap is dropped by
   transformers on the SDPA path, and the served values match what the SDPA
-  kernel computed.
+  kernel computed. Under `attn_implementation="eager"`, `eager_attention_forward`
+  applies the softcap inside the call, so `probs` returns the post-softcap
+  weights and `scores` and `lse` raise `ValueError` naming `softcap`.
 - **`torch.compile`:** A module that executes inside a compiled region does not
   push a frame onto the active-module stack and the shim calls the kernel
   directly, so a site request on a compiled module raises `OutOfOrderError`

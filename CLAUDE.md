@@ -18,7 +18,7 @@
 | Run several prompts at once, or share values between them | [usage/invoke-and-batching.md](docs/usage/invoke-and-batching.md), [usage/barrier.md](docs/usage/barrier.md) |
 | Bundle several traces / share values across them | [usage/session.md](docs/usage/session.md) |
 | Reach operations inside a module's forward | [usage/source.md](docs/usage/source.md) |
-| Read attention probabilities under `sdpa` (any of its backends, including FlashAttention), recurrent states from gated delta or Mamba2 layers, or per-expert MoE outputs without switching to eager | [usage/kernel.md](docs/usage/kernel.md) |
+| Read attention probabilities under `sdpa` (with any backend, including FlashAttention) or `eager`, recurrent states from gated delta or Mamba2 layers, or per-expert MoE outputs without changing the model's implementation | [usage/kernel.md](docs/usage/kernel.md) |
 | Cache activations from many modules | [usage/cache.md](docs/usage/cache.md) |
 | Take gradients | [usage/backward-and-grad.md](docs/usage/backward-and-grad.md) |
 | Check shapes without running the model | [usage/scan.md](docs/usage/scan.md) |

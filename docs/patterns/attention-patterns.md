@@ -157,6 +157,12 @@ with model.trace(prompt):
     weights = model.transformer.h[0].attn.output[1].save()
 ```
 
+`attn.kernel.probs(...)` is also served under `attn_implementation="eager"` and
+returns that same weights tensor (`provenance.kind == "exact export"`,
+`provenance.kernel == "modeling_gpt2.eager_attention_forward"`), sliced by
+`heads=`, `query=`, and `key=`, so code written against `.kernel` runs under
+either implementation ([kernel](../usage/kernel.md#under-eager-attention)).
+
 Every layer at once, from the model's own return value:
 
 ```python
