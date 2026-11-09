@@ -555,12 +555,6 @@ def arguments(fn: Callable, args: tuple, kwargs: dict) -> dict[str, Any]:
     return signature.arguments
 
 
-def drill(interleaver: Any, path: str, fn: Callable) -> tuple[Callable, Compiled]:
-    """An instrumented ``fn`` whose operations are addressable under ``{path}.source.*``
-    while ``interleaver`` is interleaving; raises [`SourceNotAvailable`][nnsight.intervention.source.SourceNotAvailable]."""
-    return instrument(fn, make_op(lambda: (interleaver, path) if interleaver.interleaving else (None, None)))
-
-
 def make_op(locate: Callable[[], tuple]) -> Callable:
     """Build the ``__nnsight_op__`` an instrumented function calls at each operation.
 
@@ -901,7 +895,9 @@ class SourceEnvoy:
                     f"function to drill into"
                 )
             if interleaver.sourced[self.path] is None:
-                interleaver.sourced[self.path] = drill(interleaver, self.path, fn)
+                interleaver.sourced[self.path] = instrument(  # raises SourceNotAvailable if it can't
+                    fn, make_op(lambda: (interleaver, self.path) if interleaver.interleaving else (None, None))
+                )
         return Source(self.envoy, prefix=self.path, compiled=interleaver.sourced[self.path][1])
 
     @eproperty

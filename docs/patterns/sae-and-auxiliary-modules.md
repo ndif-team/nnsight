@@ -253,7 +253,6 @@ for the tokens actually routed to `e`:
 
 ```python
 experts = model.model.layers[0].mlp.experts
-experts.kernel
 with model.trace() as tracer:
     with tracer.invoke(short_prompt):
         index = experts.inputs[0][1].save()                           # [batch * seq, top_k], whole batch

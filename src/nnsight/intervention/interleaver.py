@@ -101,8 +101,7 @@ def counted(location: str) -> str:
     """Return the location key whose visit counter tracks occurrences of ``location``.
 
     A module's kernel location (``"{path}.kernel"``, see intervention/kernel.py)
-    only fires on calls where the module's forward is source-instrumented and a
-    worker is waiting on it. Counting it via ``"{path}.output"``, which the
+    only fires on calls where a worker is waiting on it. Counting it via ``"{path}.output"``, which the
     module controller increments on every call, ensures that a ``tracer.iter``
     request at step ``n`` targets the kernel call inside the module's ``n``-th
     execution.
@@ -958,7 +957,4 @@ class Interleaver:
         # place they would tie the model to its own interleaver in a cycle.
         self.observers = {}
         self.batcher = None
-        # A drilled wrapper's globals hold the op closure, which holds this
-        # interleaver; left in place after the run they would keep it alive.
-        self.sourced.clear()
 
