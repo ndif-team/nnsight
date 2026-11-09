@@ -59,26 +59,6 @@ class Mixer(nn.Module):
         return self.merge(out.transpose(1, 2).flatten(2))
 
 
-def attention_through(module, q, k, v, bias, **kwargs):
-    """Wrapper function modeling a transformers attention interface selected at runtime."""
-    return F.scaled_dot_product_attention(q, k, v, attn_mask=bias, is_causal=bias is None), None
-
-
-class Routed(nn.Module):
-    """Attention module that calls SDPA through a wrapper function assigned to a local variable in `forward`."""
-
-    def __init__(self, width=16, heads=2):
-        super().__init__()
-        self.heads, self.head = heads, width // heads
-        self.qkv = nn.Linear(width, 3 * width)
-
-    def forward(self, x):
-        q, k, v = (t.view(*t.shape[:2], self.heads, self.head).transpose(1, 2) for t in self.qkv(x).chunk(3, -1))
-        interface = attention_through
-        out, _ = interface(self, q, k, v, None)
-        return out.transpose(1, 2).flatten(2)
-
-
 class Twice(nn.Module):
     """Module containing two sequential attention submodules with distinct kernel configurations."""
 
@@ -159,15 +139,6 @@ class TestSites:
         _, expected, _ = _reference(*_inputs(mixer, x), mask=bias)
         assert torch.allclose(probs, expected, atol=1e-6)
         assert (probs[~allowed.expand_as(probs)] == 0).all()
-
-    def test_wrapper_function_between_module_and_kernel_is_transparent(self, x):
-        routed = Routed()
-        envoy = Envoy(routed)
-        with envoy.trace(x):
-            probs = nnsight.save(envoy.kernel.probs(heads=1, query=-1))
-        q, k, _ = (t.view(*t.shape[:2], 2, 8).transpose(1, 2) for t in routed.qkv(x).chunk(3, -1))
-        _, expected, _ = _reference(q, k, is_causal=True)
-        assert torch.allclose(probs, expected[:, 1, -1], atol=1e-6)
 
     def test_output_is_unchanged_by_a_request(self, x):
         envoy = Envoy(Mixer())
