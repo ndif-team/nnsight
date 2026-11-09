@@ -154,9 +154,8 @@ class TestServe:
     def test_a_later_trace_from_the_same_file_runs_its_own_invokes(
         self, serve_client, serve_url, ET_prompt, MSG_prompt
     ):
-        # The server registers each block's source under the client's filename
-        # and parses its invokes from there, so a cache of that filename's
-        # source kept the first trace's and parsed every later one against it.
+        # Two traces in one file, the second with its invokes in the opposite
+        # order: each must run its own invokes.
         with serve_client.trace(temperature=0.0, top_p=1, serve=serve_url) as tracer:
             with tracer.invoke(ET_prompt):
                 a = serve_client.logits.save()

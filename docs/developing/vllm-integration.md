@@ -62,18 +62,25 @@ vLLM's built-in `SamplingParams.extra_args` — a dict field that survives both 
 boundary; for each mediator with a non-`None` `batch_group`:
 
 ```python
-param.extra_args = {"nnsight_mediator": dumps(mediator)}
+param.extra_args = {"nnsight_mediator": dumps(mediator, tree=self)}
 ```
 
 `dumps` is the source-based pickler (see [serialization.md](./serialization.md)), so
 the mediator's block recompiles against the worker's Python; its `__globals__`
-(including referenced user variables) travel with it. Trace-level sampling kwargs
-fill in any `SamplingParams` field still at its default.
+(including referenced user variables) travel with it. The block names `model`, and
+`tree=self` makes every envoy of the model's tree travel as `Envoy:<path>`: the worker
+wraps the same model at the same paths and resolves each to a copy made for the
+request, so a request's payload is a few hundred bytes. An envoy holding state the
+worker lacks (an alias, a wrapper subclass's class) goes by value. Trace-level
+sampling kwargs fill in any `SamplingParams` field still at its default.
 
 On the worker, `Requests.add` (`GPUModelRunner.py`) deserializes each new
 request's mediator with `loads(..., persistent_objects=model._remoteable_persistent_objects())`
-(the tokenizer resolves by persistent ID). Requests with no nnsight payload — other
-tenants sharing the engine — are skipped.
+(the tokenizer and every envoy resolve by persistent ID). The worker's tree is
+built once at load and marked `interleaver.shared = True`: a block that mounts a
+module on it (`model.sae = module`) gets an `AttributeError`, since the module would
+reach every later request. Requests with no nnsight payload, from other tenants
+sharing the engine, are skipped.
 
 ## The three interleaver entry points
 
@@ -325,23 +332,27 @@ the meta model, and a server holds one dispatched async `VLLM`.
   mode="async", dispatch=True, ...)`, optionally guards requests with an
   `ndif-api-key` header, and `uvicorn.run`s the app. Default host is loopback; it
   warns on `0.0.0.0` since it runs client-sent code.
-- `serve/server.py` — a FastAPI app. `POST /v1/nnsight/generate` takes a
-  `RequestModel.serialize(tracer)` blob, `_build_tracer` deserializes it
-  (`RequestModel.deserialize`, plus restoring `tracer.node`), calls `prepare` +
-  `_attach_mediators`, runs each invoke through the engine, collects saves via
-  `collect_nnsight`, and `torch.save`s `{"saves", "error"}` back (saved values only;
-  a build or runtime error rides `error` with its real type + traceback). Worker
-  building is synchronous (all before the first `await`), so concurrent requests
-  never interleave on the shared interleaver. `POST /v1/nnsight/register/{id}` and
-  `.../clear` install and drop a block on the server's engine — the HTTP form of the
-  `collective_rpc` an in-process `model.edit()` makes. `GET /health` reports
-  readiness, and `_ready()` is what every endpoint calls first.
-- `serve/http.py` — the headers, timeouts, and non-200 handling both client halves
+- `serve/server.py`: a FastAPI app. `POST /v1/nnsight/generate` unpickles
+  `(prompts, params, lora_requests)` (one entry per invoke), submits each invoke to
+  `model.vllm_entrypoint.generate`, collects saves via `acollect` (`collect_nnsight`),
+  and returns `torch.save({"saves": all_saves, "error": first_error})` (saved values
+  only; an unpickling, generation, or worker intervention error is returned in `error`
+  with its original type name and traceback). Each invoke's serialized `Mediator` arrives
+  in `SamplingParams.extra_args["nnsight_mediator"]` and passes through the server to
+  the workers as opaque bytes. `POST /v1/nnsight/register/{id}` and `.../clear` install
+  and remove a persistent block on the server's engine via `collective_rpc`, the HTTP
+  counterpart of an in-process `model.edit()`. `GET /health` reports readiness, and
+  every endpoint calls `_ready()` first.
+- `serve/http.py`: the headers, timeouts, and non-200 handling both client halves
   share: `LocalServeBackend` sending a trace and `ServeRegistration` sending a block.
-- `serve/backend.py` — `LocalServeBackend(Backend)`, the client side of `serve=url`:
-  serializes the trace, POSTs it, `torch.load`s the result, `raise_deferred`s any
-  error, `mark`s the saves, and `push`es them into the caller's frame — so reading a
-  `.save()`d variable after the block works exactly as locally.
+- `serve/backend.py`: `LocalServeBackend(Backend)`, the client side of `serve=url`.
+  Calls `tracer.prepare` and `model._attach_mediators` on the client's meta model to
+  build `(prompts, params, lora_requests)` with each invoke's `Mediator` serialized into
+  `SamplingParams.extra_args["nnsight_mediator"]` (errors in `prepare` or
+  `_attach_mediators` raise here before anything is sent), cancels the client's
+  interleaver, clears `shared_locals`, pickles and POSTs the request tuple,
+  `torch.load`s the response, calls `raise_deferred` on `error`, marks the saved values
+  with `mark`, and writes them into the caller's frame with `push`.
 
 ## Lifecycle (sync, end-to-end)
 

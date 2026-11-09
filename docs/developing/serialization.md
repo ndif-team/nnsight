@@ -36,8 +36,8 @@ The round-trip suite is `tests/test_serialization.py`.
 ## Architecture
 
 Two layered mechanisms: `code_reduce` (capture code as text plus only the names it
-references) and persistent ids (`_persistent_id`, reference heavy objects instead
-of pickling them).
+references) and persistent ids (the model's objects written as names the receiver
+resolves on its own tree, instead of pickling them).
 
 ### `code_reduce` and `reduce_block`
 
@@ -65,11 +65,21 @@ of pickling them).
   `(OSError, TypeError)` — C functions, dataclass methods, REPL functions with no
   recoverable source — it falls back to cloudpickle's bytecode path, which only
   loads on a matching Python.
-- `persistent_id(obj)` (`serialization.py`) returns
-  `obj.__dict__["_persistent_id"]` when present (else `None`).
+- `persistent_id(obj)` (`serialization.py`) writes the model's objects as
+  names when the pickler was built with `tree=<any envoy of the model>`: the
+  root's `_persistent_attachments()` by identity (`"Interleaver"`, a tokenizer,
+  a pipeline), `f"Module:{path}"` for a module the root's interleaver registers,
+  `f"Envoy:{path}"` for an `Envoy` of that tree (one whose `interleaver` is the
+  root's) that `_state_below()` is false for, and `None` (by value) for one that
+  it is true for. An `Envoy` of any other tree, or any `Envoy` with no `tree=`,
+  raises `pickle.PicklingError`.
+- `reducer_override(obj)` (`serialization.py`) writes the envoy passed as `tree=`,
+  when it holds no state, as its name plus one field of state (see
+  [the envoy running the payload](#envoys-by-reference)).
 - `CustomCloudUnpickler(pickle.Unpickler)` (`serialization.py`) overrides
-  `persistent_load(pid)` to return `self.persistent_objects[pid]`, raising
-  `UnknownPersistentIdError` if the ID is absent.
+  `persistent_load(pid)` to resolve the ID from `self.persistent_objects`, with a
+  per-payload copy for an `Envoy:<path>`, raising `UnknownPersistentIdError` if the
+  ID is absent.
 
 ### Reconstruction
 
@@ -115,7 +125,7 @@ model itself is never carried — it is identified by `model_key`. Fields:
 - `serialize(tracer, compress=False)` (`request.py`, classmethod) builds the
   binary execution payload: `variables = dict(tracer.info.frame.f_locals)`,
   `interventions = reduce_block(tracer.node, glbls, variables)`, then
-  `dumps((tracer, interventions))`, zstd level 6 if `compress`.
+  `dumps((tracer, interventions), tree=tracer.envoy)`, zstd level 6 if `compress`.
 - `deserialize(blob, persistent_objects=None, compress=False, ...)`
   (`request.py`, staticmethod) is the inverse: `tracer, (source, glbls, vars) =
   loads(...)`, recompiles the block into `tracer.info.code`, registers it in
@@ -150,23 +160,125 @@ and re-inits.
 
 ## Persistent objects — model/tokenizer by reference
 
-Heavy server-side objects (the model, its tokenizer, the module tree, the
-interleaver) are never serialized — they're referenced by ID and re-bound to the
+Heavy server-side objects (the model's modules, its tokenizer and other attachments,
+the interleaver) are never serialized: they're written as names and re-bound to the
 server actor's live objects.
 
-- **Tagging (client):** `Envoy.__getstate__` (`envoy.py`) sets
-  `interleaver._persistent_id = "Interleaver"` and `_module._persistent_id =
-  f"Module:{self.path}"`. `TransformersModel.__getstate__` (`transformers.py`)
-  additionally tags each non-`None` preprocessor and the pipeline, using the
+- **Naming (client):** the pickler is built with `tree=<any envoy of the model>`
+  (`RequestModel.serialize` passes `tracer.envoy`, which a trace and a session
+  both carry; `VLLM._attach_mediators` and the edit registration pass the
+  model). `Envoy._persistent_attachments()` (`envoy.py`) names the interleaver,
+  and `TransformersModel` adds its attachments from the
   `_PERSISTENT` map (`transformers.py`): `tokenizer → "Tokenizer"`, `processor
   → "Processor"`, `image_processor → "ImageProcessor"`, `feature_extractor →
-  "FeatureExtractor"`, `pipeline → "Pipeline"`.
+  "FeatureExtractor"`, `pipeline → "Pipeline"`; `DiffusionModel` and `VLLM`
+  add theirs. A module of the tree is `Module:<path>`, from the interleaver's
+  registry, and an envoy is `Envoy:<path>` (below). Nothing is stamped on the
+  objects: a tokenizer a block captured on its own (`tok = model.tokenizer`
+  above the trace) is found by identity.
 - **Resolving (server):** `Remotable._remoteable_persistent_objects()`
-  (`remotable.py`) builds the `{id: object}` map — `{"Interleaver":
-  self.interleaver}` plus `Module:<path>` for every envoy in `self.modules()`.
-  `TransformersModel` extends it (`transformers.py`) with the tokenizer and
-  friends. This map is passed to `loads(..., persistent_objects=...)`; a missing ID
-  raises `UnknownPersistentIdError: <id>`.
+  (`remotable.py`) builds the `{name: object}` map from the same definitions:
+  the `_persistent_attachments()`, and `Module:<path>` and `Envoy:<path>` for
+  every envoy in `self.modules()`. This
+  map is passed to `loads(..., persistent_objects=...)`; a missing name raises
+  `UnknownPersistentIdError`.
+
+### Envoys by reference
+
+The receiver wraps the same model in the same tree, so a path identifies an envoy,
+and an envoy of the tree is written as `Envoy:<path>`. The interleaver identifies
+the tree. An envoy of another tree (a second model in scope) raises
+`pickle.PicklingError` when the payload is written, and so does any envoy written
+with no `tree=`, since the receiver cannot resolve it.
+
+**What goes by value.** An envoy holding state the receiver's tree lacks is pickled
+by value, and so is every envoy above it that pickle reaches. A block reaches an
+envoy from the one it names by attribute access, and an envoy sent by path resolves
+its descendants on the receiver's tree. `Envoy._carries_state()` is true for an
+envoy with any of:
+
+- non-empty `_edits`;
+- a `rename=` alias bound on it, since the block's source names the alias;
+- a child class a caller's `envoys=` map chose. A map a runtime sets on both sides,
+  vLLM's `parallel_envoys()` or tensor parallelism's `tp_envoys()`, is a
+  `RuntimeEnvoys` and does not count;
+- a root class from outside the `nnsight` package, such as a user's subclass of
+  `TransformersModel`. A third-party class a receiver also builds goes by value
+  too, at the cost of a larger payload.
+
+`Envoy._state_below()` checks an envoy and its descendants, so a stateless sibling
+subtree still goes by path. `rename={"attn": "self_attn"}`, bound on each block,
+takes the root, `transformer`, `h` and each block by value and leaves every block's
+children by path. When no envoy registered in `interleaver.envoys` carries state
+(`CustomCloudPickler._clean`), `_goes_by_name()` returns `True` in a single lookup for
+any envoy registered in `interleaver.envoys`. An `edit(inplace=False)` copy shares
+`_module` with the registered envoy at its path while the registered entry in
+`interleaver.envoys` remains the original envoy, so `_goes_by_name()` runs
+`_state_below()` on the copy and sends it by value with its `_edits`.
+
+A by-value envoy's `__getstate__` is its `__dict__` minus the parent link, and
+`__setstate__` links every child to it, so `.parent` and `.root` from a child reach
+the by-value envoy above it. An `edit()` copy made before dispatch writes the current
+state of the envoy registered at its path, with its own edits, because dispatch
+replaced its module and pipeline. A class defined in a script, or in a module
+registered for by-value pickling (`nnsight.register`, or `pull_env()` for local
+modules), travels by source, `eproperty` descriptors included (`eproperty.__reduce__`).
+A class from any other module is written by import path, and a receiver without that
+module raises `ModuleNotFoundError`.
+
+**What a payload receives.** `Envoy:<path>` resolves to a copy made for that payload
+(`CustomCloudUnpickler.persistent_load`, `_PayloadCopies`). The receiver's tree serves
+every payload, and an edit or a plain attribute write through an envoy stays with that
+payload. A mounted `torch.nn.Module` goes on the receiver's module and reaches later
+payloads, unless the tree refuses it (below). A copy has the same class and path, so it reads the
+same values (an eproperty locates a value by path). Its `_module` is the receiver's
+`Module:<path>` entry, which a server may have wrapped to guard its model. Its
+`_edits` start empty, so an edit
+stored on the receiver's envoy stays out of the payload, and its dicts (`_aliases`,
+`kwargs`) are its own.
+
+Children are copied one level at a time (`Envoy._materialize`), on the first access to
+an envoy above or below the copy, so a block touching one layer copies only the
+envoys on its path and their siblings. The table of copies holds them weakly, which
+leaves no reference cycle, so a payload is freed without a GC pass. A copy reached
+without its parent, such as `layer = model.transformer.h[3]` captured above the block,
+holds its parent's copy strongly. Reading `.root` from such a child makes a small
+cycle of envoys that a GC pass frees; the payload's tensors are outside it.
+
+**The envoy running the payload.** The envoy passed as `tree=` is written by
+`reducer_override` when it holds no state: the callable `_named_envoy`, the argument
+`Envoy:<path>`, and the state `{"interleaver": ...}`, whose value is written as the
+name `Interleaver`. Pickle resolves the envoy and then calls `__setstate__` with that
+state. The receiver's class then does its setup (`Meta.__setstate__` sets
+`dispatched`), and the envoy uses the interleaver the receiver resolves for this
+request. A wrapper's `interleave` depends on both.
+
+A receiver's unpickler decides what a name resolves to. NDIF's sandbox runner
+(`IPCCloudUnpickler`) returns the map's entry with no copy, which is the runner's meta
+model, and a new `IPCInterleaver` for `Interleaver`, so the payload's interleaver
+replaces the one on that meta model. This is safe while each request has its own
+runner process. `__setstate__` links the envoy's direct children, so with
+`CustomCloudUnpickler` their copies are made at load, and a module of that level
+missing from the map raises `UnknownPersistentIdError` during load.
+
+**Attributes.** A child envoy takes no new public attribute (`Envoy.__setattr__`),
+because the receiver's envoy at that path would not have it. A value a block needs
+goes in a variable of the block. A `torch.nn.Module` may still be attached, and one
+attached above the block does not travel: by path the receiver's envoy lacks it
+(`AttributeError` when the block reads it), and by value its name is missing from the
+map (`UnknownPersistentIdError` at load). A root
+accepts new attributes, since a model wrapper sets its own in `_load`. A new attribute
+on a stock root is not sent, so reading it on a receiver raises `AttributeError`.
+
+On gpt2 (166 envoys) the root is 118 B by path and a whole trace payload is about
+780 B. An alias on each block takes that payload to 9.4 KB.
+
+A tree that serves many requests at once (vLLM's model runner) marks its interleaver
+`shared = True`, and `Envoy._add_envoy` refuses a mount on it, because a copy holds the
+receiver's module and every later request would see the new one. A plain value written
+on a root, or on an attribute the envoy already has, lands on the payload's copy, so
+`shared` does not refuse it. `Envoy.__setattr__` refuses a new public attribute on a
+child on every tree.
 
 ### Model identity — `to_model_key`
 
@@ -199,12 +311,13 @@ backends use to push a result home after a trace has already exited.
 
 1. **Client.** `model.trace(..., remote=True)` builds a `RemoteBackend`
    (`remotable.py`). On `__exit__`, `RequestModel.serialize(tracer)` reduces the
-   block (`reduce_block`) and `dumps((tracer, interventions))`.
+   block (`reduce_block`) and `dumps((tracer, interventions), tree=tracer.envoy)`.
 2. **Wire.** `RemoteBackend._post` POSTs the JSON envelope (`request.metadata()`)
    plus the payload blob (optionally zstd-compressed) to `{host}/request`.
 3. **Server.** `RequestModel.deserialize(blob, persistent_objects)` runs `loads`;
    `_load_function` recompiles each captured function against the server's Python;
-   persistent IDs resolve to the server's live model/tokenizer/module tree.
+   persistent IDs resolve to the server's live modules and tokenizer, and each
+   `Envoy:<path>` to a copy of the server's envoy made for this payload.
 4. **Execute.** The reconstructed tracer runs against the server-side model; saved
    values are collected.
 5. **Return.** Saves are `torch.save`-pickled, zstd-compressed, and returned with

@@ -509,13 +509,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # No envoy: the spans come from the scheduler rather than from an invoke,
         # so the row math never looks at a tree — and there is none to hand it yet.
         interleaver.batcher = VLLMBatcher(None)
+        # This worker reuses one envoy tree across all requests, so refuse attaching
+        # new `nn.Module` attributes inside request blocks.
+        interleaver.shared = True
         # A worker's error must end only its own request, not tear down the engine
         # every other request shares.
         interleaver.defer_exceptions = True
 
         self.nnsight_requests = Requests()
         # The map that resolves a serialized request's persistent ids (the interleaver,
-        # every module, the tokenizer) back to this worker's objects. The tree is fixed
+        # every module and envoy, the tokenizer) to this worker's objects. The tree is fixed
         # after load, so build it once here rather than walk it every step in `add`.
         self.nnsight_persistent_objects = (
             self.nnsight_model._remoteable_persistent_objects()

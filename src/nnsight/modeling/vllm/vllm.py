@@ -803,14 +803,16 @@ class VLLM(Remotable):
         return names
 
     def _check_edit_names(self, edits: list[str] | None) -> None:
-        """Refuse a name nothing is installed under, when this process holds the engine.
+        """Raise ``ValueError`` for an unknown edit name when this process holds the engine.
 
-        The worker makes the same check for every request (a served engine's
-        edits are installed over HTTP, which this process cannot see), but here
-        the mistake can be reported at the call rather than as the request's
-        deferred error.
+        When ``self.vllm_entrypoint`` is present, ``self._installed_edits`` tracks
+        every edit installed on the engine and unknown names fail before the
+        request is submitted. On an undispatched meta model (such as a
+        ``serve=url`` client, whose edits are installed on the server over HTTP),
+        ``self.vllm_entrypoint`` is ``None`` and ``Requests.add`` in the worker
+        validates ``extra_args["nnsight_edits"]`` when the request arrives.
         """
-        if edits is None or getattr(self, "_serving", False):
+        if edits is None or self.vllm_entrypoint is None:
             return
         installed = {edit.name for edit in self._installed_edits if edit.name is not None}
         unknown = [name for name in edits if name not in installed]
@@ -1090,12 +1092,9 @@ class VLLM(Remotable):
         # the check below and rides `extra_args` beside the block.
         kwargs = dict(kwargs)
         trace_edits = self._edit_names(kwargs.pop("edits", None))
-        # Not on an nnsight-serve server: its edits arrive over HTTP, unseen by
-        # this list, and the worker checks every request anyway.
-        if not getattr(self, "_serving", False):
-            self._check_edit_names(trace_edits)
-            for param in params:
-                self._check_edit_names(getattr(param, "nnsight_edits", None))
+        self._check_edit_names(trace_edits)
+        for param in params:
+            self._check_edit_names(getattr(param, "nnsight_edits", None))
 
         default = SamplingParams()
         for attr in kwargs:
@@ -1107,7 +1106,9 @@ class VLLM(Remotable):
                 )
 
         for mediator, param in zip(attached, params):
-            param.extra_args = {"nnsight_mediator": dumps(mediator)}
+            # Pass `tree=self` so envoys captured by each invoke's mediator serialize
+            # as `Envoy:<path>` persistent IDs resolved on the worker's model tree.
+            param.extra_args = {"nnsight_mediator": dumps(mediator, tree=self)}
             named = getattr(param, "nnsight_named", frozenset())
             edits = getattr(param, "nnsight_edits", None) if "edits" in named else trace_edits
             if edits is not None:
@@ -1151,15 +1152,14 @@ class VLLM(Remotable):
     def _remoteable_from_model_key(cls, model_key: str, **kwargs: Any) -> "VLLM":
         return cls(model_key, **kwargs)
 
-    def _remoteable_persistent_objects(self) -> dict:
-        objects = super()._remoteable_persistent_objects()
-        objects["Tokenizer"] = self.tokenizer
+    def _persistent_attachments(self) -> dict[str, Any]:
+        objects = super()._persistent_attachments()
+        if self.tokenizer is not None:
+            objects["Tokenizer"] = self.tokenizer
         return objects
 
     def __getstate__(self) -> dict:
         state = super().__getstate__()
         # The engine is a live process handle; the far side has its own.
         state["vllm_entrypoint"] = None
-        if self.tokenizer is not None:
-            self.tokenizer._persistent_id = "Tokenizer"
         return state

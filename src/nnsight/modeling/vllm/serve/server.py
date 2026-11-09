@@ -1,23 +1,26 @@
 """A local HTTP server that runs nnsight traces on a vLLM engine.
 
 The server holds one dispatched async [`VLLM`][nnsight.modeling.vllm.vllm.VLLM].
-A client with only a meta model (no GPU) writes a trace as usual and sends it here
-with ``model.trace(..., serve=url)``; the server deserializes it, builds and submits
-the request to its engine, collects the saved values, and returns them. The trace
-is authored on the client and *run* on the server — the same serialized-trace format
-the remote (NDIF) path uses, so the client needs no weights.
-
-The request handler builds its workers synchronously (deserialize → prepare →
-attach), all before the first ``await``, so concurrent requests never interleave
-while sharing the model's one interleaver.
+When a client with a meta-device model (no GPU) runs ``model.trace(..., serve=url)``,
+[`LocalServeBackend`][nnsight.modeling.vllm.serve.backend.LocalServeBackend] prepares
+one engine request per invoke on the client, with that invoke's serialized
+[`Mediator`][nnsight.intervention.interleaver.Mediator] stored as ``bytes`` in
+``SamplingParams.extra_args["nnsight_mediator"]``, and sends a pickle of
+``(prompts, params, lora_requests)`` to ``POST /v1/nnsight/generate``. This server
+unpickles the request tuple, submits each invoke to ``model.vllm_entrypoint.generate``,
+collects the saved values from the workers with
+[`acollect`][nnsight.modeling.vllm.engines.engine.acollect], and returns them. The
+serialized ``Mediator`` bytes in ``extra_args`` pass through this process untouched
+and are unpickled by [`NNsightGPUModelRunner`][nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner]
+in the worker processes.
 """
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import io
 import logging
+import pickle
 import uuid
 import warnings
 from typing import TYPE_CHECKING, Any, Optional
@@ -25,7 +28,6 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 from fastapi import FastAPI, HTTPException, Request, Response
 
-from ....tracing.globals import block_scope
 from ..engines.engine import acollect
 
 if TYPE_CHECKING:
@@ -37,7 +39,6 @@ app = FastAPI(title="nnsight-vllm-serve")
 
 # Set by the CLI once the engine is up.
 _model: Optional["VLLM"] = None
-_persistent_objects: Optional[dict] = None
 
 # Strong references to fire-and-forget worker-cleanup tasks, so the loop doesn't
 # garbage-collect them mid-flight (asyncio tracks tasks weakly).
@@ -53,40 +54,8 @@ def _payload(saves: dict, error: Optional[dict]) -> Response:
 
 def set_model(model: "VLLM") -> None:
     """Register the dispatched engine the server runs traces on."""
-    global _model, _persistent_objects
+    global _model
     _model = model
-    # Edits reach this engine over HTTP, not through model.edit(), so the
-    # client-side edit-name check has nothing to consult here; the worker checks.
-    model._serving = True
-    _persistent_objects = model._remoteable_persistent_objects()
-
-
-def _build_tracer(body: bytes, compress: bool) -> Any:
-    """Rebuild a runnable tracer from a serialized trace, bound to this model.
-
-    [`RequestModel.deserialize`][nnsight.schema.request.RequestModel.deserialize]
-    does the work — recompile the block from its source onto the tracer — and this
-    adds the one thing it drops: the AST node. Server-side mediators normally just
-    run in place, so deserialize has no use for it, but here they are re-serialized
-    onto the engine's requests, which does; parsing the shipped source back gives
-    an equivalent node whose ``body`` reduces the same way.
-
-    Note that deserialize registers the source in ``linecache`` under the client's
-    filename (e.g. ``"<stdin>"``), so requests from different clients collide on
-    that process-global cache. The caller runs the whole build under
-    [`block_scope`][nnsight.tracing.globals.block_scope], which undoes that
-    afterwards, and without an await (see the module docstring): no two builds
-    interleave, so the source read back here is always the one just written. An
-    await added to the build path would break both.
-    """
-    import linecache
-
-    from ....schema.request import RequestModel
-
-    tracer = RequestModel.deserialize(body, _persistent_objects, compress=compress)
-    source = "".join(linecache.cache[tracer.info.frame.f_code.co_filename][2])
-    tracer.node = ast.parse(source)
-    return tracer
 
 
 def _ready() -> "VLLM":
@@ -153,40 +122,28 @@ async def clear_registration(registration_id: str) -> dict:
 
 @app.post("/v1/nnsight/generate")
 async def generate(request: Request) -> Response:
-    """Run a serialized trace and return its saved values.
+    """Run a trace's requests and return their saved values.
 
-    Body: ``RequestModel.serialize(tracer)`` bytes. Response: ``torch.save`` of
-    ``{"saves": {name: value}, "error": <deferred error or None>}`` — saved values
-    only, so read generated tokens by saving ``tracer.result``, which is served here
-    like anywhere else. A build error (a corrupt/incompatible trace) or a runtime
-    intervention error both come back as the deferred ``error`` so the client re-raises
-    the real exception type with its traceback, rather than an opaque HTTP error.
+    Body: a pickle of ``(prompts, params, lora_requests)``, one entry per invoke,
+    produced by [`LocalServeBackend`][nnsight.modeling.vllm.serve.backend.LocalServeBackend]
+    with each invoke's serialized [`Mediator`][nnsight.intervention.interleaver.Mediator]
+    in ``SamplingParams.extra_args["nnsight_mediator"]``. Response: ``torch.save`` of
+    ``{"saves": {name: value}, "error": <deferred error or None>}``. Only saved values
+    are returned, so read generated tokens by saving ``tracer.result``. An exception
+    unpickling the request body, an engine error during generation, or an intervention
+    error in the worker is captured in ``error`` so
+    [`raise_deferred`][nnsight.intervention.errors.raise_deferred] on the client
+    re-raises the exception with its original type name and traceback.
     """
     from ....intervention.errors import capture_exception
 
     model = _ready()
 
-    body = await request.body()
-    compress = request.headers.get("nnsight-compress", "False").lower() == "true"
-
     try:
-        # The rebuilt tracer is a VLLMTracer whose interleaver resolves to this
-        # server's — so building its workers puts them on this model. What the
-        # build registers of the client's source goes when it is done.
-        with block_scope():
-            tracer = _build_tracer(body, compress)
-            _, (prompts, params, lora_requests), forward_kwargs = tracer.prepare(
-                tracer.info.code
-            )
-            model._attach_mediators(params, **forward_kwargs)
+        prompts, params, lora_requests = pickle.loads(await request.body())
     except Exception as exception:
-        logger.exception("Failed to build trace")
+        logger.exception("Failed to read the trace's requests")
         return _payload({}, capture_exception(exception))
-    finally:
-        # prepare appends this request's workers onto the shared interleaver; clear
-        # them whether the build succeeded (they are serialized onto the request now)
-        # or failed (or they would bleed into the next request's build).
-        model.interleaver.cancel()
 
     engine = model.vllm_entrypoint
 
@@ -228,7 +185,8 @@ async def generate(request: Request) -> Response:
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Merge each invoke's saves (later invoke wins a name clash, matching the local
-    # push). A generation failure surfaces as the deferred error, like a build error.
+    # push). Capture any exception from `run_invoke` as the deferred error alongside
+    # worker intervention errors.
     all_saves: dict = {}
     first_error = None
     for result in results:

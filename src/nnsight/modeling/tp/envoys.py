@@ -35,7 +35,7 @@ from typing import Any
 
 import torch
 
-from ...intervention.envoy import Envoy
+from ...intervention.envoy import Envoy, RuntimeEnvoys
 from .fragments import _gather, _placement, _width
 
 #: Styles whose own input transform splits the input for them.
@@ -123,10 +123,12 @@ def tp_envoys() -> dict:
     another — while the map is consulted per module as the tree is built.
     `TPEnvoy` asks `TPFragments` which style its own path got.
     """
-    return {
-        torch.nn.Linear: TPEnvoy,
-        torch.nn.Embedding: TPEnvoy,
-    }
+    return RuntimeEnvoys(
+        {
+            torch.nn.Linear: TPEnvoy,
+            torch.nn.Embedding: TPEnvoy,
+        }
+    )
 
 
 def wants_tensor_parallel(target: Any, load_kwargs: dict) -> bool:

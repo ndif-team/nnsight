@@ -221,8 +221,11 @@ with model.trace(prompt):
 The link is a weak reference to the envoy whose `_children` holds this one
 (`_parent`). It is set as the child is built (`parent=` on `Envoy.__init__`), kept
 through a dispatch re-point (`_update` keeps the envoys), and left out of the
-pickled state: on unpickling a parent re-links its children, and an envoy shipped
-without its parent has none. Being weak, it keeps no ancestor alive, so `del model`
+pickled state: on unpickling a by-value parent links its children, a by-value envoy
+shipped without its parent has none, and an envoy named by path is a copy of the
+receiver's whose parent is a copy of the receiver's parent, held strongly if the copy
+was reached without its parent. In the sender's tree the link is weak, so it keeps no
+ancestor alive and `del model`
 frees the tree by refcounting. A shared module's envoy has the parent at its first
 path; an alias is not a child and changes no parent.
 

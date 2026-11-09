@@ -654,6 +654,11 @@ class Interleaver:
         # it for its row scoping. Cleared by cancel().
         self.batcher: Any = None
         self.interleaving = False
+        # True when one envoy tree serves many requests at once; only
+        # `NNsightGPUModelRunner` sets it. When True,
+        # `Envoy._add_envoy` refuses attaching new `nn.Module` attributes so one
+        # request cannot mutate the shared `nn.Module` tree seen by other requests.
+        self.shared = False
         # Whether a module's handoff has anything to reach: recomputed with the
         # worker list (`reindex`), and the gate every module checks before handing
         # off, so a run with no workers costs a module one attribute test. A
