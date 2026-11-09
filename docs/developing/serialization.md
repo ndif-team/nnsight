@@ -209,11 +209,12 @@ envoy with any of:
 `Envoy._state_below()` checks an envoy and its descendants, so a stateless sibling
 subtree still goes by path. `rename={"attn": "self_attn"}`, bound on each block,
 takes the root, `transformer`, `h` and each block by value and leaves every block's
-children by path. The pickler checks the envoy it is given, so an `edit()` copy,
-which shares its module with the envoy registered at its path, goes by value with its
-edits. When no envoy
-registered on the tree carries state, one flat check per pickler sends every
-registered envoy by path.
+children by path. When no envoy registered in `interleaver.envoys` carries state
+(`CustomCloudPickler._clean`), `_goes_by_name()` returns `True` in a single lookup for
+any envoy registered in `interleaver.envoys`. An `edit(inplace=False)` copy shares
+`_module` with the registered envoy at its path while the registered entry in
+`interleaver.envoys` remains the original envoy, so `_goes_by_name()` runs
+`_state_below()` on the copy and sends it by value with its `_edits`.
 
 A by-value envoy's `__getstate__` is its `__dict__` minus the parent link, and
 `__setstate__` links every child to it, so `.parent` and `.root` from a child reach

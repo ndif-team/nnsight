@@ -803,12 +803,14 @@ class VLLM(Remotable):
         return names
 
     def _check_edit_names(self, edits: list[str] | None) -> None:
-        """Refuse a name nothing is installed under, when this process holds the engine.
+        """Raise ``ValueError`` for an unknown edit name when this process holds the engine.
 
-        The worker makes the same check for every request (a served engine's
-        edits are installed over HTTP, which this process cannot see), but here
-        the mistake can be reported at the call rather than as the request's
-        deferred error.
+        When ``self.vllm_entrypoint`` is present, ``self._installed_edits`` tracks
+        every edit installed on the engine and unknown names fail before the
+        request is submitted. On an undispatched meta model (such as a
+        ``serve=url`` client, whose edits are installed on the server over HTTP),
+        ``self.vllm_entrypoint`` is ``None`` and ``Requests.add`` in the worker
+        validates ``extra_args["nnsight_edits"]`` when the request arrives.
         """
         if edits is None or self.vllm_entrypoint is None:
             return

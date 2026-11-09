@@ -1,12 +1,14 @@
 """Run a trace on a remote nnsight-serve engine.
 
-The backend for ``model.trace(..., serve=url)``. The trace is written against a
-meta model (no GPU, no weights). This backend builds the trace's requests here, one
-per invoke with that invoke's serialized block in its ``SamplingParams``, the same
-requests an in-process engine is given, and sends them to a running nnsight-serve
-instance. The server submits them to its engine and returns the saved values, which
-are pushed back into the caller's frame exactly as a local run would, so reading a
-``.save()``d value after the block just works::
+The backend for ``model.trace(..., serve=url)``. The client holds a meta-device
+[`VLLM`][nnsight.modeling.vllm.vllm.VLLM] model (no GPU, no weights). On trace exit,
+[`LocalServeBackend`][nnsight.modeling.vllm.serve.backend.LocalServeBackend] runs
+``tracer.prepare`` and ``model._attach_mediators`` to build one request per invoke,
+with each invoke's [`Mediator`][nnsight.intervention.interleaver.Mediator] serialized
+into ``SamplingParams.extra_args["nnsight_mediator"]``, then pickles
+``(prompts, params, lora_requests)`` and POSTs the payload to ``/v1/nnsight/generate``
+on a running nnsight-serve instance. The server runs the requests on its engine and
+returns the saved values, which are written into the caller's frame::
 
     model = VLLM("gpt2")                                       # no GPU needed
     with model.trace("Hello", serve="http://host:8000", api_key="..."):
@@ -14,11 +16,15 @@ are pushed back into the caller's frame exactly as a local run would, so reading
     logits                                                     # pushed back here
 
 ``api_key`` (optional) is sent as the ``ndif-api-key`` header. The server's response
-is a ``torch.save`` of ``{"saves": {name: value}, "error": <deferred or None>}`` —
-saved values only, so read generated tokens by saving ``tracer.result``. An error
-building the requests raises here, before anything is sent. A runtime error comes
-back as ``error`` and is re-raised at the client with its real type and traceback; a
-transport/service failure (e.g. the engine not ready) surfaces as ``ConnectionError``.
+is a ``torch.save`` payload of ``{"saves": {name: value}, "error": <deferred or None>}``.
+Only saved values are returned, so read generated tokens by saving ``tracer.result``.
+Errors during ``tracer.prepare`` or ``_attach_mediators`` (such as an invoke without a
+prompt or an unknown sampling argument) raise in the client before the request is sent.
+An exception raised while an intervention runs on the server is returned in ``error``
+and re-raised at the client by [`raise_deferred`][nnsight.intervention.errors.raise_deferred]
+with its original type name and traceback. A non-200 response (such as a 503 when
+the engine is not ready) raises ``ConnectionError``, and a server that cannot be
+reached raises ``httpx.ConnectError``.
 """
 
 from __future__ import annotations
@@ -48,14 +54,17 @@ class LocalServeBackend(Backend):
 
         model = self.model
         try:
-            # What `VLLM._call` does before it hands the requests to its engine;
-            # the meta model has none, so the server's engine takes them.
+            # Collect each invoke's prompt, SamplingParams, and Mediator on the client
+            # meta model, then serialize each Mediator into SamplingParams.extra_args,
+            # matching the preparation VLLMTracer.execute and VLLM._call run locally.
             _, (prompts, params, lora_requests), forward_kwargs = tracer.prepare(
                 tracer.info.code
             )
             model._attach_mediators(params, **forward_kwargs)
         finally:
-            # The workers are serialized onto the requests now; the live ones are done.
+            # LocalServeBackend runs in place of VLLMTracer.execute, so clear the
+            # client's interleaver and shared-locals store here once the Mediators
+            # have been serialized onto `params`.
             model.interleaver.cancel()
             clear_shared_locals()
         saves = self._send(pickle.dumps((prompts, params, lora_requests)))

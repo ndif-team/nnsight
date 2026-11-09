@@ -52,7 +52,7 @@ print(last.saves["logits"].shape)       # `logits` itself is still unbound
 ## Remote / serve
 
 - `trace(..., remote=True)` runs on NDIF. The model key is the repo id (`vllm.py`).
-- `trace(..., serve=url, api_key=...)` runs the trace on a standalone **nnsight-serve** engine: the block is written against a **GPU-less** meta model, turned into one engine request per invoke on the client, sent to the server, and its saved values pushed back into your frame — so reading a `.save()`d variable after the block works exactly as locally.
+- `trace(..., serve=url, api_key=...)` runs the trace on a standalone **nnsight-serve** engine: the trace is written against a **GPU-less** meta model, prepared on the client as one engine request per invoke with its serialized intervention block in `SamplingParams.extra_args`, and sent to the server. Saved values are pushed back into your frame after the `with` block exits, just as in a local trace.
 
 Start a server (holds one dispatched async engine):
 
@@ -92,7 +92,7 @@ with model.trace("The Eiffel Tower is in", serve="http://127.0.0.1:8000", api_ke
 print(model.tokenizer.decode(logits.argmax(dim=-1)))
 ```
 
-The server returns saved values only — save `tracer.result` to get the finished `RequestOutput` back with them. An error building the requests raises on the client before anything is sent; a runtime error comes back with its real type and traceback. See `src/nnsight/modeling/vllm/serve/`.
+The server returns saved values only: save `tracer.result` to get the finished `RequestOutput` back with them. An error while preparing the requests on the client (such as an invoke without a prompt or an unknown sampling argument) raises before anything is sent; an error inside an intervention block on the server comes back and is re-raised as a `RuntimeError` carrying its original exception type name and traceback. See `src/nnsight/modeling/vllm/serve/`.
 
 `model.edit(serve=url, api_key=...)` installs a block on the server's engine the same way, over `POST /v1/nnsight/register/{id}`:
 

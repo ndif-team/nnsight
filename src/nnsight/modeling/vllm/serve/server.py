@@ -1,13 +1,18 @@
 """A local HTTP server that runs nnsight traces on a vLLM engine.
 
 The server holds one dispatched async [`VLLM`][nnsight.modeling.vllm.vllm.VLLM].
-A client with only a meta model (no GPU) writes a trace as usual and sends it here
-with ``model.trace(..., serve=url)``. The client builds the trace's requests, one
-per invoke with that invoke's serialized block in ``SamplingParams.extra_args``, the
-same requests an in-process engine is given; this server submits them to its engine,
-collects the saved values, and returns them. The blocks reach the engine's workers
-unopened: this process unpickles only the prompts and sampling settings, and never
-rebuilds a tracer.
+When a client with a meta-device model (no GPU) runs ``model.trace(..., serve=url)``,
+[`LocalServeBackend`][nnsight.modeling.vllm.serve.backend.LocalServeBackend] prepares
+one engine request per invoke on the client, with that invoke's serialized
+[`Mediator`][nnsight.intervention.interleaver.Mediator] stored as ``bytes`` in
+``SamplingParams.extra_args["nnsight_mediator"]``, and sends a pickle of
+``(prompts, params, lora_requests)`` to ``POST /v1/nnsight/generate``. This server
+unpickles the request tuple, submits each invoke to ``model.vllm_entrypoint.generate``,
+collects the saved values from the workers with
+[`acollect`][nnsight.modeling.vllm.engines.engine.acollect], and returns them. The
+serialized ``Mediator`` bytes in ``extra_args`` pass through this process untouched
+and are unpickled by [`NNsightGPUModelRunner`][nnsight.modeling.vllm.model_runners.GPUModelRunner.NNsightGPUModelRunner]
+in the worker processes.
 """
 
 from __future__ import annotations
@@ -119,15 +124,16 @@ async def clear_registration(registration_id: str) -> dict:
 async def generate(request: Request) -> Response:
     """Run a trace's requests and return their saved values.
 
-    Body: a pickle of ``(prompts, params, lora_requests)``, one entry per invoke, as
-    [`LocalServeBackend`][nnsight.modeling.vllm.serve.backend.LocalServeBackend]
-    builds them; each invoke's block rides its ``SamplingParams.extra_args`` to the
-    workers unopened. Response: ``torch.save`` of
-    ``{"saves": {name: value}, "error": <deferred error or None>}`` — saved values
-    only, so read generated tokens by saving ``tracer.result``, which is served here
-    like anywhere else. A body that does not unpickle or a runtime intervention error
-    both come back as the deferred ``error`` so the client re-raises the real
-    exception type with its traceback, rather than an opaque HTTP error.
+    Body: a pickle of ``(prompts, params, lora_requests)``, one entry per invoke,
+    produced by [`LocalServeBackend`][nnsight.modeling.vllm.serve.backend.LocalServeBackend]
+    with each invoke's serialized [`Mediator`][nnsight.intervention.interleaver.Mediator]
+    in ``SamplingParams.extra_args["nnsight_mediator"]``. Response: ``torch.save`` of
+    ``{"saves": {name: value}, "error": <deferred error or None>}``. Only saved values
+    are returned, so read generated tokens by saving ``tracer.result``. An exception
+    unpickling the request body, an engine error during generation, or an intervention
+    error in the worker is captured in ``error`` so
+    [`raise_deferred`][nnsight.intervention.errors.raise_deferred] on the client
+    re-raises the exception with its original type name and traceback.
     """
     from ....intervention.errors import capture_exception
 
@@ -179,7 +185,8 @@ async def generate(request: Request) -> Response:
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Merge each invoke's saves (later invoke wins a name clash, matching the local
-    # push). A generation failure surfaces as the deferred error, like a build error.
+    # push). Capture any exception from `run_invoke` as the deferred error alongside
+    # worker intervention errors.
     all_saves: dict = {}
     first_error = None
     for result in results:

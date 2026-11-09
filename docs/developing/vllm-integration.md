@@ -332,24 +332,27 @@ the meta model, and a server holds one dispatched async `VLLM`.
   mode="async", dispatch=True, ...)`, optionally guards requests with an
   `ndif-api-key` header, and `uvicorn.run`s the app. Default host is loopback; it
   warns on `0.0.0.0` since it runs client-sent code.
-- `serve/server.py` — a FastAPI app. `POST /v1/nnsight/generate` takes a pickle of
-  `(prompts, params, lora_requests)`, one entry per invoke, runs each through the
-  engine, collects saves via `collect_nnsight`, and `torch.save`s `{"saves", "error"}`
-  back (saved values only; a runtime error rides `error` with its real type +
-  traceback). Each invoke's block arrives serialized in its `SamplingParams.extra_args`
-  and goes to the workers unopened, so the server never rebuilds a tracer and never
-  touches its own interleaver. `POST /v1/nnsight/register/{id}` and
-  `.../clear` install and drop a block on the server's engine — the HTTP form of the
-  `collective_rpc` an in-process `model.edit()` makes. `GET /health` reports
-  readiness, and `_ready()` is what every endpoint calls first.
-- `serve/http.py` — the headers, timeouts, and non-200 handling both client halves
+- `serve/server.py`: a FastAPI app. `POST /v1/nnsight/generate` unpickles
+  `(prompts, params, lora_requests)` (one entry per invoke), submits each invoke to
+  `model.vllm_entrypoint.generate`, collects saves via `acollect` (`collect_nnsight`),
+  and returns `torch.save({"saves": all_saves, "error": first_error})` (saved values
+  only; an unpickling, generation, or worker intervention error is returned in `error`
+  with its original type name and traceback). Each invoke's serialized `Mediator` arrives
+  in `SamplingParams.extra_args["nnsight_mediator"]` and passes through the server to
+  the workers as opaque bytes. `POST /v1/nnsight/register/{id}` and `.../clear` install
+  and remove a persistent block on the server's engine via `collective_rpc`, the HTTP
+  counterpart of an in-process `model.edit()`. `GET /health` reports readiness, and
+  every endpoint calls `_ready()` first.
+- `serve/http.py`: the headers, timeouts, and non-200 handling both client halves
   share: `LocalServeBackend` sending a trace and `ServeRegistration` sending a block.
-- `serve/backend.py` — `LocalServeBackend(Backend)`, the client side of `serve=url`:
-  runs `tracer.prepare` and `_attach_mediators` on the meta model (what `VLLM._call`
-  does before its engine call, so an error building the requests raises here),
-  pickles the requests, POSTs them, `torch.load`s the result, `raise_deferred`s any
-  error, `mark`s the saves, and `push`es them into the caller's frame — so reading a
-  `.save()`d variable after the block works exactly as locally.
+- `serve/backend.py`: `LocalServeBackend(Backend)`, the client side of `serve=url`.
+  Calls `tracer.prepare` and `model._attach_mediators` on the client's meta model to
+  build `(prompts, params, lora_requests)` with each invoke's `Mediator` serialized into
+  `SamplingParams.extra_args["nnsight_mediator"]` (errors in `prepare` or
+  `_attach_mediators` raise here before anything is sent), cancels the client's
+  interleaver, clears `shared_locals`, pickles and POSTs the request tuple,
+  `torch.load`s the response, calls `raise_deferred` on `error`, marks the saved values
+  with `mark`, and writes them into the caller's frame with `push`.
 
 ## Lifecycle (sync, end-to-end)
 
