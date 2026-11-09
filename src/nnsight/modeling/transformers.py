@@ -73,6 +73,9 @@ if TYPE_CHECKING:
 
 _PREPROCESSORS = ("tokenizer", "image_processor", "feature_extractor", "processor")
 
+#: `model_type` prefixes of families trained with ``<bos>`` opening every sequence.
+_BOS_FAMILIES = ("gemma",)
+
 # Attribute -> persistent id: for a remote request these are referenced by id
 # rather than serialized, and resolved to the actor's live object server-side (see
 # _remoteable_persistent_objects / __getstate__). The pipeline is included so a
@@ -387,6 +390,31 @@ class TransformersModel(HuggingFaceModel):
             self.tokenizer.padding_side = "left"
         elif self._is_encoder_decoder():
             self.tokenizer.padding_side = "right"
+        self._ensure_bos()
+
+    def _ensure_bos(self) -> None:
+        # Gemma answers noise without a leading <bos>, but some of its tokenizers
+        # (Gemma 4) leave it off plain text. Gate on the family, not on "declares a
+        # bos id": GPT-2 declares one and is meant to encode without it.
+        config = getattr(getattr(self.pipeline, "model", None), "config", None)
+        config = getattr(config, "text_config", None) or config  # multimodal nests it
+        family = getattr(config, "model_type", None) or ""
+        if not family.startswith(_BOS_FAMILIES):
+            return
+        if self.tokenizer.bos_token_id is None or self._is_bos_prepended():
+            return
+        self.tokenizer.add_bos_token = True  # rebuilds the post-processor
+        if not self._is_bos_prepended():
+            warnings.warn(
+                f"{type(self.tokenizer).__name__} does not prepend <bos> to a string "
+                "prompt and setting `add_bos_token` did not change that; the model "
+                "expects it first, so pass token ids starting with "
+                "`model.tokenizer.bos_token_id` instead of a string."
+            )
+
+    def _is_bos_prepended(self) -> bool:
+        ids = self.tokenizer("a", add_special_tokens=True)["input_ids"]
+        return bool(ids) and ids[0] == self.tokenizer.bos_token_id
 
     def _is_causal(self) -> bool:
         # A decoder-only generative model (GPT-2, Llava, ...) — as opposed to an
