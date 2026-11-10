@@ -434,11 +434,10 @@ also reaches the local variables of the fused forwards in expert-sorted order
   `torch.ops.vllm.moe_forward`, whose Triton kernels keep per-pair rows in
   op-local workspace buffers that neither AST instrumentation nor a dispatch mode
   can see (and under `taps`, the engine also replays recorded CUDA graphs).
-- **Parallel and post-norm experts:** Experts under transformers' tensor or
+- **Parallel experts:** Experts under transformers' tensor or
   expert parallelism are served as `Unavailable`, because each rank holds only a
   shard of the intermediate axis and a partial down projection, or holds other
-  ranks' pairs as sentinels. Transformers versions newer than 5.19 that add a
-  post-expert norm to these forwards are also served as `Unavailable`.
+  ranks' pairs as sentinels.
 - **Submodule name collisions:** A submodule named `kernel` is accessed as
   `E_kernel` ([access-and-modify](access-and-modify.md#overloaded-names)).
 - **Registering a custom kernel:**

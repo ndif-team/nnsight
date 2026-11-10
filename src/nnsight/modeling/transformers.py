@@ -364,9 +364,7 @@ class TransformersModel(HuggingFaceModel):
                 ("grouped_mm_experts_forward", "grouped_mm", experts.serve_grouped_mm),
                 ("batched_mm_experts_forward", "batched_mm", experts.serve_batched_mm),
             ):
-                forward = unshimmed(vars(moe).get(name))
-                if forward is not None:
-                    register(forward, serve, Item(moe.ALL_EXPERTS_FUNCTIONS._global_mapping, key))
+                register(unshimmed(vars(moe)[name]), serve, Item(moe.ALL_EXPERTS_FUNCTIONS._global_mapping, key))
         # Chunked recurrent kernels (gated delta rule, Kimi delta attention,
         # Mamba2, Mamba1) are called through `use_kernel_func_from_hub_with_fallback`
         # wrappers defined in each model's modeling module. The wrapper invokes

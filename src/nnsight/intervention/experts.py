@@ -146,12 +146,11 @@ def _parallel(module: torch.nn.Module) -> bool:
 
     Under tensor or expert parallelism, each rank computes only a shard of the
     intermediate dimension and a partial down projection, or fills unowned pairs
-    with sentinel indices. Because nnsight's controller wraps ``module.forward``,
-    check the underlying ``state.original`` callable when present.
+    with sentinel indices. A kernel call is served only while the module's
+    controller runs, so the module carries nnsight's `State`, whose ``original``
+    is the forward the controller replaced.
     """
-    state = vars(module).get(STATE)
-    original = state.original if state is not None else vars(module).get("forward")
-    return module._is_expert_parallel or (original is not None and original.__name__ in _PARALLEL_FORWARDS)
+    return module._is_expert_parallel or vars(module)[STATE].original.__name__ in _PARALLEL_FORWARDS
 
 
 def _serve(fn: Callable, args: tuple, kwargs: dict, layout: dict[str, str], sorted_rows: bool) -> tuple[Any, Sites]:
@@ -163,9 +162,6 @@ def _serve(fn: Callable, args: tuple, kwargs: dict, layout: dict[str, str], sort
             f"{fn.__name__} ran under tensor or expert parallelism; this rank's rows are its share of the experts, "
             f"so the per-pair sites are not served"
         )
-    # Guard against future transformers versions that add a post-expert norm after the down projection.
-    if vars(module).get("has_post_expert_norm", False):
-        return output, Unavailable(f"{fn.__name__} applies a post-expert norm; this reader covers the forward without one")
     index = bound_arguments["top_k_index"]
     pairs = index.numel()
     hidden = bound_arguments["hidden_states"].shape[-1]

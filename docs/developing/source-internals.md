@@ -182,7 +182,7 @@ happens at the kernel call, a worker can read a submodule inside the parent
 module before requesting a `.kernel` site on the same pass. When `.source` is
 accessed on the operation that calls the shim, `peel_index` steps through the
 shim as a one-cell decorator wrapping the kernel function, and `decorator_chain`
-follows the shim's `__kernel_shim__` attribute to a C builtin so `compiled`
+looks the shim up with `kernel.unshimmed` to reach a C builtin so `compiled`
 raises `SourceNotAvailable`.
 
 A function that refers to its own name in its body is not drillable: the shell makes

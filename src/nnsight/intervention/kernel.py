@@ -320,6 +320,9 @@ _lock = threading.Lock()
 #: Count of currently open interleavers; shims remain installed while this is greater than zero.
 _open = 0
 
+#: Maps each installed shim to the kernel function it wraps (see `unshimmed`).
+_shims: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
 #: Live functions built by `function_like` over copied module globals (see `adopt`).
 _copies: weakref.WeakSet = weakref.WeakSet()
 
@@ -377,7 +380,8 @@ def requested(interleaver: Interleaver, module_path: str) -> bool:
 
 def unshimmed(fn: Callable) -> Callable:
     """Return the underlying kernel function if ``fn`` is a kernel shim, or ``fn`` unchanged."""
-    return getattr(fn, "__kernel_shim__", fn)
+    # Every shim is a Python function built by `shim`; the type check keeps unhashable values out of the lookup.
+    return _shims[fn] if isinstance(fn, FunctionType) and fn in _shims else fn
 
 
 def _serves(frame: Frame | None) -> bool:
@@ -401,7 +405,7 @@ def shim(entry: Entry) -> Callable:
     ``.source`` peels the shim like a standard decorator (`peel_index` in
     intervention/source.py) to reach the underlying kernel function. For builtin
     kernels, which are not Python functions and have no source, the
-    ``__kernel_shim__`` attribute allows `decorator_chain` to step onto the
+    `unshimmed` lookup allows `decorator_chain` to step onto the
     builtin after peeling so `compiled` raises ``SourceNotAvailable``. When
     ``.source`` drills into a Python kernel and `rewrap` rebuilds this shim
     around the source-instrumented copy, ``fn`` holds that copy (`fn is not
@@ -435,7 +439,7 @@ def shim(entry: Entry) -> Callable:
         frame.interleaver.handle(f"{frame.path}{SUFFIX}", sites)
         return output
 
-    kernel_shim.__kernel_shim__ = fn  # lets `decorator_chain` step from the shim onto a builtin kernel
+    _shims[kernel_shim] = fn  # lets `decorator_chain` step from the shim onto a builtin kernel
     return kernel_shim
 
 
@@ -483,7 +487,7 @@ def _entry_of(value: Any) -> Entry | None:
         return None
     try:
         return _KERNELS.get(unshimmed(value))
-    except Exception:  # unhashable callable or custom `__getattr__` raising on `__kernel_shim__`
+    except TypeError:  # an unhashable callable is not a registered kernel
         return None
 
 

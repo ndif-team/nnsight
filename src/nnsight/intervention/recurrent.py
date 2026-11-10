@@ -535,7 +535,13 @@ def serve_mamba2_decode(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, S
 # Flash-Linear-Attention (fla) kernels
 # ---------------------------------------------------------------------------
 
-_fla_capture = threading.local()
+class _Capture(threading.local):
+    """Per-thread list that `serve_fla` collects the inner kernel's results in; ``None`` outside a served call."""
+
+    results: list | None = None
+
+
+_fla_capture = _Capture()
 _fla_installed: set[str] = set()
 _fla_lock = threading.Lock()
 
@@ -549,7 +555,7 @@ def _install_fla_recorder(module: ModuleType) -> None:
 
         def recording(*inner_args: Any, **inner_kwargs: Any) -> Any:
             result = inner(*inner_args, **inner_kwargs)
-            captured = vars(_fla_capture).get("results")
+            captured = _fla_capture.results
             if captured is not None:
                 captured.append(result)
             return result

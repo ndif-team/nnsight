@@ -409,7 +409,7 @@ class TestShims:
         first, second = Envoy(Mixer()).interleaver, Envoy(Mixer()).interleaver
         with first:
             shim = F.scaled_dot_product_attention
-            assert shim is not original and shim.__kernel_shim__ is original
+            assert shim is not original and kernel.unshimmed(shim) is original
             assert torch._C._nn.scaled_dot_product_attention is original  # PyTorch's C++ dispatch table is not patched
             with second:
                 assert F.scaled_dot_product_attention is shim
@@ -442,7 +442,7 @@ class TestShims:
             kernel.register(original, _no_sites, kernel.Item(table, "scan"))  # duplicate holder is deduplicated
             assert len(kernel._KERNELS[original].holders) == 2
             with Envoy(Mixer()).interleaver:
-                assert table["scan"].__kernel_shim__ is original and cell.cell_contents is table["scan"]
+                assert kernel.unshimmed(table["scan"]) is original and cell.cell_contents is table["scan"]
             assert table["scan"] is original and cell.cell_contents is original
         finally:
             kernel._KERNELS.pop(original)
@@ -489,7 +489,7 @@ class TestShims:
             warnings.simplefilter("error")
             with Envoy(Mixer()).interleaver:
                 kernel.register(F.scaled_dot_product_attention, kernel._KERNELS[original].serve)  # passes the installed shim
-                assert len(kernel._KERNELS) == entries and F.scaled_dot_product_attention.__kernel_shim__ is original
+                assert len(kernel._KERNELS) == entries and kernel.unshimmed(F.scaled_dot_product_attention) is original
         assert F.scaled_dot_product_attention is original
 
     def test_envoy_called_with_hook_false_does_not_serve_sites(self, x):
