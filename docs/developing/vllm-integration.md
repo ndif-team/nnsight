@@ -40,7 +40,9 @@ a captured CUDA graph replays kernels without calling the module controllers —
 unless the client declared `taps`. Then graphs are on and the worker's interleaver is a
 `VLLMInterleaver` (`interleaver.py`): at each tap it registers its own `handle`
 with vLLM's breakable graph capture (`add_eager`), so the handoff is replayed
-with the graph. The tap set reaches the worker in
+with the graph. Only piecewise graphs are breakable, so `_load` defaults a tapped
+engine to `cudagraph_mode="PIECEWISE"` and `capture_model` refuses one whose
+resolved mode has full graphs. The tap set reaches the worker in
 `vllm_config.additional_config["nnsight_taps"]`; an edit at a tap is copied back
 into the recording's tensor, since the callable's return is discarded.
 
@@ -80,7 +82,8 @@ tenants sharing the engine — are skipped.
 `NNsightGPUModelRunner(GPUModelRunner)` (`GPUModelRunner.py`) subclasses vLLM's GPU
 model runner (`vllm/v1/worker/gpu/model_runner.py`). `NNsightGPUWorker` builds it in
 `_make_model_runner`, the method vLLM's worker leaves for a subclass to override
-(`GPUWorker.py`) — vLLM's own startup is not patched. The runner enters the
+(`GPUWorker.py`) — vLLM's own startup is not patched — and refuses an engine on
+which vLLM has fallen back to its older runner. The runner enters the
 interleaver at two points:
 
 1. **Forward** — `execute_model` (`GPUModelRunner.py`): runs

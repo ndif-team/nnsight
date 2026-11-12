@@ -199,6 +199,18 @@ def test_source_tap_in_place_edit_lands(vllm_gpt2_source_taps, ET_prompt):
     assert not torch.allclose(plain.float(), edited.float())
 
 
+def test_full_graphs_are_refused():
+    """A full graph records no tap, so the steps it runs would serve none: a load error."""
+    from nnsight.modeling.vllm import VLLM
+
+    if GPU_COUNT < 1:
+        pytest.skip("vLLM tests need a GPU")
+    with pytest.raises(Exception):
+        VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True,
+             taps=["transformer.h.*.output"],
+             compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"})
+
+
 def test_source_tap_on_a_missing_op_is_refused():
     """The op is checked when the worker loads, so a typo is a load error, not a parked request."""
     from nnsight.modeling.vllm import VLLM

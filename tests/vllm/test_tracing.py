@@ -1031,3 +1031,23 @@ def test_data_parallelism_is_refused_before_anything_is_built():
 
     with pytest.raises(NotImplementedError, match="data_parallel_size"):
         VLLM("gpt2", data_parallel_size=2)
+
+
+def test_batch_sharded_sampling_is_refused_before_anything_is_built():
+    # Each rank's sampler is then handed only the requests it owns, where a
+    # block's logits are scoped to the step's whole batch.
+    from nnsight.modeling.vllm import VLLM
+
+    with pytest.raises(NotImplementedError, match="enable_batch_sharded_sampling"):
+        VLLM("gpt2", tensor_parallel_size=2, enable_batch_sharded_sampling=True)
+
+
+def test_vllms_older_model_runner_is_refused():
+    # vLLM 0.33 can still fall back to it; its scheduler then drives a protocol
+    # nnsight's runner does not speak, and the engine dies on the first resume.
+    from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
+
+    worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
+    worker.use_v2_model_runner = False
+    with pytest.raises(NotImplementedError, match="V1 model runner"):
+        worker._make_model_runner()

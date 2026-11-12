@@ -130,6 +130,14 @@ class VLLM(Remotable):
                 "per request. Drop speculative_config to trace, or use vLLM "
                 "directly for that run."
             )
+        # Each tensor-parallel rank then samples only the requests it owns, so
+        # the logits its sampler is handed are not this step's rows.
+        if kwargs.get("enable_batch_sharded_sampling"):
+            raise NotImplementedError(
+                "enable_batch_sharded_sampling is not supported on an nnsight "
+                "engine: each rank samples a slice of the batch, and a block's "
+                "logits are scoped to the whole of it. Drop it to trace."
+            )
         # vLLM's data-parallel client sends a utility call to every engine but
         # returns only the first engine's reply, and the collect is one.
         if kwargs.get("data_parallel_size", 1) > 1:

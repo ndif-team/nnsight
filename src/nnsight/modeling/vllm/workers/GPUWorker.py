@@ -20,6 +20,15 @@ class NNsightGPUWorker(Worker):
     """A vLLM GPU worker whose model runner interleaves interventions."""
 
     def _make_model_runner(self) -> NNsightGPUModelRunner:
+        # vLLM 0.33 still has its older runner, and falls back to it when told to
+        # or for an option only that one supports. The scheduler then speaks the
+        # older runner's protocol, which nnsight's does not.
+        if not self.use_v2_model_runner:
+            raise NotImplementedError(
+                "vLLM chose its V1 model runner for this engine, which nnsight "
+                "does not instrument. Unset VLLM_USE_V2_MODEL_RUNNER, or drop the "
+                "option vLLM's log names as unsupported by Model Runner V2."
+            )
         return NNsightGPUModelRunner(self.vllm_config, self.device)
 
     def collect_nnsight(
