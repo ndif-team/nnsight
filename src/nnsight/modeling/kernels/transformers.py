@@ -7,7 +7,7 @@ model when a `TransformersModel` is constructed. Because the kernel registry is
 process-wide, a function registered for one model serves every model that reads
 its registered holders.
 
-Models in transformers reach their kernels in three ways, each handled by a
+Models in transformers reach their kernels in four ways, each handled by a
 locator:
 
 * `eager_functions`: under ``attn_implementation="eager"``, an attention module
@@ -15,12 +15,15 @@ locator:
   default to ``ALL_ATTENTION_FUNCTIONS.get_interface`` on each call.
 * `experts_forward`: the experts wrapper looks up its implementation in
   ``ALL_EXPERTS_FUNCTIONS`` on each call.
+* `flash_function`: under ``attn_implementation="flash_attention_2"``,
+  ``_flash_attention_forward`` reads the dense and varlen FlashAttention
+  functions from two module globals on each call.
 * `hub_kernel`: recurrent kernels are called through
   ``use_kernel_func_from_hub_with_fallback`` wrappers, which invoke the callable
   stored in their ``implementation`` closure cell (transformers' Python
   reference or an installed library's kernel).
 
-Site readers live in the sibling modules eager.py, recurrent.py, and experts.py.
+Site readers live in the sibling modules eager.py, flash.py, recurrent.py, and experts.py.
 PyTorch's SDPA has its own single-row catalog in intervention/attention.py.
 
 The hub-kernel wrappers exist from transformers 4.50 and carry the closure
@@ -38,7 +41,7 @@ from typing import Callable, NamedTuple
 import torch
 
 from ...intervention.kernel import Attr, Item, Located, Spec, register_catalog, unshimmed
-from . import eager, experts, recurrent
+from . import eager, experts, flash, recurrent
 
 #: The closure variables of a hub-kernel wrapper that `hub_kernel` reads.
 _WRAPPER_CELLS = frozenset({"func_name", "package", "torch_function", "implementation"})
@@ -146,10 +149,33 @@ def hub_kernel(name: str, package: str | None = None) -> Callable[[Modeling], Lo
     return locate
 
 
+def flash_function(name: str) -> Callable[[Modeling], Located]:
+    """Locate the FlashAttention function transformers holds in its module global ``name``.
+
+    transformers fills ``_flash_fn`` and ``_flash_varlen_fn`` when a model is
+    loaded with a flash attention implementation and reads them on every call.
+    The global is ``None`` when no model asked for flash attention, and absent on
+    releases that imported the functions under their own names.
+    """
+
+    def locate(context: Modeling) -> Located:
+        try:
+            from transformers import modeling_flash_attention_utils as utils
+        except ImportError:
+            return
+        fn = unshimmed(vars(utils).get(name))
+        if fn is not None:
+            yield fn, (Attr(utils, name),)
+
+    return locate
+
+
 #: Supported kernels on transformers models. Recurrent rows are labeled by their hub-kernel name (prefixed with
 #: ``"{package}."`` for library kernels); the function a Python reference row registers has a different name.
 CATALOG: list[Spec] = [
     Spec("eager_attention_forward", "attention", eager_functions, eager.serve_eager),
+    Spec("flash_attn_func", "attention", flash_function("_flash_fn"), flash.serve),
+    Spec("flash_attn_varlen_func", "attention", flash_function("_flash_varlen_fn"), flash.serve),
     Spec("grouped_mm_experts_forward", "experts", experts_forward("grouped_mm_experts_forward", "grouped_mm"), experts.serve_grouped_mm),
     Spec("batched_mm_experts_forward", "experts", experts_forward("batched_mm_experts_forward", "batched_mm"), experts.serve_batched_mm),
     Spec("chunk_gated_delta_rule", "recurrent", hub_kernel("chunk_gated_delta_rule"), recurrent.serve_gated_delta_chunk),

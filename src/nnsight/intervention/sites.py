@@ -107,6 +107,8 @@ class Sites:
     """
 
     names: tuple[str, ...] = ()
+    #: True when `read` already returns only the requesting worker's rows, so `Kernel._request` does not narrow the value again.
+    narrowed: bool = False
 
     def read(self, site: str, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
         if site not in self.names:
@@ -278,7 +280,7 @@ class Kernel:
             start, size = mediator.batch_group if mediator.batch_group is not None else (0, batcher.total)
             batch = Batch(batcher.total, start, size)
         value, provenance = sites.read(site, spec, batch)
-        if batcher is not None:
+        if batcher is not None and not sites.narrowed:
             value = batcher.narrow(value, mediator.batch_group)
         # Attach provenance after batch narrowing because slicing a tensor creates a view without custom attributes.
         value.provenance = provenance

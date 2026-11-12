@@ -1248,6 +1248,76 @@ def _per_pair(experts_module, x, index):
     return act, out
 
 
+def _dense_flash(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1), softcap=0.0, alibi_slopes=None, deterministic=False, return_attn_probs=False):
+    """Stand-in with FlashAttention 2's dense signature and return convention, computed in fp32 with the mask aligned bottom right."""
+    scale = q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
+    keys = k.float().repeat_interleave(q.shape[2] // k.shape[2], 2)
+    scores = torch.einsum("bqhd,bkhd->bhqk", q.float(), keys) * scale
+    if causal:
+        rows, cols = torch.arange(q.shape[1])[:, None], torch.arange(k.shape[1])[None, :]
+        scores = scores.masked_fill(cols > rows + (k.shape[1] - q.shape[1]), float("-inf"))
+    values = v.float().repeat_interleave(q.shape[2] // v.shape[2], 2)
+    out = torch.einsum("bhqk,bkhd->bqhd", torch.softmax(scores, -1), values).to(q.dtype)
+    return (out, torch.logsumexp(scores, -1), None) if return_attn_probs else out
+
+
+def _packed_flash(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1), softcap=0.0, alibi_slopes=None, deterministic=False, return_attn_probs=False, block_table=None):
+    """Stand-in with FlashAttention 2's varlen signature: one dense call per span, rows concatenated and lse as ``[heads, rows]``."""
+    outs, lses = [], []
+    for i in range(len(cu_seqlens_q) - 1):
+        rows, cols = slice(cu_seqlens_q[i], cu_seqlens_q[i + 1]), slice(cu_seqlens_k[i], cu_seqlens_k[i + 1])
+        out, lse, _ = _dense_flash(q[None, rows], k[None, cols], v[None, cols], softmax_scale=softmax_scale, causal=causal, return_attn_probs=True)
+        outs.append(out[0])
+        lses.append(lse[0])
+    out = torch.cat(outs)
+    return (out, torch.cat(lses, -1), None) if return_attn_probs else out
+
+
+class TestFlash:
+    def test_dense_call_serves_bottom_right_causal_probs_per_prompt(self):
+        from nnsight.modeling.kernels import flash
+
+        torch.manual_seed(0)
+        q, k, v = torch.randn(2, 3, 4, 8), torch.randn(2, 7, 2, 8), torch.randn(2, 7, 2, 8)
+        output, reader = flash.serve(_dense_flash, (q, k, v), {"causal": True})
+        probs, provenance = reader.read("probs", {}, sites.Batch(2, 1, 1))
+        _, lse, _ = _dense_flash(q, k, v, causal=True, return_attn_probs=True)
+        keys = k.repeat_interleave(2, 2)
+        expected = torch.softmax(torch.einsum("bqhd,bkhd->bhqk", q, keys) * 8**-0.5, -1)
+        assert torch.equal(output, _dense_flash(q, k, v, causal=True))
+        assert probs.shape == (1, 4, 3, 7)
+        assert (probs[0, :, 0, 5:] == 0).all() and (probs[0, :, 0, :5] > 0).all()  # row 0 of 3 sees keys 0..4 of 7
+        assert torch.allclose(probs.sum(-1), torch.ones(1, 4, 3), atol=1e-5)
+        assert torch.allclose(probs[0, :, -1], expected[1, :, -1], atol=1e-6)  # the last row is unmasked
+        assert provenance.kind == "exact reconstruction" and provenance.kernel == "_dense_flash"
+        assert torch.equal(reader.read("lse", {"heads": 3}, sites.Batch(2, 0, 2))[0], lse[:, 3])
+
+    def test_packed_call_serves_each_prompt_without_padding_rows(self):
+        from nnsight.modeling.kernels import flash
+
+        torch.manual_seed(0)
+        q, k, v = torch.randn(8, 2, 4), torch.randn(8, 2, 4), torch.randn(8, 2, 4)
+        spans = torch.tensor([0, 5, 8])
+        output, reader = flash.serve(_packed_flash, (q, k, v, spans, spans, 5, 5), {"causal": True})
+        short, _ = reader.read("probs", {}, sites.Batch(2, 1, 1))
+        expected, _, _ = _reference(q[5:].transpose(0, 1)[None], k[5:].transpose(0, 1)[None], is_causal=True)
+        assert torch.equal(output, _packed_flash(q, k, v, spans, spans, 5, 5, causal=True))
+        assert short.shape == (1, 2, 3, 3)
+        assert torch.allclose(short, torch.softmax(expected, -1), atol=1e-6)
+        assert reader.read("scores", {"query": -1, "key": 0}, sites.Batch(2, 0, 1))[0].shape == (1, 2)
+        with pytest.raises(ValueError, match="key counts differ"):
+            reader.read("probs", {}, sites.Batch(2, 0, 2))
+
+    def test_an_argument_outside_the_modelled_set_makes_the_sites_unavailable(self):
+        from nnsight.modeling.kernels import flash
+
+        q, k, v = torch.randn(1, 4, 2, 4), torch.randn(1, 4, 2, 4), torch.randn(1, 4, 2, 4)
+        output, reader = flash.serve(_dense_flash, (q, k, v), {"softcap": 30.0})
+        assert torch.equal(output, _dense_flash(q, k, v))
+        with pytest.raises(ValueError, match="sets softcap"):
+            reader.read("probs", {}, None)
+
+
 class TestExperts:
     def test_pair_buffers_match_a_per_pair_computation(self, moe):
         experts = moe.model.layers[0].mlp.experts
@@ -1531,6 +1601,42 @@ class TestCuda:
         assert torch.equal(plain, served)
         assert backend.split("_")[0].lower() in probs.provenance.kernel
         assert torch.allclose(probs.sum(-1), torch.ones_like(probs.sum(-1)), atol=1e-5)
+
+    def test_flash_attention_2_sites_match_the_sdpa_sites_on_the_same_weights(self):
+        from transformers import LlamaConfig, LlamaForCausalLM
+
+        def build(implementation):
+            config = LlamaConfig(vocab_size=256, hidden_size=64, intermediate_size=128, num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2)
+            config._attn_implementation = implementation
+            torch.manual_seed(0)
+            return _wrap(LlamaForCausalLM(config).cuda().to(torch.bfloat16))
+
+        try:
+            flash = build("flash_attention_2")
+        except ImportError:
+            pytest.skip("FlashAttention 2 is not installed")
+        sdpa = build("sdpa")
+        long, short = _ids(12, batch=1).cuda(), _ids(7, batch=1).cuda()
+
+        def read(model, *prompts):
+            attn = model.model.layers[0].self_attn
+            saved = []
+            with model.trace() as tracer:
+                for prompt in prompts:
+                    with tracer.invoke(prompt):
+                        saved.append(nnsight.save(attn.kernel.probs()))
+            return saved
+
+        # The padded two-invoke batch runs through the packed kernel; each invoke gets its own prompt's tokens.
+        packed_long, packed_short = read(flash, long, short)
+        (dense_long,), (dense_short,) = read(sdpa, long), read(sdpa, short)
+        assert packed_long.provenance.kernel == "flash_attn_varlen_func"
+        assert packed_short.shape == (1, 4, 7, 7)
+        assert torch.allclose(packed_long, dense_long, atol=1e-5)
+        assert torch.allclose(packed_short, dense_short, atol=1e-5)
+        (single,) = read(flash, long)
+        assert single.provenance.kernel == "flash_attn_func"
+        assert torch.allclose(single, dense_long, atol=1e-5)
 
     def test_fla_chunk_states_match_the_reference_loop(self):
         pytest.importorskip("fla")

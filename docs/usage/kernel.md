@@ -222,7 +222,7 @@ kernel, the location never fires and the trace ends with `OutOfOrderError:
 - An MLP module, a full decoder block (request `.kernel` on its attention
   submodule instead), or a full MoE block (request `.kernel` on its `experts`
   submodule instead).
-- A model loaded with `attn_implementation="flash_attention_2"`.
+- A model loaded with `attn_implementation="flash_attention_3"` or `"flash_attention_4"`: the request raises `ValueError`, since only FlashAttention 2 is served.
 - An eager attention module whose forward pass computes attention inline
   instead of calling a module-level `*eager_attention_forward` function, such
   as GPT-2 with `reorder_and_upcast_attn=True` and older architectures (BLOOM,
@@ -406,6 +406,26 @@ also reaches the local variables of the fused forwards in expert-sorted order
 (`experts.source.experts_forward_1.source.proj_out_2.output`), whereas the
 `.kernel` sites reorder them back into token order.
 
+## FlashAttention 2
+
+A model loaded with `attn_implementation="flash_attention_2"` serves the same
+`lse`, `scores` and `probs` sites, from the `flash_attn` package or the
+`kernels-community/flash-attn2` kernel that transformers falls back to. The
+kernel returns its per-row logsumexp from the launch that fills the output, and
+`probs` is `exp(scores - lse)` in fp32 with provenance `exact reconstruction`.
+
+Two things differ from the `sdpa` path:
+
+- transformers packs a padded batch into one row per real token before calling
+  the kernel. The query and key axes therefore cover a prompt's own tokens and
+  hold no padding positions: an invoke with a 7-token prompt batched beside a
+  12-token one gets `[1, heads, 7, 7]`. An invoke that itself holds prompts of
+  different lengths has no rectangular result and raises `ValueError`; use one
+  invoke per prompt.
+- A call is served only when every argument that changes the scores is one the
+  reconstruction models. A sliding window, a logit soft cap, ALiBi slopes or
+  dropout makes the request raise `ValueError` naming the argument.
+
 ## Supported kernels
 
 Each row below corresponds to an entry in a source catalog: `CATALOG` in
@@ -422,6 +442,8 @@ rows); the function a Python reference row registers has a different name
 |---|---|---|---|
 | `scaled_dot_product_attention` | attention | `lse`, `scores`, `probs` | The attribute of `torch.nn.functional`, registered when nnsight is imported. |
 | `eager_attention_forward` | attention | `lse`, `scores`, `probs` | Every `*eager_attention_forward` function in the model's modeling modules. |
+| `flash_attn_func` | attention | same | The FlashAttention function transformers loads for `attn_implementation="flash_attention_2"` and calls for a batch without padding. |
+| `flash_attn_varlen_func` | attention | same | Same, for the function it calls for a padded batch. |
 | `grouped_mm_experts_forward` | experts | `expert_input`, `expert_activation`, `expert_output` | The `grouped_mm` entry of transformers' experts-implementation mapping. |
 | `batched_mm_experts_forward` | experts | same | The `batched_mm` entry of that mapping. |
 | `chunk_gated_delta_rule` | recurrent | `chunk_states`, `states` | The hub-kernel wrapper of that name, running transformers' Python reference. |
