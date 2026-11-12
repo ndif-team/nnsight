@@ -67,6 +67,30 @@ def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
     return shared
 
 
+def merge_run_saves(runs: list) -> dict:
+    """Each saved name's one value across a trace's runs — a list where they differ.
+
+    The block runs once per invoke, and once per sampled sequence (``n``) within
+    each, and every run ships its own saves. A name saved by exactly one run
+    stays that value. Several runs' values are separate values rather than copies
+    of one thing, so they come back as a list, in run order — unless every run
+    saved the same object, as they do for ``tracer.result``, which is the
+    request's single output however many sequences sampled from it. (Identity
+    survives the collect, which pickles one request's sequences together.)
+
+    Shared by the local push and the serve response, so a served trace reads the
+    way the same trace does on a local engine.
+    """
+    values: dict[str, list] = {}
+    for saves in runs:
+        for name, value in saves.items():
+            values.setdefault(name, []).append(value)
+    return {
+        name: found if any(other is not found[0] for other in found) else found[0]
+        for name, found in values.items()
+    }
+
+
 class _CompactPickler(pickle.Pickler):
     """Writes each tensor that views a larger storage as a copy of itself (see `dumps_compact`)."""
 

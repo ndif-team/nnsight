@@ -995,19 +995,15 @@ class VLLM(Remotable):
 
         A name can come back more than once — one invoke per request, and one
         sampled sequence per ``n`` within each — because the block ran once for
-        each. Those are separate values rather than copies of one thing, so they
-        come back as a list, in submission order. A name saved by exactly one run
-        stays that value, which is every trace that does not use several invokes
-        or ``n``; so does one whose runs all saved the same object, as they do for
-        ``tracer.result``, which is the request's single output however many
-        sequences sampled from it.
+        each; [`merge_run_saves`][nnsight.modeling.vllm.collect.merge_run_saves]
+        decides what such a name reads as.
         """
         from ...intervention.errors import raise_deferred
         from ...tracing.tracer import mark
-        from .collect import merge_shared_saves
+        from .collect import merge_run_saves, merge_shared_saves
 
         per_request_saves = []
-        values: dict[str, list] = {}
+        runs = []
         for output in outputs:
             # The trace's own names only. `output.saves` also carries whatever a
             # registered block saved for this request, and those must not be
@@ -1016,10 +1012,7 @@ class VLLM(Remotable):
             if not sequences:
                 sequences = [getattr(output, "nnsight_saves", {})]
             per_request_saves.append(sequences[0])
-            for saves in sequences:
-                for name, value in saves.items():
-                    mark(value)  # results marked after the run; no trace to guard
-                    values.setdefault(name, []).append(value)
+            runs.extend(sequences)
 
         # A name bound and saved above the invoke blocks is one object locally,
         # and ships back once per request with that request's writes; merge those
@@ -1029,17 +1022,15 @@ class VLLM(Remotable):
         for value in shared.values():
             mark(value)
 
-        for name, found in values.items():
+        # Results are marked after the run, so there is no trace to guard; a list
+        # of several runs' values is new, and is what gets pushed.
+        for saves in runs:
+            for value in saves.values():
+                mark(value)
+        for name, value in merge_run_saves(runs).items():
             if name in shared:
                 continue
-            value = found[0]
-            # Several runs, but one object: `tracer.result` is the request's one
-            # output, served to every sequence's block, so it is not `n` values
-            # of anything. Identity is preserved across the collect, which pickles
-            # them together.
-            if len(found) > 1 and any(other is not value for other in found):
-                value = found
-                mark(value)  # the list itself is new, and is what gets pushed
+            mark(value)
             for mediator in mediators:
                 mediator.lcls[name] = value
 

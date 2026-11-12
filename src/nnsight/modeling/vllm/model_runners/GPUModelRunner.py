@@ -753,7 +753,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         if not get_tp_group().is_first_rank:
             return None
         # The flat keys are the primary sequence, which is all there is unless the
-        # request asked for several; `attach` and the server read those. A request
+        # request asked for several; `attach` reads those. A request
         # can lack sequence 0: under `n > 1`, a child nothing traced whose
         # registered copies saved nothing is dropped at harvest.
         for entry in collected.values():

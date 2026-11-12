@@ -174,6 +174,36 @@ class TestServe:
         assert serve_client.tokenizer.decode(d.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
+    def test_a_name_saved_in_every_invoke_is_a_list(
+        self, serve_client, serve_url, ET_prompt, MSG_prompt
+    ):
+        # As on a local engine: one value per invoke, in invoke order. The server
+        # once merged the invokes' saves by name and kept only the last.
+        with serve_client.trace(temperature=0.0, top_p=1, serve=serve_url) as tracer:
+            with tracer.invoke(ET_prompt):
+                token = serve_client.logits.argmax(dim=-1).save()
+            with tracer.invoke(MSG_prompt):
+                token = serve_client.logits.argmax(dim=-1).save()
+
+        assert [serve_client.tokenizer.decode(t) for t in token] == [" Paris", " New"]
+
+    @torch.no_grad()
+    def test_a_name_saved_under_n_is_a_list_per_sequence(
+        self, serve_client, serve_url, ET_prompt
+    ):
+        # As on a local engine: the block runs once per sampled sequence, and the
+        # one RequestOutput they share stays one object. The server once returned
+        # sequence 0's value alone.
+        with serve_client.trace(
+            ET_prompt, temperature=0.9, seed=0, n=3, max_tokens=2, serve=serve_url
+        ) as tracer:
+            sample = serve_client.samples.item().save()
+            result = tracer.result.save()
+
+        assert type(result).__name__ == "RequestOutput" and len(result.outputs) == 3
+        assert sample == [completion.token_ids[0] for completion in result.outputs]
+
+    @torch.no_grad()
     def test_error_surfaces(self, serve_client, serve_url, ET_prompt):
         # An intervention error on the server comes back and raises at the client.
         with pytest.raises(RuntimeError, match="ZeroDivisionError"):
