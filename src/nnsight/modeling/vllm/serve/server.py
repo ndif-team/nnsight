@@ -159,7 +159,7 @@ async def generate(request: Request) -> Response:
 
     Body: ``RequestModel.serialize(tracer)`` bytes. Response: ``torch.save`` of
     ``{"saves": {name: value}, "error": <deferred error or None>}`` — saved values
-    only, so read generated tokens by saving ``tracer.result``, which is served here
+    only (none with an error), so read generated tokens by saving ``tracer.result``, which is served here
     like anywhere else. A build error (a corrupt/incompatible trace) or a runtime
     intervention error both come back as the deferred ``error`` so the client re-raises
     the real exception type with its traceback, rather than an opaque HTTP error.
@@ -244,7 +244,10 @@ async def generate(request: Request) -> Response:
             continue
         sequences = result["sequences"]
         runs.extend(sequences[index]["saves"] for index in sorted(sequences))
-        if result["error"] is not None and first_error is None:
-            first_error = result["error"]
+        # Skip a stop: the client does not raise it, so it would hide a real error.
+        error = result["error"]
+        if error is not None and not error["is_control_flow"] and first_error is None:
+            first_error = error
 
-    return _payload(merge_run_saves(runs), first_error)
+    # The client raises before binding, so send no saves.
+    return _payload({} if first_error else merge_run_saves(runs), first_error)

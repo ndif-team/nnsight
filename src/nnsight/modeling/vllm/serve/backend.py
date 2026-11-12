@@ -63,8 +63,8 @@ class LocalServeBackend(Backend):
         result = torch.load(
             io.BytesIO(response.content), map_location="cpu", weights_only=False
         )
-        # A real intervention error on the server comes back as a deferred error;
-        # re-raise it here (a tracer.stop() is control flow and stays silent).
+        # Raised before the push, so a trace that errors binds nothing (a
+        # tracer.stop() is control flow and stays silent).
         raise_deferred(result.get("error"))
         return result.get("saves", {})
 

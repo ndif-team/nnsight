@@ -359,7 +359,7 @@ the meta model, and a server holds one dispatched async `VLLM`.
 5. `_sample` serves `logits`, then `samples`.
 6. `NNsightLLMEngine.step` detects finished requests, `collect_nnsight` pulls saves,
    attaches `RequestOutput.saves`.
-7. `VLLM._collect` marks saves into the user's variables and re-raises deferred errors.
+7. `VLLM._collect` marks the saves and re-raises deferred errors; `VLLMTracer.execute` pushes them into the user's variables only if nothing raised.
 
 Async replaces steps 2 and 6-7 with `AsyncVLLMBackend` streaming.
 

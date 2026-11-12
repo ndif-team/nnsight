@@ -96,15 +96,10 @@ class VLLMTracer(InterleavingTracer):
         """Build the workers, run the forward interleaved, push results back."""
         try:
             mediators, args, kwargs = self.prepare(code)
-            try:
-                self.envoy.interleave(self.fn, *args, **kwargs)
-            finally:
-                # Pushed even when the run raises. A block's error is deferred to
-                # the collect and re-raised out of `interleave`, so pushing only
-                # on success would hand back a frame with none of the values that
-                # did arrive — including the ones from the invokes that finished.
-                for mediator in mediators:
-                    push_result(self.info.frame, mediator.lcls.writes())
+            self.envoy.interleave(self.fn, *args, **kwargs)
+            # Not in a finally: a trace that raises binds nothing.
+            for mediator in mediators:
+                push_result(self.info.frame, mediator.lcls.writes())
         finally:
             # interleave clears the interleaver on its way out; do it here too so a
             # failure before it doesn't leave workers/batcher behind.
