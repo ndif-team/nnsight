@@ -199,9 +199,8 @@ async def generate(request: Request) -> Response:
             # The last streamed output is the finished ``RequestOutput``; the
             # worker cannot build it and needs it to serve ``tracer.result``, so
             # keep it and hand it back on the collect.
-            # One output with every sampled sequence's completion, as the
-            # synchronous engine asks for. Streamed, each output carries only the
-            # sequences that ended in that step, and the last would lack the rest.
+            # As the synchronous engine does. Streamed, the last output lacks
+            # the sampled sequences (`n`) that ended before the final step.
             param.output_kind = RequestOutputKind.FINAL_ONLY
             output = None
             async for output in engine.generate(
@@ -231,9 +230,8 @@ async def generate(request: Request) -> Response:
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Every run of the block — one per invoke, and one per sampled sequence within
-    # it — in order, merged by the rule the local push uses. A generation failure
-    # surfaces as the deferred error, like a build error.
+    # Every run's saves, in order, merged as the local push merges them. A
+    # generation failure surfaces as the deferred error, like a build error.
     runs: list = []
     first_error = None
     for result in results:

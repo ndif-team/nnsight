@@ -731,13 +731,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # The run's return value, served the way `Envoy.interleave`
                     # serves it locally — the block runs here in the worker and
                     # the value is a `RequestOutput` the *engine* assembles, so
-                    # this is the first moment both exist. The engine's output
-                    # carries every sampled sequence's completion; each
-                    # sequence's block is handed a copy holding its own, so the
-                    # result of a run is that run's, as every other value is.
-                    # What a registered block saved for this sequence goes on
-                    # that copy; the engine attaches it to *its* output after
-                    # this returns and the trace never sees that object.
+                    # this is the first moment both exist. Each sequence's
+                    # block gets a copy holding its own completion and what a
+                    # registered block saved for it; the engine attaches those
+                    # to *its* output afterwards, which the trace never sees.
                     output = copy.copy(outputs[engine_id])
                     output.outputs = [
                         completion

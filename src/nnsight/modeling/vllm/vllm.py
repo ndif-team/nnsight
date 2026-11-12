@@ -1022,8 +1022,8 @@ class VLLM(Remotable):
         for value in shared.values():
             mark(value)
 
-        # Results are marked after the run, so there is no trace to guard; a list
-        # of several runs' values is new, and is what gets pushed.
+        # Marked after the run, so there is no trace to guard. A list of several
+        # runs' values is new, and is what gets pushed.
         for saves in runs:
             for value in saves.values():
                 mark(value)

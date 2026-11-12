@@ -45,6 +45,7 @@ the same per-request scoping. Only the collection of saved values differs: with 
 
 from __future__ import annotations
 
+import copy
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
@@ -101,14 +102,19 @@ class AsyncVLLMBackend(Backend):
     async def __aiter__(self) -> "AsyncGenerator[RequestOutput, None]":
         """Yield each step's output; attach saved values to the finished one."""
         finished = False
+        # Each sampled sequence's latest completion. An output carries only the
+        # sequences that advanced that step, so the last one lacks the rest, and
+        # `tracer.result` needs them all.
+        completions: dict = {}
         try:
             async for output in self._generator:
                 # Every output carries a `saves` dict for a uniform shape; only the
                 # finished one is ever non-empty (saves arrive once the block is done).
                 output.saves = {}
+                completions.update((c.index, c) for c in output.outputs)
                 if output.finished:
                     finished = True
-                    await self._attach_saves(output)
+                    await self._attach_saves(output, completions)
                 yield output
         finally:
             # A stream closed before its finished output (the consumer stopped
@@ -142,14 +148,20 @@ class AsyncVLLMBackend(Backend):
 
         return _drain().__await__()
 
-    async def _attach_saves(self, output: "RequestOutput") -> None:
-        """Fetch this finished request's saved values from the worker onto ``output``."""
+    async def _attach_saves(self, output: "RequestOutput", completions: dict) -> None:
+        """Fetch this finished request's saved values from the worker onto ``output``.
+
+        The worker is handed a copy with every sequence's completion, to serve
+        as ``tracer.result``; ``output`` itself stays as vLLM streamed it.
+        """
         from ...intervention.errors import raise_deferred
 
         from .engines.engine import acollect, attach
 
+        result = copy.copy(output)
+        result.outputs = [completions[index] for index in sorted(completions)]
         entry = await acollect(
-            self.model.vllm_entrypoint, self._request_id, output
+            self.model.vllm_entrypoint, self._request_id, result
         )
         if entry is not None:
             attach(output, entry)

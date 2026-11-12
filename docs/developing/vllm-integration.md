@@ -215,12 +215,10 @@ arrival, taking the child reading only when the parent it names is one the engin
 asked about — so an id that merely starts with digits and an underscore is not
 mistaken for a second sequence. The flat `saves`/`registered` are the primary
 sequence's; `attach` puts each sequence's on `output.outputs[i].saves` and the trace's own on
-`output.nnsight_sequences`. `VLLM._collect` and the serve handler both hand every run's saves,
-in order, to `collect.merge_run_saves`: a name one run saved is that value, a name several
-saved is the list. The `RequestOutput` served as `tracer.result` is a copy per sequence holding
-that sequence's completion (and its registered values, as `.saves`), so it follows the same
-rule. The serve handler submits with `output_kind=FINAL_ONLY`, as vLLM's synchronous
-`generate` does, so the output it hands back carries every sequence's completion.
+`output.nnsight_sequences`. `VLLM._collect` and the serve handler pass every run's saves, in
+order, to `collect.merge_run_saves`. `tracer.result` is served as a copy per sequence holding
+that sequence's completion; so that the output has every sequence's, the serve handler submits
+with `output_kind=FINAL_ONLY` and the async backend keeps each sequence's latest from the stream.
 
 **Every rank winds up its own workers; only one reports.** Each rank ran the block,
 so each holds a worker, a greenlet, and whatever that greenlet captured — all of it
