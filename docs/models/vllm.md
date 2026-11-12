@@ -419,7 +419,7 @@ Your block runs in vLLM's EngineCore subprocess, and that decides where you read
 `RuntimeError` carrying the original type, its message and an "Intervention traceback" pointing at
 your line — `1/0` in a block arrives as `RuntimeError: ZeroDivisionError: division by zero`.
 Because the type is carried in the message rather than in the class, catch `RuntimeError` and match
-on the text. A trace that raises binds none of its saved names, the other invokes' included. The
+on the text. A trace that raises binds none of its saved names, not even another invoke's. The
 engine keeps serving afterwards, and requests from other clients in the same batch are unaffected.
 
 **Warnings do not.** A warning raised while the block runs prints to the EngineCore process's

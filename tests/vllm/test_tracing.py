@@ -670,8 +670,7 @@ class TestDeferredErrors:
 
     @torch.no_grad()
     def test_an_error_binds_nothing(self, vllm_gpt2, ET_prompt, MSG_prompt):
-        # As on any other model: the invoke that finished does not push its
-        # values past the other one's error, and a stop does not hide the error.
+        # The invoke that stopped binds nothing, and its stop does not hide the other's error.
         token = "unbound"
         with pytest.raises(RuntimeError, match="ZeroDivisionError"):
             with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:

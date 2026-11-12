@@ -235,8 +235,7 @@ class TestServe:
     def test_a_stop_does_not_hide_another_invokes_error(
         self, serve_client, serve_url, ET_prompt, MSG_prompt
     ):
-        # The server once sent back the first invoke's stop as the trace's error,
-        # which the client does not raise.
+        # The client does not raise a stop, so the server must not send one as the error.
         token = "unbound"
         with pytest.raises(RuntimeError, match="ZeroDivisionError"):
             with serve_client.trace(temperature=0.0, top_p=1, serve=serve_url) as tracer:
@@ -246,7 +245,6 @@ class TestServe:
                 with tracer.invoke(MSG_prompt):
                     _ = 1 / 0
 
-        # An error binds nothing, as on any other model.
         assert token == "unbound"
 
     @torch.no_grad()

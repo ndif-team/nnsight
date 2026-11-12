@@ -97,8 +97,7 @@ class VLLMTracer(InterleavingTracer):
         try:
             mediators, args, kwargs = self.prepare(code)
             self.envoy.interleave(self.fn, *args, **kwargs)
-            # Not reached when a block raised: an error binds nothing, as on
-            # any other model.
+            # Not in a finally: a trace that raises binds nothing.
             for mediator in mediators:
                 push_result(self.info.frame, mediator.lcls.writes())
         finally:
