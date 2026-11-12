@@ -6,10 +6,10 @@ Under ``attn_implementation="eager"``, a transformers attention module calls the
 which builds the probability matrix in Python and returns it alongside the
 attention output. `serve_eager` serves the three attention sites of
 intervention/attention.py from that call: ``probs`` is the weights tensor
-returned by the function and multiplied with the
-values (an ``"exact export"`` in the model dtype), and ``scores`` and ``lse`` are
-an fp32 replay of ``q . k * scale`` plus the mask computed beside the call
-(``"replay"``, because the function computes its own scores in the model dtype).
+returned by the function and multiplied with the values (an ``"exact export"``
+in the model dtype), and ``scores`` and ``lse`` are an fp32 replay of
+``q . k * scale`` plus the mask computed beside the call (``"replay"``, because
+the function computes its own scores in the model dtype).
 ``probs`` is always served; ``scores`` and ``lse`` raise ``ValueError`` when the
 function receives an extra parameter beyond the seven shared parameters (such as
 Gemma's ``softcap`` or T5's ``position_bias``) or when the returned rows sum to

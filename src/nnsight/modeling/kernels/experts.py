@@ -56,7 +56,8 @@ from torch._subclasses.fake_tensor import FakeTensor
 
 from ...intervention import sites
 from ...intervention.sites import Batch, Provenance, Sites, Unavailable
-from ...intervention.source import STATE, arguments, record
+from ...intervention.source import arguments, record
+from ..tp.fragments import _is_tp_wrapped
 
 #: Local variable binding names in `grouped_mm_experts_forward` and
 #: `batched_mm_experts_forward` for the per-pair input, the gated or ungated
@@ -68,8 +69,6 @@ _GROUPED = {"input": "selected_hidden_states_g", "gated": "proj_out_2", "ungated
 _BATCHED = {"input": "selected_hidden_states", "gated": "proj_out_1", "ungated": "proj_out_2", "output": "proj_out_3"}
 #: Human-readable description of each site's rows for provenance notes.
 _ROWS = {"expert_input": "input rows", "expert_activation": "activation rows", "expert_output": "down-projection rows"}
-#: Function names installed on `experts.forward` by transformers' tensor-parallel and expert-parallel plans.
-_PARALLEL_FORWARDS = ("tp_forward", "ep_forward")
 
 
 class Experts(Sites):
@@ -146,11 +145,14 @@ def _parallel(module: torch.nn.Module) -> bool:
 
     Under tensor or expert parallelism, each rank computes only a shard of the
     intermediate dimension and a partial down projection, or fills unowned pairs
-    with sentinel indices. A kernel call is served only while the module's
-    controller runs, so the module carries nnsight's `State`, whose ``original``
-    is the forward the controller replaced.
+    with sentinel indices. Expert parallelism sets ``_is_expert_parallel`` on the
+    module. Tensor parallelism installs a wrapper on ``module.forward`` (which
+    nnsight rebuilds around the controller; see modeling/tp/fragments.py).
+    Inspecting the parameters for ``DTensor`` does not detect tensor parallelism
+    during the call because transformers swaps them for this rank's local
+    tensors while the forward runs.
     """
-    return module._is_expert_parallel or vars(module)[STATE].original.__name__ in _PARALLEL_FORWARDS
+    return module._is_expert_parallel or _is_tp_wrapped(module)
 
 
 def _serve(fn: Callable, args: tuple, kwargs: dict, layout: dict[str, str], sorted_rows: bool) -> tuple[Any, Sites]:

@@ -102,6 +102,18 @@ def main() -> None:
         layer.mlp.experts.output = layer.mlp.experts.output * 0.5
         record("edited_logits", model.lm_head.output.save())
 
+    if args.mode == "tp":
+        # Under tensor parallelism each rank computes only a shard of each expert, so
+        # `expert_output()` must raise `ValueError` on sharded runs and succeed on the single-process run.
+        try:
+            with model.trace({"input_ids": ids}):
+                layer.mlp.experts.kernel.expert_output().save()
+            refused = False
+        except ValueError as error:
+            assert "tensor or expert parallelism" in str(error), error
+            refused = True
+        results["kernel_sites_refused"] = torch.tensor(float(refused))
+
     torch.save(results, os.path.join(args.out, f"rank{rank}.pt"))
 
 

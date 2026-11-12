@@ -67,19 +67,18 @@ How it works with the interleaver's location and
 
     p.provenance   # Provenance(kind='exact reconstruction', kernel='aten._scaled_dot_product_flash_attention', ...)
 
-Which kernels are supported is declared in catalogs of
+Supported kernels are listed in catalogs of
 [`Spec`][nnsight.intervention.kernel.Spec] rows, one catalog per backend, and
-[`register_catalog`][nnsight.intervention.kernel.register_catalog] registers a
-catalog's rows. A row names a kernel, the family of sites it serves, how to find
-the function and the places the model looks it up, and its serve function:
+[`register_catalog`][nnsight.intervention.kernel.register_catalog] registers the
+functions each row locates. Each row specifies a table label, a site family, a
+locator yielding ``(function, holders)`` pairs, and a serve function:
 
 * intervention/attention.py: PyTorch's SDPA, registered at import.
-* modeling/kernels/: the kernels transformers models call (eager attention,
-  chunked recurrent kernels, grouped mixture-of-experts forwards), registered
-  when a `TransformersModel` is built.
+* Model-library catalogs live alongside the model classes that use them under
+  modeling/.
 
 The site interface (`Sites`, `Provenance`, the `Kernel` accessor, and the
-slicing helpers readers share) is in intervention/sites.py.
+shared slicing helpers) is in intervention/sites.py.
 
 Because a kernel executes inside its module's forward pass, the interleaver tracks
 the occurrence count of ``"{module}.kernel"`` using ``"{module}.output"`` (see
@@ -229,7 +228,7 @@ _lock = threading.Lock()
 #: Count of currently open interleavers; shims remain installed while this is greater than zero.
 _open = 0
 
-#: Maps each installed shim to the kernel function it wraps (see `unshimmed`).
+#: Maps each registered kernel's shim to the kernel function it wraps (see `unshimmed`).
 _shims: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 #: Live functions built by `function_like` over copied module globals (see `adopt`).
@@ -476,28 +475,36 @@ def uninstall() -> None:
 # ---------------------------------------------------------------------------
 
 
+#: Pairs of ``(function, holders)`` yielded by a catalog locator.
+Located = Iterable[tuple[Callable, tuple[Attr, ...]]]
+
+
 class Spec(NamedTuple):
-    """One supported kernel, as a row of a backend's catalog.
+    """Catalog entry declaring how to locate and serve a supported kernel.
 
     ``locate(context)`` yields ``(function, holders)`` for every function this row
-    covers in ``context`` (whatever the backend passes to `register_catalog`, such
-    as the modeling modules of one model). A row that finds nothing yields nothing:
-    the kernel is not installed or the model does not use it.
+    covers in ``context`` (the value passed to `register_catalog`, such as the
+    modeling modules of one model). A row may yield nothing when no matching
+    function is present (for example, when an optional kernel library is not
+    installed). ``name`` and ``family`` are descriptive metadata; `register_catalog`
+    uses only ``locate`` and ``serve``.
     """
 
-    #: The kernel function's name, as the supported-kernels table in docs/usage/kernel.md lists it.
+    #: Label for this row in the supported-kernels table of docs/usage/kernel.md. One row may cover several functions.
     name: str
-    #: The set of sites served: ``"attention"``, ``"recurrent"`` or ``"experts"``.
+    #: Site family served by this row's reader (for example, ``"attention"``).
     family: str
-    locate: Callable[[Any], Iterable[tuple[Callable, tuple[Attr, ...]]]]
+    #: Callable returning ``(function, holders)`` pairs for a given ``context``.
+    locate: Callable[[Any], Located]
+    #: Serve function passed to `register` for each located function.
     serve: Callable
 
 
-def attribute(obj: Any, name: str) -> Callable[[Any], Iterable[tuple[Callable, tuple[Attr, ...]]]]:
-    """Locate a kernel the model reads as the attribute ``name`` of ``obj`` on every call."""
+def attribute(obj: Any, name: str) -> Callable[[Any], Located]:
+    """Build a locator for a kernel read as attribute ``name`` of ``obj`` on every call. The attribute must exist on ``obj``."""
 
-    def locate(context: Any) -> Iterable[tuple[Callable, tuple[Attr, ...]]]:
-        yield unshimmed(vars(obj)[name]), (Attr(obj, name),)
+    def locate(context: Any) -> Located:
+        yield unshimmed(getattr(obj, name)), (Attr(obj, name),)
 
     return locate
 

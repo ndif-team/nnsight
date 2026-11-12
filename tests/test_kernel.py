@@ -402,16 +402,17 @@ class TestMemory:
         assert ref() is None
 
 
-def test_every_catalog_row_is_in_the_supported_kernels_table():
-    from nnsight.intervention import attention
-    from nnsight.modeling import kernels
+class TestCatalog:
+    def test_every_catalog_row_is_in_the_supported_kernels_table(self):
+        from nnsight.intervention import attention
+        from nnsight.modeling.kernels import transformers as catalog
 
-    table = (Path(__file__).parent.parent / "docs" / "usage" / "kernel.md").read_text().split("## Supported kernels")[1].split("\n## ")[0]
-    rows = [*attention.CATALOG, *kernels.CATALOG]
-    assert len({spec.name for spec in rows}) == len(rows)
-    for spec in rows:
-        assert f"| `{spec.name}` | {spec.family} |" in table, spec.name
-    assert table.count("\n| `") == len(rows)
+        table = (Path(__file__).parent.parent / "docs" / "usage" / "kernel.md").read_text().split("## Supported kernels")[1].split("\n## ")[0]
+        rows = [*attention.CATALOG, *catalog.CATALOG]
+        assert len({spec.name for spec in rows}) == len(rows)
+        for spec in rows:
+            assert f"| `{spec.name}` | {spec.family} |" in table, spec.name
+        assert table.count("\n| `") == len(rows)
 
 
 class TestShims:
@@ -1013,7 +1014,8 @@ class TestRecurrent:
     def test_model_built_while_a_trace_is_open_unwraps_the_shim(self):
         import transformers.models.qwen3_next.modeling_qwen3_next as modeling
 
-        from nnsight.modeling.kernels import _hub_wrappers, recurrent
+        from nnsight.modeling.kernels import recurrent
+        from nnsight.modeling.kernels.transformers import _hub_wrappers
 
         cell = next(cells for cells in _hub_wrappers(modeling) if cells["func_name"].cell_contents == "chunk_gated_delta_rule")["implementation"]
         torch_function = cell.cell_contents

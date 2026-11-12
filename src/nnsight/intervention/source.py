@@ -522,8 +522,7 @@ def run_op(interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict)
 def record(fn: Callable, args: tuple, kwargs: dict, prefixes: tuple[str, ...]) -> tuple[Any, dict[str, list[torch.Tensor]]]:
     """Run ``fn`` under AST instrumentation and collect tensors bound to variable names matching ``prefixes``.
 
-    Used by kernel serve functions (in modeling/kernels/recurrent.py and
-    modeling/kernels/experts.py) to capture local variables from Python kernel
+    Used by kernel serve functions to capture local variables from Python kernel
     implementations without changing their operations or execution order. A
     prefix matches both ``"{prefix}"`` and indexed binding names ``"{prefix}_{n}"``,
     so passing ``"state"`` collects all rebindings of ``state`` while ``"state_2"``

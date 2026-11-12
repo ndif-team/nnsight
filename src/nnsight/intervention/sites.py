@@ -1,10 +1,11 @@
-"""Kernel sites: what a served kernel call offers a trace, and how a trace asks for it.
+"""Site readers, provenance metadata, slicing helpers, and the ``.kernel`` accessor.
 
-A kernel *site* is one value a fused kernel call can serve, such as ``probs`` or
-``lse``. The serve function of a kernel (see intervention/kernel.py for how a
-call reaches it) returns a [`Sites`][nnsight.intervention.sites.Sites] reader
-holding the call's captured inputs and exported statistics; the reader computes
-a site only when a worker requests it.
+A kernel *site* is a named intermediate value exposed from a kernel call, such
+as ``probs`` or ``lse``. When a registered kernel is served (see
+intervention/kernel.py), its serve function returns a
+[`Sites`][nnsight.intervention.sites.Sites] reader holding the call's captured
+inputs and exported statistics, and the reader computes a site slice only when a
+worker requests it.
 
 On the user side, [`Envoy.kernel`][nnsight.intervention.envoy.Envoy.kernel]
 returns a [`Kernel`][nnsight.intervention.sites.Kernel] accessor whose
@@ -26,12 +27,11 @@ that records how the value was obtained:
   usable statistics.
 * ``"derived"``: a quantity that the chunked algorithm never forms directly,
   computed by advancing an exported boundary state using the layer's intra-chunk
-  recurrence (such as a per-token state inside a chunk; see
-  modeling/kernels/recurrent.py).
+  recurrence (such as a per-token state inside a chunk).
 
-This module also holds the slicing helpers readers share (`indices`, `select`,
-`positions`, `offsets`, `squeeze`, `check_axes`, `warn_if_large`), so every
-family applies the same indexing rules to its axis keywords.
+This module also provides the shared slicing helpers (`indices`, `select`,
+`positions`, `offsets`, `squeeze`, `check_axes`, `warn_if_large`) so all site
+families apply the same indexing rules to their axis keywords.
 """
 
 from __future__ import annotations

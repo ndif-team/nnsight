@@ -160,12 +160,12 @@ Two consequences:
   so the `handle` on `{base}.fn` is a no-op and the cached copy is reused. That is
   what makes a drill survive generation steps.
 
-Kernel sites (`intervention/kernel.py`; the supported kernels are the catalog rows
-in `intervention/attention.py` and `modeling/kernels/__init__.py`) are served by a shim installed on each
-registered kernel function while an interleaver is open (`F.scaled_dot_product_attention`,
-the eager attention function of each modeling module loaded by a `TransformersModel`,
-the function in a hub wrapper's `implementation` cell, and the entries of the
-experts dispatch table). `function_like` passes each function it builds to
+Kernel sites (`intervention/kernel.py` and `intervention/sites.py`, with catalogs
+in `intervention/attention.py` and `modeling/kernels/transformers.py`) are served
+by a shim installed on each registered kernel function while an interleaver is
+open (`F.scaled_dot_product_attention`, the eager attention function of each
+modeling module loaded by a `TransformersModel`, the function in a hub wrapper's
+`implementation` cell, and the entries of the experts dispatch table). `function_like` passes each function it builds to
 `kernel.adopt`, which registers every kernel found in that function's copied
 globals dict as a `Global` holder referencing the function weakly (so the holder
 lives only as long as the copy: while an instrumented forward is cached on a
@@ -183,7 +183,7 @@ happens at the kernel call, a worker can read a submodule inside the parent
 module before requesting a `.kernel` site on the same pass. When `.source` is
 accessed on the operation that calls the shim, `peel_index` steps through the
 shim as a one-cell decorator wrapping the kernel function, and `decorator_chain`
-looks the shim up with `kernel.unshimmed` to reach a C builtin so `compiled`
+resolves the shim via `kernel.unshimmed` to reach a C builtin so `compiled`
 raises `SourceNotAvailable`.
 
 A function that refers to its own name in its body is not drillable: the shell makes

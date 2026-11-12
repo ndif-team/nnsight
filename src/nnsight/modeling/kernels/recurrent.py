@@ -59,7 +59,7 @@ How states and intermediates are captured across kernel implementations:
   only the final state, which during single-token decoding is the only token's
   state.
 
-Each kernel is a row of the catalog in modeling/kernels/__init__.py, which
+Each kernel is a row of the catalog in modeling/kernels/transformers.py, which
 `TransformersModel` registers when the model is constructed.
 
 .. code-block:: python
@@ -535,7 +535,7 @@ def serve_mamba2_decode(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, S
 # ---------------------------------------------------------------------------
 
 class _Capture(threading.local):
-    """Per-thread list that `serve_fla` collects the inner kernel's results in; ``None`` outside a served call."""
+    """Thread-local state whose ``results`` list collects ``chunk_gated_delta_rule_fwd_h`` outputs during `serve_fla_gated_delta_chunk` (``None`` outside a served call)."""
 
     results: list | None = None
 

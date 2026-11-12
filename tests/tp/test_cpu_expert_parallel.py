@@ -194,6 +194,12 @@ def test_tp_only_moe_ranks_agree(tp_runs) -> None:
             assert torch.equal(value, result[name]), f"rank {rank} disagrees on {name}"
 
 
+def test_tp_only_moe_refuses_experts_kernel_sites(tp_runs) -> None:
+    reference, sharded = tp_runs
+    assert reference["kernel_sites_refused"] == 0
+    assert all(result["kernel_sites_refused"] == 1 for result in sharded)
+
+
 @pytest.mark.parametrize("name", ["experts_out", "mlp_out", "logits", "edited_logits"])
 def test_tp_only_moe_matches_the_single_process_run(tp_runs, name) -> None:
     reference, sharded = tp_runs

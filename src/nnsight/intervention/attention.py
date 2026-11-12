@@ -58,9 +58,6 @@ tensors are detached from autograd because the kernel's ``lse`` is captured belo
 autograd, where differentiating through ``exp(S - lse)`` would treat ``lse`` as a
 constant. When ``dropout_p > 0``, dropout is applied after these probabilities,
 and the provenance note records that ``dropout_p`` value.
-
-The eager attention functions of transformers serve the same three sites through
-a subclass of `Attention` (modeling/kernels/eager.py).
 """
 
 from __future__ import annotations

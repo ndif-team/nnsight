@@ -3,7 +3,7 @@ title: Kernel Sites
 one_liner: Read intermediate values from fused kernels without switching to eager execution: attention probabilities, scores, and logsumexp (`attn.kernel.probs(...)`), recurrent states from gated delta rule, Kimi delta attention, Mamba2, and Mamba layers (`mixer.kernel.states(...)`), and per-expert rows from grouped mixture-of-experts forwards (`experts.kernel.expert_output(...)`).
 tags: [usage, kernel, attention, intervention]
 related: [docs/usage/source.md, docs/patterns/attention-patterns.md, docs/patterns/per-head-attention.md, docs/usage/access-and-modify.md, docs/usage/iteration.md, docs/errors/module-never-fired.md]
-sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/sites.py, src/nnsight/intervention/attention.py, src/nnsight/modeling/kernels/__init__.py, src/nnsight/modeling/kernels/eager.py, src/nnsight/modeling/kernels/recurrent.py, src/nnsight/modeling/kernels/experts.py, src/nnsight/intervention/source.py, src/nnsight/intervention/interleaver.py, src/nnsight/modeling/transformers.py, tests/test_kernel.py]
+sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/sites.py, src/nnsight/intervention/attention.py, src/nnsight/modeling/kernels/transformers.py, src/nnsight/modeling/kernels/eager.py, src/nnsight/modeling/kernels/recurrent.py, src/nnsight/modeling/kernels/experts.py, src/nnsight/intervention/source.py, src/nnsight/intervention/interleaver.py, src/nnsight/modeling/transformers.py, tests/test_kernel.py]
 ---
 
 # Kernel Sites
@@ -408,11 +408,15 @@ also reaches the local variables of the fused forwards in expert-sorted order
 
 ## Supported kernels
 
-Each row is one entry of a catalog in the source: `CATALOG` in
-`intervention/attention.py` for PyTorch's own kernel, and `CATALOG` in
-`modeling/kernels/__init__.py` for the kernels transformers models call. A
-catalog row names the kernel function, the family of sites it serves, how the
-function is found, and its serve function.
+Each row below corresponds to an entry in a source catalog: `CATALOG` in
+`intervention/attention.py` for PyTorch's SDPA kernel, and `CATALOG` in
+`modeling/kernels/transformers.py` for kernels called by transformers models.
+Each catalog entry specifies a row label, a site family, a locator that yields
+the functions and holders to patch, and a serve function. Recurrent rows are
+labeled by their hub-kernel name (prefixed with `fla.` for the `fla` library
+rows); the function a Python reference row registers has a different name
+(for example, the row `chunk_gated_delta_rule` registers
+`torch_chunk_gated_delta_rule`).
 
 | Kernel | Family | Sites | How it is found |
 |---|---|---|---|
@@ -425,15 +429,24 @@ function is found, and its serve function.
 | `chunk_kda` | recurrent | same | Same, for Kimi delta attention. |
 | `fused_recurrent_kda` | recurrent | same | Same, for its single-token decode kernel. |
 | `mamba_chunk_scan_combined` | recurrent | same | Same, for Mamba2's chunked scan. |
-| `selective_state_update` | recurrent | same | Same, for Mamba2's single-token decode update. |
+| `selective_state_update` | recurrent | same | Same, for the single-token decode update of Mamba2 and Mamba1. |
 | `selective_scan_fn` | recurrent | same | Same, for Mamba1's selective scan. |
-| `fla.chunk_gated_delta_rule` | recurrent | same | The hub-kernel wrapper of that name, running the `fla` library's kernel. |
-| `fla.fused_recurrent_gated_delta_rule` | recurrent | same | Same, for `fla`'s single-token decode kernel. |
+| `fla.chunk_gated_delta_rule` | recurrent | same | The `chunk_gated_delta_rule` hub-kernel wrapper, running the `fla` library's kernel. |
+| `fla.fused_recurrent_gated_delta_rule` | recurrent | same | The `fused_recurrent_gated_delta_rule` hub-kernel wrapper, running `fla`'s single-token decode kernel. |
 
 A hub-kernel wrapper calls the library kernel when the library is installed and
-the Python reference otherwise, so one model is served by one of the two rows
-that share a name. To support another kernel, write its serve function and add
-a row; `kernel.register_catalog(catalog, context)` registers a catalog.
+the Python reference otherwise. For the two gated delta rule kernels, the `fla.`
+row covers the library kernel and the unprefixed row covers the reference. The
+other recurrent kernels have a reference row only, so a wrapper running a
+library kernel is covered by no row and serves no sites (see [Limits](#limits)).
+
+To support another kernel, write its serve function and add a
+`nnsight.intervention.kernel.Spec(name, family, locate, serve)` row, where
+`locate(context)` yields `(function, holders)` pairs for the storage locations
+from which the model reads each function. `kernel.attribute(obj, name)` builds
+a locator for a function read as an attribute, and
+`kernel.register_catalog(catalog, context)` registers the rows. A row appended
+to the transformers `CATALOG` applies to models constructed afterward.
 
 ## Limits
 
@@ -470,8 +483,8 @@ a row; `kernel.register_catalog(catalog, context)` registers a catalog.
 - **Submodule name collisions:** A submodule named `kernel` is accessed as
   `E_kernel` ([access-and-modify](access-and-modify.md#overloaded-names)).
 - **Registering a custom kernel:**
-  `nnsight.intervention.kernel.register(fn, serve, *holders)` (what a catalog
-  row calls for each function it finds) associates a
+  `nnsight.intervention.kernel.register(fn, serve, *holders)` (called by
+  `register_catalog` for each function a row locates) associates a
   callable `fn` with a serve function `serve(fn, args, kwargs) -> (output,
   sites)` and the storage locations from which the model looks up `fn`:
   `Attr(module, name)` for a module attribute, `Attr(cell, "cell_contents")`

@@ -58,8 +58,9 @@ import torch
 
 from .. import NNsightDeprecationWarning
 from ..intervention.envoy import Envoy, traceable
-from . import kernels, peft, processing
+from . import peft, processing
 from .huggingface import HuggingFaceModel
+from .kernels.transformers import register_model
 
 if TYPE_CHECKING:
     from transformers import (
@@ -315,8 +316,8 @@ class TransformersModel(HuggingFaceModel):
             parent=self,
         )
         self._children.append(self.generator)
-        # Kernel sites for the fused kernels this model's modules call (see `.kernels`).
-        kernels.register(self._module)
+        # Kernel sites for the fused kernels this model's modules call (modeling/kernels/transformers.py).
+        register_model(self._module)
 
     # -- loading -------------------------------------------------------------
 
