@@ -47,6 +47,7 @@ module never fired.
 | `ValueError` | ``trace() needs an input, or at least one `with tracer.invoke(...)` block`` | [cannot-access-outside-interleaving.md](cannot-access-outside-interleaving.md) |
 | `ValueError` | ``Cannot invoke while the model is already running.`` | [invoke-during-execution.md](invoke-during-execution.md) |
 | `NotImplementedError` | ``<ModelClass> does not support batching multiple invokes`` | [batching-not-implemented.md](batching-not-implemented.md) |
+| `UserWarning` | ``<Tokenizer> does not prepend <bos> to a string prompt and setting `add_bos_token` did not change that …`` | [transformers-model.md](../models/transformers-model.md#input-forms) |
 
 ## Capturing the block
 
