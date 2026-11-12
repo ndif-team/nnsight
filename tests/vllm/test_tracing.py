@@ -669,6 +669,21 @@ class TestDeferredErrors:
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
 
     @torch.no_grad()
+    def test_an_error_binds_nothing(self, vllm_gpt2, ET_prompt, MSG_prompt):
+        # As on any other model: the invoke that finished does not push its
+        # values past the other one's error, and a stop does not hide the error.
+        token = "unbound"
+        with pytest.raises(RuntimeError, match="ZeroDivisionError"):
+            with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+                with tracer.invoke(ET_prompt):
+                    token = vllm_gpt2.logits.argmax(dim=-1).save()
+                    tracer.stop()
+                with tracer.invoke(MSG_prompt):
+                    _ = 1 / 0
+
+        assert token == "unbound"
+
+    @torch.no_grad()
     def test_a_raise_inside_an_iter_loop_spares_the_engine(self, vllm_gpt2,
                                                            ET_prompt):
         # The same, reached the way a generation loop reaches it.

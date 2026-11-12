@@ -244,7 +244,10 @@ async def generate(request: Request) -> Response:
             continue
         sequences = result["sequences"]
         runs.extend(sequences[index]["saves"] for index in sorted(sequences))
-        if result["error"] is not None and first_error is None:
-            first_error = result["error"]
+        # A `tracer.stop()` is control flow, not an error to send back.
+        error = result["error"]
+        if error is not None and not error["is_control_flow"] and first_error is None:
+            first_error = error
 
-    return _payload(merge_run_saves(runs), first_error)
+    # An error binds nothing at the client, so its saves are not sent.
+    return _payload({} if first_error else merge_run_saves(runs), first_error)

@@ -232,6 +232,24 @@ class TestServe:
                 serve_client.logits.save()
 
     @torch.no_grad()
+    def test_a_stop_does_not_hide_another_invokes_error(
+        self, serve_client, serve_url, ET_prompt, MSG_prompt
+    ):
+        # The server once sent back the first invoke's stop as the trace's error,
+        # which the client does not raise.
+        token = "unbound"
+        with pytest.raises(RuntimeError, match="ZeroDivisionError"):
+            with serve_client.trace(temperature=0.0, top_p=1, serve=serve_url) as tracer:
+                with tracer.invoke(ET_prompt):
+                    token = serve_client.logits.argmax(dim=-1).save()
+                    tracer.stop()
+                with tracer.invoke(MSG_prompt):
+                    _ = 1 / 0
+
+        # An error binds nothing, as on any other model.
+        assert token == "unbound"
+
+    @torch.no_grad()
     def test_engine_survives_error(self, serve_client, serve_url, ET_prompt):
         # A failed serve trace leaves the shared server engine healthy for the next one.
         try:
