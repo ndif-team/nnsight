@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from fastapi import FastAPI, HTTPException, Request, Response
+from vllm.sampling_params import RequestOutputKind
 
 from ....tracing.globals import block_scope
 from ..collect import merge_run_saves
@@ -198,6 +199,10 @@ async def generate(request: Request) -> Response:
             # The last streamed output is the finished ``RequestOutput``; the
             # worker cannot build it and needs it to serve ``tracer.result``, so
             # keep it and hand it back on the collect.
+            # One output with every sampled sequence's completion, as the
+            # synchronous engine asks for. Streamed, each output carries only the
+            # sequences that ended in that step, and the last would lack the rest.
+            param.output_kind = RequestOutputKind.FINAL_ONLY
             output = None
             async for output in engine.generate(
                 prompt, param, request_id, lora_request=lora_request

@@ -14,6 +14,8 @@ import time
 import pytest
 import torch
 
+import nnsight
+
 pytest.importorskip("vllm")
 pytest.importorskip("fastapi")
 psutil = pytest.importorskip("psutil")
@@ -191,17 +193,33 @@ class TestServe:
     def test_a_name_saved_under_n_is_a_list_per_sequence(
         self, serve_client, serve_url, ET_prompt
     ):
-        # As on a local engine: the block runs once per sampled sequence, and the
-        # one RequestOutput they share stays one object. The server once returned
-        # sequence 0's value alone.
+        # As on a local engine: the block runs once per sampled sequence, and each
+        # run's result is its own sequence's output. The stop strings end the
+        # sequences at different steps; the server once kept only the completions
+        # that ended in the last one.
         with serve_client.trace(
-            ET_prompt, temperature=0.9, seed=0, n=3, max_tokens=2, serve=serve_url
+            ET_prompt, temperature=1.0, seed=0, n=3, max_tokens=12,
+            stop=[".", ",", "\n"], serve=serve_url,
         ) as tracer:
             sample = serve_client.samples.item().save()
             result = tracer.result.save()
 
-        assert type(result).__name__ == "RequestOutput" and len(result.outputs) == 3
-        assert sample == [completion.token_ids[0] for completion in result.outputs]
+        assert len(sample) == 3 and len(result) == 3
+        for index, output in enumerate(result):
+            assert [completion.index for completion in output.outputs] == [index]
+            assert output.outputs[0].token_ids[0] == sample[index]
+
+    @torch.no_grad()
+    def test_equal_values_are_still_one_per_run(
+        self, serve_client, serve_url, ET_prompt, MSG_prompt
+    ):
+        with serve_client.trace(temperature=0.0, top_p=1, serve=serve_url) as tracer:
+            with tracer.invoke(ET_prompt):
+                flag = nnsight.save(True)
+            with tracer.invoke(MSG_prompt):
+                flag = nnsight.save(True)
+
+        assert flag == [True, True]
 
     @torch.no_grad()
     def test_error_surfaces(self, serve_client, serve_url, ET_prompt):

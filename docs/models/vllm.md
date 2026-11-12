@@ -308,7 +308,8 @@ patched invoke per layer.
 
 `n=k` asks vLLM for k continuations of one prompt, and it fans the request into a
 child per sequence — so your block runs k times, once per sequence, against that
-sequence's own rows. Saved names come back as a list here for the same reason:
+sequence's own rows. Every saved name comes back as a list here for the same reason,
+`tracer.result` included:
 
 ```python
 with model.trace(prompt, max_tokens=5, temperature=1.0, n=3) as tracer:
@@ -316,14 +317,23 @@ with model.trace(prompt, max_tokens=5, temperature=1.0, n=3) as tracer:
     result = tracer.result.save()
 
 hidden[1]                        # sequence 1's
-result.outputs[1].text           # what sequence 1 sampled
+result[1].outputs[0].text        # what sequence 1 sampled
 ```
 
-`tracer.result` is **not** a list: the sequences are its `outputs[i]`. Where you hold outputs
-rather than variables (async, `serve=`, plain `generate` with an edit), sequence *i*'s values are
-`output.outputs[i].saves[...]`; `output.saves` is the primary sequence's. On an **async** engine
-each streamed output carries only the completions that ended that step — accumulate by
-`completion.index`, or read the finished output's `nnsight_sequences`.
+Each run's `tracer.result` is a `RequestOutput` holding that sequence's one completion
+(`result[i].outputs[0]`, whose `index` is `i`), and whatever an installed edit saved for that
+sequence is on `result[i].saves`. The list does not depend on the values: three sequences
+that sample the same token save `[t, t, t]`. With several invokes as well, the list runs
+invoke by invoke and sequence by sequence within one — `[a0, a1, b0, b1]` for two invokes at
+`n=2` — and holds only the runs that saved the name, so save it in every run if you read by
+position.
+
+Where you hold outputs rather than variables (async, plain `generate` with an edit), sequence
+*i*'s values are `output.outputs[i].saves[...]`; `output.saves` is the primary sequence's. On an
+**async** engine each streamed output carries only the completions that ended that step —
+accumulate by `completion.index`, or read the finished output's `nnsight_sequences` — and a
+block's `tracer.result` holds its sequence's completion only if that sequence ended in the
+last step.
 
 ## Special properties
 
