@@ -506,10 +506,13 @@ to the transformers `CATALOG` applies to models constructed afterward.
 - **Identity checks on the kernel function:** `torch._C._nn`, where the C++
   SDPA builtin resides, is PyTorch's dispatch table and is not patched, so
   `__torch_function__` dispatch and `torch.compile` observe the original
-  builtin. A `__torch_function__` handler that compares its `func` argument
-  against `torch.nn.functional.scaled_dot_product_attention` by object identity
-  (such as `CausalBias` in `torch.nn.attention.bias`) observes the shim while a
-  trace is open and falls back to its generic path.
+  builtin. A `__torch_function__` handler or `TorchFunctionMode` that tests
+  `func is torch.nn.functional.scaled_dot_product_attention` does not match
+  while a trace is open: `func` is the builtin and the attribute holds the
+  shim. `CausalBias` in `torch.nn.attention.bias` then falls back to its generic
+  path, and diffusers' `AttentionScoreSkipFunctionMode` (`hooks/layer_skip.py`,
+  used by skip-layer guidance) computes attention normally instead of skipping
+  it inside the trace.
 - **Gemma 2 attention softcap:** Gemma 2's attention logit softcap is dropped by
   transformers on the SDPA path, and the served values match what the SDPA
   kernel computed. Under `attn_implementation="eager"`, `eager_attention_forward`
