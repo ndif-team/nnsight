@@ -68,18 +68,12 @@ def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
 
 
 def merge_run_saves(runs: list) -> dict:
-    """Each saved name's one value across a trace's runs — a list where they differ.
+    """Each saved name across a trace's runs: one value, or a list where the runs differ.
 
-    The block runs once per invoke, and once per sampled sequence (``n``) within
-    each, and every run ships its own saves. A name saved by exactly one run
-    stays that value. Several runs' values are separate values rather than copies
-    of one thing, so they come back as a list, in run order — unless every run
-    saved the same object, as they do for ``tracer.result``, which is the
-    request's single output however many sequences sampled from it. (Identity
-    survives the collect, which pickles one request's sequences together.)
-
-    Shared by the local push and the serve response, so a served trace reads the
-    way the same trace does on a local engine.
+    Runs are in order: invoke by invoke, and sampled sequence by sequence within
+    one. Runs that all saved the same object (``tracer.result``, one output per
+    request) keep that one object. The local push and the serve response both use
+    this, so they read the same.
     """
     values: dict[str, list] = {}
     for saves in runs:

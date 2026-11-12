@@ -226,9 +226,8 @@ async def generate(request: Request) -> Response:
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Every run of the block — one per invoke, and one per sampled sequence within
-    # it — in order, merged by the rule the local push uses. A generation failure
-    # surfaces as the deferred error, like a build error.
+    # Every run's saves, in order, merged as the local push merges them. A
+    # generation failure surfaces as the deferred error, like a build error.
     runs: list = []
     first_error = None
     for result in results:
