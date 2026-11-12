@@ -392,6 +392,29 @@ class TestAsyncSeveralSequences:
         async_loop.run_until_complete(run())
 
     @torch.no_grad()
+    def test_each_sequences_result_is_its_own_completion(
+        self, vllm_gpt2_async, async_loop, ET_prompt
+    ):
+        # The stop strings end the sequences at different steps, so the last
+        # streamed output lacks the ones that ended earlier; each block's result
+        # still holds its own.
+        model = vllm_gpt2_async
+
+        async def run():
+            with model.trace(ET_prompt, max_tokens=12, temperature=1.0, seed=0,
+                             n=3, stop=[".", ",", "\n"]) as tracer:
+                result = tracer.result.save()
+            last = await tracer.backend
+
+            assert len(last.nnsight_sequences) == 3
+            for index, saves in enumerate(last.nnsight_sequences):
+                completions = saves["result"].outputs
+                assert [completion.index for completion in completions] == [index]
+                assert completions[0].finished()
+
+        async_loop.run_until_complete(run())
+
+    @torch.no_grad()
     def test_no_worker_is_left_behind(self, vllm_gpt2_async, async_loop, ET_prompt):
         model = vllm_gpt2_async
 

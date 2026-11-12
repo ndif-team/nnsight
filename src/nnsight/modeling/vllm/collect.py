@@ -67,6 +67,19 @@ def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
     return shared
 
 
+def merge_run_saves(runs: list) -> dict:
+    """Each saved name across a trace's runs: the value if one run saved it, else the list.
+
+    Runs are in order: invoke by invoke, and sampled sequence by sequence within
+    one. The local push and the serve response both use this, so they read the same.
+    """
+    values: dict[str, list] = {}
+    for saves in runs:
+        for name, value in saves.items():
+            values.setdefault(name, []).append(value)
+    return {name: found if len(found) > 1 else found[0] for name, found in values.items()}
+
+
 class _CompactPickler(pickle.Pickler):
     """Writes each tensor that views a larger storage as a copy of itself (see `dumps_compact`)."""
 

@@ -26,6 +26,7 @@ compiled-graph one, is refused (see ``NNsightGPUWorker``).
 
 from __future__ import annotations
 
+import copy
 import re
 import warnings
 from typing import TYPE_CHECKING, Any
@@ -730,11 +731,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # The run's return value, served the way `Envoy.interleave`
                     # serves it locally — the block runs here in the worker and
                     # the value is a `RequestOutput` the *engine* assembles, so
-                    # this is the first moment both exist. What a registered
-                    # block saved for this request goes on the copy the block is
-                    # about to be handed; the engine attaches it to *its* copy
-                    # after this returns and the trace never sees that object.
-                    output = outputs[engine_id]
+                    # this is the first moment both exist. Each sequence's
+                    # block gets a copy holding its own completion and what a
+                    # registered block saved for it; the engine attaches those
+                    # to *its* output afterwards, which the trace never sees.
+                    output = copy.copy(outputs[engine_id])
+                    output.outputs = [
+                        completion
+                        for completion in output.outputs
+                        if completion.index == index
+                    ]
                     if sequence["registered"]:
                         output.saves = dict(sequence["registered"])
                     requests.serve_result(mediator, output)
@@ -753,7 +759,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         if not get_tp_group().is_first_rank:
             return None
         # The flat keys are the primary sequence, which is all there is unless the
-        # request asked for several; `attach` and the server read those. A request
+        # request asked for several; `attach` reads those. A request
         # can lack sequence 0: under `n > 1`, a child nothing traced whose
         # registered copies saved nothing is dropped at harvest.
         for entry in collected.values():

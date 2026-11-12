@@ -24,8 +24,10 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from fastapi import FastAPI, HTTPException, Request, Response
+from vllm.sampling_params import RequestOutputKind
 
 from ....tracing.globals import block_scope
+from ..collect import merge_run_saves
 from ..engines.engine import acollect
 
 if TYPE_CHECKING:
@@ -190,13 +192,16 @@ async def generate(request: Request) -> Response:
 
     engine = model.vllm_entrypoint
 
-    async def run_invoke(prompt: Any, param: Any, lora_request: Any) -> tuple:
+    async def run_invoke(prompt: Any, param: Any, lora_request: Any) -> Optional[dict]:
         request_id = str(uuid.uuid4())
         collected = False
         try:
             # The last streamed output is the finished ``RequestOutput``; the
             # worker cannot build it and needs it to serve ``tracer.result``, so
             # keep it and hand it back on the collect.
+            # As the synchronous engine does. Streamed, the last output lacks
+            # the sampled sequences (`n`) that ended before the final step.
+            param.output_kind = RequestOutputKind.FINAL_ONLY
             output = None
             async for output in engine.generate(
                 prompt, param, request_id, lora_request=lora_request
@@ -205,9 +210,7 @@ async def generate(request: Request) -> Response:
 
             entry = await acollect(engine, request_id, output)
             collected = True
-            if entry is not None:
-                return entry["saves"], entry["error"]
-            return {}, None
+            return entry
         finally:
             # If this task is cancelled mid-generation (server shutdown, or a
             # disconnect the server is configured to propagate), the request is never
@@ -227,9 +230,9 @@ async def generate(request: Request) -> Response:
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Merge each invoke's saves (later invoke wins a name clash, matching the local
-    # push). A generation failure surfaces as the deferred error, like a build error.
-    all_saves: dict = {}
+    # Every run's saves, in order, merged as the local push merges them. A
+    # generation failure surfaces as the deferred error, like a build error.
+    runs: list = []
     first_error = None
     for result in results:
         if isinstance(result, BaseException):
@@ -237,9 +240,11 @@ async def generate(request: Request) -> Response:
             if first_error is None:
                 first_error = capture_exception(result)
             continue
-        saves, error = result
-        all_saves.update(saves)
-        if error is not None and first_error is None:
-            first_error = error
+        if result is None:
+            continue
+        sequences = result["sequences"]
+        runs.extend(sequences[index]["saves"] for index in sorted(sequences))
+        if result["error"] is not None and first_error is None:
+            first_error = result["error"]
 
-    return _payload(all_saves, first_error)
+    return _payload(merge_run_saves(runs), first_error)

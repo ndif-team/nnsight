@@ -14,6 +14,8 @@ import time
 import pytest
 import torch
 
+import nnsight
+
 pytest.importorskip("vllm")
 pytest.importorskip("fastapi")
 psutil = pytest.importorskip("psutil")
@@ -172,6 +174,52 @@ class TestServe:
 
         assert serve_client.tokenizer.decode(c.argmax(dim=-1)) == " New"
         assert serve_client.tokenizer.decode(d.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_a_name_saved_in_every_invoke_is_a_list(
+        self, serve_client, serve_url, ET_prompt, MSG_prompt
+    ):
+        # As on a local engine: one value per invoke, in invoke order. The server
+        # once merged the invokes' saves by name and kept only the last.
+        with serve_client.trace(temperature=0.0, top_p=1, serve=serve_url) as tracer:
+            with tracer.invoke(ET_prompt):
+                token = serve_client.logits.argmax(dim=-1).save()
+            with tracer.invoke(MSG_prompt):
+                token = serve_client.logits.argmax(dim=-1).save()
+
+        assert [serve_client.tokenizer.decode(t) for t in token] == [" Paris", " New"]
+
+    @torch.no_grad()
+    def test_a_name_saved_under_n_is_a_list_per_sequence(
+        self, serve_client, serve_url, ET_prompt
+    ):
+        # As on a local engine: the block runs once per sampled sequence, and each
+        # run's result is its own sequence's output. The stop strings end the
+        # sequences at different steps; the server once kept only the completions
+        # that ended in the last one.
+        with serve_client.trace(
+            ET_prompt, temperature=1.0, seed=0, n=3, max_tokens=12,
+            stop=[".", ",", "\n"], serve=serve_url,
+        ) as tracer:
+            sample = serve_client.samples.item().save()
+            result = tracer.result.save()
+
+        assert len(sample) == 3 and len(result) == 3
+        for index, output in enumerate(result):
+            assert [completion.index for completion in output.outputs] == [index]
+            assert output.outputs[0].token_ids[0] == sample[index]
+
+    @torch.no_grad()
+    def test_equal_values_are_still_one_per_run(
+        self, serve_client, serve_url, ET_prompt, MSG_prompt
+    ):
+        with serve_client.trace(temperature=0.0, top_p=1, serve=serve_url) as tracer:
+            with tracer.invoke(ET_prompt):
+                flag = nnsight.save(True)
+            with tracer.invoke(MSG_prompt):
+                flag = nnsight.save(True)
+
+        assert flag == [True, True]
 
     @torch.no_grad()
     def test_error_surfaces(self, serve_client, serve_url, ET_prompt):
