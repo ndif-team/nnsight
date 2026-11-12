@@ -1,11 +1,9 @@
 """The one place nnsight gets into a vLLM worker process.
 
-vLLM's worker builds its model runner in ``init_device``; once it has, the
-runner's class is swapped for nnsight's subclass, which adds behaviour and no
-constructor state. `_load` names this class as vLLM's ``worker_cls``, a supported
-engine argument, so no part of vLLM's own startup is patched — and a runner
-nnsight does not instrument is refused here, in the worker, rather than coming up
-silently uninstrumented.
+vLLM's worker builds its model runner in ``_make_model_runner``, which it leaves
+for a subclass to override; this one builds nnsight's runner there. `_load` names
+this class as vLLM's ``worker_cls``, a supported engine argument, so no part of
+vLLM's own startup is patched.
 """
 
 from __future__ import annotations
@@ -13,8 +11,6 @@ from __future__ import annotations
 import pickle
 from typing import Any, Optional
 
-from vllm import envs
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 
 from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
@@ -23,30 +19,8 @@ from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
 class NNsightGPUWorker(Worker):
     """A vLLM GPU worker whose model runner interleaves interventions."""
 
-    def init_device(self) -> None:
-        # vLLM's compiled-graph Ray executor runs the forward on a thread of its
-        # own, and a block suspended there cannot be resumed from the thread a
-        # collect arrives on, so `tracer.result` and a parked block's error are lost.
-        if (
-            self.vllm_config.parallel_config.distributed_executor_backend == "ray"
-            and not envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND
-        ):
-            raise NotImplementedError(
-                "nnsight does not support vLLM's compiled-graph Ray executor "
-                "(VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0): it runs the forward on a "
-                "different thread from the calls that collect a request's values. "
-                "Unset VLLM_USE_RAY_V2_EXECUTOR_BACKEND to use vLLM's default Ray executor."
-            )
-        super().init_device()
-        runner = self.model_runner
-        if type(runner) is not GPUModelRunner:
-            raise NotImplementedError(
-                f"nnsight instruments vLLM's GPUModelRunner, but this worker built "
-                f"{type(runner).__module__}.{type(runner).__name__} (the V2 runner, "
-                "or a runner from another platform). Unset VLLM_USE_V2_MODEL_RUNNER "
-                "to trace, or drop nnsight and use vLLM directly for that run."
-            )
-        runner.__class__ = NNsightGPUModelRunner
+    def _make_model_runner(self) -> NNsightGPUModelRunner:
+        return NNsightGPUModelRunner(self.vllm_config, self.device)
 
     def collect_nnsight(
         self,
