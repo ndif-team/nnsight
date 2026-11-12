@@ -387,7 +387,7 @@ What changes under graphs, and why:
   replaces — see [Replacing a value](#replacing-a-value-keeps-its-rows).
 - **Clone what you keep — and nothing warns.** The value served at a tap *is* the graph's memory, rewritten next step. Un-cloned decode entries appended under `tracer.iter` all come back holding the last step's values (the prefill entry is a different buffer and survives). See [Serving copies instead of views](#serving-copies-instead-of-views).
 - **`torch.compile` is off.** Breakable graphs keep replay and drop the compiled path; that is most of the throughput, not all of it. The flag is process-wide, so one process holds either graph engines or compiled ones.
-- **The graphs are piecewise.** A tapped engine sets `cudagraph_mode="PIECEWISE"`, since a tap is a break in a piecewise graph and a full graph has none. A `compilation_config` of your own that asks for full graphs is kept, and its taps then go unserved on the steps a full graph runs.
+- **The graphs are piecewise.** A tapped engine sets `cudagraph_mode="PIECEWISE"`, since a tap is a break in a piecewise graph and a full graph has none. A `compilation_config` of your own that asks for full graphs is refused while the engine builds.
 
 ## Serving copies instead of views
 
@@ -457,6 +457,7 @@ False ...}`.
 - **`.skip()` is effectively unsupported** — see [`.skip()` needs the whole step](#skip-needs-the-whole-step).
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
 - **No speculative decoding** — a speculative step scores several draft tokens per request, and a block is scoped to one logits row and one sampled token per request. `VLLM(..., speculative_config=...)` raises `NotImplementedError` before anything is built.
+- **No batch-sharded sampling** — each tensor-parallel rank then samples only the requests it owns, and a block's logits are scoped to the whole batch. `VLLM(..., enable_batch_sharded_sampling=True)` raises `NotImplementedError` before anything is built.
 - **No data parallelism** — vLLM answers the call that brings a request's saved values back from its first engine only, so `VLLM(..., data_parallel_size=N)` with `N > 1` raises `NotImplementedError` before anything is built. Use `tensor_parallel_size`, or one `VLLM` per GPU.
 - **No backward / gradients, and no source tracing inside a fused CUDA kernel** — the kernel's
   inputs and outputs are locations; its interior is not Python.
@@ -478,6 +479,10 @@ nnsight is built and tested against vLLM **0.33**, and the `vllm` extra pins
 `vllm>=0.33,<0.34`. nnsight subclasses vLLM's GPU model runner and imports its internals directly
 (`vllm.tokenizers`, `vllm.v1.worker.gpu.model_runner`, `vllm.v1.engine.async_llm`), which move between
 minor releases. A vLLM installed outside the pin is untested and can be wrong without an error.
+
+vLLM 0.33 still carries its older model runner and falls back to it under `VLLM_USE_V2_MODEL_RUNNER=0`,
+or for an option only that runner supports (its log names which). nnsight does not instrument it, so
+such an engine is refused while it builds.
 
 ## Gotchas
 

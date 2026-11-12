@@ -47,7 +47,6 @@ from ..interleaver import VLLMInterleaver
 from ..vllm import VLLM
 
 if TYPE_CHECKING:
-    from vllm.sequence import IntermediateTensors
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -205,8 +204,9 @@ class Requests:
             if data.req_id in self.requests:
                 continue
             request = self.requests[data.req_id] = Request(data.req_id)
-            request.eos = getattr(data.sampling_params, "eos_token_id", None)
-            extra_args = getattr(data.sampling_params, "extra_args", None) or {}
+            params = data.sampling_params
+            request.eos = None if params is None else params.eos_token_id
+            extra_args = getattr(params, "extra_args", None) or {}
             # Which installed blocks this request runs: all of them, unless it
             # named the ones it wants — then those, plus every block installed
             # without a name. A name nothing is installed under is the request's
@@ -512,8 +512,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # The taps the client declared, if the engine replays CUDA graphs; they
         # ride the engine config so every worker process sees the same set.
         taps = self.vllm_config.additional_config.get("nnsight_taps", ())
-        # `get_model`, not `self.model`: under CUDA graphs vLLM has wrapped the
-        # module in its graph runner, and the tree is built over the module.
         self.nnsight_model: VLLM = VLLM(
             self.get_model(),
             interleaver=VLLMInterleaver(taps, fragments=VLLMFragments()),
@@ -552,6 +550,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
         each tap's replay into the graph.
         """
         interleaver = self.nnsight_model.interleaver
+        mode = self.cudagraph_manager.cudagraph_mode
+        if interleaver.taps and mode.has_full_cudagraphs():
+            raise ValueError(
+                f"cudagraph_mode={mode.name} records full CUDA graphs, which no tap "
+                "can be registered in, so the steps they run would serve none. "
+                "Drop it from compilation_config (a tapped engine defaults to "
+                "PIECEWISE), or drop `taps` for the eager engine."
+            )
         with interleaver:
             # No workers, but the handoff must run: it is what registers the taps.
             interleaver.busy = True
@@ -570,21 +576,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         requests.scope(self.nnsight_model, spans)
         return batch
 
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-        intermediate_tensors: IntermediateTensors | None = None,
-        dummy_run: bool = False,
-        **kwargs: Any,
-    ) -> Any:
-        # Profiling and graph capture run the forward with no request in it, and
-        # capture does so inside `capture_model`'s interleaver, which entering
-        # again here would close.
-        if dummy_run:
-            return super().execute_model(
-                scheduler_output, intermediate_tensors, dummy_run, **kwargs
-            )
-
+    def execute_model(self, scheduler_output: "SchedulerOutput", *args: Any, **kwargs: Any) -> Any:
         # Registered blocks are collected off the scheduler's own finished set:
         # a request nobody traced has no collect coming for it, and this is the
         # one place the runner is told it is over.
@@ -607,7 +599,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         interleaver.mediators = []
 
         with interleaver:
-            return super().execute_model(scheduler_output, intermediate_tensors, **kwargs)
+            return super().execute_model(scheduler_output, *args, **kwargs)
 
     def sample(self, *args: Any, **kwargs: Any) -> Any:
         model = self.nnsight_model
