@@ -8,7 +8,6 @@ run in the worker, saved values shipped home.
 """
 
 from collections import namedtuple
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -465,9 +464,7 @@ class TestEarlyStop:
 
     @torch.no_grad()
     def test_stop_finishes_the_request_under_min_tokens(self, vllm_gpt2, MSG_prompt):
-        # min_tokens defers the scheduler's stop check, so a single forced
-        # end-of-sequence would not retire the request. Re-forcing it every step ends
-        # the request once min_tokens is met — still well short of max_tokens.
+        # The forced end-of-sequence ends a request whatever its min_tokens.
         with vllm_gpt2.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=40, min_tokens=4
         ) as tracer:
@@ -477,8 +474,7 @@ class TestEarlyStop:
                 if it == 0:
                     tracer.stop()
 
-        steps = len(cache["model.transformer.h.0"])
-        assert 4 <= steps < 40
+        assert len(cache["model.transformer.h.0"]) < 4
 
     @torch.no_grad()
     def test_stop_under_ignore_eos_runs_to_max_tokens(self, vllm_gpt2, MSG_prompt):
@@ -996,76 +992,6 @@ class TestPromptForms:
 
         assert vllm_gpt2.tokenizer.decode(et.argmax(dim=-1)) == " Paris"
         assert vllm_gpt2.tokenizer.decode(msg.argmax(dim=-1)) == " New"
-
-
-class TestModelRunnerSelection:
-    """nnsight instruments one of vLLM's two GPU model runners, and says so."""
-
-    def test_it_asks_for_the_runner_it_instruments(self):
-        # Set before the engine is built, since the worker processes inherit it.
-        import os
-
-        from nnsight.modeling.vllm import VLLM
-
-        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
-        VLLM._require_v1_model_runner()
-        assert os.environ["VLLM_USE_V2_MODEL_RUNNER"] == "0"
-
-    def test_the_worker_swaps_in_its_runner_and_refuses_any_other(self, monkeypatch):
-        # The worker builds vLLM's runner in init_device; nnsight's subclass is
-        # swapped onto that instance, and anything else is a hard error there
-        # rather than an engine that comes up uninstrumented.
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-        from vllm.v1.worker.gpu_worker import Worker
-
-        from nnsight.modeling.vllm.model_runners.GPUModelRunner import NNsightGPUModelRunner
-        from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
-
-        monkeypatch.setattr(Worker, "init_device", lambda self: None)
-        worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
-        worker.vllm_config = SimpleNamespace(
-            parallel_config=SimpleNamespace(distributed_executor_backend="mp")
-        )
-
-        worker.model_runner = object()
-        with pytest.raises(NotImplementedError, match="instruments vLLM's GPUModelRunner"):
-            worker.init_device()
-
-        worker.model_runner = GPUModelRunner.__new__(GPUModelRunner)
-        worker.init_device()
-        assert type(worker.model_runner) is NNsightGPUModelRunner
-
-    def test_rays_compiled_graph_executor_is_refused(self, monkeypatch):
-        # It runs the forward on a thread of its own, and a suspended block can
-        # only be resumed from its own thread, so a collect could not finish it.
-        from vllm import envs
-        from vllm.v1.worker.gpu_worker import Worker
-
-        from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
-
-        monkeypatch.setattr(Worker, "init_device", lambda self: None)
-        monkeypatch.setattr(envs, "VLLM_USE_RAY_V2_EXECUTOR_BACKEND", False, raising=False)
-        worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
-        worker.vllm_config = SimpleNamespace(
-            parallel_config=SimpleNamespace(distributed_executor_backend="ray")
-        )
-
-        with pytest.raises(NotImplementedError, match="compiled-graph Ray executor"):
-            worker.init_device()
-
-    def test_asking_for_the_other_one_is_refused(self):
-        # Overriding it silently would be worse: the engine comes up with no
-        # instrumentation and the first collect fails with a missing method.
-        import os
-
-        from nnsight.modeling.vllm import VLLM
-
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
-        try:
-            with pytest.raises(NotImplementedError, match="V2 GPU model runner"):
-                VLLM._require_v1_model_runner()
-        finally:
-            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
 
 
 class TestScan:

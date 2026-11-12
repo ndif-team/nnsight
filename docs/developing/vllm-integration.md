@@ -75,22 +75,28 @@ request's mediator with `loads(..., persistent_objects=model._remoteable_persist
 (the tokenizer resolves by persistent ID). Requests with no nnsight payload — other
 tenants sharing the engine — are skipped.
 
-## The three interleaver entry points
+## The interleaver entry points
 
-`NNsightGPUModelRunner(GPUModelRunner)` (`GPUModelRunner.py`) is installed by
-`NNsightGPUWorker`, which rebinds `gpu_model_runner.GPUModelRunner` to the nnsight
-subclass **before** `Worker.__init__` resolves it (`GPUWorker.py`) — vLLM's own
-startup is not patched. The runner enters the interleaver at three points:
+`NNsightGPUModelRunner(GPUModelRunner)` (`GPUModelRunner.py`) subclasses vLLM's GPU
+model runner (`vllm/v1/worker/gpu/model_runner.py`). `NNsightGPUWorker` builds it in
+`_make_model_runner`, the method vLLM's worker leaves for a subclass to override
+(`GPUWorker.py`) — vLLM's own startup is not patched. The runner enters the
+interleaver at two points:
 
 1. **Forward** — `execute_model` (`GPUModelRunner.py`): runs
    `super().execute_model(...)` inside `with interleaver:`, so the module
-   controllers serve parked workers. `_model_forward` calls `Requests.unflatten` as the
-   forward returns, switching each worker's batch group from per-token to per-row before
-   `compute_logits` runs the model's `logits_processor` on one row per request.
-2. **Logits and sampling** — `_sample`, which vLLM's `sample_tokens` calls with the
-   step's logits (after a structured-output request's grammar mask): offers them via
-   `type(model).logits.provide(model, logits)`, samples from what comes back, then
-   offers `sampler_output.sampled_token_ids = type(model).samples.provide(model, ...)`.
+   controllers serve parked workers. vLLM lays the step's batch out inside that call,
+   in `prepare_inputs`, which is where `Requests` takes on new requests and scopes
+   every worker to its tokens.
+2. **Logits and sampling** — `sample`, which vLLM's `sample_tokens` calls with the
+   step's hidden states. It calls `Requests.unflatten`, switching each worker's batch
+   group from per-token to per-row, then re-enters the interleaver around vLLM's own
+   `sample`: `compute_logits` runs the model's `logits_processor` on one row per
+   request, and the logits (after a structured-output request's grammar mask) go to
+   the sampler. That is `NNsightSampler`, swapped onto vLLM's sampler at load, which
+   offers them via `type(model).logits.provide(model, logits)` and samples from what
+   comes back. `sample` then offers
+   `sampler_output.sampled_token_ids = type(model).samples.provide(model, ...)`.
 
 `logits`/`samples` are `eproperty` descriptors on `VLLM`, and these `.provide` calls
 are their produce side — the worked example in
@@ -118,9 +124,8 @@ recomputed every step:
   sat out when it returns, so its next `tracer.iter` step is the recompute step.
 - `scope(model)` sets each scheduled worker's `batch_group = [start,
   tokens]`, `mediator.start(interleaver)` on first schedule, and keeps finished
-  workers scheduled only if they still hold caches or an exception. It orders by
-  `list(self.input_batch.req_ids)` — **input-batch order, not scheduler order**,
-  which `condense`/reorders can diverge from.
+  workers scheduled only if they still hold caches. It orders by the step's
+  `InputBatch.req_ids` — **batch order, not scheduler order**.
 - `unflatten(model)` re-points each scheduled worker to `[row, 1]` for the
   per-request logits/samples tensors.
 - `match(request_ids)` reconciles engine ids with worker ids — vLLM appends
@@ -129,8 +134,7 @@ recomputed every step:
   in `scope` as it starts), not the thread's: the engine never closes the trace
   scope a local run clears that set on, so the thread's would be shared by every
   request. `saves()` / `deferred()` read a worker's saved values and error at
-  collect, on the workers' thread; Ray's compiled-graph executor, where collect
-  would run on another thread, is refused in `NNsightGPUWorker.init_device`.
+  collect, on the workers' thread.
 - `finish_dangling(worker_id)` throws a still-parked worker at request end
   into a `ValueError` (barrier) or `OutOfOrderError` (the run already ran past its
   location); an over-iterated `tracer.iter` only warns.
@@ -273,7 +277,7 @@ every rank via `collective_rpc("nnsight_register", ...)` and kept there.
 - Registered copies are scoped, started and unflattened alongside traced ones (`Requests.scope` runs them *first*, so a trace on the
   same request sees what they left).
 - `Requests.harvest` moves a finished request's saves into `harvested`, driven by
-  `scheduler_output.finished_req_ids` in `_update_states` — **not** by
+  `scheduler_output.finished_req_ids` in `execute_model` — **not** by
   `collect_nnsight`, because a request nobody traced never triggers a collect.
 - Values are taken at collect, not held: `collect_nnsight` pops them from
   `harvested` into the entry that rides home on the output. It also harvests on
@@ -299,11 +303,6 @@ every rank via `collective_rpc("nnsight_register", ...)` and kept there.
 Worker RPCs are exposed on `NNsightGPUWorker`, not the runner —
 `collective_rpc` resolves method names on the worker.
 
-**Which runner.** `NNsightGPUModelRunner` subclasses vLLM's V1 GPU model runner
-(`vllm/v1/worker/gpu_model_runner.py`). `VLLM._require_v1_model_runner` forces
-`VLLM_USE_V2_MODEL_RUNNER=0` before the engine is built (workers inherit it) and
-refuses an explicit `1`, which would give an engine with no instrumentation.
-
 **Prefix caching.** A cached token runs no forward, so no controller sees it. A
 trace sets `skip_reading_prefix_cache` on its own request (`_attach_mediators`).
 A registration rides requests it did not create, which it cannot flag, and only
@@ -311,9 +310,8 @@ vLLM's scheduler (in the engine-core process) decides per request, so `_load`
 defaults `enable_prefix_caching=False`; `_warn_if_prefix_caching` warns when an
 edit is installed on an engine built with it on.
 
-**Logits and saves.** The sampler scales its logits in place, so when a block is
-in the step `_sample` hands it a copy, and a saved `model.logits` stays
-what the block read. Pickling a tensor writes its whole storage, and a block's
+**Logits and saves.** vLLM's sampler copies its logits before it scales them, so
+a saved `model.logits` stays what the block read. Pickling a tensor writes its whole storage, and a block's
 reads are rows narrowed out of the step's buffers, so `collect_nnsight` ships
 each saved view as a copy of itself (`collect.dumps_compact`, a pickler whose
 `reducer_override` clones a tensor that views a larger storage).
@@ -352,11 +350,10 @@ the meta model, and a server holds one dispatched async `VLLM`.
 2. On `__exit__`, `VLLM._call` → `_attach_mediators` writes each mediator into its
    `SamplingParams.extra_args["nnsight_mediator"]`, then
    `vllm_entrypoint.generate(prompts, sampling_params=params, ...)`.
-3. The scheduler forwards to the worker; `_update_states` → `Requests.add`
-   (deserialize mediators) + `scope` (token spans).
-4. `execute_model` runs the forward under the interleaver (the controllers serve
-   parked workers); `unflatten` switches to per-row spans as `_model_forward` returns.
-5. `_sample` serves `logits`, then `samples`.
+3. The scheduler forwards to the worker; `execute_model` → `prepare_inputs` →
+   `Requests.add` (deserialize mediators) + `scope` (token spans).
+4. The forward runs under the interleaver (the controllers serve parked workers).
+5. `sample` switches to per-row spans (`unflatten`) and serves `logits`, then `samples`.
 6. `NNsightLLMEngine.step` detects finished requests, `collect_nnsight` pulls saves,
    attaches `RequestOutput.saves`.
 7. `VLLM._collect` marks the saves and re-raises deferred errors; `VLLMTracer.execute` pushes them into the user's variables only if nothing raised.

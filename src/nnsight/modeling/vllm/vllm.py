@@ -307,15 +307,6 @@ class VLLM(Remotable):
         # would be handed to the real engine on dispatch.
         _ROPE_DICT.clear()
 
-        # Whether any layer is recurrent rather than attention (a hybrid
-        # gated-delta / Mamba trunk, or an attention-free model). Recorded here —
-        # vLLM's model config is the authority — because a tapped engine must
-        # not replay a full graph over such a model's prefill (see `_load`).
-        mc = vllm_config.model_config
-        self._graph_unsafe_prefill = bool(
-            getattr(mc, "is_hybrid", False) or getattr(mc, "is_attention_free", False)
-        )
-
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -341,8 +332,6 @@ class VLLM(Remotable):
         meta_model = self.__dict__.get("_module")
         if meta_model is None:
             meta_model = self._load_meta(repo_id, **kwargs)
-
-        self._require_v1_model_runner()
 
         # A traced prompt has to be prefilled in one forward: chunked prefill
         # would hand a block a slice of its prompt one step and the rest the
@@ -376,19 +365,11 @@ class VLLM(Remotable):
             self.taps = self._resolve_taps(meta_model)
             # The flag is read by the worker processes, which inherit the environment.
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-            if getattr(self, "_graph_unsafe_prefill", False):
-                # A recurrent layer runs a different computation for a prefill
-                # than for a decode step, chosen per batch — a full graph
-                # captured for one composition replays the wrong one for the
-                # other, and the forward is silently wrong (a hybrid trunk's
-                # greedy generation diverges from eager). The compiled engine
-                # avoids this by splitting its graphs around the recurrent op;
-                # breakable graphs run without the compiler, so pin graphs to
-                # pure-decode steps and run prefill eagerly instead. Decode is
-                # where replay pays anyway. A caller's own setting wins.
-                compilation = kwargs.setdefault("compilation_config", {})
-                if isinstance(compilation, dict):
-                    compilation.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
+            # Breakable graphs are piecewise ones: a full graph is an ordinary
+            # recording that no tap is registered in. A caller's own setting wins.
+            compilation = kwargs.setdefault("compilation_config", {})
+            if isinstance(compilation, dict):
+                compilation.setdefault("cudagraph_mode", "PIECEWISE")
             kwargs["additional_config"] = {
                 **(kwargs.get("additional_config") or {}),
                 "nnsight_taps": list(self.taps),
@@ -417,39 +398,6 @@ class VLLM(Remotable):
             self.vllm_entrypoint = self._load_sync(repo_id, **kwargs)
 
         return meta_model
-
-    @staticmethod
-    def _require_v1_model_runner() -> None:
-        """Ask vLLM for the model runner nnsight instruments.
-
-        vLLM has two GPU model runners. nnsight instruments the original one
-        ([`NNsightGPUWorker`][nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker]
-        swaps in its subclass once the worker has built it, and refuses any other),
-        so the client asks for that one up front rather than letting the engine
-        come up only to be refused in the worker.
-
-        From vLLM 0.27 the second runner is the *default* for every non-MoE model
-        (`use_v2_model_runner` in vLLM's config: ``is_default_v2_architecture or
-        not is_moe``), so this is the ordinary case rather than an exotic one. The
-        switch is vLLM's own environment variable, which it consults ahead of its
-        defaults, and the engine's worker processes inherit it.
-
-        A caller who has asked for the other runner explicitly is told so, rather
-        than silently overridden or silently uninstrumented.
-        """
-        import os
-
-        key = "VLLM_USE_V2_MODEL_RUNNER"
-        asked = os.environ.get(key)
-        if asked not in (None, "", "0"):
-            raise NotImplementedError(
-                f"{key}={asked!r} selects vLLM's V2 GPU model runner, which "
-                "nnsight does not instrument yet — the engine would run with no "
-                "interventions installed. Unset it to trace, or drop nnsight and "
-                "use vLLM directly for that run."
-            )
-        # Older vLLM has no such setting and ignores it.
-        os.environ[key] = "0"
 
     def _resolve_taps(self, module: "Module") -> tuple[str, ...]:
         """Expand the tap patterns into full locations on the module tree.

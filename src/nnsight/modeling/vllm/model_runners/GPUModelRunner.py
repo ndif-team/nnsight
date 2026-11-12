@@ -7,21 +7,19 @@ worker arriving on a request then resolves straight onto the real modules.
 
 Three points on vLLM's own path carry it:
 
-* ``_update_states`` — the scheduler has just decided what runs this step, so new
-  requests hand over their workers and every worker's token span is recomputed.
+* ``prepare_inputs`` — vLLM has just laid out this step's batch, so new requests
+  hand over their workers and every worker's token span is recomputed.
 * ``execute_model`` — the forward, run with the interleaver open so hooks serve
-  the parked workers; ``_model_forward`` re-points them from tokens to rows as
-  soon as the forward returns, before the logits are computed.
-* ``_sample`` — logits and sampled ids never pass through a module, so they are
-  offered to workers directly by location.
+  the parked workers.
+* ``sample`` — the logits and the sampled ids, one row per request. Neither
+  passes through a module, so they are offered to workers directly by location.
 
-Workers run as greenlets on this thread. ``_update_states`` is called from
+Workers run as greenlets on this thread. ``prepare_inputs`` is called from
 ``execute_model``, and hooks fire on whichever thread runs the forward, so the
 worker and the model take strict turns on one thread — there is nothing to
 synchronize *during the forward*. Collection (``collect_nnsight``) runs on that
 thread too, between steps, which is what lets it resume a worker to serve
-``tracer.result`` or unwind it; the one executor where it would not, Ray's
-compiled-graph one, is refused (see ``NNsightGPUWorker``).
+``tracer.result`` or unwind it.
 """
 
 from __future__ import annotations
@@ -35,7 +33,8 @@ import torch
 from vllm import envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 from ....intervention.errors import capture_exception
 from ....intervention.interleaver import Mediator, OutOfOrderError, dangling_unwind
@@ -50,6 +49,7 @@ from ..vllm import VLLM
 if TYPE_CHECKING:
     from vllm.sequence import IntermediateTensors
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class Request:
@@ -60,10 +60,11 @@ class Request:
     the external id; both spellings are parsed here once. ``mediator`` is the
     traced worker, if the request is an nnsight trace; ``copies`` are the
     registered blocks' per-request workers, moved to ``harvested`` once the
-    request is over; ``error`` is a payload that failed to deserialize.
+    request is over; ``error`` is a payload that failed to deserialize; ``eos``
+    is the token id that ends the request (see ``_finish_erred``).
     """
 
-    __slots__ = ("id", "stem", "engine_id", "index", "mediator", "copies", "harvested", "error")
+    __slots__ = ("id", "stem", "engine_id", "index", "mediator", "copies", "harvested", "error", "eos")
 
     def __init__(self, request_id: str) -> None:
         self.id = request_id
@@ -82,6 +83,7 @@ class Request:
         self.copies: dict[str, Any] = {}
         self.harvested: dict[str, dict] = {}
         self.error: dict | None = None
+        self.eos: int | None = None
 
     def named(self, ids) -> bool:
         """Whether ``ids`` (the engine's, or the scheduler's) name this request."""
@@ -203,6 +205,7 @@ class Requests:
             if data.req_id in self.requests:
                 continue
             request = self.requests[data.req_id] = Request(data.req_id)
+            request.eos = getattr(data.sampling_params, "eos_token_id", None)
             extra_args = getattr(data.sampling_params, "extra_args", None) or {}
             # Which installed blocks this request runs: all of them, unless it
             # named the ones it wants — then those, plus every block installed
@@ -242,25 +245,26 @@ class Requests:
             except Exception as exception:
                 request.error = capture_exception(exception)
 
-    def refuse_chunked(self, spans: list[tuple[str, int]], states: dict) -> None:
+    def refuse_chunked(self, batch: "InputBatch") -> None:
         """Give a request whose prompt this step only partly prefills its error, not a worker.
 
         Chunked prefill (off by default on an nnsight engine) splits a prompt
         across steps: a block would see a slice of its prompt now and the rest
         later, and the sample of every chunk but the last is one vLLM discards.
-        ``states`` is the runner's per-request state, which knows how much of the
-        prompt is computed before this step.
+        ``batch`` knows, per row, the prompt's length and how much of it is
+        computed before this step.
         """
-        for request_id, scheduled in spans:
+        for row, request_id in enumerate(batch.req_ids):
             request = self.requests.get(request_id)
-            state = states.get(request_id)
-            if request is None or state is None or request.mediator is None:
+            if request is None or request.mediator is None:
                 continue
-            if state.num_computed_tokens + scheduled >= state.num_prompt_tokens:
+            scheduled = int(batch.num_scheduled_tokens[row])
+            prompt = int(batch.prefill_len_np[row])
+            if batch.num_computed_prefill_tokens_np[row] + scheduled >= prompt:
                 continue
             request.error = capture_exception(
                 RuntimeError(
-                    f"This request's {state.num_prompt_tokens}-token prompt was split "
+                    f"This request's {prompt}-token prompt was split "
                     f"across steps by chunked prefill ({scheduled} tokens this step), "
                     "so no block could see it whole. nnsight engines disable chunked "
                     "prefill by default; drop enable_chunked_prefill=True, or raise "
@@ -297,14 +301,11 @@ class Requests:
             """Give one worker this request's span, starting it the first time."""
             # A finished block is dropped — its work is done and it must not run
             # again — unless it holds open caches (tracer.cache() observes every
-            # step until the request ends) or raised: an erred worker keeps a row
-            # so _finish_erred can force its end-of-sequence every step until vLLM
-            # actually retires it (once is not enough when min_tokens defers the
-            # stop). `worker is not None` means started; started-but-not-alive
-            # means finished.
+            # step until the request ends). `worker is not None` means started;
+            # started-but-not-alive means finished.
             started = mediator.worker is not None
             finished = started and not mediator.alive
-            if finished and not mediator.caches and mediator.exception is None:
+            if finished and not mediator.caches:
                 return
             mediator.batch_group = [start, tokens]
             mediator.row = row
@@ -483,6 +484,19 @@ class Requests:
 
 
 
+class NNsightSampler(Sampler):
+    """vLLM's sampler, offering a step's logits to the workers before it draws from them.
+
+    The runner computes the logits and hands them straight to its sampler, so
+    this call is the one place they pass. vLLM has applied a structured-output
+    request's grammar mask by now, so a block reads, and edits, the masked logits.
+    """
+
+    def __call__(self, logits: Any, input_batch: "InputBatch") -> Any:
+        model = self.nnsight_model
+        return super().__call__(type(model).logits.provide(model, logits), input_batch)
+
+
 class NNsightGPUModelRunner(GPUModelRunner):
     """A vLLM model runner that interleaves interventions with the forward."""
 
@@ -522,7 +536,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
             self.nnsight_model._remoteable_persistent_objects()
         )
 
-    def capture_model(self) -> Any:
+        # vLLM's own sampler, made to serve `VLLM.logits`. A model with a sampler
+        # of another kind (watermarking, diffusion), or with none (pooling), keeps
+        # what it has and serves no logits.
+        if type(self.sampler) is Sampler:
+            self.sampler.__class__ = NNsightSampler
+            self.sampler.nnsight_model = self.nnsight_model
+
+    def capture_model(self, **kwargs: Any) -> Any:
         """Record vLLM's CUDA graphs with the interleaver open.
 
         A module hands off only while interleaving, and recording the graphs runs
@@ -534,36 +555,42 @@ class NNsightGPUModelRunner(GPUModelRunner):
         with interleaver:
             # No workers, but the handoff must run: it is what registers the taps.
             interleaver.busy = True
-            return super().capture_model()
+            return super().capture_model(**kwargs)
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> Any:
-        # vLLM returns a correction to run once the forward is launched (speculative
-        # decoding's token counts); `execute_model` calls it, so it goes back as is.
-        corrections = super()._update_states(scheduler_output)
+    def prepare_inputs(self, scheduler_output: "SchedulerOutput", *args: Any, **kwargs: Any) -> "InputBatch":
+        batch = super().prepare_inputs(scheduler_output, *args, **kwargs)
 
         requests = self.nnsight_requests
-        # Registered blocks are collected off the scheduler's own finished set:
-        # a request nobody traced has no collect coming for it, and this is the
-        # one place the runner is told it is over.
-        if scheduler_output.finished_req_ids:
-            requests.harvest(scheduler_output.finished_req_ids)
         requests.add(
             scheduler_output.scheduled_new_reqs, self.nnsight_persistent_objects
         )
-        # input_batch order, not the scheduler's: the batch is condensed and may be
-        # reordered after the scheduler counts tokens, and the forward's tensors
-        # follow the batch.
-        tokens = scheduler_output.num_scheduled_tokens
-        spans = [(rid, tokens[rid]) for rid in self.input_batch.req_ids]
-        requests.refuse_chunked(spans, self.requests)
+        requests.refuse_chunked(batch)
+        # The batch's order, not the scheduler's: the forward's tensors follow the batch.
+        spans = list(zip(batch.req_ids, batch.num_scheduled_tokens.tolist()))
         requests.scope(self.nnsight_model, spans)
-        return corrections
+        return batch
 
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
+        dummy_run: bool = False,
+        **kwargs: Any,
     ) -> Any:
+        # Profiling and graph capture run the forward with no request in it, and
+        # capture does so inside `capture_model`'s interleaver, which entering
+        # again here would close.
+        if dummy_run:
+            return super().execute_model(
+                scheduler_output, intermediate_tensors, dummy_run, **kwargs
+            )
+
+        # Registered blocks are collected off the scheduler's own finished set:
+        # a request nobody traced has no collect coming for it, and this is the
+        # one place the runner is told it is over.
+        if scheduler_output.finished_req_ids:
+            self.nnsight_requests.harvest(scheduler_output.finished_req_ids)
+
         # The worker runs each block directly as a mediator greenlet, with no Tracer
         # to open a trace scope, so a block's `.save()` would see no trace and raise.
         # Open one on this thread — the forward thread the greenlet is created and run
@@ -574,49 +601,35 @@ class NNsightGPUModelRunner(GPUModelRunner):
             inc()
 
         interleaver = self.nnsight_model.interleaver
-        # The scheduler picks this step's requests partway through the forward, so
-        # there is nothing to register yet. Entering empty leaves the interleaver
-        # with no worker to start — `Requests.scope` starts them as they appear.
+        # vLLM lays the batch out partway through this call, so there is nothing
+        # to register yet. Entering empty leaves the interleaver with no worker
+        # to start — `Requests.scope` starts them as they appear.
         interleaver.mediators = []
 
         with interleaver:
-            return super().execute_model(scheduler_output, intermediate_tensors)
+            return super().execute_model(scheduler_output, intermediate_tensors, **kwargs)
 
-    def _model_forward(self, *args: Any, **kwargs: Any) -> Any:
-        output = super()._model_forward(*args, **kwargs)
-        # The forward is done; what follows it — `compute_logits`, which runs the
-        # model's `logits_processor` on one row per request, then the sampler —
-        # is per-request, not per-token.
-        self.nnsight_requests.unflatten(self.nnsight_model)
-        return output
-
-    def _sample(self, logits: Any, *args: Any, **kwargs: Any) -> Any:
+    def sample(self, *args: Any, **kwargs: Any) -> Any:
         model = self.nnsight_model
-        interleaver = model.interleaver
-        # Re-entered for the per-request values; a worker that finished in the
-        # forward is parked nowhere and so is not served. Both are served through
-        # the eproperties the client reads (VLLM.logits, VLLM.samples), whose
+        # What this call produces — the logits, then the sampled ids — carries
+        # one row per request, not per token.
+        self.nnsight_requests.unflatten(model)
+        # Re-entered for those values; a worker that finished in the forward is
+        # parked nowhere and so is not served. Both are served through the
+        # eproperties the client reads (VLLM.logits, VLLM.samples), whose
         # `provide` hands the value over at the eproperty's own location, so the
-        # two sides can't drift out of sync. A tracer.stop() that unwinds a handle
-        # is swallowed by the interleaver, and the value stays as it was. vLLM has
-        # applied a structured-output request's grammar mask by now, so a block
-        # reads, and edits, the masked logits.
-        with interleaver:
-            logits = type(model).logits.provide(model, logits)
-        # The sampler scales its logits in place (temperature, top-k, top-p), so
-        # with a block in the step it gets a copy: a block's read is a view of
-        # these, and would otherwise be scaled after the block saved it.
-        if interleaver.mediators:
-            logits = logits.clone()
-        sampler_output = super()._sample(logits, *args, **kwargs)
-
-        with interleaver:
+        # two sides can't drift out of sync. The logits never leave this call:
+        # it computes them and hands them to the sampler, which serves them
+        # (see `NNsightSampler`).
+        with model.interleaver:
+            output = super().sample(*args, **kwargs)
+            sampler_output = output[0]
             sampler_output.sampled_token_ids = type(model).samples.provide(
                 model, sampler_output.sampled_token_ids
             )
 
         self._finish_erred(sampler_output)
-        return sampler_output
+        return output
 
     def _finish_erred(self, sampler_output: Any) -> None:
         """End any request whose worker raised — a ``tracer.stop()`` or a real error.
@@ -624,17 +637,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
         vLLM decides a request is done from the token it just sampled, so such a
         request is retired by forcing its sampled token to the end-of-sequence id the
         scheduler's stop check compares against — the request's own
-        ``sampling_params.eos_token_id`` — which then finishes it. Whether the
+        ``sampling_params.eos_token_id``, kept as ``Request.eos`` — which then finishes it. Whether the
         exception was an intentional stop or a real error only decides if it is
         re-raised at the client (see [`nnsight.intervention.errors`][nnsight.intervention.errors]). Only a
         request's traced worker ends it — a registered copy's error stays its own — so
         they are found on the tracked requests; its row in this step's output is
-        its ``batch_group`` (an erred worker is kept scheduled — see
-        [`Requests.scope`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.scope] — so [`Requests.unflatten`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.unflatten] gives it one every step).
+        its ``batch_group``, which [`Requests.unflatten`][nnsight.modeling.vllm.model_runners.GPUModelRunner.Requests.unflatten] set.
 
-        The forced token is re-applied every step the request survives, because the
-        scheduler's stop check can defer it: ``min_tokens`` holds the request open
-        until that many tokens are produced, at which point the forced EOS stops it.
+        An end-of-sequence token finishes a request whatever its ``min_tokens``.
         A request with no eos id — ``ignore_eos`` clears it — has nothing to force: it
         runs to ``max_tokens``, where it finishes naturally and its error is surfaced
         then; forcing a stop there would need vLLM's own abort, which does not surface
@@ -644,9 +654,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
             mediator = request.mediator
             if mediator is None or mediator.exception is None or mediator.batch_group is None:
                 continue
-            eos = self.requests[request.id].sampling_params.eos_token_id
-            if eos is not None:
-                sampler_output.sampled_token_ids[mediator.batch_group[0]] = eos
+            if request.eos is not None:
+                sampler_output.sampled_token_ids[mediator.batch_group[0]] = request.eos
 
     def collect_nnsight(
         self,
