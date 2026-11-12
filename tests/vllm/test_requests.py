@@ -330,18 +330,49 @@ class TestSeveralSequences:
         assert isinstance(hidden, torch.Tensor)
 
     @torch.no_grad()
-    def test_the_result_is_one_object_not_one_per_sequence(
-        self, vllm_gpt2, ET_prompt
-    ):
-        # A request has one output carrying n completions, and every sequence's
-        # block is served that same object — so it is not n values of anything.
+    def test_the_result_is_each_sequences_own(self, vllm_gpt2, ET_prompt):
+        # The engine's output carries n completions; each sequence's block is
+        # handed a copy holding its own, so the result is a list like any other.
         with vllm_gpt2.trace(
             ET_prompt, max_tokens=3, temperature=1.0, seed=0, n=2
         ) as tracer:
             result = tracer.result.save()
 
-        assert type(result).__name__ == "RequestOutput"
-        assert len(result.outputs) == 2
+        assert isinstance(result, list) and len(result) == 2
+        for index, output in enumerate(result):
+            assert type(output).__name__ == "RequestOutput"
+            assert [completion.index for completion in output.outputs] == [index]
+
+    @torch.no_grad()
+    def test_equal_values_are_still_one_per_sequence(self, vllm_gpt2, ET_prompt):
+        # The list does not depend on what was saved: `True` is one object in
+        # every run, and was once collapsed to a single value for it.
+        with vllm_gpt2.trace(ET_prompt, max_tokens=1, temperature=1.0, seed=0, n=3):
+            flag = nnsight.save(True)
+
+        assert flag == [True, True, True]
+
+    @torch.no_grad()
+    def test_a_registered_value_rides_its_own_sequences_result(
+        self, vllm_gpt2_uncached, ET_prompt
+    ):
+        # Each sequence's result carries what an installed block saved for that
+        # sequence. They once shared one output, which kept the last one's.
+        model = vllm_gpt2_uncached
+
+        with model.edit() as (tracer, edit):
+            first = nnsight.save(model.samples.item())
+        try:
+            with model.trace(
+                ET_prompt, max_tokens=1, temperature=1.0, seed=0, n=3
+            ) as tracer:
+                result = tracer.result.save()
+
+            assert [output.saves["first"] for output in result] == [
+                output.outputs[0].token_ids[0] for output in result
+            ]
+        finally:
+            edit.clear()
 
     @torch.no_grad()
     def test_each_completion_carries_its_own(self, vllm_gpt2_uncached, ET_prompt):
@@ -385,8 +416,8 @@ class TestSeveralSequences:
         first, second = (
             [int(step.flatten()[0]) for step in sequence] for sequence in steps
         )
-        assert first == list(result.outputs[0].token_ids)
-        assert second == list(result.outputs[1].token_ids)
+        assert first == list(result[0].outputs[0].token_ids)
+        assert second == list(result[1].outputs[0].token_ids)
 
     @torch.no_grad()
     def test_no_worker_is_left_behind(self, vllm_gpt2, ET_prompt):

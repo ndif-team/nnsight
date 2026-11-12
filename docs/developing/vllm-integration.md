@@ -195,7 +195,7 @@ lands on.
 
 `attach` sets `output.saves` (trace and registered values together) and
 `output.nnsight_saves` (the trace's own), plus `nnsight_error`. The separation is
-load-bearing: `_collect` feeds only `nnsight_saves` to `merge_shared_saves`, which
+load-bearing: `_collect` feeds only the trace's own saves to `merge_shared_saves`, which
 reads a name saved across several requests as one shared container and would
 otherwise fold a sweep's per-request values into one.
 
@@ -215,7 +215,10 @@ arrival, taking the child reading only when the parent it names is one the engin
 asked about — so an id that merely starts with digits and an underscore is not
 mistaken for a second sequence. The flat `saves`/`registered` are the primary
 sequence's; `attach` puts each sequence's on `output.outputs[i].saves` and the trace's own on
-`output.nnsight_sequences`, which `VLLM._collect` pushes back as a list.
+`output.nnsight_sequences`. `VLLM._collect` and the serve handler pass every run's saves, in
+order, to `collect.merge_run_saves`. `tracer.result` is served as a copy per sequence holding
+that sequence's completion; so that the output has every sequence's, the serve handler submits
+with `output_kind=FINAL_ONLY` and the async backend keeps each sequence's latest from the stream.
 
 **Every rank winds up its own workers; only one reports.** Each rank ran the block,
 so each holds a worker, a greenlet, and whatever that greenlet captured — all of it

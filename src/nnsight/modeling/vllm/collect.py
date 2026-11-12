@@ -68,21 +68,16 @@ def merge_shared_saves(mediators: list, per_request_saves: list) -> dict:
 
 
 def merge_run_saves(runs: list) -> dict:
-    """Each saved name across a trace's runs: one value, or a list where the runs differ.
+    """Each saved name across a trace's runs: the value if one run saved it, else the list.
 
     Runs are in order: invoke by invoke, and sampled sequence by sequence within
-    one. Runs that all saved the same object (``tracer.result``, one output per
-    request) keep that one object. The local push and the serve response both use
-    this, so they read the same.
+    one. The local push and the serve response both use this, so they read the same.
     """
     values: dict[str, list] = {}
     for saves in runs:
         for name, value in saves.items():
             values.setdefault(name, []).append(value)
-    return {
-        name: found if any(other is not found[0] for other in found) else found[0]
-        for name, found in values.items()
-    }
+    return {name: found if len(found) > 1 else found[0] for name, found in values.items()}
 
 
 class _CompactPickler(pickle.Pickler):

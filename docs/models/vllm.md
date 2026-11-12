@@ -308,7 +308,8 @@ patched invoke per layer.
 
 `n=k` asks vLLM for k continuations of one prompt, and it fans the request into a
 child per sequence — so your block runs k times, once per sequence, against that
-sequence's own rows. Saved names come back as a list here for the same reason:
+sequence's own rows. Every saved name comes back as a list here for the same reason,
+`tracer.result` included:
 
 ```python
 with model.trace(prompt, max_tokens=5, temperature=1.0, n=3) as tracer:
@@ -316,14 +317,17 @@ with model.trace(prompt, max_tokens=5, temperature=1.0, n=3) as tracer:
     result = tracer.result.save()
 
 hidden[1]                        # sequence 1's
-result.outputs[1].text           # what sequence 1 sampled
+result[1].outputs[0].text        # what sequence 1 sampled
 ```
 
-`tracer.result` is **not** a list: the sequences are its `outputs[i]`. Where you hold outputs
-rather than variables (async, `serve=`, plain `generate` with an edit), sequence *i*'s values are
-`output.outputs[i].saves[...]`; `output.saves` is the primary sequence's. On an **async** engine
-each streamed output carries only the completions that ended that step — accumulate by
-`completion.index`, or read the finished output's `nnsight_sequences`.
+Each `result[i]` is a `RequestOutput` holding sequence *i*'s completion, with whatever an
+installed edit saved for that sequence on `result[i].saves`. With several invokes too, the list
+runs invoke by invoke, then sequence by sequence: `[a0, a1, b0, b1]` for two invokes at `n=2`.
+
+Where you hold outputs rather than variables (async, plain `generate` with an edit), sequence
+*i*'s values are `output.outputs[i].saves[...]`; `output.saves` is the primary sequence's. On an
+**async** engine each streamed output carries only the completions that advanced that step —
+accumulate by `completion.index`, or read the finished output's `nnsight_sequences`.
 
 ## Special properties
 
