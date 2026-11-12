@@ -160,7 +160,8 @@ Two consequences:
   so the `handle` on `{base}.fn` is a no-op and the cached copy is reused. That is
   what makes a drill survive generation steps.
 
-Kernel sites (`intervention/kernel.py`) are served by a shim installed on each
+Kernel sites (`intervention/kernel.py`; the supported kernels are the catalog rows
+in `intervention/attention.py` and `modeling/kernels/__init__.py`) are served by a shim installed on each
 registered kernel function while an interleaver is open (`F.scaled_dot_product_attention`,
 the eager attention function of each modeling module loaded by a `TransformersModel`,
 the function in a hub wrapper's `implementation` cell, and the entries of the

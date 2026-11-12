@@ -3,7 +3,7 @@ title: Kernel Sites
 one_liner: Read intermediate values from fused kernels without switching to eager execution: attention probabilities, scores, and logsumexp (`attn.kernel.probs(...)`), recurrent states from gated delta rule, Kimi delta attention, Mamba2, and Mamba layers (`mixer.kernel.states(...)`), and per-expert rows from grouped mixture-of-experts forwards (`experts.kernel.expert_output(...)`).
 tags: [usage, kernel, attention, intervention]
 related: [docs/usage/source.md, docs/patterns/attention-patterns.md, docs/patterns/per-head-attention.md, docs/usage/access-and-modify.md, docs/usage/iteration.md, docs/errors/module-never-fired.md]
-sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/attention.py, src/nnsight/intervention/recurrent.py, src/nnsight/intervention/experts.py, src/nnsight/intervention/source.py, src/nnsight/intervention/interleaver.py, src/nnsight/modeling/transformers.py, tests/test_kernel.py]
+sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/sites.py, src/nnsight/intervention/attention.py, src/nnsight/modeling/kernels/__init__.py, src/nnsight/modeling/kernels/eager.py, src/nnsight/modeling/kernels/recurrent.py, src/nnsight/modeling/kernels/experts.py, src/nnsight/intervention/source.py, src/nnsight/intervention/interleaver.py, src/nnsight/modeling/transformers.py, tests/test_kernel.py]
 ---
 
 # Kernel Sites
@@ -406,6 +406,35 @@ also reaches the local variables of the fused forwards in expert-sorted order
 (`experts.source.experts_forward_1.source.proj_out_2.output`), whereas the
 `.kernel` sites reorder them back into token order.
 
+## Supported kernels
+
+Each row is one entry of a catalog in the source: `CATALOG` in
+`intervention/attention.py` for PyTorch's own kernel, and `CATALOG` in
+`modeling/kernels/__init__.py` for the kernels transformers models call. A
+catalog row names the kernel function, the family of sites it serves, how the
+function is found, and its serve function.
+
+| Kernel | Family | Sites | How it is found |
+|---|---|---|---|
+| `scaled_dot_product_attention` | attention | `lse`, `scores`, `probs` | The attribute of `torch.nn.functional`, registered when nnsight is imported. |
+| `eager_attention_forward` | attention | `lse`, `scores`, `probs` | Every `*eager_attention_forward` function in the model's modeling modules. |
+| `grouped_mm_experts_forward` | experts | `expert_input`, `expert_activation`, `expert_output` | The `grouped_mm` entry of transformers' experts-implementation mapping. |
+| `batched_mm_experts_forward` | experts | same | The `batched_mm` entry of that mapping. |
+| `chunk_gated_delta_rule` | recurrent | `chunk_states`, `states` | The hub-kernel wrapper of that name, running transformers' Python reference. |
+| `fused_recurrent_gated_delta_rule` | recurrent | same | Same, for the single-token decode kernel. |
+| `chunk_kda` | recurrent | same | Same, for Kimi delta attention. |
+| `fused_recurrent_kda` | recurrent | same | Same, for its single-token decode kernel. |
+| `mamba_chunk_scan_combined` | recurrent | same | Same, for Mamba2's chunked scan. |
+| `selective_state_update` | recurrent | same | Same, for Mamba2's single-token decode update. |
+| `selective_scan_fn` | recurrent | same | Same, for Mamba1's selective scan. |
+| `fla.chunk_gated_delta_rule` | recurrent | same | The hub-kernel wrapper of that name, running the `fla` library's kernel. |
+| `fla.fused_recurrent_gated_delta_rule` | recurrent | same | Same, for `fla`'s single-token decode kernel. |
+
+A hub-kernel wrapper calls the library kernel when the library is installed and
+the Python reference otherwise, so one model is served by one of the two rows
+that share a name. To support another kernel, write its serve function and add
+a row; `kernel.register_catalog(catalog, context)` registers a catalog.
+
 ## Limits
 
 - **Reads only:** A site cannot be assigned to. To modify attention scores, add
@@ -441,7 +470,8 @@ also reaches the local variables of the fused forwards in expert-sorted order
 - **Submodule name collisions:** A submodule named `kernel` is accessed as
   `E_kernel` ([access-and-modify](access-and-modify.md#overloaded-names)).
 - **Registering a custom kernel:**
-  `nnsight.intervention.kernel.register(fn, serve, *holders)` associates a
+  `nnsight.intervention.kernel.register(fn, serve, *holders)` (what a catalog
+  row calls for each function it finds) associates a
   callable `fn` with a serve function `serve(fn, args, kwargs) -> (output,
   sites)` and the storage locations from which the model looks up `fn`:
   `Attr(module, name)` for a module attribute, `Attr(cell, "cell_contents")`

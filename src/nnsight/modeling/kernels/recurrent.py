@@ -59,9 +59,8 @@ How states and intermediates are captured across kernel implementations:
   only the final state, which during single-token decoding is the only token's
   state.
 
-`TransformersModel` registers the kernels referenced by its modeling module when
-the model is constructed (see `REFERENCE` and `LIBRARY`). The registry is
-process-wide.
+Each kernel is a row of the catalog in modeling/kernels/__init__.py, which
+`TransformersModel` registers when the model is constructed.
 
 .. code-block:: python
 
@@ -85,9 +84,9 @@ import torch
 import torch.nn.functional as F
 from torch._subclasses.fake_tensor import FakeTensor
 
-from . import kernel
-from .kernel import Provenance, Sites, Unavailable
-from .source import arguments, record
+from ...intervention import sites
+from ...intervention.sites import Provenance, Sites, Unavailable
+from ...intervention.source import arguments, record
 
 #: Epsilon added inside the square root by transformers' and fla's ``l2norm``.
 _L2NORM_EPS = 1e-6
@@ -151,12 +150,12 @@ class Recurrence(Sites):
             value = torch.stack(states, 1)
         else:
             value = self.boundaries.new_zeros((shape[0], 0, *shape[2:]), dtype=torch.float32)
-        value = kernel.select(value, 2, kernel.indices(spec.get("heads"), shape[2], value.device))
-        return kernel.squeeze(value, spec, {"heads": 2, axis: 1}).clone()
+        value = sites.select(value, 2, sites.indices(spec.get("heads"), shape[2], value.device))
+        return sites.squeeze(value, spec, {"heads": 2, axis: 1}).clone()
 
     def chunk_states(self, spec: dict[str, Any]) -> tuple[torch.Tensor, Provenance]:
-        kernel.check_axes(spec, "chunk_states", ("chunks", "heads"))
-        positions = kernel.offsets(spec.get("chunks"), self.count)
+        sites.check_axes(spec, "chunk_states", ("chunks", "heads"))
+        positions = sites.offsets(spec.get("chunks"), self.count)
         value = self._stack([self._boundary(i) for i in positions], spec, "chunks")
         kept = f"kept in {self.boundaries.dtype}" if self.boundaries.dtype is not torch.float32 else "fp32"
         final = f", index {self.chunks} final" if self.count > self.chunks else "; the kernel returned no final state"
@@ -167,9 +166,9 @@ class Recurrence(Sites):
         return value, Provenance("exact export", self.op_name, note)
 
     def states(self, spec: dict[str, Any]) -> tuple[torch.Tensor, Provenance]:
-        kernel.check_axes(spec, "states", ("tokens", "heads"))
-        positions = kernel.offsets(spec.get("tokens"), self.length)
-        kernel.warn_if_large((self.boundaries.shape[0], len(positions), *self.boundaries.shape[2:]), "states", "tokens=, heads=")
+        sites.check_axes(spec, "states", ("tokens", "heads"))
+        positions = sites.offsets(spec.get("tokens"), self.length)
+        sites.warn_if_large((self.boundaries.shape[0], len(positions), *self.boundaries.shape[2:]), "states", "tokens=, heads=")
         by_chunk: dict[int, set[int]] = {}
         for token in positions:
             by_chunk.setdefault(token // self.chunk_size, set()).add(token)
@@ -631,21 +630,3 @@ def serve_fla_gated_delta_recurrent(fn: Callable, args: tuple, kwargs: dict) -> 
     if bound["state_v_first"]:
         initial, final = initial.transpose(-1, -2), final.transpose(-1, -2)
     return output, Recurrence(torch.stack([initial, final], 1), None, 1, length, None, fn.__name__)
-
-
-#: Maps transformers hub-kernel names to the serve functions for their Python reference implementations.
-REFERENCE: dict[str, Callable] = {
-    "chunk_gated_delta_rule": serve_gated_delta_chunk,
-    "fused_recurrent_gated_delta_rule": serve_gated_delta_recurrent,
-    "chunk_kda": serve_kda_chunk,
-    "fused_recurrent_kda": serve_gated_delta_recurrent,
-    "mamba_chunk_scan_combined": serve_mamba2_chunk,
-    "selective_scan_fn": serve_mamba1_scan,
-    "selective_state_update": serve_mamba2_decode,
-}
-
-#: Maps ``(package, hub_kernel_name)`` pairs to the serve functions for external kernel libraries.
-LIBRARY: dict[tuple[str, str], Callable] = {
-    ("fla", "chunk_gated_delta_rule"): serve_fla_gated_delta_chunk,
-    ("fla", "fused_recurrent_gated_delta_rule"): serve_fla_gated_delta_recurrent,
-}

@@ -3,7 +3,7 @@ title: Attention Patterns
 one_liner: Read attention probability matrices from the fused kernel with `attn.kernel.probs(...)`, or from `attn.output[1]` under eager execution, to see what each head attends to.
 tags: [pattern, interpretability, attention, kernel, source-tracing]
 related: [docs/usage/kernel.md, docs/usage/source.md, docs/patterns/per-head-attention.md, docs/patterns/logit-lens.md]
-sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/attention.py, src/nnsight/intervention/source.py, tests/test_kernel.py, tests/test_source.py]
+sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/sites.py, src/nnsight/intervention/attention.py, src/nnsight/modeling/kernels/eager.py, src/nnsight/intervention/source.py, tests/test_kernel.py, tests/test_source.py]
 ---
 
 # Attention Patterns

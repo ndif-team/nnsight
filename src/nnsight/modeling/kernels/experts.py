@@ -54,9 +54,9 @@ from typing import Any, Callable
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
-from . import kernel
-from .kernel import Batch, Provenance, Sites, Unavailable
-from .source import STATE, arguments, record
+from ...intervention import sites
+from ...intervention.sites import Batch, Provenance, Sites, Unavailable
+from ...intervention.source import STATE, arguments, record
 
 #: Local variable binding names in `grouped_mm_experts_forward` and
 #: `batched_mm_experts_forward` for the per-pair input, the gated or ungated
@@ -97,7 +97,7 @@ class Experts(Sites):
         return self._site(site, spec, batch)
 
     def _site(self, name: str, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
-        kernel.check_axes(spec, name, ("tokens", "slot", "expert"))
+        sites.check_axes(spec, name, ("tokens", "slot", "expert"))
         if "slot" in spec and "expert" in spec:
             raise ValueError(f"kernel site {name!r} takes slot= or expert=, not both")
         tokens, top_k = self.top_k_index.shape
@@ -116,8 +116,8 @@ class Experts(Sites):
             pairs = pairs.view(batch.total, length, top_k)[batch.start : batch.start + batch.size]
             index = index.view(batch.total, length, top_k)[batch.start : batch.start + batch.size]
             axis = 1
-        picked = kernel.indices(spec.get("tokens"), pairs.shape[axis], pairs.device)
-        pairs, index = kernel.select(pairs, axis, picked), kernel.select(index, axis, picked)
+        picked = sites.indices(spec.get("tokens"), pairs.shape[axis], pairs.device)
+        pairs, index = sites.select(pairs, axis, picked), sites.select(index, axis, picked)
         if "expert" in spec:
             expert = spec["expert"]
             if not isinstance(expert, int):
@@ -125,18 +125,18 @@ class Experts(Sites):
             if not -self.num_experts <= expert < self.num_experts:
                 raise IndexError(f"kernel site expert index {expert} is out of range for {self.num_experts} experts")
         else:
-            slots = kernel.indices(spec.get("slot"), top_k, pairs.device)
-            pairs, index = kernel.select(pairs, axis + 1, slots), kernel.select(index, axis + 1, slots)
+            slots = sites.indices(spec.get("slot"), top_k, pairs.device)
+            pairs, index = sites.select(pairs, axis + 1, slots), sites.select(index, axis + 1, slots)
         rows = self.buffers[name]
-        kernel.warn_if_large((*pairs.shape, rows.shape[-1]), name, "tokens=, slot= or expert=", rows.dtype)
+        sites.warn_if_large((*pairs.shape, rows.shape[-1]), name, "tokens=, slot= or expert=", rows.dtype)
         value = rows[pairs if self.inv_perm is None else self.inv_perm[pairs]]
         if "expert" in spec:
             mask = (index == expert % self.num_experts).unsqueeze(-1)
             value = torch.where(mask, value, value.new_zeros(())).sum(axis + 1)
-            value = kernel.squeeze(value, spec, {"tokens": axis})
+            value = sites.squeeze(value, spec, {"tokens": axis})
             note = f"the expert's {_ROWS[name]} from the forward, 0 for a token not routed to it"
         else:
-            value = kernel.squeeze(value, spec, {"slot": axis + 1, "tokens": axis})
+            value = sites.squeeze(value, spec, {"slot": axis + 1, "tokens": axis})
             note = f"the forward's {_ROWS[name]} in token order; slot k is the token's k-th routed expert (top_k_index[..., k])"
         return value, Provenance("exact export", self.op_name, note)
 

@@ -7,14 +7,16 @@ import weakref
 import pytest
 import torch
 
+from pathlib import Path
+
 import nnsight
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nnsight.intervention import kernel
+from nnsight.intervention import kernel, sites
 from nnsight.intervention.envoy import Envoy
 from nnsight.intervention.interleaver import OutOfOrderError
-from nnsight.intervention.kernel import Provenance
+from nnsight.intervention.sites import Provenance
 from nnsight.intervention.source import SourceNotAvailable
 
 
@@ -244,7 +246,7 @@ class TestIndexing:
                 envoy.kernel.lse(key=0)
 
     def test_large_unsliced_request_warns(self, monkeypatch, x):
-        monkeypatch.setattr(kernel, "_LARGE_SITE_BYTES", 100)
+        monkeypatch.setattr(sites, "_LARGE_SITE_BYTES", 100)
         envoy = Envoy(Mixer())
         with pytest.warns(UserWarning, match="materializes"):
             with envoy.trace(x):
@@ -398,6 +400,18 @@ class TestMemory:
         ref = build()
         gc.collect()
         assert ref() is None
+
+
+def test_every_catalog_row_is_in_the_supported_kernels_table():
+    from nnsight.intervention import attention
+    from nnsight.modeling import kernels
+
+    table = (Path(__file__).parent.parent / "docs" / "usage" / "kernel.md").read_text().split("## Supported kernels")[1].split("\n## ")[0]
+    rows = [*attention.CATALOG, *kernels.CATALOG]
+    assert len({spec.name for spec in rows}) == len(rows)
+    for spec in rows:
+        assert f"| `{spec.name}` | {spec.family} |" in table, spec.name
+    assert table.count("\n| `") == len(rows)
 
 
 class TestShims:
@@ -893,7 +907,7 @@ class _LateUser(nn.Module):
 
 
 def _no_sites(fn, args, kwargs):
-    return fn(*args, **kwargs), kernel.Unavailable("this call keeps nothing to read")
+    return fn(*args, **kwargs), sites.Unavailable("this call keeps nothing to read")
 
 
 def _plain_scan(x):
@@ -999,16 +1013,14 @@ class TestRecurrent:
     def test_model_built_while_a_trace_is_open_unwraps_the_shim(self):
         import transformers.models.qwen3_next.modeling_qwen3_next as modeling
 
-        from nnsight.intervention import recurrent
-
-        from nnsight.modeling.transformers import _hub_wrappers
+        from nnsight.modeling.kernels import _hub_wrappers, recurrent
 
         cell = next(cells for cells in _hub_wrappers(modeling) if cells["func_name"].cell_contents == "chunk_gated_delta_rule")["implementation"]
         torch_function = cell.cell_contents
         with Envoy(Mixer()).interleaver:
-            model = _wrap(_gated_delta_module())  # `_register_kernels` runs while the cell contains the shim
+            model = _wrap(_gated_delta_module())  # the catalog is registered while the cell contains the shim
         assert cell.cell_contents is torch_function
-        assert kernel._KERNELS[torch_function].serve is recurrent.REFERENCE["chunk_gated_delta_rule"]
+        assert kernel._KERNELS[torch_function].serve is recurrent.serve_gated_delta_chunk
         mixer = model.model.layers[0].linear_attn
         with model.trace(_ids(150)):
             states = mixer.kernel.chunk_states(chunks=-1).save()
@@ -1208,7 +1220,7 @@ def _pool():
     from transformers.integrations import moe
     from transformers.integrations.moe import use_experts_implementation
 
-    from nnsight.intervention import experts
+    from nnsight.modeling.kernels import experts
 
     # Register `grouped_mm_experts_forward` for standalone `Envoy` tests that do not construct a `TransformersModel`;
     # `use_experts_implementation` looks up the implementation in `ALL_EXPERTS_FUNCTIONS`.

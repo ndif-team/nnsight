@@ -66,7 +66,7 @@ from . import aliasing
 from .batching import Batcher
 from .editing import EditingTracer
 from .eproperty import eproperty
-from .kernel import Kernel
+from .sites import Kernel
 from .source import Source, install_source
 from .tracer import InterleavingTracer
 from .util import first_input, replace_first_input
@@ -652,7 +652,7 @@ class Envoy:
 
         Each attribute on `.kernel` names a site. Calling a site with optional
         slice keyword arguments returns the requested tensor with its
-        [`Provenance`][nnsight.intervention.kernel.Provenance] attached at
+        [`Provenance`][nnsight.intervention.sites.Provenance] attached at
         ``.provenance``. For attention modules calling
         ``scaled_dot_product_attention``, the sites are ``probs``, ``scores``, and
         ``lse``, indexed by ``heads=``, ``query=``, and ``key=``.
@@ -662,7 +662,7 @@ class Envoy:
             ...     p = model.model.layers[6].self_attn.kernel.probs(heads=4, query=-1).save()
 
         Returns:
-            A [`Kernel`][nnsight.intervention.kernel.Kernel] accessor for this module.
+            A [`Kernel`][nnsight.intervention.sites.Kernel] accessor for this module.
         """
         return Kernel(self)
 
