@@ -16,7 +16,7 @@ locator:
 * `experts_forward`: the experts wrapper looks up its implementation in
   ``ALL_EXPERTS_FUNCTIONS`` on each call.
 * `flash_function`: under ``attn_implementation="flash_attention_2"``,
-  ``_flash_attention_forward`` reads the dense and varlen FlashAttention
+  ``_flash_attention_forward`` reads the dense and varlen FlashAttention 2
   functions from two module globals on each call.
 * `hub_kernel`: recurrent kernels are called through
   ``use_kernel_func_from_hub_with_fallback`` wrappers, which invoke the callable
@@ -150,12 +150,16 @@ def hub_kernel(name: str, package: str | None = None) -> Callable[[Modeling], Lo
 
 
 def flash_function(name: str) -> Callable[[Modeling], Located]:
-    """Locate the FlashAttention function transformers holds in its module global ``name``.
+    """Locate the FlashAttention 2 function transformers holds in its module global ``name``.
 
     transformers fills ``_flash_fn`` and ``_flash_varlen_fn`` when a model is
-    loaded with a flash attention implementation and reads them on every call.
-    The global is ``None`` when no model asked for flash attention, and absent on
-    releases that imported the functions under their own names.
+    loaded with a flash attention implementation, records which one in
+    ``_loaded_implementation``, and reads the functions on every call. Only
+    FlashAttention 2 is located: the ``flash_attn`` package or the hub kernel
+    transformers falls back to without it. FlashAttention 3 functions share the
+    names and accept ``return_attn_probs`` but have not been validated. The
+    globals are absent on releases that imported the functions under their own
+    names, and then nothing is located.
     """
 
     def locate(context: Modeling) -> Located:
@@ -163,9 +167,12 @@ def flash_function(name: str) -> Callable[[Modeling], Located]:
             from transformers import modeling_flash_attention_utils as utils
         except ImportError:
             return
-        fn = unshimmed(vars(utils).get(name))
-        if fn is not None:
-            yield fn, (Attr(utils, name),)
+        found = vars(utils)
+        if "_loaded_implementation" not in found or "FLASH_ATTN_KERNEL_FALLBACK" not in found:
+            return
+        if found["_loaded_implementation"] not in ("flash_attention_2", utils.FLASH_ATTN_KERNEL_FALLBACK["flash_attention_2"]):
+            return
+        yield unshimmed(found[name]), (Attr(utils, name),)
 
     return locate
 

@@ -1274,6 +1274,17 @@ def _packed_flash(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_
 
 
 class TestFlash:
+    def test_only_flash_attention_2_functions_are_located(self, monkeypatch):
+        from transformers import modeling_flash_attention_utils as utils
+
+        from nnsight.modeling.kernels import transformers as catalog
+
+        monkeypatch.setattr(utils, "_flash_varlen_fn", _packed_flash)
+        hub = utils.FLASH_ATTN_KERNEL_FALLBACK["flash_attention_2"]
+        for implementation, expected in (("flash_attention_2", [_packed_flash]), (hub, [_packed_flash]), ("flash_attention_3", []), ("sdpa", [])):
+            monkeypatch.setattr(utils, "_loaded_implementation", implementation)
+            assert [fn for fn, _ in catalog.flash_function("_flash_varlen_fn")(None)] == expected, implementation
+
     def test_dense_call_serves_bottom_right_causal_probs_per_prompt(self):
         from nnsight.modeling.kernels import flash
 

@@ -222,7 +222,7 @@ kernel, the location never fires and the trace ends with `OutOfOrderError:
 - An MLP module, a full decoder block (request `.kernel` on its attention
   submodule instead), or a full MoE block (request `.kernel` on its `experts`
   submodule instead).
-- A model loaded with `attn_implementation="flash_attention_3"` or `"flash_attention_4"`: the request raises `ValueError`, since only FlashAttention 2 is served.
+- A model loaded with `attn_implementation="flash_attention_3"` or `"flash_attention_4"`. Only FlashAttention 2 is served.
 - An eager attention module whose forward pass computes attention inline
   instead of calling a module-level `*eager_attention_forward` function, such
   as GPT-2 with `reorder_and_upcast_attn=True` and older architectures (BLOOM,
