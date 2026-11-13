@@ -180,7 +180,7 @@ async def generate(request: Request) -> Response:
             _, (prompts, params, lora_requests), forward_kwargs = tracer.prepare(
                 tracer.info.code
             )
-            model._attach_mediators(params, **forward_kwargs)
+            model._attach_mediators(params, lora_requests, **forward_kwargs)
     except Exception as exception:
         logger.exception("Failed to build trace")
         return _payload({}, capture_exception(exception))

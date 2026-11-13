@@ -500,6 +500,9 @@ class VLLM(Remotable):
         prompts, params, lora_requests = [], [], []
         for inputs, kwargs in invokes:
             kwargs = dict(kwargs)
+            # Noted before it is taken out: an adapter this invoke named, `None`
+            # included, is not the trace's to fill in (see `_attach_mediators`).
+            named_adapter = {"lora_request"} & kwargs.keys()
             lora_requests.append(kwargs.pop("lora_request", None))
             prompts.append(self._prompt(*inputs))
             # Which installed edits this request runs — nnsight's, not a sampling
@@ -510,7 +513,7 @@ class VLLM(Remotable):
             # alone. Recorded rather than inferred: the value a caller passed
             # cannot be told from the one it would have had by default, and half
             # of vLLM's defaults are the obvious thing to type.
-            param.nnsight_named = frozenset(kwargs) | ({"edits"} if edits is not None else set())
+            param.nnsight_named = frozenset(kwargs) | named_adapter | ({"edits"} if edits is not None else set())
             param.nnsight_edits = self._edit_names(edits)
             params.append(param)
 
@@ -915,7 +918,7 @@ class VLLM(Remotable):
         self, prompts: list, params: list, lora_requests: list, **kwargs: Any
     ) -> Any:
         """Run the engine with this trace's workers attached to its requests."""
-        mediators = self._attach_mediators(params, **kwargs)
+        mediators = self._attach_mediators(params, lora_requests, **kwargs)
         try:
             outputs = self.vllm_entrypoint.generate(
                 prompts, sampling_params=params, lora_request=lora_requests
@@ -993,13 +996,14 @@ class VLLM(Remotable):
         for output in outputs:
             raise_deferred(getattr(output, "nnsight_error", None))
 
-    def _attach_mediators(self, params: list, **kwargs: Any) -> list:
+    def _attach_mediators(self, params: list, lora_requests: list, **kwargs: Any) -> list:
         """Serialize each invoke's worker into its request's ``extra_args``.
 
         ``extra_args`` is a stock ``SamplingParams`` field that vLLM already carries
         through to the worker, so the worker needs no transport of its own. Sampling
         settings given to ``trace`` itself fill in for any request that did not set
-        them on its own invoke.
+        them on its own invoke, and so does its ``lora_request``: vLLM takes adapters
+        beside the params, so that one is filled into ``lora_requests``.
 
         A worker with no batch group is an invoke with no prompt — it has no vLLM
         request to ride, since each invoke *is* one request. An empty ``tracer.invoke()``
@@ -1037,6 +1041,7 @@ class VLLM(Remotable):
         # the check below and rides `extra_args` beside the block.
         kwargs = dict(kwargs)
         trace_edits = self._edit_names(kwargs.pop("edits", None))
+        trace_adapter = kwargs.pop("lora_request", None)
         # Not on an nnsight-serve server: its edits arrive over HTTP, unseen by
         # this list, and the worker checks every request anyway.
         if not getattr(self, "_serving", False):
@@ -1053,9 +1058,11 @@ class VLLM(Remotable):
                     "(temperature, top_p, max_tokens, ...)."
                 )
 
-        for mediator, param in zip(attached, params):
+        for index, (mediator, param) in enumerate(zip(attached, params)):
             param.extra_args = {"nnsight_mediator": dumps(mediator)}
             named = getattr(param, "nnsight_named", frozenset())
+            if "lora_request" not in named:
+                lora_requests[index] = trace_adapter
             edits = getattr(param, "nnsight_edits", None) if "edits" in named else trace_edits
             if edits is not None:
                 param.extra_args["nnsight_edits"] = edits
