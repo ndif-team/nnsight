@@ -60,7 +60,7 @@ The intervention is compiled in the client but must run in the worker. NNsight u
 vLLM's built-in `SamplingParams.extra_args` — a dict field that survives both Ray
 (pickle) and multiprocessing (msgpack) — so no `SamplingParams` subclass is needed.
 
-`VLLM._attach_mediators(params, **kwargs)` (`vllm.py`) is the serialization
+`VLLM._attach_mediators(params, lora_requests, **kwargs)` (`vllm.py`) is the serialization
 boundary; for each mediator with a non-`None` `batch_group`:
 
 ```python

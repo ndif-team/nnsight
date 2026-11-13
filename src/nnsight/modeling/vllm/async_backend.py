@@ -86,7 +86,7 @@ class AsyncVLLMBackend(Backend):
                     "Async tracing takes a single prompt; use one tracer.invoke or a "
                     "direct input, not several invokes."
                 )
-            self.model._attach_mediators(params, **forward_kwargs)
+            self.model._attach_mediators(params, lora_requests, **forward_kwargs)
 
             self._request_id = str(uuid.uuid4())
             self._generator = self.model.vllm_entrypoint.generate(
