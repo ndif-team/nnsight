@@ -46,9 +46,9 @@ Pass `device=` (`"cpu"`, `"cuda:1"`, `0`) to put the whole model on one device; 
 
 Inferring the task asks the Hub for the checkpoint's metadata, and a fully cached
 checkpoint does not change that. Under `HF_HUB_OFFLINE=1` the first form raises
-`RuntimeError: You cannot infer task automatically within 'pipeline' when using
-offline mode`, so pass `task=` on an air-gapped machine or a cluster node with no
-outbound network.
+`OfflineModeIsEnabled: Cannot reach https://huggingface.co/api/models/openai-community/gpt2:
+offline mode is enabled`, so pass `task=` on an air-gapped machine or a cluster
+node with no outbound network.
 
 **Seq2seq checkpoints (T5, BART).** transformers 5 has no seq2seq pipeline task, and `text-generation` from a repo id silently builds the decoder-only class (`BartForCausalLM`, no encoder). Load the model yourself and pass the module:
 
