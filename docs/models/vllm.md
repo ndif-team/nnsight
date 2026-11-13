@@ -329,6 +329,39 @@ Where you hold outputs rather than variables (async, plain `generate` with an ed
 **async** engine each streamed output carries only the completions that advanced that step —
 accumulate by `completion.index`, or read the finished output's `nnsight_sequences`.
 
+### LoRA adapters
+
+Build the engine with `enable_lora=True` and name an adapter per request with vLLM's
+`LoRARequest`. The adapter is a PEFT directory (`adapter_config.json` and
+`adapter_model.safetensors`).
+
+```python
+from vllm.lora.request import LoRARequest
+
+model = VLLM("meta-llama/Llama-3.2-1B", dispatch=True, enable_lora=True, max_lora_rank=8)
+adapter = LoRARequest(lora_name="mine", lora_int_id=1, lora_path="/path/to/adapter")
+model.vllm_entrypoint.llm_engine.add_lora(adapter)   # load it now; raises if it cannot
+
+with model.trace(temperature=0.0, max_tokens=1, lora_request=adapter) as tracer:
+    with tracer.invoke(prompt):                       # the trace's adapter
+        adapted = model.logits.save()
+    with tracer.invoke(prompt, lora_request=None):    # opts out: the base model
+        base = model.logits.save()
+```
+
+- `lora_request=` goes on `trace`, `invoke` or a plain `generate`. On `trace` it is the default
+  for its invokes; an invoke that names its own, `None` included, keeps it.
+- `max_lora_rank` (vLLM's default is 16) has to cover the adapter's rank. `max_loras` (default 1)
+  is how many different adapters one step can hold.
+- A LoRA-wrapped layer's `.output` is the adapted value.
+- **Load the adapter with `add_lora` first.** A request naming an adapter the engine cannot load
+  (a missing path, a rank over `max_lora_rank`) kills the engine with `EngineDeadError`, as it
+  does in plain vLLM. `add_lora` raises an ordinary exception carrying the real message, and the
+  engine keeps serving.
+- Without `enable_lora`, a request naming an adapter raises `VLLMValidationError: Got lora_request
+  ... but LoRA is not enabled!`.
+- Over `serve=`, start the server with `--enable-lora True`; `lora_path` is read on the server.
+
 ## Special properties
 
 | Attribute | Description |
