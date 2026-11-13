@@ -3,7 +3,7 @@ title: vLLM Integration Internals
 one_liner: How NNsight injects interventions into vLLM's worker processes via SamplingParams.extra_args, serves forward/logits/sampling values to them, and streams sync/async/served results.
 tags: [internals, dev]
 related: [docs/developing/serialization.md, docs/developing/batching-internals.md, docs/developing/adding-a-new-runtime.md]
-sources: [src/nnsight/modeling/vllm/vllm.py, src/nnsight/modeling/vllm/batching.py, src/nnsight/modeling/vllm/async_backend.py, src/nnsight/modeling/vllm/tracer.py, src/nnsight/modeling/vllm/engines/engine.py, src/nnsight/modeling/vllm/model_runners/GPUModelRunner.py, src/nnsight/modeling/vllm/workers/GPUWorker.py, src/nnsight/modeling/vllm/serve/]
+sources: [src/nnsight/modeling/vllm/vllm.py, src/nnsight/modeling/vllm/batching.py, src/nnsight/modeling/vllm/async_backend.py, src/nnsight/modeling/vllm/tracer.py, src/nnsight/modeling/vllm/engines/engine.py, src/nnsight/modeling/vllm/model_runners/GPUModelRunner.py, src/nnsight/modeling/vllm/model_runners/GPUModelRunnerV2.py, src/nnsight/modeling/vllm/workers/GPUWorker.py, src/nnsight/modeling/vllm/serve/]
 ---
 
 # vLLM Integration Internals
@@ -80,7 +80,9 @@ tenants sharing the engine — are skipped.
 `NNsightGPUModelRunner(GPUModelRunner)` (`GPUModelRunner.py`) is installed by
 `NNsightGPUWorker`, which rebinds `gpu_model_runner.GPUModelRunner` to the nnsight
 subclass **before** `Worker.__init__` resolves it (`GPUWorker.py`) — vLLM's own
-startup is not patched. The runner enters the interleaver at three points:
+startup is not patched. This section describes vLLM's V1 runner; the V2 runner
+reaches the same points elsewhere (see **Which runner**). The runner enters the
+interleaver at three points:
 
 1. **Forward** — `execute_model` (`GPUModelRunner.py`): runs
    `super().execute_model(...)` inside `with interleaver:`, so the module
@@ -299,10 +301,27 @@ every rank via `collective_rpc("nnsight_register", ...)` and kept there.
 Worker RPCs are exposed on `NNsightGPUWorker`, not the runner —
 `collective_rpc` resolves method names on the worker.
 
-**Which runner.** `NNsightGPUModelRunner` subclasses vLLM's V1 GPU model runner
-(`vllm/v1/worker/gpu_model_runner.py`). `VLLM._require_v1_model_runner` forces
-`VLLM_USE_V2_MODEL_RUNNER=0` before the engine is built (workers inherit it) and
-refuses an explicit `1`, which would give an engine with no instrumentation.
+**Which runner.** vLLM chooses between its two GPU model runners per engine
+(`VllmConfig.use_v2_model_runner`, overridden by `VLLM_USE_V2_MODEL_RUNNER`), and
+nnsight does not steer it. `NNsightGPUWorker.init_device` swaps in the adapter for
+whichever was built (`ADAPTERS`): `NNsightGPUModelRunner` over the V1 runner
+(`vllm/v1/worker/gpu_model_runner.py`) or `NNsightGPUModelRunnerV2`
+(`GPUModelRunnerV2.py`) over the V2 runner (`vllm/v1/worker/gpu/model_runner.py`).
+Both inherit `NNsightRunner`: the tree, `Requests`, `_serve_logits`,
+`_serve_samples`, `_finish_erred`, `capture_model` and collection. Only the hook
+points differ:
+
+| | V1 | V2 |
+|---|---|---|
+| new and finished requests | `_update_states` | `add_requests` |
+| token spans (`scope`) | `_update_states`, off `input_batch.req_ids` | `prepare_inputs`, off the `InputBatch` it returns |
+| forward | `execute_model` | `execute_model` (a `dummy_run` passes through) |
+| `unflatten` | as `_model_forward` returns | as `execute_model` returns |
+| logits, samples | `_sample` | `sample` holds the interleaver open; `NNsightSampler`, swapped onto the runner's sampler, serves them in `__call__` and `sample` |
+
+The V2 runner replays a decode-only step from a full CUDA graph, which has no
+break points, so `_load` defaults a tapped engine to `cudagraph_mode="PIECEWISE"`
+and the V2 adapter refuses taps under a mode with full graphs.
 
 **Prefix caching.** A cached token runs no forward, so no controller sees it. A
 trace sets `skip_reading_prefix_cache` on its own request (`_attach_mediators`).

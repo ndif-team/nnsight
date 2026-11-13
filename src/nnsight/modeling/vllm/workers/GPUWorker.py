@@ -6,6 +6,10 @@ constructor state. `_load` names this class as vLLM's ``worker_cls``, a supporte
 engine argument, so no part of vLLM's own startup is patched — and a runner
 nnsight does not instrument is refused here, in the worker, rather than coming up
 silently uninstrumented.
+
+vLLM has two GPU model runners and chooses between them itself, per engine (its
+``use_v2_model_runner``, which ``VLLM_USE_V2_MODEL_RUNNER`` overrides). nnsight
+has an adapter for each and swaps in the one matching the runner vLLM built.
 """
 
 from __future__ import annotations
@@ -14,10 +18,18 @@ import pickle
 from typing import Any, Optional
 
 from vllm import envs
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 
 from ..model_runners.GPUModelRunner import NNsightGPUModelRunner
+from ..model_runners.GPUModelRunnerV2 import NNsightGPUModelRunnerV2
+
+# vLLM's runner class -> the nnsight subclass swapped in for it.
+ADAPTERS = {
+    GPUModelRunner: NNsightGPUModelRunner,
+    GPUModelRunnerV2: NNsightGPUModelRunnerV2,
+}
 
 
 class NNsightGPUWorker(Worker):
@@ -39,14 +51,15 @@ class NNsightGPUWorker(Worker):
             )
         super().init_device()
         runner = self.model_runner
-        if type(runner) is not GPUModelRunner:
+        adapter = ADAPTERS.get(type(runner))
+        if adapter is None:
             raise NotImplementedError(
-                f"nnsight instruments vLLM's GPUModelRunner, but this worker built "
-                f"{type(runner).__module__}.{type(runner).__name__} (the V2 runner, "
-                "or a runner from another platform). Unset VLLM_USE_V2_MODEL_RUNNER "
-                "to trace, or drop nnsight and use vLLM directly for that run."
+                f"nnsight instruments vLLM's two GPU model runners, but this worker "
+                f"built {type(runner).__module__}.{type(runner).__name__} (a runner "
+                "from another platform). Drop nnsight and use vLLM directly for "
+                "that run."
             )
-        runner.__class__ = NNsightGPUModelRunner
+        runner.__class__ = adapter
 
     def collect_nnsight(
         self,

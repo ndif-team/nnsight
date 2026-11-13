@@ -478,14 +478,18 @@ False ...}`.
 
 Everything on these vLLM pages was run on **0.27.1**, and the `vllm` extra pins
 `vllm>=0.27.1,<0.28`. nnsight targets vLLM's V1 engine and imports its internals directly
-(`vllm.tokenizers`, `vllm.v1.worker.gpu_model_runner`, `vllm.v1.engine.async_llm`), which move between
+(`vllm.tokenizers`, `vllm.v1.worker.gpu_model_runner`, `vllm.v1.worker.gpu.model_runner`,
+`vllm.v1.engine.async_llm`), which move between
 minor releases. A later vLLM installed over the pin is untested and can be wrong without an error: on
 0.32, CUDA-graph taps stop firing after the prefill.
 
-vLLM 0.27 ships a second GPU model runner and defaults to it for non-MoE models. nnsight's
-interventions subclass the original one, so nnsight builds the engine with
-`VLLM_USE_V2_MODEL_RUNNER=0`; setting it to `1` yourself is refused, since the engine would come up
-with no interventions installed. The V2 runner is not instrumented.
+vLLM 0.27 has two GPU model runners and chooses one per engine: the second one (Model Runner V2)
+for most non-MoE models, the original one otherwise. nnsight instruments both and follows vLLM's
+choice, so a trace reads the same on either. vLLM's own `VLLM_USE_V2_MODEL_RUNNER` (`0` or `1`)
+overrides the choice, and nnsight honours it. Two things differ on V2: a sampled draw comes from a
+different random stream, so the same `seed` gives different tokens on the two runners; and a
+`taps=` engine uses piecewise CUDA graphs only, which nnsight sets (a `cudagraph_mode` with full
+graphs is refused there, since a full graph replays without reaching a tap).
 
 ## Gotchas
 

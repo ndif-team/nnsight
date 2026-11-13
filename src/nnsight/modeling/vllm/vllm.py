@@ -342,8 +342,6 @@ class VLLM(Remotable):
         if meta_model is None:
             meta_model = self._load_meta(repo_id, **kwargs)
 
-        self._require_v1_model_runner()
-
         # A traced prompt has to be prefilled in one forward: chunked prefill
         # would hand a block a slice of its prompt one step and the rest the
         # next, and vLLM discards the sample of every chunk but the last. Off
@@ -389,6 +387,15 @@ class VLLM(Remotable):
                 compilation = kwargs.setdefault("compilation_config", {})
                 if isinstance(compilation, dict):
                     compilation.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
+            else:
+                # A tap is recorded into a breakable graph, which is vLLM's
+                # piecewise kind. Its V2 runner replays a decode-only step from
+                # a full graph, which has no break points, so the taps would
+                # stop firing after the prefill; piecewise graphs alone serve
+                # every step on both runners. A caller's own setting wins.
+                compilation = kwargs.setdefault("compilation_config", {})
+                if isinstance(compilation, dict):
+                    compilation.setdefault("cudagraph_mode", "PIECEWISE")
             kwargs["additional_config"] = {
                 **(kwargs.get("additional_config") or {}),
                 "nnsight_taps": list(self.taps),
@@ -417,39 +424,6 @@ class VLLM(Remotable):
             self.vllm_entrypoint = self._load_sync(repo_id, **kwargs)
 
         return meta_model
-
-    @staticmethod
-    def _require_v1_model_runner() -> None:
-        """Ask vLLM for the model runner nnsight instruments.
-
-        vLLM has two GPU model runners. nnsight instruments the original one
-        ([`NNsightGPUWorker`][nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker]
-        swaps in its subclass once the worker has built it, and refuses any other),
-        so the client asks for that one up front rather than letting the engine
-        come up only to be refused in the worker.
-
-        From vLLM 0.27 the second runner is the *default* for every non-MoE model
-        (`use_v2_model_runner` in vLLM's config: ``is_default_v2_architecture or
-        not is_moe``), so this is the ordinary case rather than an exotic one. The
-        switch is vLLM's own environment variable, which it consults ahead of its
-        defaults, and the engine's worker processes inherit it.
-
-        A caller who has asked for the other runner explicitly is told so, rather
-        than silently overridden or silently uninstrumented.
-        """
-        import os
-
-        key = "VLLM_USE_V2_MODEL_RUNNER"
-        asked = os.environ.get(key)
-        if asked not in (None, "", "0"):
-            raise NotImplementedError(
-                f"{key}={asked!r} selects vLLM's V2 GPU model runner, which "
-                "nnsight does not instrument yet — the engine would run with no "
-                "interventions installed. Unset it to trace, or drop nnsight and "
-                "use vLLM directly for that run."
-            )
-        # Older vLLM has no such setting and ignores it.
-        os.environ[key] = "0"
 
     def _resolve_taps(self, module: "Module") -> tuple[str, ...]:
         """Expand the tap patterns into full locations on the module tree.

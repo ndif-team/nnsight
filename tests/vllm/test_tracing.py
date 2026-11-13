@@ -220,7 +220,9 @@ class TestSampling:
     @torch.no_grad()
     def test_temperature_changes_samples(self, vllm_gpt2, MSG_prompt):
         with vllm_gpt2.trace(max_tokens=3) as tracer:
-            with tracer.invoke(MSG_prompt, temperature=0.8, top_p=0.95, seed=1):
+            # A seed whose draw differs from greedy on both of vLLM's runners,
+            # which draw from different random streams.
+            with tracer.invoke(MSG_prompt, temperature=0.8, top_p=0.95, seed=2):
                 sampled = list().save()
                 for _ in tracer.iter[0:3]:
                     sampled.append(vllm_gpt2.samples.item())
@@ -999,26 +1001,18 @@ class TestPromptForms:
 
 
 class TestModelRunnerSelection:
-    """nnsight instruments one of vLLM's two GPU model runners, and says so."""
+    """vLLM chooses between its two GPU model runners; nnsight instruments whichever it built."""
 
-    def test_it_asks_for_the_runner_it_instruments(self):
-        # Set before the engine is built, since the worker processes inherit it.
-        import os
-
-        from nnsight.modeling.vllm import VLLM
-
-        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
-        VLLM._require_v1_model_runner()
-        assert os.environ["VLLM_USE_V2_MODEL_RUNNER"] == "0"
-
-    def test_the_worker_swaps_in_its_runner_and_refuses_any_other(self, monkeypatch):
-        # The worker builds vLLM's runner in init_device; nnsight's subclass is
-        # swapped onto that instance, and anything else is a hard error there
-        # rather than an engine that comes up uninstrumented.
+    def test_the_worker_swaps_in_the_adapter_for_the_runner_vllm_built(self, monkeypatch):
+        # The worker builds vLLM's runner in init_device; the matching nnsight
+        # subclass is swapped onto that instance, and anything else is a hard
+        # error there rather than an engine that comes up uninstrumented.
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
         from vllm.v1.worker.gpu_worker import Worker
 
         from nnsight.modeling.vllm.model_runners.GPUModelRunner import NNsightGPUModelRunner
+        from nnsight.modeling.vllm.model_runners.GPUModelRunnerV2 import NNsightGPUModelRunnerV2
         from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
 
         monkeypatch.setattr(Worker, "init_device", lambda self: None)
@@ -1028,12 +1022,69 @@ class TestModelRunnerSelection:
         )
 
         worker.model_runner = object()
-        with pytest.raises(NotImplementedError, match="instruments vLLM's GPUModelRunner"):
+        with pytest.raises(NotImplementedError, match="two GPU model runners"):
             worker.init_device()
 
-        worker.model_runner = GPUModelRunner.__new__(GPUModelRunner)
-        worker.init_device()
-        assert type(worker.model_runner) is NNsightGPUModelRunner
+        for built, adapter in (
+            (GPUModelRunner, NNsightGPUModelRunner),
+            (GPUModelRunnerV2, NNsightGPUModelRunnerV2),
+        ):
+            worker.model_runner = built.__new__(built)
+            worker.init_device()
+            assert type(worker.model_runner) is adapter
+
+    def test_the_engine_runs_the_adapter_for_the_runner_vllm_chose(self, vllm_gpt2):
+        # Nothing here sets vLLM's switch, so the choice is vLLM's own.
+        engine = vllm_gpt2.vllm_entrypoint.llm_engine
+        chosen = (
+            "NNsightGPUModelRunnerV2"
+            if engine.vllm_config.use_v2_model_runner
+            else "NNsightGPUModelRunner"
+        )
+        built = engine.collective_rpc(lambda worker: type(worker.model_runner).__name__)
+        assert built == [chosen]
+
+    @torch.no_grad()
+    def test_the_other_runner_serves_a_trace_too(self, vllm_gpt2, ET_prompt):
+        # vLLM's switch picks the runner it would not have chosen for this model;
+        # a read, a logits edit and a replaced sample each land there as well.
+        import os
+
+        from nnsight.modeling.vllm import VLLM
+
+        default = vllm_gpt2.vllm_entrypoint.llm_engine.vllm_config.use_v2_model_runner
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0" if default else "1"
+        try:
+            other = VLLM(
+                "gpt2", tensor_parallel_size=1, gpu_memory_utilization=0.1, dispatch=True
+            )
+        finally:
+            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+        built = other.vllm_entrypoint.llm_engine.collective_rpc(
+            lambda worker: type(worker.model_runner).__name__
+        )
+        assert built == ["NNsightGPUModelRunner" if default else "NNsightGPUModelRunnerV2"]
+
+        rome = other.tokenizer.encode(" Rome")[0]
+        london = other.tokenizer.encode(" London")[0]
+        with other.trace(temperature=0.0, max_tokens=2) as tracer:
+            with tracer.invoke(ET_prompt):
+                hidden = other.transformer.h[5].output[0].save()
+                read = other.logits.clone().save()
+            with tracer.invoke(ET_prompt):
+                other.logits[:, rome] = 1e4
+                edited = other.samples.clone().save()
+            with tracer.invoke(ET_prompt):
+                other.samples[:] = london
+                following = list().save()
+                for _ in tracer.iter[1:2]:
+                    following.append(other.transformer.wte.input.clone())
+
+        assert hidden.shape[-1] == other.transformer.wte.weight.shape[-1]
+        assert other.tokenizer.decode(read.argmax(dim=-1)) == " Paris"
+        assert edited.flatten().tolist() == [rome]
+        # The replaced sample is the token the next step's forward was given.
+        assert following[0].flatten().tolist() == [london]
 
     def test_rays_compiled_graph_executor_is_refused(self, monkeypatch):
         # It runs the forward on a thread of its own, and a suspended block can
@@ -1052,20 +1103,6 @@ class TestModelRunnerSelection:
 
         with pytest.raises(NotImplementedError, match="compiled-graph Ray executor"):
             worker.init_device()
-
-    def test_asking_for_the_other_one_is_refused(self):
-        # Overriding it silently would be worse: the engine comes up with no
-        # instrumentation and the first collect fails with a missing method.
-        import os
-
-        from nnsight.modeling.vllm import VLLM
-
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
-        try:
-            with pytest.raises(NotImplementedError, match="V2 GPU model runner"):
-                VLLM._require_v1_model_runner()
-        finally:
-            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
 
 
 class TestScan:
