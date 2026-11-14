@@ -408,7 +408,7 @@ class TestCatalog:
         from nnsight.modeling.kernels import transformers as catalog
 
         table = (Path(__file__).parent.parent / "docs" / "usage" / "kernel.md").read_text().split("## Supported kernels")[1].split("\n## ")[0]
-        rows = [*attention.CATALOG, *catalog.CATALOG]
+        rows = [*attention.CATALOG, *catalog.CATALOG, *catalog.FLASH]
         assert len({spec.name for spec in rows}) == len(rows)
         for spec in rows:
             assert f"| `{spec.name}` | {spec.family} |" in table, spec.name
@@ -924,6 +924,25 @@ class Scan(nn.Module):
 
 
 class TestRecurrent:
+    def test_sites_are_served_when_the_kernels_package_wraps_the_reference(self, monkeypatch):
+        import transformers.models.qwen3_next.modeling_qwen3_next as modeling
+
+        def module_around(func):
+            """What ``kernels.use_kernel_forward_from_hub`` returns for a function: a module whose forward closes over it as ``func``."""
+
+            class Func(nn.Module):
+                def forward(self, *args, **kwargs):
+                    return func(*args, **kwargs)
+
+            return Func()
+
+        monkeypatch.setattr(modeling, "torch_chunk_gated_delta_rule", module_around(modeling.torch_chunk_gated_delta_rule))
+        model = _wrap(_gated_delta_module())
+        with model.trace(_ids(150)):
+            boundaries = model.model.layers[0].linear_attn.kernel.chunk_states().save()
+        assert boundaries.shape == (3, 4, 6, 8, 12)
+        assert boundaries.provenance.kind == "exact export"
+
     def test_gated_delta_chunk_states_match_the_per_token_reference(self, gated_delta):
         mixer = gated_delta.model.layers[0].linear_attn
         ids = _ids(150)  # two full 64-token chunks followed by a partial chunk
@@ -1250,15 +1269,21 @@ def _per_pair(experts_module, x, index):
 
 def _dense_flash(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1), softcap=0.0, alibi_slopes=None, deterministic=False, return_attn_probs=False):
     """Stand-in with FlashAttention 2's dense signature and return convention, computed in fp32 with the mask aligned bottom right."""
+    out, lse = _flash_math(q, k, v, softmax_scale, causal)
+    return (out, lse, None) if return_attn_probs else out
+
+
+def _flash_math(q, k, v, softmax_scale, causal):
+    """The stand-ins' shared computation, kept out of the kernel registry so a packed call does not shim its per-span calls."""
     scale = q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
     keys = k.float().repeat_interleave(q.shape[2] // k.shape[2], 2)
     scores = torch.einsum("bqhd,bkhd->bhqk", q.float(), keys) * scale
     if causal:
-        rows, cols = torch.arange(q.shape[1])[:, None], torch.arange(k.shape[1])[None, :]
+        rows, cols = torch.arange(q.shape[1], device=q.device)[:, None], torch.arange(k.shape[1], device=q.device)[None, :]
         scores = scores.masked_fill(cols > rows + (k.shape[1] - q.shape[1]), float("-inf"))
     values = v.float().repeat_interleave(q.shape[2] // v.shape[2], 2)
     out = torch.einsum("bhqk,bkhd->bqhd", torch.softmax(scores, -1), values).to(q.dtype)
-    return (out, torch.logsumexp(scores, -1), None) if return_attn_probs else out
+    return out, torch.logsumexp(scores, -1)
 
 
 def _packed_flash(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1), softcap=0.0, alibi_slopes=None, deterministic=False, return_attn_probs=False, block_table=None):
@@ -1266,24 +1291,104 @@ def _packed_flash(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_
     outs, lses = [], []
     for i in range(len(cu_seqlens_q) - 1):
         rows, cols = slice(cu_seqlens_q[i], cu_seqlens_q[i + 1]), slice(cu_seqlens_k[i], cu_seqlens_k[i + 1])
-        out, lse, _ = _dense_flash(q[None, rows], k[None, cols], v[None, cols], softmax_scale=softmax_scale, causal=causal, return_attn_probs=True)
+        out, lse = _flash_math(q[None, rows], k[None, cols], v[None, cols], softmax_scale, causal)
         outs.append(out[0])
         lses.append(lse[0])
     out = torch.cat(outs)
     return (out, torch.cat(lses, -1), None) if return_attn_probs else out
 
 
+def _batch(total, start, size):
+    """A `sites.Batch` narrowing as the base batcher does: rows ``[start, start + size)`` of a dim 0 equal to ``total``, else every row."""
+    return sites.Batch(total, start, size, lambda rows: rows[start : start + size] if rows.shape[0] == total else rows)
+
+
+@pytest.fixture
+def stand_in_flash(monkeypatch):
+    """Make transformers load the CPU stand-ins as its FlashAttention 2 functions, restoring its globals afterwards."""
+    from transformers import modeling_flash_attention_utils as utils
+
+    for name in ("_loaded_implementation", "_flash_fn", "_flash_varlen_fn", "_flash_with_kvcache_fn", "_pad_fn", "_unpad_fn", "_process_flash_kwargs_fn", "_process_with_kvcache_kwargs_fn"):
+        monkeypatch.setattr(utils, name, vars(utils)[name])
+    monkeypatch.setattr(utils, "_lazy_imports", lambda *args, **kwargs: (_dense_flash, _packed_flash, None, utils._pad_input, utils._unpad_input))
+    return utils
+
+
+def _llama(implementation):
+    """Build a two-layer Llama (4 query heads, 2 key-value heads) with the same weights for every ``implementation``."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(vocab_size=256, hidden_size=64, intermediate_size=128, num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2)
+    torch.manual_seed(0)
+    module = LlamaForCausalLM(config)
+    # Set after construction: constructing under flash_attention_2 checks for the package and a GPU.
+    module.config._attn_implementation = implementation
+    return module
+
+
 class TestFlash:
-    def test_only_flash_attention_2_functions_are_located(self, monkeypatch):
-        from transformers import modeling_flash_attention_utils as utils
+    @pytest.mark.parametrize("before", ["switched after wrapping", "another implementation loaded last"])
+    def test_sites_follow_the_implementation_loaded_when_the_trace_starts(self, stand_in_flash, before):
+        if before == "switched after wrapping":
+            model = _wrap(_llama("sdpa"))
+            model._module.config._attn_implementation = "flash_attention_2"
+        else:
+            other = lambda *args, **kwargs: None  # noqa: E731
+            stand_in_flash._loaded_implementation, stand_in_flash._flash_fn, stand_in_flash._flash_varlen_fn = "flash_attention_3", other, other
+            model = _wrap(_llama("flash_attention_2"))
+        reference = _wrap(_llama("sdpa"))
+        ids = _ids(6, batch=1).clamp(min=1)
+        with model.trace(ids):
+            probs = model.model.layers[0].self_attn.kernel.probs().save()
+        with reference.trace(ids):
+            expected = reference.model.layers[0].self_attn.kernel.probs().save()
+        assert probs.provenance.kernel == "_dense_flash"
+        assert torch.allclose(probs, expected, atol=1e-5)
 
-        from nnsight.modeling.kernels import transformers as catalog
+    def test_beam_search_gives_each_invoke_every_beam_as_sdpa_does(self, stand_in_flash):
+        first, second = _ids(6, batch=2).clamp(min=1).chunk(2)
 
-        monkeypatch.setattr(utils, "_flash_varlen_fn", _packed_flash)
-        hub = utils.FLASH_ATTN_KERNEL_FALLBACK["flash_attention_2"]
-        for implementation, expected in (("flash_attention_2", [_packed_flash]), (hub, [_packed_flash]), ("flash_attention_3", []), ("sdpa", [])):
-            monkeypatch.setattr(utils, "_loaded_implementation", implementation)
-            assert [fn for fn, _ in catalog.flash_function("_flash_varlen_fn")(None)] == expected, implementation
+        def read(model):
+            saved = []
+            with model.generate(max_new_tokens=1, num_beams=2, pad_token_id=0, eos_token_id=None) as tracer:
+                for prompt in (first, second):
+                    with tracer.invoke(prompt):
+                        saved.append(model.model.layers[0].self_attn.kernel.probs().save())
+            return saved
+
+        # generate expands the two prompts into four beam rows, which nnsight does not attribute to invokes.
+        for got, expected in zip(read(_wrap(_llama("flash_attention_2"))), read(_wrap(_llama("sdpa")))):
+            assert got.shape == expected.shape == (4, 4, 6, 6)
+            assert torch.allclose(got, expected, atol=1e-5)
+
+    def test_sequences_packed_into_one_row_are_served_separately(self, stand_in_flash):
+        model, reference = _wrap(_llama("flash_attention_2")), _wrap(_llama("sdpa"))
+        ids = _ids(8, batch=1).clamp(min=1)
+        # position_ids restarting at 0 pack two 4-token sequences into one row.
+        with model.trace({"input_ids": ids, "position_ids": torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]])}):
+            probs = model.model.layers[0].self_attn.kernel.probs().save()
+        assert probs.provenance.kernel == "_packed_flash"
+        assert probs.shape == (2, 4, 4, 4)
+        for index, sequence in enumerate(ids.chunk(2, dim=1)):
+            with reference.trace(sequence):
+                expected = reference.model.layers[0].self_attn.kernel.probs().save()
+            assert torch.allclose(probs[index], expected[0], atol=1e-5)
+
+    def test_the_padded_varlen_logsumexp_of_flash_attn_before_2_6_is_refused(self):
+        from nnsight.modeling.kernels import flash
+
+        def padded_flash(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1), softcap=0.0, alibi_slopes=None, deterministic=False, return_attn_probs=False, block_table=None):
+            out, lse, _ = _packed_flash(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale=softmax_scale, causal=causal, return_attn_probs=True)
+            padded = lse.new_zeros(len(cu_seqlens_q) - 1, lse.shape[0], max_seqlen_q)  # flash_attn 2.3.3 to 2.5.9: [batch, heads, max_seqlen_q]
+            return (out, padded, None) if return_attn_probs else out
+
+        torch.manual_seed(0)
+        q, k, v = torch.randn(8, 2, 4), torch.randn(8, 2, 4), torch.randn(8, 2, 4)
+        spans = torch.tensor([0, 5, 8])
+        output, reader = flash.serve(padded_flash, (q, k, v, spans, spans, 5, 5), {"causal": True})
+        assert torch.equal(output, _packed_flash(q, k, v, spans, spans, 5, 5, causal=True))
+        with pytest.raises(ValueError, match="flash_attn 2.6.0 or later"):
+            reader.read("probs", {}, None)
 
     def test_dense_call_serves_bottom_right_causal_probs_per_prompt(self):
         from nnsight.modeling.kernels import flash
@@ -1291,7 +1396,7 @@ class TestFlash:
         torch.manual_seed(0)
         q, k, v = torch.randn(2, 3, 4, 8), torch.randn(2, 7, 2, 8), torch.randn(2, 7, 2, 8)
         output, reader = flash.serve(_dense_flash, (q, k, v), {"causal": True})
-        probs, provenance = reader.read("probs", {}, sites.Batch(2, 1, 1))
+        probs, provenance = reader.read("probs", {}, _batch(2, 1, 1))
         _, lse, _ = _dense_flash(q, k, v, causal=True, return_attn_probs=True)
         keys = k.repeat_interleave(2, 2)
         expected = torch.softmax(torch.einsum("bqhd,bkhd->bhqk", q, keys) * 8**-0.5, -1)
@@ -1301,7 +1406,7 @@ class TestFlash:
         assert torch.allclose(probs.sum(-1), torch.ones(1, 4, 3), atol=1e-5)
         assert torch.allclose(probs[0, :, -1], expected[1, :, -1], atol=1e-6)  # the last row is unmasked
         assert provenance.kind == "exact reconstruction" and provenance.kernel == "_dense_flash"
-        assert torch.equal(reader.read("lse", {"heads": 3}, sites.Batch(2, 0, 2))[0], lse[:, 3])
+        assert torch.equal(reader.read("lse", {"heads": 3}, _batch(2, 0, 2))[0], lse[:, 3])
 
     def test_packed_call_serves_each_prompt_without_padding_rows(self):
         from nnsight.modeling.kernels import flash
@@ -1310,14 +1415,14 @@ class TestFlash:
         q, k, v = torch.randn(8, 2, 4), torch.randn(8, 2, 4), torch.randn(8, 2, 4)
         spans = torch.tensor([0, 5, 8])
         output, reader = flash.serve(_packed_flash, (q, k, v, spans, spans, 5, 5), {"causal": True})
-        short, _ = reader.read("probs", {}, sites.Batch(2, 1, 1))
+        short, _ = reader.read("probs", {}, _batch(2, 1, 1))
         expected, _, _ = _reference(q[5:].transpose(0, 1)[None], k[5:].transpose(0, 1)[None], is_causal=True)
         assert torch.equal(output, _packed_flash(q, k, v, spans, spans, 5, 5, causal=True))
         assert short.shape == (1, 2, 3, 3)
         assert torch.allclose(short, torch.softmax(expected, -1), atol=1e-6)
-        assert reader.read("scores", {"query": -1, "key": 0}, sites.Batch(2, 0, 1))[0].shape == (1, 2)
-        with pytest.raises(ValueError, match="key counts differ"):
-            reader.read("probs", {}, sites.Batch(2, 0, 2))
+        assert reader.read("scores", {"query": -1, "key": 0}, _batch(2, 0, 1))[0].shape == (1, 2)
+        with pytest.raises(ValueError, match="different lengths"):
+            reader.read("probs", {}, _batch(2, 0, 2))
 
     def test_an_argument_outside_the_modelled_set_makes_the_sites_unavailable(self):
         from nnsight.modeling.kernels import flash
@@ -1648,6 +1753,25 @@ class TestCuda:
         (single,) = read(flash, long)
         assert single.provenance.kernel == "flash_attn_func"
         assert torch.allclose(single, dense_long, atol=1e-5)
+        # A model loaded under SDPA and switched afterwards is served by the next trace.
+        switched = build("sdpa")
+        switched._module.set_attn_implementation("flash_attention_2")
+        (after_switch,) = read(switched, long)
+        assert after_switch.provenance.kernel == "flash_attn_func"
+        assert torch.allclose(after_switch, dense_long, atol=1e-5)
+
+        def beams(model):
+            saved = []
+            with model.generate(max_new_tokens=1, num_beams=2, pad_token_id=0, eos_token_id=None) as tracer:
+                for prompt in (long, long.flip(1)):
+                    with tracer.invoke(prompt):
+                        saved.append(nnsight.save(model.model.layers[0].self_attn.kernel.probs()))
+            return saved
+
+        # Beam search runs four rows for two invokes; each invoke gets all four, as under SDPA.
+        for got, expected in zip(beams(flash), beams(sdpa)):
+            assert got.shape == (4, 4, 12, 12)
+            assert torch.allclose(got, expected, atol=1e-5)
 
     def test_fla_chunk_states_match_the_reference_loop(self):
         pytest.importorskip("fla")

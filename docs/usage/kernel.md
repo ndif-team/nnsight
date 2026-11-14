@@ -3,7 +3,7 @@ title: Kernel Sites
 one_liner: Read intermediate values from fused kernels without switching to eager execution: attention probabilities, scores, and logsumexp (`attn.kernel.probs(...)`), recurrent states from gated delta rule, Kimi delta attention, Mamba2, and Mamba layers (`mixer.kernel.states(...)`), and per-expert rows from grouped mixture-of-experts forwards (`experts.kernel.expert_output(...)`).
 tags: [usage, kernel, attention, intervention]
 related: [docs/usage/source.md, docs/patterns/attention-patterns.md, docs/patterns/per-head-attention.md, docs/usage/access-and-modify.md, docs/usage/iteration.md, docs/errors/module-never-fired.md]
-sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/sites.py, src/nnsight/intervention/attention.py, src/nnsight/modeling/kernels/transformers.py, src/nnsight/modeling/kernels/eager.py, src/nnsight/modeling/kernels/recurrent.py, src/nnsight/modeling/kernels/experts.py, src/nnsight/intervention/source.py, src/nnsight/intervention/interleaver.py, src/nnsight/modeling/transformers.py, tests/test_kernel.py]
+sources: [src/nnsight/intervention/kernel.py, src/nnsight/intervention/sites.py, src/nnsight/intervention/attention.py, src/nnsight/modeling/kernels/transformers.py, src/nnsight/modeling/kernels/eager.py, src/nnsight/modeling/kernels/flash.py, src/nnsight/modeling/kernels/recurrent.py, src/nnsight/modeling/kernels/experts.py, src/nnsight/intervention/source.py, src/nnsight/intervention/interleaver.py, src/nnsight/modeling/transformers.py, tests/test_kernel.py]
 ---
 
 # Kernel Sites
@@ -61,8 +61,10 @@ unmasked row sums to 1 within a few fp32 ulps of the row's largest `|S|` (within
 
 Call `module.kernel.<site>(heads=, query=, key=)` on any attention module whose
 forward calls `torch.nn.functional.scaled_dot_product_attention` (directly or
-through one of transformers' attention interfaces) or calls transformers'
-`eager_attention_forward` under `attn_implementation="eager"` ([below](#under-eager-attention)).
+through one of transformers' attention interfaces), calls transformers'
+`eager_attention_forward` under `attn_implementation="eager"` ([below](#under-eager-attention)),
+or calls the FlashAttention 2 functions under
+`attn_implementation="flash_attention_2"` ([below](#flashattention-2)).
 
 | Site | Value | Shape (unsliced) | Provenance |
 |---|---|---|---|
@@ -188,9 +190,12 @@ attribute, but saving the tensor preserves `.provenance` across `torch.save` and
 - **GQA:** Query head `h` maps to key head `h // (Hq // Hkv)`, matching both
   `enable_gqa=True` and transformers' `repeat_kv`. The `heads=` argument always
   indexes query heads.
-- **Causal:** Causal calls use top-left alignment (query `i` attends to keys
-  `0..i`), matching PyTorch's `is_causal=True`. Whenever query and key lengths
-  differ, transformers passes an explicit attention mask.
+- **Causal:** Under `sdpa` and `eager`, causal calls use top-left alignment
+  (query `i` attends to keys `0..i`), matching PyTorch's `is_causal=True`, and
+  whenever query and key lengths differ transformers passes an explicit
+  attention mask. FlashAttention 2 aligns its causal mask bottom right: query
+  row `r` of `Lq` attends to keys `0..r + (Lk - Lq)`, and during decoding
+  transformers passes `causal=True` with no mask.
 - **Decoding:** During `generate`, each decode step calls the kernel with a
   single query row against the KV cache, so `probs()` at step `n` has shape
   `[batch, heads, 1, prompt + n]` under a dynamic cache. You can collect sites
@@ -223,6 +228,9 @@ kernel, the location never fires and the trace ends with `OutOfOrderError:
   submodule instead), or a full MoE block (request `.kernel` on its `experts`
   submodule instead).
 - A model loaded with `attn_implementation="flash_attention_3"` or `"flash_attention_4"`. Only FlashAttention 2 is served.
+- A FlashAttention 2 call made while a model with a different flash attention
+  implementation runs inside the same trace. transformers holds one flash
+  implementation at a time and swaps it on that model's forward.
 - An eager attention module whose forward pass computes attention inline
   instead of calling a module-level `*eager_attention_forward` function, such
   as GPT-2 with `reorder_and_upcast_attn=True` and older architectures (BLOOM,
@@ -408,29 +416,43 @@ also reaches the local variables of the fused forwards in expert-sorted order
 
 ## FlashAttention 2
 
-A model loaded with `attn_implementation="flash_attention_2"` serves the same
+A model running with `attn_implementation="flash_attention_2"` serves the same
 `lse`, `scores` and `probs` sites, from the `flash_attn` package or the
-`kernels-community/flash-attn2` kernel that transformers falls back to. The
-kernel returns its per-row logsumexp from the launch that fills the output, and
+`kernels-community/flash-attn2` kernel that transformers falls back to when the
+package is missing (the fallback needs the `kernels` package). The kernel
+returns its per-row logsumexp from the launch that fills the output, and
 `probs` is `exp(scores - lse)` in fp32 with provenance `exact reconstruction`.
+Each trace loads the model's implementation before it starts, so a model
+switched to FlashAttention 2 after loading (`set_attn_implementation`, or a
+remote request's `attn_implementation`) is served from its next trace.
 
-Two things differ from the `sdpa` path:
+Several things differ from the `sdpa` path:
 
-- transformers packs a padded batch into one row per real token before calling
-  the kernel. The query and key axes therefore cover a prompt's own tokens and
-  hold no padding positions: an invoke with a 7-token prompt batched beside a
-  12-token one gets `[1, heads, 7, 7]`. An invoke that itself holds prompts of
-  different lengths has no rectangular result and raises `ValueError`; use one
-  invoke per prompt.
+- transformers calls `flash_attn_varlen_func` instead of `flash_attn_func` for
+  a padded batch, which it packs into one row per real token, and for
+  sequences packed into one row through `position_ids`. The query and key axes
+  therefore cover a sequence's own tokens and hold no padding positions: an
+  invoke with a 7-token prompt batched beside a 12-token one gets
+  `[1, heads, 7, 7]`, and a row packing two 4-token sequences gets
+  `[2, heads, 4, 4]`. An invoke whose sequences have different lengths has no
+  rectangular result and raises `ValueError`; use one invoke per prompt.
+- The first axis counts the kernel's sequences. When those are the trace's
+  batch rows, each invoke gets its own; otherwise every invoke gets all of
+  them, as `.output` and the `sdpa` sites do. Beam search is the common case:
+  `generate(num_beams=2)` over two invokes runs four rows, and each invoke's
+  `probs()` holds all four.
 - A call is served only when every argument that changes the scores is one the
   reconstruction models. A sliding window, a logit soft cap, ALiBi slopes or
-  dropout makes the request raise `ValueError` naming the argument.
+  dropout makes the request raise `ValueError` naming the argument. So does a
+  `flash_attn_varlen_func` from `flash_attn` before 2.6.0, which returns its
+  logsumexp padded to `[batch, heads, max_seqlen_q]`.
 
 ## Supported kernels
 
 Each row below corresponds to an entry in a source catalog: `CATALOG` in
-`intervention/attention.py` for PyTorch's SDPA kernel, and `CATALOG` in
-`modeling/kernels/transformers.py` for kernels called by transformers models.
+`intervention/attention.py` for PyTorch's SDPA kernel, and `CATALOG` and
+`FLASH` in `modeling/kernels/transformers.py` for kernels called by
+transformers models (`FLASH` is registered at the start of each trace).
 Each catalog entry specifies a row label, a site family, a locator that yields
 the functions and holders to patch, and a serve function. Recurrent rows are
 labeled by their hub-kernel name (prefixed with `fla.` for the `fla` library
@@ -443,7 +465,7 @@ rows); the function a Python reference row registers has a different name
 | `scaled_dot_product_attention` | attention | `lse`, `scores`, `probs` | The attribute of `torch.nn.functional`, registered when nnsight is imported. |
 | `eager_attention_forward` | attention | `lse`, `scores`, `probs` | Every `*eager_attention_forward` function in the model's modeling modules. |
 | `flash_attn_func` | attention | same | The FlashAttention function transformers loads for `attn_implementation="flash_attention_2"` and calls for a batch without padding. |
-| `flash_attn_varlen_func` | attention | same | Same, for the function it calls for a padded batch. |
+| `flash_attn_varlen_func` | attention | same | Same, for the function it calls for a padded batch or sequences packed through `position_ids`. |
 | `grouped_mm_experts_forward` | experts | `expert_input`, `expert_activation`, `expert_output` | The `grouped_mm` entry of transformers' experts-implementation mapping. |
 | `batched_mm_experts_forward` | experts | same | The `batched_mm` entry of that mapping. |
 | `chunk_gated_delta_rule` | recurrent | `chunk_states`, `states` | The hub-kernel wrapper of that name, running transformers' Python reference. |

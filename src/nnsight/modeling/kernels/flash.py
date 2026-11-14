@@ -1,27 +1,36 @@
-"""Attention probabilities, scores, and logsumexp from the FlashAttention 2 package.
+"""Attention probabilities, scores, and logsumexp from FlashAttention 2.
 
-Under ``attn_implementation="flash_attention_2"`` transformers calls
-``flash_attn_func`` for a batch without padding and ``flash_attn_varlen_func``
-for a padded batch, which it first packs into one row per real token with
-``cu_seqlens`` marking each prompt's span. Neither function writes the
-probability matrix. Both compute the per-row logsumexp in fp32 and return it
-when called with ``return_attn_probs=True``, in the same launch that fills the
-output. `serve` asks for it, returns to the model what the model asked for, and
+Under ``attn_implementation="flash_attention_2"`` transformers calls the
+``flash_attn`` package's functions, or the same functions from the
+``kernels-community/flash-attn2`` hub kernel when the package is missing. It
+calls ``flash_attn_func`` for a batch without padding and
+``flash_attn_varlen_func`` otherwise: for a padded batch, which it first packs
+into one row per real token, for sequences packed into one row through
+``position_ids``, and when the caller passes ``cu_seq_lens_q`` and
+``cu_seq_lens_k``. ``cu_seqlens`` marks where each sequence starts. Neither
+function writes the probability matrix. Both compute the per-row logsumexp in
+fp32 and return it when called with ``return_attn_probs=True``, in the same
+launch that fills the output. `serve` asks for it, returns to the model what the model asked for, and
 builds a `Flash` reader that reconstructs ``exp(S - lse)`` from the fp32 scores,
 as intervention/attention.py does for PyTorch's SDPA.
 
-Sites are ``lse`` ``[batch, heads, queries]`` and ``scores`` and ``probs``
-``[batch, heads, queries, keys]``, with ``heads=``, ``query=`` and ``key=``.
-Because a padded batch runs packed, the query and key axes cover a prompt's own
-tokens and hold no padding positions. An invoke whose prompts have different
-lengths therefore has no rectangular result and raises ``ValueError``; one
-prompt per invoke always works.
+Sites are ``lse`` ``[sequences, heads, queries]`` and ``scores`` and ``probs``
+``[sequences, heads, queries, keys]``, with ``heads=``, ``query=`` and ``key=``.
+The trace's batcher decides which of the kernel's sequences belong to an invoke
+(`Batch.rows`): its own rows when the kernel ran one sequence per batch row, and
+every sequence otherwise, as for generation's beams or sequences packed into
+one row. Because a padded batch runs packed, the query and key axes cover a
+sequence's own tokens and hold no padding positions. An invoke whose sequences
+have different lengths therefore has no rectangular result and raises
+``ValueError``; one prompt per invoke always works.
 
 Causal masking follows FlashAttention 2.1 and later: the mask is aligned to the
 bottom right, so query row ``r`` of ``Lq`` attends to keys ``0..r + (Lk - Lq)``.
 A call is served only when every argument that changes the scores is one the
 reconstruction models; a sliding window, logit soft cap, ALiBi slopes, dropout,
-or any other non-default argument makes its sites `Unavailable`.
+or any other non-default argument makes its sites `Unavailable`. So does a
+varlen logsumexp in the padded ``[batch, heads, max_seqlen_q]`` layout that
+``flash_attn`` returned before 2.6.0.
 """
 
 from __future__ import annotations
@@ -66,15 +75,22 @@ def serve(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
     asked = bound["return_attn_probs"]
     # With dropout_p == 0 (checked above) the third element is an empty placeholder, so asking costs nothing.
     result = fn(**{**bound, "return_attn_probs": True})
-    return (result if asked else result[0]), Flash(name, bound, result[1])
+    output, lse = (result if asked else result[0]), result[1]
+    if bound["q"].dim() == 3 and lse.dim() != 2:
+        return output, Unavailable(
+            f"{name} returned its logsumexp as {tuple(lse.shape)}, the padded layout of flash_attn before 2.6.0; "
+            "its kernel sites need flash_attn 2.6.0 or later"
+        )
+    return output, Flash(name, bound, lse)
 
 
 class Flash(Sites):
     """Site reader for one ``flash_attn_func`` or ``flash_attn_varlen_func`` call.
 
     Both calls are held in packed form: ``q`` ``[query rows, heads, dim]``, ``k``
-    ``[key rows, kv heads, dim]``, the row at which each prompt starts on each
-    side, and the kernel's logsumexp as ``[heads, query rows]``.
+    ``[key rows, kv heads, dim]``, the rows at which each sequence starts and
+    ends on each side (``spans_q``, ``spans_k``), and the kernel's logsumexp as
+    ``[heads, query rows]``.
     """
 
     names = ("lse", "scores", "probs")
@@ -91,30 +107,32 @@ class Flash(Sites):
             lse = lse.transpose(0, 1).flatten(1)
         else:
             self.spans_q = bound["cu_seqlens_q"].tolist()
-            self.spans_k = bound["cu_seqlens_k"].tolist()
+            # transformers passes one tensor for both sides on a prefill; reading it once saves a device sync.
+            self.spans_k = self.spans_q if bound["cu_seqlens_k"] is bound["cu_seqlens_q"] else bound["cu_seqlens_k"].tolist()
         self.q: torch.Tensor = q
         self.k: torch.Tensor = k
         #: ``[heads, query rows]`` fp32, as the kernel returns it.
         self.exported: torch.Tensor = lse.detach()
         self.scale: float = bound["softmax_scale"] if bound["softmax_scale"] is not None else q.shape[-1] ** -0.5
         self.causal = bool(bound["causal"])
-        self.batch: Batch | None = None
 
     def read(self, site: str, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
-        self.batch = batch
-        return super().read(site, spec, batch)
+        if site not in self.names:
+            raise ValueError(f"this kernel has no site {site!r}; available: {', '.join(self.names)}")
+        return getattr(self, site)(spec, batch)
 
-    def _axes(self, spec: dict[str, Any], site: str, allowed: tuple[str, ...]) -> tuple:
-        """Resolve the worker's prompts and the requested heads, query rows and key columns into packed row indices."""
+    def _axes(self, spec: dict[str, Any], batch: Batch | None, site: str, allowed: tuple[str, ...]) -> tuple:
+        """Resolve the worker's sequences and the requested heads, query rows and key columns into packed row indices."""
         sites.check_axes(spec, site, allowed)
-        start, size = (0, len(self.spans_q) - 1) if self.batch is None else (self.batch.start, self.batch.size)
-        prompts = range(start, start + size)
+        count = len(self.spans_q) - 1
+        prompts = list(range(count)) if batch is None else batch.rows(count)
         queries = {self.spans_q[i + 1] - self.spans_q[i] for i in prompts}
         keys = {self.spans_k[i + 1] - self.spans_k[i] for i in prompts}
         if len(queries) != 1 or len(keys) != 1:
             raise ValueError(
-                f"kernel sites: {self.name} ran this invoke's {size} prompts packed and their key counts differ ({sorted(keys)}), "
-                "so they have no shared [queries, keys] shape; request sites from an invoke per prompt"
+                f"kernel sites: {self.name} ran this invoke's {len(prompts)} sequences packed with different lengths "
+                f"(queries {sorted(queries)}, keys {sorted(keys)}), so they have no shared [queries, keys] shape; "
+                "request sites from an invoke per prompt"
             )
         queries, keys = queries.pop(), keys.pop()
         device = self.q.device
@@ -137,19 +155,20 @@ class Flash(Sites):
             scores = scores.masked_fill(cols[None, :] > rows[:, None] + offset, float("-inf"))
         return scores
 
-    def lse(self, spec: dict[str, Any]) -> tuple[torch.Tensor, Provenance]:
-        heads, _, _, at_q, _, _ = self._axes(spec, "lse", ("heads", "query"))
+    def lse(self, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
+        heads, _, _, at_q, _, _ = self._axes(spec, batch, "lse", ("heads", "query"))
         provenance = Provenance("exact export", self.name, "the kernel's own per-row logsumexp, fp32")
         return sites.squeeze(self._lse(heads, at_q), spec, {"heads": 1, "query": 2}), provenance
 
-    def scores(self, spec: dict[str, Any]) -> tuple[torch.Tensor, Provenance]:
-        heads, rows, cols, at_q, at_k, offset = self._axes(spec, "scores", ("heads", "query", "key"))
+    def scores(self, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
+        heads, rows, cols, at_q, at_k, offset = self._axes(spec, batch, "scores", ("heads", "query", "key"))
         sites.warn_if_large((at_q.shape[0], heads.numel(), rows.numel(), cols.numel()), "scores", "heads=, query= or key=")
-        provenance = Provenance("exact reconstruction", self.name, "q . k * scale in fp32 from the kernel's inputs, causal mask added")
+        note = "q . k * scale in fp32 from the kernel's inputs" + (", causal mask added" if self.causal else "")
+        provenance = Provenance("exact reconstruction", self.name, note)
         return sites.squeeze(self._scores(heads, rows, cols, at_q, at_k, offset), spec, {"heads": 1, "query": 2, "key": 3}), provenance
 
-    def probs(self, spec: dict[str, Any]) -> tuple[torch.Tensor, Provenance]:
-        heads, rows, cols, at_q, at_k, offset = self._axes(spec, "probs", ("heads", "query", "key"))
+    def probs(self, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
+        heads, rows, cols, at_q, at_k, offset = self._axes(spec, batch, "probs", ("heads", "query", "key"))
         sites.warn_if_large((at_q.shape[0], heads.numel(), rows.numel(), cols.numel()), "probs", "heads=, query= or key=")
         probs = torch.exp(self._scores(heads, rows, cols, at_q, at_k, offset) - self._lse(heads, at_q).unsqueeze(-1))
         provenance = Provenance("exact reconstruction", self.name, "exp(scores - lse) in fp32, the kernel backward's own formula")
