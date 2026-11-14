@@ -343,6 +343,13 @@ parallelism, but expert parallelism is still open). A style added to a plan
 They are refused because no model in the test set exercises them, not because
 they are known to be ungatherable.
 
+**Kernel sites are local to each rank.** `attn.kernel.probs(heads=h)` ([kernel sites](../usage/kernel.md))
+indexes the query heads held by the local rank (`heads / tp` heads per rank), and rank 0 returns its
+local slice without an all-gather. Because reading a site performs no collective communication, all
+ranks stay in lockstep. Recurrent sites are full on every rank. MoE sites
+(`experts.kernel.expert_output(...)`) are unavailable under tensor or expert parallelism because each
+rank holds only its local shard of the experts, and requesting them raises `ValueError`.
+
 **Results differ slightly from one GPU**, because an all-reduce sums in a
 different order than one matmul. In `bfloat16` expect relative differences
 around 1e-3, growing with depth; in `float32`, around 1e-6. Greedy tokens match

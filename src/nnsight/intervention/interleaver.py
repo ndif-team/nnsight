@@ -97,6 +97,20 @@ class Pending(NamedTuple):
         return f"{self.provider}.i{self.iteration}"
 
 
+def counted(location: str) -> str:
+    """Return the location key whose visit counter tracks occurrences of ``location``.
+
+    A module's kernel location (``"{path}.kernel"``, see intervention/kernel.py)
+    only fires on calls where a worker is waiting on it. Counting it via ``"{path}.output"``, which the
+    module controller increments on every call, ensures that a ``tracer.iter``
+    request at step ``n`` targets the kernel call inside the module's ``n``-th
+    execution.
+    """
+    if location.endswith(".kernel"):
+        return location[: -len(".kernel")] + ".output"
+    return location
+
+
 class EarlyStopException(Exception):
     """Raised by an intervention to halt the model run early.
 
@@ -346,6 +360,7 @@ class Mediator:
 
     def occurrence(self, location: str) -> int:
         """How many times the model has reached ``location`` since this worker started."""
+        location = counted(location)
         counts = {} if self.interleaver is None else self.interleaver.counts
         return counts.get(location, 0) - self.counts_at_start.get(location, 0)
 
@@ -560,10 +575,16 @@ def dangling_unwind(mediator: "Mediator") -> tuple[BaseException, Optional[str]]
             ),
             None,
         )
+    detail = ""
+    if requester.provider is not None and requester.provider.endswith(".kernel"):
+        detail = (
+            "; a `.kernel` site is served only when the module's forward reaches a "
+            "registered fused kernel (see docs/usage/kernel.md)"
+        )
     if mediator.iteration == 0:
         return (
             OutOfOrderError(
-                f"'{requester}' was requested but the model already ran past it"
+                f"'{requester}' was requested but the model already ran past it{detail}"
             ),
             None,
         )
@@ -731,6 +752,13 @@ class Interleaver:
         # workers — including any registered by appending to the list rather than
         # replacing it, which is how the local path does it.
         self.reindex()
+        # Install kernel shims after starting all workers: a worker that raises
+        # before its first park makes `__enter__` re-raise from the `except` block
+        # above without `__exit__`, so an install placed earlier would leak the
+        # open-trace refcount.
+        from . import kernel  # lazy: kernel imports this module
+
+        kernel.install()
         return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
@@ -741,6 +769,9 @@ class Interleaver:
         it is not an error. Any other exception propagates.
         """
         self.interleaving = False
+        from . import kernel  # lazy: kernel imports this module
+
+        kernel.uninstall()
         # An EarlyStopException means an intervention asked to halt the run; it
         # has done its job unwinding the model, so swallow it here.
         return exc_type is EarlyStopException

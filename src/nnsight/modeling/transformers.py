@@ -55,11 +55,13 @@ from typing import TYPE_CHECKING, Any, Optional
 import warnings
 
 import torch
+from torch._guards import detect_fake_mode
 
 from .. import NNsightDeprecationWarning
 from ..intervention.envoy import Envoy, traceable
 from . import peft, processing
 from .huggingface import HuggingFaceModel
+from .kernels.transformers import register_flash, register_model
 
 if TYPE_CHECKING:
     from transformers import (
@@ -315,6 +317,8 @@ class TransformersModel(HuggingFaceModel):
             parent=self,
         )
         self._children.append(self.generator)
+        # Kernel sites for the fused kernels this model's modules call (modeling/kernels/transformers.py).
+        register_model(self._module)
 
     # -- loading -------------------------------------------------------------
 
@@ -584,6 +588,15 @@ class TransformersModel(HuggingFaceModel):
         if fn is None:
             fn = self._call
         return super().scan(*inputs, fn=fn, **kwargs)
+
+    def interleave(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        # Load the weights now, as `MetaMixin.interleave` would next, so the
+        # FlashAttention 2 functions are loaded and registered for the model
+        # that will run, before the interleaver installs the kernel shims.
+        if not self.dispatched and detect_fake_mode() is None:
+            self.dispatch()
+        register_flash(self._module)
+        return super().interleave(fn, *args, **kwargs)
 
     @traceable
     def generate(self, *inputs: Any, **kwargs: Any) -> Any:

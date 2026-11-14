@@ -174,6 +174,27 @@ below-median one; ablate by selection, not by weight. And the router's `.input` 
 `.output` have no batch axis (`(B*T, E)`), so per-token statistics over a padded batch
 quietly include the pad rows.
 
+Under transformers' fused MoE implementations (`grouped_mm` and `batched_mm`),
+the `experts` module's output is the sum across each token's routed slots of the
+expert's output row multiplied by its routing weight. You can read those
+per-expert rows from `experts.kernel.expert_output(...)` ([kernel](../usage/kernel.md))
+and subtract a single expert's contribution from `experts.output` in forward
+order, leaving the remaining experts' routing weights untouched:
+
+```python
+experts = model.model.layers[0].mlp.experts
+with model.trace(prompt):
+    index, weights = experts.inputs[0][1], experts.inputs[0][2]       # [tokens, top_k]
+    rows = experts.kernel.expert_output(expert=3)        # [batch, seq, hidden]; 0 where not routed to 3
+    weight = (weights * (index == 3)).sum(-1)            # the token's weight on expert 3, or 0
+    experts.output[:] = experts.output - weight[:, None] * rows.flatten(0, 1)
+    logits = model.output.logits.save()
+```
+
+This produces the same output as zeroing expert 3's `down_proj` weights
+(`tests/test_kernel.py::TestWorkloads`). Passing `weight[:, None] * rows` through
+the unembedding instead gives that expert's direct contribution to the logits.
+
 ## Interpretation tips
 
 - **Compare logits, log-probs, or task accuracy**, not activation norms.
@@ -194,5 +215,6 @@ quietly include the pad rows.
 - [attribution-patching](attribution-patching.md)
 - [per-head-attention](per-head-attention.md)
 - [invoke-and-batching](../usage/invoke-and-batching.md#comparing-prompts-one-trace-not-a-loop-of-traces)
+- [kernel](../usage/kernel.md): reading per-expert rows from fused MoE forwards.
 - `docs/usage/access-and-modify.md`
 - `docs/usage/barrier.md`
