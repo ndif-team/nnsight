@@ -14,12 +14,14 @@ uses it.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from nnsight.intervention.interleaver import Interleaver
 from nnsight.modeling.tp import (
+    MINIMUM_TRANSFORMERS,
     SIDES,
     UNSUPPORTED,
     TPFragments,
@@ -28,13 +30,15 @@ from nnsight.modeling.tp import (
 
 
 def _upstream_styles() -> set:
-    # The module `TPFragments._style_of` imports, so the table is checked against
-    # the registry the supported backend actually reads. On a transformers too
-    # old to have the DTensor backend this import is what fails, which is the
-    # point.
-    from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+    # The registry `TPFragments.instrument` reads, so the table is checked
+    # against what the supported backend actually has. Below the floor the
+    # table does not describe the installed transformers, and is not meant to.
+    pytest.importorskip("transformers", minversion=MINIMUM_TRANSFORMERS)
+    # Each of the two modules registers its own styles when imported.
+    from transformers.distributed import expert_parallel, tensor_parallel  # noqa: F401
+    from transformers.distributed.parallel_utils import ALL_PARALLEL_STYLES
 
-    return set(ALL_PARALLEL_STYLES._global_mapping)
+    return set(ALL_PARALLEL_STYLES)
 
 
 class _FakeMesh:
@@ -66,38 +70,26 @@ class _FakeEnvoy:
 ROOT = "model"
 
 
-def _tp_wrapped_forward():
-    """A stand-in for transformers' TP forward wrapper, recognised by qualname."""
-
-    class TensorParallelLayer:
-        @staticmethod
-        def install_forward():
-            def tp_forward(*args, **kwargs):
-                raise AssertionError("these tests instrument a tree, they do not run one")
-
-            return tp_forward
-
-    return TensorParallelLayer.install_forward()
-
-
 def _sharded(style: str | None, path: str = "model.thing", size: int = 2, **attrs):
     """A `TPFragments` that has walked a model sharding ``path`` as ``style``.
 
-    Built the way transformers describes a sharded model: the plan lives on the
-    *root*, keyed by each module's path below it, with a mesh saying it was
+    Built the way transformers describes a sharded model: the *root* resolves
+    the plan, keyed by each module's path below it, with a mesh saying it was
     really split — so the root is instrumented first, exactly as `Envoy.__init__`
     does before walking its children.
     """
+    # `instrument` refuses a transformers below the floor before reading a plan.
+    pytest.importorskip("transformers", minversion=MINIMUM_TRANSFORMERS)
+
+    plan = {path[len(ROOT) + 1 :]: style} if style is not None else {}
     root = torch.nn.Identity()
-    root.tp_plan = {path[len(ROOT) + 1 :]: style} if style is not None else {}
+    root.config = SimpleNamespace(distributed_config=None)
+    root._resolve_parallel_plans = lambda distributed_config: (plan, {}, {})
     root._device_mesh = _FakeMesh(size)
 
-    # Stands in for the wrapper transformers installs when it shards a module:
-    # `instrument` records a rule only for a module it actually wrapped. A
-    # Linear, because colwise and rowwise refuse a module without
+    # A Linear, because colwise and rowwise refuse a module without
     # `out_features`/`in_features`.
     module = torch.nn.Linear(8, 6)
-    module.__dict__["forward"] = _tp_wrapped_forward()
     for name, value in attrs.items():
         setattr(module, name, value)
 
@@ -125,10 +117,7 @@ class TestStyleCoverage:
     # release added is not stale on an install that predates it. Each names
     # the release that introduced it; drop an entry here once the floor
     # passes that release.
-    FORWARD_STYLES: set = {
-        "embedding_colwise",  # 5.21
-        "replicate",          # 5.21
-    }
+    FORWARD_STYLES: set = set()
 
     def test_no_rule_names_a_style_that_no_longer_exists(self):
         stale = (
@@ -248,7 +237,7 @@ class TestMaxTpSize:
         # A model whose plan nnsight cannot gather would fail at load; it must
         # not be *placed* as though it could be split.
         assert max_tp_size(self._config(
-            plan={"layers.*.mlp.experts": "megamoe_experts"},
+            plan={"layers.*.self_attn.kv_a_proj_with_mqa": "mla_kv_a_proj"},
             num_attention_heads=16, num_key_value_heads=16, intermediate_size=4096,
         )) is None
 
@@ -300,12 +289,13 @@ class TestBytesPerElement:
 class TestTransformersVersionFloor:
     """Sharding is refused on a transformers whose TP nnsight cannot read.
 
-    The floor is the DTensor rewrite. Below it the plan is stamped per module
-    rather than kept on the model, so nnsight finds nothing sharded — which does
-    not fail, it hands intervention code one rank's slice as the whole tensor.
-    That is the same shape of bug as the one caught on a live deployment running
-    5.14.1, where a tied-embedding model returned logits four times the
-    vocabulary width while the argmax — and so every eyeball check — stayed right.
+    The floor is the first transformers whose model resolves its own plan.
+    Below it nnsight would have to guess how the plan was applied, and a wrong
+    guess does not fail: it hands intervention code one rank's slice as the
+    whole tensor. That is the same shape of bug as the one caught on a live
+    deployment running 5.14.1, where a tied-embedding model returned logits four
+    times the vocabulary width while the argmax — and so every eyeball check —
+    stayed right.
     """
 
     def _check(self, monkeypatch, version: str):
@@ -317,19 +307,19 @@ class TestTransformersVersionFloor:
         monkeypatch.setattr(tp_fragments, "_version_checked", False)
         tp_fragments._check_transformers_version()
 
-    @pytest.mark.parametrize("version", ["5.15.1", "5.16.1", "5.18.0"])
+    @pytest.mark.parametrize("version", ["5.15.1", "5.19.0", "5.22.2"])
     def test_an_older_transformers_is_refused(self, monkeypatch, version):
         from nnsight.modeling.tp import UnsupportedTransformersVersion
 
-        with pytest.raises(UnsupportedTransformersVersion, match="5.19"):
+        with pytest.raises(UnsupportedTransformersVersion, match="5.23"):
             self._check(monkeypatch, version)
 
     @pytest.mark.parametrize(
-        "version", ["5.19.0", "5.19.1", "6.0.0", "5.19.0.dev0", "5.20.0rc1"]
+        "version", ["5.23.0", "5.23.1", "6.0.0", "5.23.0.dev0", "5.24.0rc1"]
     )
     def test_the_floor_and_above_are_allowed(self, monkeypatch, version):
         # Including pre-releases of the fixed series: an editable transformers
-        # checkout reports 5.19.0.dev0, which a plain >= would reject.
+        # checkout reports 5.23.0.dev0, which a plain >= would reject.
         self._check(monkeypatch, version)
 
     def test_it_only_runs_once(self, monkeypatch):
@@ -339,7 +329,7 @@ class TestTransformersVersionFloor:
 
         from nnsight.modeling.tp import fragments as tp_fragments
 
-        monkeypatch.setattr(transformers, "__version__", "5.19.0")
+        monkeypatch.setattr(transformers, "__version__", "5.23.0")
         monkeypatch.setattr(tp_fragments, "_version_checked", False)
         tp_fragments._check_transformers_version()
         monkeypatch.setattr(transformers, "__version__", "0.1.0")
@@ -380,7 +370,7 @@ class TestTheTwoGatesAgree:
     def test_a_refused_style_is_still_refused(self):
         from nnsight.modeling.tp import max_tp_size
 
-        assert max_tp_size(self._config({"layer.experts": "megamoe_experts"})) is None
+        assert max_tp_size(self._config({"layer.kv_a_proj": "mla_kv_a_proj"})) is None
 
     def test_a_known_style_still_places(self):
         from nnsight.modeling.tp import max_tp_size
@@ -434,17 +424,16 @@ class TestExpertParallelIsNotAutomaticallyRefused:
     def test_a_style_no_model_has_exercised_is_still_refused(self):
         """The refused set is now what nothing has been run against.
 
-        ``ep_router`` and ``grouped_gemm`` left it because an expert-parallel
-        model was actually traced end to end (`tests/tp/test_cpu_expert_parallel.py`)
-        and their values proved to need no gather at all. The rest stay refused
-        for the reason the table has always given: reading a style's transforms
-        is not the same as having run one.
+        ``grouped_gemm`` left it because an expert-parallel model was actually
+        traced end to end (`tests/tp/test_cpu_expert_parallel.py`) and its
+        values proved to need no gather at all. The rest stay refused for the
+        reason the table has always given: reading a style's transforms is not
+        the same as having run one.
         """
         from nnsight.modeling.tp import SIDES, UNSUPPORTED
 
-        assert "megamoe_experts" in UNSUPPORTED
+        assert "moe_identity_expert" in UNSUPPORTED
         assert "mla_kv_a_proj" in UNSUPPORTED
-        assert "ep_router" in SIDES
         assert "grouped_gemm" in SIDES
 
 

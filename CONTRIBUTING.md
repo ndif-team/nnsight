@@ -114,7 +114,7 @@ request and on pushes to `main` and `dev`.
 
 1. Branch from the latest `dev`: `git checkout -b my-feature origin/dev`.
 2. Make the change and add tests; run `CUDA_VISIBLE_DEVICES="" pytest tests/ -q --ignore=tests/vllm --ignore=tests/tp`
-   (drop `--ignore=tests/tp` on transformers >= 5.19).
+   (drop `--ignore=tests/tp` on transformers >= 5.23).
    Update the docs the change affects (see [Documentation](#documentation)).
 3. Commit with an `area: summary` subject (e.g. `tracing: ...`, `docs: ...`) and open
    a PR against `dev`.

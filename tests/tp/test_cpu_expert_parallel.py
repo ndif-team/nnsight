@@ -6,21 +6,20 @@ whole experts across ranks — and transformers expresses it with a separate pla
 (``base_model_ep_plan``) applied when expert parallelism is requested. The styles
 in it are not variations on colwise/rowwise:
 
-* ``ep_router`` leaves the router replicated and masks non-local experts in its
-  own post-transform, so at the handoff its value is already whole.
-* ``grouped_gemm`` shards expert *parameters* and installs an identity wrapper,
-  so it too has nothing to gather.
-* ``moe_tp_experts`` produces this rank's term of a sum, like a row-parallel
-  output.
+* ``grouped_gemm`` shards expert *parameters*, by expert, and wraps nothing, so
+  it has nothing to gather.
+* ``ep_dispatch_experts`` wraps the experts module: it brings each token to the
+  rank owning its expert and returns the combined answer, so the module's two
+  sides are whole and the wrapper stays inside nnsight's handoffs.
 
-All three used to be refused outright. Two of them turn out to need no gather at
-all, and the third was already described — but nothing had ever run the path, so
-"refused" and "correct" were indistinguishable. This is what tells them apart.
+The router carries no style at all: it is replicated, and every rank computes
+the same thing.
 
 The suite also covers the other way to shard a MoE model — plain tensor
-parallelism, no EP — because the two configurations resolve the *same* experts
-module to different styles, and getting that resolution wrong is invisible to
-both the dense TP suite and the EP run (see `MOE_TP_REPO` below).
+parallelism, no EP — where the *same* experts module is ``moe_tp_experts``
+instead and produces this rank's term of a sum, like a row-parallel output.
+Getting that resolution wrong is invisible to both the dense TP suite and the EP
+run (see `moe_tp_repo` below).
 
 Runs on CPU over gloo, like its tensor-parallel sibling, so CI covers it.
 """
@@ -34,6 +33,11 @@ import sys
 
 import pytest
 import torch
+
+from nnsight.modeling.tp import MINIMUM_TRANSFORMERS
+
+# Below the floor a sharded load is refused, so there is nothing to compare.
+pytest.importorskip("transformers", minversion=MINIMUM_TRANSFORMERS)
 
 WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ep_worker.py")
 EP_SIZE = 2
@@ -120,8 +124,9 @@ def test_the_ranks_agree(runs) -> None:
 @pytest.mark.parametrize(
     "name",
     [
-        "router_logits",   # replicated: masked only after the handoff
-        "experts_out",     # this rank's term of the expert sum
+        "router_logits",   # replicated
+        "experts_out",     # combined across ranks inside the module's wrapper
+        "nograd_experts_out",   # ... by an all-reduce rather than a token exchange
         "mlp_out",
         "logits",
         "edited_logits",   # an edit on the summed expert output, carried back
@@ -141,10 +146,10 @@ def test_rank0_matches_the_single_process_run(runs, name) -> None:
 # This is its own case because the raw plans collide: Qwen3-MoE names
 # ``layers.*.mlp.experts`` as ``moe_tp_experts`` in ``tp_plan`` and as
 # ``ep_dispatch_experts`` in ``ep_plan``, and transformers applies the EP entry
-# only when ``ep_size > 1``. nnsight has to resolve styles the way they were
-# *applied*: merging ``ep_plan`` in unconditionally made this run resolve the
-# experts to a style transformers never installed, strip the real wrapper, and
-# die on ``aten._grouped_mm got mixed torch.Tensor and DTensor``.
+# only when ``ep_size > 1``. nnsight reads the plans as transformers resolved
+# them, so the experts get the style that was *applied*: under the other one the
+# real wrapper is stripped and the forward dies on
+# ``aten._grouped_mm got mixed torch.Tensor and DTensor``.
 #
 # The model is generated here rather than pulled from the hub:
 # ``hf-internal-testing/tiny-random-Qwen3MoeForCausalLM`` predates 5.19's
