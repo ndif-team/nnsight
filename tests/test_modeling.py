@@ -1012,3 +1012,29 @@ class TestMetaAudio:
         assert all(p.device.type == "meta" for p in model._module.parameters())
         # The feature extractor is a real object, loaded off the repo id.
         assert model.feature_extractor is not None
+
+
+class TestMetaPreprocessors:
+    """``_loaded_preprocessors`` resolves the task's pipeline class whether
+    ``check_task`` stores ``impl`` as a class or as a dotted import path."""
+
+    def test_string_impl_resolves_preprocessor_flags(self, monkeypatch):
+        from transformers import pipelines
+
+        real_check_task = pipelines.check_task
+
+        def string_impl_check_task(task):
+            norm, targeted, opts = real_check_task(task)
+            impl = targeted["impl"]
+            dotted = (
+                impl
+                if isinstance(impl, str)
+                else f"{impl.__module__}.{impl.__qualname__}"
+            )
+            return norm, {**targeted, "impl": dotted}, opts
+
+        monkeypatch.setattr(pipelines, "check_task", string_impl_check_task)
+
+        stub = object.__new__(TransformersModel)
+        stub.task = "text-generation"
+        assert stub._loaded_preprocessors() == {"tokenizer"}

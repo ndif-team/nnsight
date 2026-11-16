@@ -348,7 +348,11 @@ class TransformersModel(HuggingFaceModel):
         # Which of tokenizer/image_processor/feature_extractor/processor the task's
         # pipeline class loads, read from its _load_* class flags (e.g. text-
         # generation loads a tokenizer; image-text-to-text loads a processor).
+        # The task registry stores `impl` either as the class or as its dotted
+        # import path.
         from transformers.pipelines import check_task
+
+        from ..util import from_import_path
 
         flags = {
             "tokenizer": "_load_tokenizer",
@@ -359,6 +363,8 @@ class TransformersModel(HuggingFaceModel):
         try:
             _, targeted, _ = check_task(self.task)
             impl = targeted["impl"]
+            if isinstance(impl, str):
+                impl = from_import_path(impl)
         except Exception:  # noqa: BLE001 - unknown/unset task: source them all
             return set(_PREPROCESSORS)
         return {attr for attr, flag in flags.items() if getattr(impl, flag, False)}
