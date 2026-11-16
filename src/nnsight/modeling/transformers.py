@@ -95,6 +95,22 @@ _PERSISTENT = {
 # tree) is built, so the client's meta model matches the server's real model.
 _META_MODEL_KWARGS = ("trust_remote_code", "torch_dtype", "dtype", "attn_implementation")
 
+# Kwargs held back from the meta pipeline, which wraps an already-built model and
+# so only loads preprocessors. These describe the build or where its weights land:
+# `config` was consumed by the build above, `device`/`device_map` would fight the
+# `device="meta"` the call passes itself, and the rest would reach a tokenizer or
+# processor from_pretrained that has no use for them. Everything else goes through,
+# because the fetch kwargs (cache_dir, token, local_files_only, subfolder, proxies)
+# decide where that preprocessor load looks for its files.
+_META_PIPELINE_DROPPED = (
+    "config",
+    "device",
+    "device_map",
+    "max_memory",
+    "quantization_config",
+    "model_kwargs",
+)
+
 # Architecture-class suffix -> pipeline task, for inferring a task from a pre-loaded
 # module (the pipeline factory can only infer a task from a repo-id string).
 _ARCH_TASK = {
@@ -475,16 +491,22 @@ class TransformersModel(HuggingFaceModel):
             # adapted model the server runs. No adapter weights are loaded here.
             peft.attach(model, self.peft, weights=False)
 
-        # The model is pre-built, so the meta pipeline only loads preprocessors;
-        # pass the pipeline-recognized arch kwargs (e.g. trust_remote_code) so a
-        # custom tokenizer loads correctly.
-        top_level, _ = _split_pipeline_kwargs(arch)
+        # The model is pre-built, so the meta pipeline only loads preprocessors.
+        # They are fetched like any checkpoint file, so they take the same split
+        # `_load` makes over the whole load rather than the architecture subset:
+        # a cache_dir or token that reaches the real load has to reach this one
+        # too, or a custom cache resolves here against the default cache and an
+        # offline build fails on files the caller already has.
+        top_level, model_kwargs = _split_pipeline_kwargs(
+            {k: v for k, v in kwargs.items() if k not in _META_PIPELINE_DROPPED}
+        )
         self.pipeline = pipeline(
             self.task,
             model=model,
             device="meta",
             **self._preprocessor_sources(),
             **top_level,
+            model_kwargs=model_kwargs,
         )
         self._sync()
         return model

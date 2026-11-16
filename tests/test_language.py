@@ -5,6 +5,10 @@ over generation, early stop, gradients, caching, sessions, and module aliasing.
 """
 
 import importlib.util
+import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 import torch
@@ -956,6 +960,110 @@ class TestScan:
         with gpt2.trace(PROMPT):
             expected = gpt2.output.logits.save()
         assert torch.equal(logits, expected)
+
+
+@pytest.fixture(scope="module")
+def tiny_repo_in_custom_cache(tmp_path_factory):
+    """A tiny checkpoint written into a custom hub cache, built without the Hub.
+
+    ``cache_dir`` only means anything for a repo id, so the checkpoint goes where
+    a download would have put it: huggingface_hub resolves a repo id to
+    ``<cache_dir>/<repo folder>/snapshots/<revision>``, taking the revision from
+    ``refs/main``. Returns the repo id and the cache directory holding it.
+    """
+    from huggingface_hub.file_download import repo_folder_name
+    from tokenizers import ByteLevelBPETokenizer
+    from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
+
+    repo_id, revision = "nnsight-test/tiny-gpt2", "0" * 40
+    cache = tmp_path_factory.mktemp("custom_hub_cache")
+    repo = cache / repo_folder_name(repo_id=repo_id, repo_type="model")
+    snapshot = repo / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text(revision)
+
+    bpe = ByteLevelBPETokenizer()
+    bpe.train_from_iterator(
+        ["the quick brown fox", "nnsight traces models"],
+        vocab_size=300,
+        min_frequency=1,
+        special_tokens=["<|endoftext|>"],
+    )
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=bpe,
+        unk_token="<|endoftext|>",
+        bos_token="<|endoftext|>",
+        eos_token="<|endoftext|>",
+        pad_token="<|endoftext|>",
+    )
+    tokenizer.save_pretrained(str(snapshot))
+    config = GPT2Config(
+        vocab_size=len(tokenizer),
+        n_positions=16,
+        n_embd=8,
+        n_layer=1,
+        n_head=1,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    GPT2LMHeadModel(config).save_pretrained(str(snapshot))
+    return repo_id, str(cache)
+
+
+class TestCacheDir:
+    """``cache_dir`` reaches the preprocessor load, not just the weight load.
+
+    The meta build wraps its model in a pipeline that sources preprocessors by
+    repo id, so a tokenizer is fetched there like any other checkpoint file. Given
+    a ``cache_dir`` the caller already populated, that fetch has to look in it;
+    resolving against the default cache instead fails outright offline, which is
+    the only honest way to assert it — a populated default cache would satisfy the
+    lookup either way. ``HF_HUB_CACHE`` is read when huggingface_hub is imported,
+    so the run needs its own interpreter.
+    """
+
+    _SCRIPT = textwrap.dedent(
+        """
+        import sys
+
+        from nnsight.modeling.transformers import TransformersModel
+
+        repo_id, cache_dir, dispatch = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+        model = TransformersModel(
+            repo_id, cache_dir=cache_dir, task="text-generation", dispatch=dispatch
+        )
+        assert model.dispatched is dispatch
+        assert model.tokenizer is not None
+        assert model.tokenizer("the quick brown fox")["input_ids"]
+        print("OK")
+        """
+    )
+
+    def _run(self, tiny_repo_in_custom_cache, tmp_path, dispatch):
+        repo_id, cache_dir = tiny_repo_in_custom_cache
+        empty_cache = tmp_path / "empty_hub_cache"
+        empty_cache.mkdir()
+        return subprocess.run(
+            [sys.executable, "-c", self._SCRIPT, repo_id, cache_dir, "1" if dispatch else "0"],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            env={
+                **os.environ,
+                "CUDA_VISIBLE_DEVICES": "",
+                "HF_HUB_CACHE": str(empty_cache),
+                "HF_HUB_OFFLINE": "1",
+            },
+        )
+
+    @pytest.mark.parametrize("dispatch", [False, True])
+    def test_cache_dir_resolves_the_preprocessors(
+        self, tiny_repo_in_custom_cache, tmp_path, dispatch
+    ):
+        result = self._run(tiny_repo_in_custom_cache, tmp_path, dispatch)
+        assert result.returncode == 0, result.stderr[-3000:]
+        assert "OK" in result.stdout
 
 
 def _has_lora(model) -> bool:
