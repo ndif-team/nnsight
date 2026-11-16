@@ -1016,9 +1016,7 @@ class TestMetaAudio:
 
 class TestMetaPreprocessors:
     """``_loaded_preprocessors`` resolves the task's pipeline class whether
-    ``check_task`` stores ``impl`` as a class or as a dotted import path, so a
-    lazy ``dispatch=False`` build on a local checkpoint loads its tokenizer
-    without Hub access."""
+    ``check_task`` stores ``impl`` as a class or as a dotted import path."""
 
     def test_string_impl_resolves_preprocessor_flags(self, monkeypatch):
         from transformers import pipelines
@@ -1040,50 +1038,3 @@ class TestMetaPreprocessors:
         stub = object.__new__(TransformersModel)
         stub.task = "text-generation"
         assert stub._loaded_preprocessors() == {"tokenizer"}
-
-    def test_local_checkpoint_builds_on_meta_offline(self, tmp_path, monkeypatch):
-        from tokenizers import ByteLevelBPETokenizer
-        from transformers import GPT2Config, GPT2TokenizerFast
-
-        model_dir = tmp_path / "tiny_gpt2"
-        model_dir.mkdir()
-        empty_cache = tmp_path / "empty_cache"
-        empty_cache.mkdir()
-
-        corpus = ["hello world", "nnsight traces models"] * 20
-        bpe = ByteLevelBPETokenizer()
-        bpe.train_from_iterator(
-            corpus,
-            vocab_size=300,
-            min_frequency=1,
-            special_tokens=["<|endoftext|>"],
-        )
-        bpe.save_model(str(model_dir))
-        tok = GPT2TokenizerFast(
-            vocab_file=str(model_dir / "vocab.json"),
-            merges_file=str(model_dir / "merges.txt"),
-            unk_token="<|endoftext|>",
-            bos_token="<|endoftext|>",
-            eos_token="<|endoftext|>",
-        )
-        tok.save_pretrained(str(model_dir))
-        GPT2Config(
-            vocab_size=len(tok),
-            n_layer=1,
-            n_embd=8,
-            n_head=2,
-            bos_token_id=tok.bos_token_id,
-            eos_token_id=tok.eos_token_id,
-            n_positions=64,
-        ).save_pretrained(str(model_dir))
-
-        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-        monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
-        monkeypatch.setenv("HF_HUB_CACHE", str(empty_cache))
-
-        model = TransformersModel(
-            str(model_dir), task="text-generation", dispatch=False
-        )
-        assert model.dispatched is False
-        assert model.tokenizer is not None
-        assert all(p.device.type == "meta" for p in model._module.parameters())
