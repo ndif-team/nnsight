@@ -1612,6 +1612,8 @@ class TestPeft:
         base_path, adapter_a, _ = tiny_peft_bundle
         model = TransformersModel(base_path, task="text-generation", dispatch=True)
         model._module._device_mesh = Mesh()
+        model._module.config.distributed_config = None
+        model._module._resolve_parallel_plans = lambda distributed_config: ({}, {}, {})
         with pytest.raises(ValueError, match="not supported on a tensor-parallel load"):
             model.load_adapter(adapter_a)
         assert model.peft is None and not _has_lora(model)

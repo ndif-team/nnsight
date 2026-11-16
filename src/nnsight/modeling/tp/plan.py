@@ -23,8 +23,8 @@ from .fragments import SIDES
 #: distributes whole experts rather than slicing a tensor axis, so the head
 #: counts and the intermediate size are irrelevant to it and the expert count is
 #: the only constraint. transformers raises on an uneven split itself
-#: (``EpRouterParallel`` checks ``num_experts % ep_size``), but by then the
-#: weights are already being read.
+#: (``grouped_gemm`` checks it as it shards the expert parameters), but by then
+#: the weights are already being read.
 _EXPERT_DIVIDES: tuple[str, ...] = ("num_local_experts", "num_experts")
 
 #: Config fields a tensor-parallel degree has to divide. Attention is split by
