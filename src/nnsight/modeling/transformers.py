@@ -53,9 +53,9 @@ import json
 from typing import TYPE_CHECKING, Any, Optional
 
 import warnings
+import weakref
 
 import torch
-from torch._guards import detect_fake_mode
 
 from .. import NNsightDeprecationWarning
 from ..intervention.envoy import Envoy, traceable
@@ -128,6 +128,27 @@ def _infer_task(module: torch.nn.Module) -> str:
         f"Could not infer a pipeline task for a pre-loaded {type(module).__name__}; "
         "pass task=... explicitly (e.g. TransformersModel(model, task='text-generation'))."
     )
+
+
+def _implementation(name: Optional[str]) -> Optional[str]:
+    """The attention implementation ``name`` loads, with a flash implementation's hub kernel named as the implementation.
+
+    transformers loads ``"flash_attention_2"`` from ``kernels-community/flash-attn2``
+    when the ``flash_attn`` package is missing and records the hub name, so a
+    client and a server with different packages installed spell one
+    implementation two ways.
+    """
+    try:
+        from transformers.modeling_flash_attention_utils import FLASH_ATTN_KERNEL_FALLBACK
+    except ImportError:  # releases before the hub-kernel fallback have one spelling
+        return name
+    return {hub: implementation for implementation, hub in FLASH_ATTN_KERNEL_FALLBACK.items()}.get(name, name)
+
+
+def _load_flash(model: Optional["TransformersModel"]) -> None:
+    # A shallow copy from `edit` shares the interleaver and can outlive the model that registered this.
+    if model is not None:
+        register_flash(model._module)
 
 
 def _split_pipeline_kwargs(kwargs: dict) -> tuple[dict, dict]:
@@ -319,6 +340,13 @@ class TransformersModel(HuggingFaceModel):
         self._children.append(self.generator)
         # Kernel sites for the fused kernels this model's modules call (modeling/kernels/transformers.py).
         register_model(self._module)
+        # FlashAttention 2's functions are loaded and registered at the start of
+        # every run, from the module the run executes (weights loaded by then).
+        # Held weakly, as the interleaver holds its envoys: the model owns the
+        # interleaver, and a strong reference back would keep the model's
+        # weights alive until the garbage collector finds the cycle.
+        model = weakref.ref(self)
+        self.interleaver.setup.append(lambda: _load_flash(model()))
 
     # -- loading -------------------------------------------------------------
 
@@ -589,15 +617,6 @@ class TransformersModel(HuggingFaceModel):
             fn = self._call
         return super().scan(*inputs, fn=fn, **kwargs)
 
-    def interleave(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
-        # Load the weights now, as `MetaMixin.interleave` would next, so the
-        # FlashAttention 2 functions are loaded and registered for the model
-        # that will run, before the interleaver installs the kernel shims.
-        if not self.dispatched and detect_fake_mode() is None:
-            self.dispatch()
-        register_flash(self._module)
-        return super().interleave(fn, *args, **kwargs)
-
     @traceable
     def generate(self, *inputs: Any, **kwargs: Any) -> Any:
         """Generate through the model, returning the generated token ids.
@@ -749,7 +768,10 @@ class TransformersModel(HuggingFaceModel):
         when a model cannot switch dynamically (one not written against its
         attention interface), and a request for ``"eager"`` that silently
         stays on ``"sdpa"`` is exactly the run that returns no attention
-        weights without saying why.
+        weights without saying why. A flash implementation matches whether it
+        is named by its package or by the hub kernel transformers loads in the
+        package's place. A switch that fails leaves the model on the
+        implementation it ran, since every later request runs on it.
 
         Raises:
             ValueError: for an implementation transformers does not know, or
@@ -760,16 +782,22 @@ class TransformersModel(HuggingFaceModel):
         if self.peft is not None:
             peft.set_enabled(self._module, env.get("adapters_enabled", True))
         requested = env.get("attn_implementation")
-        if requested is None or requested == self.attn_implementation:
+        current = self.attn_implementation
+        if requested is None or _implementation(requested) == _implementation(current):
             return
-        self._module.set_attn_implementation(requested)
-        if self.attn_implementation != requested:
-            raise ValueError(
-                f"{type(self._module).__name__} cannot switch its attention "
-                f"implementation to {requested!r}: it does not follow "
-                "transformers' attention interface, so it keeps "
-                f"{self.attn_implementation!r}."
-            )
+        try:
+            self._module.set_attn_implementation(requested)
+            if _implementation(self.attn_implementation) != _implementation(requested):
+                raise ValueError(
+                    f"{type(self._module).__name__} cannot switch its attention "
+                    f"implementation to {requested!r}: it does not follow "
+                    "transformers' attention interface, so it keeps "
+                    f"{self.attn_implementation!r}."
+                )
+        except BaseException:
+            # The model serves every request: leave it on what it ran.
+            self._module.set_attn_implementation(current)
+            raise
 
     @property
     def attn_implementation(self) -> Optional[str]:

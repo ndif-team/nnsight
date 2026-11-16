@@ -43,7 +43,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensor
+from torch._subclasses.fake_tensor import FakeTensor, unset_fake_temporarily
 
 from .interleaver import Event, Mediator
 
@@ -98,7 +98,9 @@ class Batch(NamedTuple):
         prompt into beams), so a reader that selects rows itself attributes them
         exactly as `.output` and the readers narrowed after `read` do.
         """
-        return self.narrow(torch.arange(count)).tolist()
+        # Real tensors under `model.scan` too, whose fake ones have no values to list.
+        with unset_fake_temporarily():
+            return self.narrow(torch.arange(count)).tolist()
 
 
 class Sites:

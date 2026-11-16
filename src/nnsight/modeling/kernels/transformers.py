@@ -78,9 +78,9 @@ def _hub_wrappers(module: ModuleType) -> list[dict[str, CellType]]:
     (``transformers.integrations.hub_kernels``). With the ``kernels`` package
     installed, the module global holds a ``kernels`` module instance whose
     ``forward`` closes over the wrapper as ``func``, and the wrapper is read from
-    that cell. Unless the model is loaded with ``use_kernels=True``, which
-    replaces that ``forward`` with a hub kernel, the wrapper still runs on every
-    call. Each entry in the returned list maps a closure variable name
+    that cell. The wrapper runs on every call until a model of the architecture
+    is kernelized (``use_kernels=True``), which replaces that ``forward`` with a
+    hub kernel for every model of the architecture in the process. Each entry in the returned list maps a closure variable name
     (``func_name``, ``package``, ``torch_function``, ``implementation``, etc.) to
     its closure cell, allowing callers to read ``cell_contents`` or pass the cell
     as a holder. The wrappers of transformers 5.15 and 5.16 do not close over
@@ -237,9 +237,11 @@ def register_flash(root: torch.nn.Module) -> None:
     installed. It loads the model's implementation the way the model's forward
     would (``lazy_import_flash_attention``), so the forward finds it loaded and
     keeps the patched globals, and registers the functions it leaves there. When
-    a model with a different flash implementation runs inside the same open
-    trace, its forward swaps the globals, and FlashAttention 2 calls after that
-    are not served.
+    a model with a different flash implementation runs while any trace is open
+    in the process, its forward swaps the globals, and FlashAttention 2 calls
+    after that are not served. The implementation is read from the first
+    Hugging Face model in ``root``, which is ``root`` itself unless a wrapper
+    such as ``PeftModel`` holds it.
     """
     try:
         from transformers import PreTrainedModel
@@ -248,9 +250,11 @@ def register_flash(root: torch.nn.Module) -> None:
         return
     if "FLASH_ATTN_KERNEL_FALLBACK" not in vars(utils):  # releases before the hub-kernel fallback keep other globals
         return
-    if not isinstance(root, PreTrainedModel):  # a wrapped plain module has no attention implementation
+    # One step for a Hugging Face root and a few for a wrapper; a tree with no Hugging Face model is walked whole on every trace.
+    model = next((module for module in root.modules() if isinstance(module, PreTrainedModel)), None)
+    if model is None:
         return
-    wanted = _implementations(root.config) & {"flash_attention_2", utils.FLASH_ATTN_KERNEL_FALLBACK["flash_attention_2"]}
+    wanted = _implementations(model.config) & {"flash_attention_2", utils.FLASH_ATTN_KERNEL_FALLBACK["flash_attention_2"]}
     # A model whose towers mix the package and hub spellings cannot have both loaded at once, so it gets no sites.
     if len(wanted) != 1:
         return

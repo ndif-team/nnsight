@@ -191,10 +191,13 @@ attribute, but saving the tensor preserves `.provenance` across `torch.save` and
   `enable_gqa=True` and transformers' `repeat_kv`. The `heads=` argument always
   indexes query heads.
 - **Causal:** Under `sdpa` and `eager`, causal calls use top-left alignment
-  (query `i` attends to keys `0..i`), matching PyTorch's `is_causal=True`, and
-  whenever query and key lengths differ transformers passes an explicit
-  attention mask. FlashAttention 2 aligns its causal mask bottom right: query
-  row `r` of `Lq` attends to keys `0..r + (Lk - Lq)`, and during decoding
+  (query `i` attends to keys `0..i`), matching PyTorch's `is_causal=True`.
+  transformers passes `eager` an explicit attention mask on every call. It
+  calls `sdpa` with `is_causal=True` and no mask when query and key lengths
+  match, and on the first forward over a static cache, whose unfilled key slots
+  follow the prompt; other calls get an explicit mask, or none for a single
+  query row. FlashAttention 2 aligns its causal mask bottom right: query row
+  `r` of `Lq` attends to keys `0..r + (Lk - Lq)`, and during decoding
   transformers passes `causal=True` with no mask.
 - **Decoding:** During `generate`, each decode step calls the kernel with a
   single query row against the KV cache, so `probs()` at step `n` has shape
@@ -228,9 +231,14 @@ kernel, the location never fires and the trace ends with `OutOfOrderError:
   submodule instead), or a full MoE block (request `.kernel` on its `experts`
   submodule instead).
 - A model loaded with `attn_implementation="flash_attention_3"` or `"flash_attention_4"`. Only FlashAttention 2 is served.
-- A FlashAttention 2 call made while a model with a different flash attention
-  implementation runs inside the same trace. transformers holds one flash
-  implementation at a time and swaps it on that model's forward.
+- A FlashAttention 2 call made after a model with a different flash attention
+  implementation has run while the trace is open, in this trace or in another
+  thread. transformers holds one flash implementation per process and swaps it
+  on that model's forward.
+- A FlashAttention 2 model wrapped in `NNsight(module)`. `TransformersModel`
+  and its subclasses (`LanguageModel`, `VisionLanguageModel`) load and register
+  the functions at the start of each trace; a plain wrapper is served only
+  while functions registered by such a trace are still the ones loaded.
 - An eager attention module whose forward pass computes attention inline
   instead of calling a module-level `*eager_attention_forward` function, such
   as GPT-2 with `reorder_and_upcast_attn=True` and older architectures (BLOOM,
@@ -434,13 +442,16 @@ Several things differ from the `sdpa` path:
   therefore cover a sequence's own tokens and hold no padding positions: an
   invoke with a 7-token prompt batched beside a 12-token one gets
   `[1, heads, 7, 7]`, and a row packing two 4-token sequences gets
-  `[2, heads, 4, 4]`. An invoke whose sequences have different lengths has no
-  rectangular result and raises `ValueError`; use one invoke per prompt.
+  `[2, heads, 4, 4]`. An invoke whose sequences have different lengths gets
+  them aligned at their last query and key and padded on the left to the
+  longest, the layout `sdpa` gives a left-padded batch: padding positions hold
+  `scores` `-inf` and `probs` `0`, and a padding query row holds `lse` `-inf`.
 - The first axis counts the kernel's sequences. When those are the trace's
   batch rows, each invoke gets its own; otherwise every invoke gets all of
   them, as `.output` and the `sdpa` sites do. Beam search is the common case:
-  `generate(num_beams=2)` over two invokes runs four rows, and each invoke's
-  `probs()` holds all four.
+  `generate(num_beams=2)` over a 4-token and a 7-token invoke runs four rows,
+  and each invoke's first-step `probs()` is `[4, heads, 7, 7]`, as under
+  `sdpa`.
 - A call is served only when every argument that changes the scores is one the
   reconstruction models. A sliding window, a logit soft cap, ALiBi slopes or
   dropout makes the request raise `ValueError` naming the argument. So does a
@@ -513,9 +524,14 @@ to the transformers `CATALOG` applies to models constructed afterward.
   linear attention has no registered entry. `fla`'s packed layout
   (`cu_seqlens`), its `use_gate_in_kernel` mode, and `fla` backends that bypass
   `chunk_gated_delta_rule_fwd_h` (such as FlashQLA on SM90 and later) are served
-  as `Unavailable`, raising a `ValueError` with the reason at the request. A
-  model whose hub wrapper is replaced by the `kernels` library has no recurrent
-  entry. Paged attention has no sites. vLLM's fused MoE has no entry: its
+  as `Unavailable`, raising a `ValueError` with the reason at the request.
+  With the `kernels` package installed, the hub wrapper sits inside a `kernels`
+  module and is still served, until a model of that architecture is loaded with
+  `use_kernels=True` on a device the hub kernel supports: from then on that
+  model and every other model of the architecture in the process run the hub
+  kernel, which has no sites. With `kernels` installed, `.source` cannot open
+  the reference implementation behind the wrapper. Paged attention has no
+  sites. vLLM's fused MoE has no entry: its
   `FusedMoE` layer runs experts inside the custom op
   `torch.ops.vllm.moe_forward`, whose Triton kernels keep per-pair rows in
   op-local workspace buffers that neither AST instrumentation nor a dispatch mode

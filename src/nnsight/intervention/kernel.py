@@ -367,26 +367,32 @@ def register(fn: Callable, serve: Callable, *holders: Attr) -> None:
     consulted by ``__torch_function__`` handling and by TorchDynamo, and is never
     patched. Calling
     ``register`` again for an already-registered ``fn`` adds any new holders to
-    the existing entry; if traces are currently open, the new holders are patched
-    immediately, and passing a shim read from an already-patched holder resolves
-    to the underlying kernel function via [`unshimmed`][nnsight.intervention.kernel.unshimmed].
+    the existing entry; if traces are currently open, every holder that holds
+    ``fn`` is patched immediately, including a known one that held another
+    function when the first trace opened, and passing a shim read from an
+    already-patched holder resolves to the underlying kernel function via
+    [`unshimmed`][nnsight.intervention.kernel.unshimmed].
     """
     fn = unshimmed(fn)
     with _lock:
         entry = _KERNELS.get(fn)
-        if entry is None:
+        new = entry is None
+        if new:
             entry = _KERNELS[fn] = Entry(fn, serve)
         entry.serve = serve
         module = sys.modules.get(fn.__module__) if isinstance(fn, FunctionType) else None
         if module is not None and unshimmed(vars(module).get(fn.__name__)) is fn:
             holders = (Attr(module, fn.__name__), *holders)
-        added = [holder for holder in holders if entry.add(holder)]
+        for holder in holders:
+            entry.add(holder)
         if _open:
-            _patch(entry, added)
-        for copy in list(_copies):
-            for name, value in list(copy.__globals__.items()):
-                if _entry_of(value) is entry:
-                    _hold(entry, copy, name)
+            _patch(entry, entry.holders)
+        # Copies taken before this kernel was registered; `adopt` scans the ones taken after.
+        if new:
+            for copy in list(_copies):
+                for name, value in list(copy.__globals__.items()):
+                    if _entry_of(value) is entry:
+                        _hold(entry, copy, name)
 
 
 def _entry_of(value: Any) -> Entry | None:
@@ -429,10 +435,12 @@ def adopt(fn: FunctionType) -> None:
 
 def _patch(entry: Entry, holders: list[Attr]) -> None:
     # Only overwrite holders that currently hold `entry.fn`; leave prior custom replacements untouched.
+    # A holder patched earlier in this trace and since reset to `entry.fn` is patched again but restored once.
     for holder in holders:
         if holder.get() is entry.fn:
             holder.set(entry.shim)
-            entry.patched.append(holder)
+            if holder not in entry.patched:
+                entry.patched.append(holder)
 
 
 def _restore(entry: Entry) -> None:

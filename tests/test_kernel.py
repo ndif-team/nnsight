@@ -1,6 +1,7 @@
 import gc
 import math
 import sys
+import types
 import warnings
 import weakref
 
@@ -387,6 +388,13 @@ class TestBatching:
                 probs = attn.kernel.probs(heads=0, query=-1).save()
         assert lse.shape[0] == 1 and probs.shape[0] == 1
         assert torch.allclose(probs.sum(-1), torch.ones_like(probs.sum(-1)), atol=1e-6)
+
+    def test_a_reader_lists_its_rows_under_scan(self):
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            assert _batch(4, 1, 2).rows(4) == [1, 2]
+            assert _batch(4, 1, 2).rows(8) == list(range(8))
 
 
 class TestMemory:
@@ -924,24 +932,29 @@ class Scan(nn.Module):
 
 
 class TestRecurrent:
-    def test_sites_are_served_when_the_kernels_package_wraps_the_reference(self, monkeypatch):
-        import transformers.models.qwen3_next.modeling_qwen3_next as modeling
+    def test_the_wrapper_inside_a_kernels_module_is_found(self):
+        from transformers.integrations import hub_kernels
 
-        def module_around(func):
-            """What ``kernels.use_kernel_forward_from_hub`` returns for a function: a module whose forward closes over it as ``func``."""
+        from nnsight.modeling.kernels.transformers import _hub_wrappers
+
+        def reference(x):
+            return x
+
+        made = hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")(reference)
+        if not isinstance(made, nn.Module):
+            # Without the kernels package the decorator returns transformers' wrapper; wrap it as kernels does.
+            func = made
 
             class Func(nn.Module):
                 def forward(self, *args, **kwargs):
                     return func(*args, **kwargs)
 
-            return Func()
-
-        monkeypatch.setattr(modeling, "torch_chunk_gated_delta_rule", module_around(modeling.torch_chunk_gated_delta_rule))
-        model = _wrap(_gated_delta_module())
-        with model.trace(_ids(150)):
-            boundaries = model.model.layers[0].linear_attn.kernel.chunk_states().save()
-        assert boundaries.shape == (3, 4, 6, 8, 12)
-        assert boundaries.provenance.kind == "exact export"
+            made = Func()
+        fresh = types.ModuleType("fresh")
+        fresh.chunk_gated_delta_rule = made
+        [cells] = _hub_wrappers(fresh)
+        assert cells["func_name"].cell_contents == "chunk_gated_delta_rule"
+        assert cells["torch_function"].cell_contents is reference
 
     def test_gated_delta_chunk_states_match_the_per_token_reference(self, gated_delta):
         mixer = gated_delta.model.layers[0].linear_attn
@@ -1310,7 +1323,9 @@ def stand_in_flash(monkeypatch):
 
     for name in ("_loaded_implementation", "_flash_fn", "_flash_varlen_fn", "_flash_with_kvcache_fn", "_pad_fn", "_unpad_fn", "_process_flash_kwargs_fn", "_process_with_kvcache_kwargs_fn"):
         monkeypatch.setattr(utils, name, vars(utils)[name])
-    monkeypatch.setattr(utils, "_lazy_imports", lambda *args, **kwargs: (_dense_flash, _packed_flash, None, utils._pad_input, utils._unpad_input))
+    # Read now: while a trace is open, this module's globals hold the stand-ins' shims, and transformers loads raw functions.
+    dense, packed = _dense_flash, _packed_flash
+    monkeypatch.setattr(utils, "_lazy_imports", lambda *args, **kwargs: (dense, packed, None, utils._pad_input, utils._unpad_input))
     return utils
 
 
@@ -1345,21 +1360,59 @@ class TestFlash:
         assert probs.provenance.kernel == "_dense_flash"
         assert torch.allclose(probs, expected, atol=1e-5)
 
+    def test_sites_are_served_for_a_model_inside_a_peft_wrapper(self, stand_in_flash):
+        import peft
+
+        model = _wrap(peft.get_peft_model(_llama("flash_attention_2"), peft.LoraConfig(r=2, target_modules=["q_proj"])))
+        with model.trace(_ids(6, batch=1).clamp(min=1)):
+            probs = model.base_model.model.model.layers[0].self_attn.kernel.probs().save()
+        assert probs.provenance.kernel == "_dense_flash"
+        assert probs.shape == (1, 4, 6, 6)
+
+    def test_a_trace_opened_inside_one_that_started_with_another_flash_implementation_is_served(self, stand_in_flash):
+        model, reference = _wrap(_llama("flash_attention_2")), _wrap(_llama("sdpa"))
+        ids = _ids(6, batch=1).clamp(min=1)
+        with model.trace(ids):  # registers the FlashAttention 2 functions and their holders
+            pass
+        other = lambda *args, **kwargs: None  # noqa: E731
+        stand_in_flash._loaded_implementation, stand_in_flash._flash_fn, stand_in_flash._flash_varlen_fn = "flash_attention_3", other, other
+        with Envoy(Mixer()).interleaver:  # opens while the globals hold another implementation
+            with model.trace(ids):
+                probs = model.model.layers[0].self_attn.kernel.probs().save()
+        with reference.trace(ids):
+            expected = reference.model.layers[0].self_attn.kernel.probs().save()
+        assert torch.allclose(probs, expected, atol=1e-5)
+
+    def test_entering_the_interleaver_directly_loads_the_functions(self, stand_in_flash):
+        # NDIF's sandbox driver runs a request by entering the model's interleaver itself.
+        model = _wrap(_llama("sdpa"))
+        model._module.config._attn_implementation = "flash_attention_2"
+        packed = _packed_flash  # read before the trace opens: the shim replaces this module's global too
+        with model.interleaver:
+            assert stand_in_flash._flash_varlen_fn is not packed
+            assert kernel.unshimmed(stand_in_flash._flash_varlen_fn) is packed
+        assert stand_in_flash._flash_varlen_fn is packed
+
     def test_beam_search_gives_each_invoke_every_beam_as_sdpa_does(self, stand_in_flash):
-        first, second = _ids(6, batch=2).clamp(min=1).chunk(2)
+        prompts = _ids(4, batch=1).clamp(min=1), _ids(7, batch=1).clamp(min=1)
 
         def read(model):
             saved = []
-            with model.generate(max_new_tokens=1, num_beams=2, pad_token_id=0, eos_token_id=None) as tracer:
-                for prompt in (first, second):
+            with model.generate(max_new_tokens=2, num_beams=2, pad_token_id=0, eos_token_id=None) as tracer:
+                for prompt in prompts:
                     with tracer.invoke(prompt):
-                        saved.append(model.model.layers[0].self_attn.kernel.probs().save())
+                        steps = nnsight.save([])
+                        for _ in tracer.iter[0:2]:
+                            steps.append(model.model.layers[0].self_attn.kernel.probs())
+                        saved.append(steps)
             return saved
 
         # generate expands the two prompts into four beam rows, which nnsight does not attribute to invokes.
+        # The 4-token prompt's beams are aligned at their last token and padded on the left, as SDPA's padded batch is.
         for got, expected in zip(read(_wrap(_llama("flash_attention_2"))), read(_wrap(_llama("sdpa")))):
-            assert got.shape == expected.shape == (4, 4, 6, 6)
-            assert torch.allclose(got, expected, atol=1e-5)
+            assert [step.shape for step in got] == [step.shape for step in expected] == [(4, 4, 7, 7), (4, 4, 1, 8)]
+            for step, reference in zip(got, expected):
+                assert torch.allclose(step, reference, atol=1e-5)
 
     def test_sequences_packed_into_one_row_are_served_separately(self, stand_in_flash):
         model, reference = _wrap(_llama("flash_attention_2")), _wrap(_llama("sdpa"))
@@ -1421,8 +1474,23 @@ class TestFlash:
         assert short.shape == (1, 2, 3, 3)
         assert torch.allclose(short, torch.softmax(expected, -1), atol=1e-6)
         assert reader.read("scores", {"query": -1, "key": 0}, _batch(2, 0, 1))[0].shape == (1, 2)
-        with pytest.raises(ValueError, match="different lengths"):
-            reader.read("probs", {}, _batch(2, 0, 2))
+
+    def test_sequences_of_different_lengths_are_aligned_at_their_last_token(self):
+        from nnsight.modeling.kernels import flash
+
+        torch.manual_seed(0)
+        q, k, v = torch.randn(5, 2, 4), torch.randn(9, 2, 4), torch.randn(9, 2, 4)
+        # 2 queries over 5 keys, then 3 queries over 4 keys: padded axes of 3 queries and 5 keys.
+        spans_q, spans_k = torch.tensor([0, 2, 5]), torch.tensor([0, 5, 9])
+        _, reader = flash.serve(_packed_flash, (q, k, v, spans_q, spans_k, 3, 5), {"causal": True})
+        probs, scores, lse = (reader.read(site, {}, None)[0] for site in ("probs", "scores", "lse"))
+        assert probs.shape == (2, 2, 3, 5)
+        assert torch.equal(probs[:1, :, 1:], reader.read("probs", {}, _batch(2, 0, 1))[0])
+        assert torch.equal(probs[1:, :, :, 1:], reader.read("probs", {}, _batch(2, 1, 1))[0])
+        assert not probs[0, :, 0].any() and torch.isneginf(scores[0, :, 0]).all() and torch.isneginf(lse[0, :, 0]).all()
+        assert not probs[1, :, :, 0].any() and torch.isneginf(scores[1, :, :, 0]).all()
+        assert torch.allclose(probs[0, :, 1:].sum(-1), torch.ones(2, 2)) and torch.allclose(probs[1].sum(-1), torch.ones(2, 3))
+        assert torch.equal(reader.read("probs", {"query": -1, "key": 2}, None)[0], probs[:, :, -1, 2])
 
     def test_an_argument_outside_the_modelled_set_makes_the_sites_unavailable(self):
         from nnsight.modeling.kernels import flash
@@ -1763,12 +1831,12 @@ class TestCuda:
         def beams(model):
             saved = []
             with model.generate(max_new_tokens=1, num_beams=2, pad_token_id=0, eos_token_id=None) as tracer:
-                for prompt in (long, long.flip(1)):
+                for prompt in (long, short):
                     with tracer.invoke(prompt):
                         saved.append(nnsight.save(model.model.layers[0].self_attn.kernel.probs()))
             return saved
 
-        # Beam search runs four rows for two invokes; each invoke gets all four, as under SDPA.
+        # Beam search runs four rows for two invokes; each invoke gets all four, the short prompt's padded on the left as under SDPA.
         for got, expected in zip(beams(flash), beams(sdpa)):
             assert got.shape == (4, 4, 12, 12)
             assert torch.allclose(got, expected, atol=1e-5)

@@ -41,9 +41,9 @@ from its attention-backend documentation and, for `trtllm_mha`, its
 | Runtime | Default attention path | Source |
 |---|---|---|
 | PyTorch | `F.scaled_dot_product_attention`, with the flash, memory-efficient, cuDNN and math backends all enabled | `torch.backends.cuda.*_sdp_enabled()` |
-| transformers | `sdpa`, falling back to eager when a model cannot dispatch to it. `flash_attention_2/3/4` on request: FlashAttention 2 from the `flash_attn` package or the `kernels-community/flash-attn2` hub kernel, 3 from `flash_attn_interface`, 4 from `flash_attn.cute` | `modeling_utils.py` `get_correct_attn_implementation`; `modeling_flash_attention_utils.py` `_lazy_imports` |
+| transformers | `sdpa`, falling back to eager when a model cannot dispatch to it. `flash_attention_2/3/4` on request: FlashAttention 2 from the `flash_attn` package, 3 from `flash_attn_interface`, 4 from `flash_attn.cute`, each from a hub kernel when its package is missing (`kernels-community/flash-attn2`, `kernels-community/vllm-flash-attn3` or `kernels-community/aiter-flash-attn` on ROCm, `kernels-community/flash-attn4`; needs the `kernels` package) | `modeling_utils.py` `get_correct_attn_implementation`, `_check_and_adjust_attn_implementation`; `modeling_flash_attention_utils.py` `FLASH_ATTN_KERNEL_FALLBACK`, `_lazy_imports` |
 | diffusers | `dispatch_attention_fn` with the `native` backend in most model files under `models/transformers/`, `AttnProcessor2_0` in the others; both call `F.scaled_dot_product_attention` | `utils/constants.py` `DIFFUSERS_ATTN_BACKEND`; `models/attention_dispatch.py`; `models/attention_processor.py` |
-| vLLM | FlashAttention, then FlashInfer, then Triton; FlashInfer first for causal attention on Blackwell (SM100), where it calls FlashInfer's `trtllm_batch_*` functions. FlashAttention version 3 on Hopper (compute capability 9), 4 on compute capability 10, 2 elsewhere. MLA models use a separate list | `platforms/cuda.py` `_get_backend_priorities`; `v1/attention/backends/fa_utils.py`; `v1/attention/backends/flashinfer.py` |
+| vLLM | FlashAttention, then FlashInfer, then Triton; FlashInfer first for causal attention on Blackwell (SM100), where it calls FlashInfer's `trtllm_batch_*` functions for prefill with an unquantized KV cache and for decode steps of at most 256 tokens, and FlashInfer's wrappers otherwise. FlashAttention version 3 on Hopper (compute capability 9), 4 on compute capability 10, 2 elsewhere. MLA models use a separate list | `platforms/cuda.py` `_get_backend_priorities`; `v1/attention/backends/fa_utils.py`; `v1/attention/backends/flashinfer.py`; `utils/flashinfer.py` `use_trtllm_attention` |
 | SGLang | FlashAttention 3 on Hopper; `trtllm_mha`, which calls FlashInfer's `trtllm_batch_*` functions, on Blackwell; FlashInfer elsewhere, Triton when FlashInfer is absent | docs.sglang.io, attention backend page; `layers/attention/trtllm_mha_backend.py` |
 
 ### Lineages in priority order
@@ -53,7 +53,7 @@ diffusers, vLLM, and SGLang on Hopper.
 
 | Entry point | Reached from | Status |
 |---|---|---|
-| `F.scaled_dot_product_attention` (flash, memory-efficient, cuDNN and CPU flash backends, math fallback) | transformers `sdpa`, diffusers, any PyTorch model | in CI for the CPU backends. The CUDA backends are validated by the GPU tests, which CI does not run. Diffusion models not validated |
+| `F.scaled_dot_product_attention` (flash, memory-efficient, cuDNN and CPU flash backends, math fallback) | transformers `sdpa`, diffusers, any PyTorch model | in CI for the CPU backends. CUDA backends default call served: the GPU tests, which CI does not run, compare them with a reference on randomly initialized modules. Diffusion models not validated |
 | FlashAttention 3 and 4 | transformers `flash_attention_3/4`, vLLM on Hopper and Blackwell, SGLang on Hopper | not started; needs a Hopper or Blackwell GPU |
 | `flash_attn_func`, `flash_attn_varlen_func` (FlashAttention 2) | transformers `flash_attention_2`, from the `flash_attn` package or `kernels-community/flash-attn2` | default call served. CPU tests run transformers' FlashAttention 2 path end to end with stand-in kernels; on an A100 the GPU test matches the `sdpa` sites on a two-layer random Llama with the hub kernel, including beam search and a model switched after loading. Not run with the `flash_attn` package |
 | `flash_attn_varlen_func` in vLLM's fork | vLLM `FLASH_ATTN` | default call validated with FlashAttention 2 on an A100, on the unmerged `kernel-vllm` branch |
@@ -95,8 +95,8 @@ technique; prefill needs a different one.
 |---|---|---|
 | `unified_attention` | vLLM `TRITON_ATTN` | not started |
 
-**4. MLA kernels** (FlashMLA, FlashInfer MLA, CUTLASS MLA, TRTLLM MLA, Triton MLA
-and their sparse variants). Used only by multi-head latent attention models such
+**4. MLA kernels** (FlashMLA, FlashInfer MLA, CUTLASS MLA, TRTLLM MLA, Triton MLA,
+FlashAttention MLA, TokenSpeed MLA and their sparse variants). Used only by multi-head latent attention models such
 as DeepSeek V3.
 
 | Entry point | Reached from | Status |

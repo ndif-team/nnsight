@@ -19,10 +19,12 @@ Sites are ``lse`` ``[sequences, heads, queries]`` and ``scores`` and ``probs``
 The trace's batcher decides which of the kernel's sequences belong to an invoke
 (`Batch.rows`): its own rows when the kernel ran one sequence per batch row, and
 every sequence otherwise, as for generation's beams or sequences packed into
-one row. Because a padded batch runs packed, the query and key axes cover a
-sequence's own tokens and hold no padding positions. An invoke whose sequences
-have different lengths therefore has no rectangular result and raises
-``ValueError``; one prompt per invoke always works.
+one row. Because a padded batch runs packed, an invoke with one sequence gets
+axes that cover its own tokens and hold no padding positions. An invoke whose
+sequences have different lengths gets them aligned at their last query and key
+and padded on the left to the longest, the layout of a left-padded batch under
+SDPA: padding positions hold score ``-inf`` and probability ``0``, and a padding
+query row holds logsumexp ``-inf``.
 
 Causal masking follows FlashAttention 2.1 and later: the mask is aligned to the
 bottom right, so query row ``r`` of ``Lq`` attends to keys ``0..r + (Lk - Lq)``.
@@ -36,7 +38,7 @@ varlen logsumexp in the padded ``[batch, heads, max_seqlen_q]`` layout that
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import torch
 
@@ -84,6 +86,22 @@ def serve(fn: Callable, args: tuple, kwargs: dict) -> tuple[Any, Sites]:
     return output, Flash(name, bound, lse)
 
 
+class Axes(NamedTuple):
+    """One request resolved against a `Flash` call: requested positions on the padded axes, and the packed rows behind them."""
+
+    heads: torch.Tensor
+    rows: torch.Tensor
+    cols: torch.Tensor
+    #: Packed query and key rows read for each sequence and position, ``[prompts, rows]`` and ``[prompts, cols]``.
+    at_q: torch.Tensor
+    at_k: torch.Tensor
+    #: Whether each of those positions is one of the sequence's own tokens rather than padding.
+    real_q: torch.Tensor
+    real_k: torch.Tensor
+    #: How many more key positions than query positions the padded axes have, for the causal mask.
+    offset: int
+
+
 class Flash(Sites):
     """Site reader for one ``flash_attn_func`` or ``flash_attn_varlen_func`` call.
 
@@ -121,55 +139,60 @@ class Flash(Sites):
             raise ValueError(f"this kernel has no site {site!r}; available: {', '.join(self.names)}")
         return getattr(self, site)(spec, batch)
 
-    def _axes(self, spec: dict[str, Any], batch: Batch | None, site: str, allowed: tuple[str, ...]) -> tuple:
-        """Resolve the worker's sequences and the requested heads, query rows and key columns into packed row indices."""
+    def _axes(self, spec: dict[str, Any], batch: Batch | None, site: str, allowed: tuple[str, ...]) -> Axes:
+        """Resolve the worker's sequences and the requested heads, query rows and key columns into packed row indices.
+
+        The sequences are aligned at their last query and key and padded on the
+        left to the longest, so position ``r`` of a sequence with ``n`` of the
+        ``queries`` rows is its own row ``r - (queries - n)``, absent when negative.
+        """
         sites.check_axes(spec, site, allowed)
         count = len(self.spans_q) - 1
         prompts = list(range(count)) if batch is None else batch.rows(count)
-        queries = {self.spans_q[i + 1] - self.spans_q[i] for i in prompts}
-        keys = {self.spans_k[i + 1] - self.spans_k[i] for i in prompts}
-        if len(queries) != 1 or len(keys) != 1:
-            raise ValueError(
-                f"kernel sites: {self.name} ran this invoke's {len(prompts)} sequences packed with different lengths "
-                f"(queries {sorted(queries)}, keys {sorted(keys)}), so they have no shared [queries, keys] shape; "
-                "request sites from an invoke per prompt"
-            )
-        queries, keys = queries.pop(), keys.pop()
+        lengths_q = [self.spans_q[i + 1] - self.spans_q[i] for i in prompts]
+        lengths_k = [self.spans_k[i + 1] - self.spans_k[i] for i in prompts]
+        queries, keys = max(lengths_q), max(lengths_k)
         device = self.q.device
         heads = sites.positions(sites.indices(spec.get("heads"), self.q.shape[1], device), self.q.shape[1], device)
         rows = sites.positions(sites.indices(spec.get("query"), queries, device), queries, device)
         cols = sites.positions(sites.indices(spec.get("key"), keys, device), keys, device)
+        own_q = rows[None, :] - torch.tensor([queries - n for n in lengths_q], device=device)[:, None]  # [prompts, rows]
+        own_k = cols[None, :] - torch.tensor([keys - n for n in lengths_k], device=device)[:, None]  # [prompts, cols]
         first_q = torch.tensor([self.spans_q[i] for i in prompts], device=device)
         first_k = torch.tensor([self.spans_k[i] for i in prompts], device=device)
-        return heads, rows, cols, first_q[:, None] + rows, first_k[:, None] + cols, keys - queries
+        return Axes(heads, rows, cols, first_q[:, None] + own_q.clamp(min=0), first_k[:, None] + own_k.clamp(min=0), own_q >= 0, own_k >= 0, keys - queries)
 
-    def _lse(self, heads: torch.Tensor, at_q: torch.Tensor) -> torch.Tensor:
-        return self.exported.index_select(0, heads)[:, at_q].transpose(0, 1).float()  # [prompts, heads, rows]
+    def _lse(self, axes: Axes) -> torch.Tensor:
+        lse = self.exported.index_select(0, axes.heads)[:, axes.at_q].transpose(0, 1).float()  # [prompts, heads, rows]
+        return lse.masked_fill(~axes.real_q[:, None, :], float("-inf"))
 
-    def _scores(self, heads: torch.Tensor, rows: torch.Tensor, cols: torch.Tensor, at_q: torch.Tensor, at_k: torch.Tensor, offset: int) -> torch.Tensor:
-        q = self.q[at_q].index_select(2, heads).float()  # [prompts, rows, heads, dim]
-        k = self.k[at_k].index_select(2, heads // (self.q.shape[1] // self.k.shape[1])).float()  # [prompts, cols, heads, dim]
+    def _scores(self, axes: Axes) -> torch.Tensor:
+        q = self.q[axes.at_q].index_select(2, axes.heads).float()  # [prompts, rows, heads, dim]
+        k = self.k[axes.at_k].index_select(2, axes.heads // (self.q.shape[1] // self.k.shape[1])).float()  # [prompts, cols, heads, dim]
         with _exact_fp32():
             scores = torch.einsum("prhd,pchd->phrc", q, k) * self.scale
+        hidden = ~(axes.real_q[:, None, :, None] & axes.real_k[:, None, None, :])
         if self.causal:
-            scores = scores.masked_fill(cols[None, :] > rows[:, None] + offset, float("-inf"))
-        return scores
+            # Aligned at the last token, each sequence's bottom-right mask is the same mask on the padded axes.
+            hidden = hidden | (axes.cols[None, :] > axes.rows[:, None] + axes.offset)
+        return scores.masked_fill(hidden, float("-inf"))
 
     def lse(self, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
-        heads, _, _, at_q, _, _ = self._axes(spec, batch, "lse", ("heads", "query"))
+        axes = self._axes(spec, batch, "lse", ("heads", "query"))
         provenance = Provenance("exact export", self.name, "the kernel's own per-row logsumexp, fp32")
-        return sites.squeeze(self._lse(heads, at_q), spec, {"heads": 1, "query": 2}), provenance
+        return sites.squeeze(self._lse(axes), spec, {"heads": 1, "query": 2}), provenance
 
     def scores(self, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
-        heads, rows, cols, at_q, at_k, offset = self._axes(spec, batch, "scores", ("heads", "query", "key"))
-        sites.warn_if_large((at_q.shape[0], heads.numel(), rows.numel(), cols.numel()), "scores", "heads=, query= or key=")
+        axes = self._axes(spec, batch, "scores", ("heads", "query", "key"))
+        sites.warn_if_large((axes.at_q.shape[0], axes.heads.numel(), axes.rows.numel(), axes.cols.numel()), "scores", "heads=, query= or key=")
         note = "q . k * scale in fp32 from the kernel's inputs" + (", causal mask added" if self.causal else "")
         provenance = Provenance("exact reconstruction", self.name, note)
-        return sites.squeeze(self._scores(heads, rows, cols, at_q, at_k, offset), spec, {"heads": 1, "query": 2, "key": 3}), provenance
+        return sites.squeeze(self._scores(axes), spec, {"heads": 1, "query": 2, "key": 3}), provenance
 
     def probs(self, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
-        heads, rows, cols, at_q, at_k, offset = self._axes(spec, batch, "probs", ("heads", "query", "key"))
-        sites.warn_if_large((at_q.shape[0], heads.numel(), rows.numel(), cols.numel()), "probs", "heads=, query= or key=")
-        probs = torch.exp(self._scores(heads, rows, cols, at_q, at_k, offset) - self._lse(heads, at_q).unsqueeze(-1))
+        axes = self._axes(spec, batch, "probs", ("heads", "query", "key"))
+        sites.warn_if_large((axes.at_q.shape[0], axes.heads.numel(), axes.rows.numel(), axes.cols.numel()), "probs", "heads=, query= or key=")
+        # A padding query row has scores and logsumexp -inf, whose difference is NaN; no key received attention there.
+        probs = torch.exp(self._scores(axes) - self._lse(axes).unsqueeze(-1)).masked_fill(~axes.real_q[:, None, :, None], 0.0)
         provenance = Provenance("exact reconstruction", self.name, "exp(scores - lse) in fp32, the kernel backward's own formula")
         return sites.squeeze(probs, spec, {"heads": 1, "query": 2, "key": 3}), provenance
