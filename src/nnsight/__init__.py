@@ -1,22 +1,3 @@
-# Import torch and transformers up front, before this module mounts `.save` onto
-# `object` (bottom of the file). anyio's strict
-# TypedAttributeSet.__init_subclass__ rejects any class with an unannotated
-# public attribute defined *after* the mount adds `save` to every object
-# ("Attribute 'save' is missing its type annotation"), so every anyio class has to
-# be defined first. Warming them here means they always are, no matter what imports
-# nnsight (the API worker, the Ray controller / model actor, ...).
-import torch  # noqa: F401
-import transformers  # noqa: F401
-
-# transformers reaches anyio via huggingface_hub -> httpcore, but only on some
-# installs, and other stacks reach it by their own route (vLLM via openai). Warm it
-# directly rather than through a chain that may not pull it; it isn't a dependency
-# of nnsight, so it may legitimately be absent.
-try:
-    import anyio  # noqa: F401
-except ImportError:
-    pass
-
 import functools
 import warnings
 from importlib.metadata import PackageNotFoundError
@@ -141,6 +122,23 @@ from .ndif import (  # noqa: F401
 from .schema.config import CONFIG  # noqa: E402
 
 if CONFIG.APP.PYMOUNT:
+    # The mount puts `save` in `dir()` of every class, and anyio refuses to define
+    # a `TypedAttributeSet` subclass whose `dir()` holds a public name with no
+    # annotation ("Attribute 'save' is missing its type annotation"). anyio
+    # defines such classes on first use — its asyncio backend, which every
+    # thread-pool call loads, defines one — so no import order puts them all ahead
+    # of the mount. That check calls `dir`, which resolves in its own module
+    # before builtins, so bind one there that leaves out the mounted `save` and
+    # keeps a `save` the class defines.
+    try:
+        from anyio._core import _typedattr
+    except ImportError:
+        pass
+    else:
+        _typedattr.dir = lambda cls: [
+            name for name in dir(cls) if name != "save" or cls.save is not save
+        ]
+
     try:
         from ._c import mount
 

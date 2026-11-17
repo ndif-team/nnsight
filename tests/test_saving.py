@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -139,6 +141,36 @@ class TestSaveMethod:
             f = nnsight.save(envoy.fc2.output)   # function form
         assert torch.allclose(m, model.fc1(x))
         assert torch.allclose(f, model(x))
+
+    def test_anyio_typed_attribute_set_defined_after_the_mount(self):
+        # anyio refuses a TypedAttributeSet subclass whose dir() holds a public
+        # name with no annotation, and the mount puts `save` in every dir().
+        anyio = pytest.importorskip("anyio")
+
+        class Extra(anyio.TypedAttributeSet):
+            peer: str = anyio.typed_attribute()
+
+        # Only the mount is left out: anyio still checks the class's own names,
+        # a `save` of its own included.
+        for name in ("peer", "save"):
+            with pytest.raises(TypeError, match=f"'{name}' is missing"):
+                type("Unannotated", (anyio.TypedAttributeSet,), {name: object()})
+
+    def test_anyio_thread_pool_runs_after_importing_nnsight(self):
+        # anyio defines such a class when its asyncio backend first loads, which
+        # is at the first thread-pool call. A fresh interpreter that imports
+        # nnsight first is the only honest test: this process may already hold
+        # the backend, loaded before nnsight was.
+        pytest.importorskip("anyio")
+        code = (
+            "import nnsight, anyio\n"
+            "print(anyio.run(anyio.to_thread.run_sync, lambda: 6 * 7))\n"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "42"
 
 
 class TestThreadSafety:
