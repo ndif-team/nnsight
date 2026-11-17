@@ -43,7 +43,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensor, unset_fake_temporarily
+from torch._subclasses.fake_tensor import FakeTensor
 
 from .interleaver import Event, Mediator
 
@@ -87,20 +87,6 @@ class Batch(NamedTuple):
     start: int
     #: Number of rows belonging to the requesting worker.
     size: int
-    #: The trace batcher's narrowing for the requesting worker, the same one `Kernel._request` applies to a reader's result.
-    narrow: Callable[[torch.Tensor], torch.Tensor]
-
-    def rows(self, count: int) -> list[int]:
-        """The worker's rows among a kernel batch of ``count`` rows, by the batcher's own rule.
-
-        The batcher keeps the worker's rows when ``count`` is the trace's row
-        count and every row otherwise (for example when generation expands each
-        prompt into beams), so a reader that selects rows itself attributes them
-        exactly as `.output` and the readers narrowed after `read` do.
-        """
-        # Real tensors under `model.scan` too, whose fake ones have no values to list.
-        with unset_fake_temporarily():
-            return self.narrow(torch.arange(count)).tolist()
 
 
 class Sites:
@@ -117,13 +103,10 @@ class Sites:
     range in the combined batch; otherwise ``batch`` is ``None``. Readers whose
     outputs have batch as dimension 0 ignore ``batch`` and let `Kernel._request`
     narrow the result afterwards. Readers whose internal buffers flatten the batch
-    and sequence dimensions use ``batch`` to select the worker's rows and set
-    ``narrowed``.
+    and sequence dimensions use ``batch`` to reshape and select the worker's rows.
     """
 
     names: tuple[str, ...] = ()
-    #: True when `read` already returns only the requesting worker's rows, so `Kernel._request` does not narrow the value again.
-    narrowed: bool = False
 
     def read(self, site: str, spec: dict[str, Any], batch: Batch | None) -> tuple[torch.Tensor, Provenance]:
         if site not in self.names:
@@ -293,9 +276,9 @@ class Kernel:
         batch = None
         if batcher is not None:
             start, size = mediator.batch_group if mediator.batch_group is not None else (0, batcher.total)
-            batch = Batch(batcher.total, start, size, partial(batcher.narrow, group=mediator.batch_group))
+            batch = Batch(batcher.total, start, size)
         value, provenance = sites.read(site, spec, batch)
-        if batcher is not None and not sites.narrowed:
+        if batcher is not None:
             value = batcher.narrow(value, mediator.batch_group)
         # Attach provenance after batch narrowing because slicing a tensor creates a view without custom attributes.
         value.provenance = provenance

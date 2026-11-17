@@ -3,13 +3,11 @@
 `CATALOG` lists the supported kernels as [`Spec`][nnsight.intervention.kernel.Spec]
 rows, each pairing a site family and serve function with a locator that yields
 matching functions and their holders. `register_model` runs `CATALOG` against a
-model when a `TransformersModel` is constructed. The FlashAttention 2 rows,
-`FLASH`, run at the start of every trace instead (`register_flash`), because
-the functions transformers holds for them change after construction. Because
-the kernel registry is process-wide, a function registered for one model serves
-every model that reads its registered holders.
+model when a `TransformersModel` is constructed. Because the kernel registry is
+process-wide, a function registered for one model serves every model that reads
+its registered holders.
 
-Models in transformers reach their kernels in four ways, each handled by a
+Models in transformers reach their kernels in three ways, each handled by a
 locator:
 
 * `eager_functions`: under ``attn_implementation="eager"``, an attention module
@@ -17,17 +15,12 @@ locator:
   default to ``ALL_ATTENTION_FUNCTIONS.get_interface`` on each call.
 * `experts_forward`: the experts wrapper looks up its implementation in
   ``ALL_EXPERTS_FUNCTIONS`` on each call.
-* `flash_function`: under ``attn_implementation="flash_attention_2"``,
-  ``_flash_attention_forward`` reads the dense and varlen FlashAttention 2
-  functions from two module globals on each call.
 * `hub_kernel`: recurrent kernels are called through
   ``use_kernel_func_from_hub_with_fallback`` wrappers, which invoke the callable
   stored in their ``implementation`` closure cell (transformers' Python
-  reference or an installed library's kernel). With the ``kernels`` package
-  installed, transformers hands each wrapper to ``kernels``, which returns a
-  module whose ``forward`` calls it; `_hub_wrappers` reads the wrapper inside.
+  reference or an installed library's kernel).
 
-Site readers live in the sibling modules eager.py, flash.py, recurrent.py, and experts.py.
+Site readers live in the sibling modules eager.py, recurrent.py, and experts.py.
 PyTorch's SDPA has its own single-row catalog in intervention/attention.py.
 
 The hub-kernel wrappers exist from transformers 4.50 and carry the closure
@@ -40,12 +33,12 @@ from __future__ import annotations
 
 import sys
 from types import CellType, FunctionType, ModuleType
-from typing import Any, Callable, NamedTuple
+from typing import Callable, NamedTuple
 
 import torch
 
 from ...intervention.kernel import Attr, Item, Located, Spec, register_catalog, unshimmed
-from . import eager, experts, flash, recurrent
+from . import eager, experts, recurrent
 
 #: The closure variables of a hub-kernel wrapper that `hub_kernel` reads.
 _WRAPPER_CELLS = frozenset({"func_name", "package", "torch_function", "implementation"})
@@ -75,27 +68,17 @@ def _hub_wrappers(module: ModuleType) -> list[dict[str, CellType]]:
     """Inspect all ``use_kernel_func_from_hub_with_fallback`` wrapper closures defined in ``module``.
 
     Each wrapper is identified by its code object's name (``"wrapped"``) and file
-    (``transformers.integrations.hub_kernels``). With the ``kernels`` package
-    installed, the module global holds a ``kernels`` module instance whose
-    ``forward`` closes over the wrapper as ``func``, and the wrapper is read from
-    that cell. The wrapper runs on every call until a model of the architecture
-    is kernelized (``use_kernels=True``), which replaces that ``forward`` with a
-    hub kernel for every model of the architecture in the process. Each entry in the returned list maps a closure variable name
-    (``func_name``, ``package``, ``torch_function``, ``implementation``, etc.) to
-    its closure cell, allowing callers to read ``cell_contents`` or pass the cell
-    as a holder. The wrappers of transformers 5.15 and 5.16 do not close over
-    ``func_name`` and ``package``, so they cannot be matched to a catalog row and
-    are left out.
+    (``transformers.integrations.hub_kernels``). Each entry in the returned list
+    maps a closure variable name (``func_name``, ``package``, ``torch_function``,
+    ``implementation``, etc.) to its closure cell, allowing callers to read
+    ``cell_contents`` or pass the cell as a holder. The wrappers of transformers
+    5.15 and 5.16 do not close over ``func_name`` and ``package``, so they cannot
+    be matched to a catalog row and are left out.
     """
     from transformers.integrations import hub_kernels
 
     found = []
     for value in vars(module).values():
-        if isinstance(value, torch.nn.Module) and isinstance(type(value).forward, FunctionType):
-            forward = type(value).forward
-            closure = dict(zip(forward.__code__.co_freevars, forward.__closure__ or ()))
-            if "func" in closure:
-                value = closure["func"].cell_contents
         if not (
             isinstance(value, FunctionType)
             and value.__code__.co_name == "wrapped"
@@ -163,23 +146,6 @@ def hub_kernel(name: str, package: str | None = None) -> Callable[[Modeling], Lo
     return locate
 
 
-def flash_function(name: str) -> Callable[[Modeling], Located]:
-    """Locate the flash attention function transformers holds in its module global ``name``.
-
-    transformers fills ``_flash_fn`` and ``_flash_varlen_fn`` with the functions
-    of one flash attention implementation at a time and reads them on every
-    call. The locator yields whatever the global holds, so it runs only from
-    `register_flash`, after that has loaded a FlashAttention 2 implementation.
-    """
-
-    def locate(context: Modeling) -> Located:
-        from transformers import modeling_flash_attention_utils as utils
-
-        yield unshimmed(vars(utils)[name]), (Attr(utils, name),)
-
-    return locate
-
-
 #: Supported kernels on transformers models. Recurrent rows are labeled by their hub-kernel name (prefixed with
 #: ``"{package}."`` for library kernels); the function a Python reference row registers has a different name.
 CATALOG: list[Spec] = [
@@ -198,13 +164,6 @@ CATALOG: list[Spec] = [
 ]
 
 
-#: The FlashAttention 2 rows, registered for each trace by `register_flash`.
-FLASH: list[Spec] = [
-    Spec("flash_attn_func", "attention", flash_function("_flash_fn"), flash.serve),
-    Spec("flash_attn_varlen_func", "attention", flash_function("_flash_varlen_fn"), flash.serve),
-]
-
-
 def register_model(root: torch.nn.Module) -> None:
     """Register every function `CATALOG` locates for ``root``.
 
@@ -212,51 +171,3 @@ def register_model(root: torch.nn.Module) -> None:
     only what ``root``'s modeling modules define.
     """
     register_catalog(CATALOG, modeling(root))
-
-
-def _implementations(config: Any) -> set[str]:
-    """The attention implementations set on ``config`` and its sub-configs (a vision-language model sets one per tower)."""
-    found = {config._attn_implementation}
-    for name in config.sub_configs:
-        sub = getattr(config, name)
-        if sub is not None:
-            found |= _implementations(sub)
-    return found
-
-
-def register_flash(root: torch.nn.Module) -> None:
-    """Load ``root``'s FlashAttention 2 functions into transformers' globals and register them, before a trace of ``root``.
-
-    transformers keeps the flash functions of the implementation that last ran
-    in module globals and swaps them when a forward runs with another one, so
-    what the globals hold when the model is constructed says nothing about the
-    model's later traces: the model may be switched to FlashAttention 2 after
-    construction (``set_attn_implementation``, or a remote request's
-    ``attn_implementation``), or another model may load a different flash
-    implementation in between. This runs before every trace's shims are
-    installed. It loads the model's implementation the way the model's forward
-    would (``lazy_import_flash_attention``), so the forward finds it loaded and
-    keeps the patched globals, and registers the functions it leaves there. When
-    a model with a different flash implementation runs while any trace is open
-    in the process, its forward swaps the globals, and FlashAttention 2 calls
-    after that are not served. The implementation is read from the first
-    Hugging Face model in ``root``, which is ``root`` itself unless a wrapper
-    such as ``PeftModel`` holds it.
-    """
-    try:
-        from transformers import PreTrainedModel
-        from transformers import modeling_flash_attention_utils as utils
-    except ImportError:
-        return
-    if "FLASH_ATTN_KERNEL_FALLBACK" not in vars(utils):  # releases before the hub-kernel fallback keep other globals
-        return
-    # One step for a Hugging Face root and a few for a wrapper; a tree with no Hugging Face model is walked whole on every trace.
-    model = next((module for module in root.modules() if isinstance(module, PreTrainedModel)), None)
-    if model is None:
-        return
-    wanted = _implementations(model.config) & {"flash_attention_2", utils.FLASH_ATTN_KERNEL_FALLBACK["flash_attention_2"]}
-    # A model whose towers mix the package and hub spellings cannot have both loaded at once, so it gets no sites.
-    if len(wanted) != 1:
-        return
-    utils.lazy_import_flash_attention(wanted.pop())
-    register_catalog(FLASH)

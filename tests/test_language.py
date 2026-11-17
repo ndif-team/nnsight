@@ -2163,27 +2163,3 @@ class TestAttnImplementation:
         )
         with pytest.raises(ValueError, match="cannot switch"):
             gpt2_meta._remoteable_set_env({"attn_implementation": "eager"})
-
-    def test_a_flash_implementation_loaded_from_its_hub_kernel_matches(self, gpt2_meta, monkeypatch):
-        # A server without flash_attn loads "flash_attention_2" from its hub kernel and records the hub name.
-        from transformers.modeling_flash_attention_utils import FLASH_ATTN_KERNEL_FALLBACK
-
-        monkeypatch.setattr(gpt2_meta._module.config, "_attn_implementation", "sdpa")
-        monkeypatch.setattr(
-            type(gpt2_meta._module), "set_attn_implementation",
-            lambda self, name, **kw: setattr(self.config, "_attn_implementation", FLASH_ATTN_KERNEL_FALLBACK.get(name, name)),
-        )
-        gpt2_meta._remoteable_set_env({"attn_implementation": "flash_attention_2"})
-        assert gpt2_meta.attn_implementation == FLASH_ATTN_KERNEL_FALLBACK["flash_attention_2"]
-
-    def test_a_failed_switch_leaves_the_implementation(self, gpt2_meta, monkeypatch):
-        def switch(self, name, **kw):
-            self.config._attn_implementation = name
-            if name == "flash_attention_2":
-                raise ImportError("flash_attn is not installed")
-
-        monkeypatch.setattr(gpt2_meta._module.config, "_attn_implementation", "sdpa")
-        monkeypatch.setattr(type(gpt2_meta._module), "set_attn_implementation", switch)
-        with pytest.raises(ImportError):
-            gpt2_meta._remoteable_set_env({"attn_implementation": "flash_attention_2"})
-        assert gpt2_meta.attn_implementation == "sdpa"

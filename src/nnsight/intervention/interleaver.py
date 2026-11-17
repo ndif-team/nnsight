@@ -693,12 +693,6 @@ class Interleaver:
         # of a run shared by several workers sets this so one worker's error ends
         # only its own run instead of tearing down the others'.
         self.defer_exceptions = False
-        # Run at the start of every run, before its workers start and its kernel
-        # shims install, on every path that enters this interleaver (local
-        # traces and drivers that enter it directly alike). A model adds the
-        # per-run setup its kernels need: `TransformersModel` loads and
-        # registers the FlashAttention 2 functions its forward will call.
-        self.setup: list[Callable[[], None]] = []
 
     def reindex(self) -> None:
         """Rebuild the parked set, cache routes and `busy` from `mediators`.
@@ -734,7 +728,7 @@ class Interleaver:
         ]
 
     def __enter__(self) -> Interleaver:
-        """Begin interleaving: run `setup`, arm the controllers and start each not-yet-started worker.
+        """Begin interleaving: arm the controllers and start each not-yet-started worker.
 
         Only a worker with no greenlet yet (``worker is None``) is started; one that
         already has a worker is left as is — parked mid-run on a re-entered interleaver.
@@ -742,8 +736,6 @@ class Interleaver:
         whose block has *finished* is also left alone: a finished greenlet is falsy, so
         an ``alive`` gate would take it for never-started and rerun its whole block.
         """
-        for setup in self.setup:
-            setup()
         self.interleaving = True
         self.sourced.clear()
         try:

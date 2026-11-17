@@ -61,8 +61,6 @@ Up: [docs/index.md](../index.md) — all sections.
   custom tracer.
 - [extending-envoy.md](./extending-envoy.md) — new served values: an `eproperty`
   on a model/runtime subclass, fed from the driver with its `.provide`; `envoys=`.
-- [kernel-support-map.md](./kernel-support-map.md): which fused kernels `.kernel`
-  sites cover, ranked by what the major runtimes default to.
 - [adding-a-new-runtime.md](./adding-a-new-runtime.md) — plug a new model type or
   inference engine in via the modeling mixins.
 - [serialization.md](./serialization.md) — source-based serialization for remote
