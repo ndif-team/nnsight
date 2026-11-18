@@ -421,6 +421,13 @@ class TransformersModel(HuggingFaceModel):
             self.tokenizer.padding_side = "left"
         elif self._is_encoder_decoder():
             self.tokenizer.padding_side = "right"
+        # Gemma answers noise without a leading <bos>, which some of its tokenizers
+        # leave off a plain string. The top-level model_type leaves out PaliGemma,
+        # whose processor puts <bos> after the image tokens. Setting the flag
+        # rebuilds the post-processor, so only a tokenizer missing <bos> gets it.
+        gemma = self.pipeline.model.config.model_type.startswith("gemma")
+        if gemma and self.tokenizer("a").input_ids[:1] != [self.tokenizer.bos_token_id]:
+            self.tokenizer.add_bos_token = True
 
     def _is_causal(self) -> bool:
         # A decoder-only generative model (GPT-2, Llava, ...) — as opposed to an
