@@ -3,7 +3,7 @@ title: Errors Index
 one_liner: Every exception and warning nnsight users hit, keyed by its message text, with the page that explains cause and fix.
 tags: [error, index]
 related: [docs/index.md, docs/errors/symptom-index.md, docs/errors/debug-mode.md]
-sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/source.py]
+sources: [src/nnsight/tracing/tracer.py, src/nnsight/intervention/interleaver.py, src/nnsight/intervention/tracer.py, src/nnsight/intervention/batching.py, src/nnsight/modeling/transformers.py, src/nnsight/intervention/envoy.py, src/nnsight/intervention/source.py]
 ---
 
 # Errors Index
@@ -68,6 +68,7 @@ module never fired.
 | `GuardOnDataDependentSymNode` | ``Could not guard on data-dependent expression …`` — branching on, or converting, a fake value under `scan` | [scan.md](../usage/scan.md#what-a-scan-cannot-tell-you) |
 | `ValueError` | ``A barrier was never reached by every block it waits for; check the count it was created with`` | [barrier.md](../usage/barrier.md) |
 | `ValueError` | ``A batched `.skip()` has to cover every row …`` | [skip.md](../usage/skip.md) |
+| `ValueError` | ``Can't scope an activation with N rows to one invoke: they count the batch's images …`` | [transformers-model.md](../models/transformers-model.md#batching-chats-with-images) |
 | `AttributeError` | ``module 'nnsight' has no attribute 'list'`` (or `apply`, `session`, …); ``'Tensor' object has no attribute 'value'`` | [migrating-to-0.8.md](../reference/migrating-to-0.8.md) |
 | `NNsightDeprecationWarning` | ``<name> is deprecated; use <replacement> instead.`` | [migrating-to-0.8.md](../reference/migrating-to-0.8.md#deprecated--warn-under-nnsightdeprecationwarning) |
 
