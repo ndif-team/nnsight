@@ -322,7 +322,7 @@ class TransformersModel(HuggingFaceModel):
 
     # -- loading -------------------------------------------------------------
 
-    def _build_pipeline(self, model: Any, kwargs: dict) -> None:
+    def _build_pipeline(self, model: Any, kwargs: dict) -> "Pipeline":
         # The one `pipeline()` call for every load path: `model` is a repo id for
         # the pipeline to load, or a model already built. The pipeline fetches
         # the preprocessors either way, so it always gets the revision and every
@@ -341,7 +341,7 @@ class TransformersModel(HuggingFaceModel):
             }
         else:
             preprocessors = self._preprocessor_sources(kwargs)
-        self.pipeline = pipeline(
+        return pipeline(
             self.task,
             model=model,
             revision=self.revision,
@@ -511,7 +511,9 @@ class TransformersModel(HuggingFaceModel):
 
         # The model is pre-built, so the pipeline only loads preprocessors.
         # Placement is this build's own, not the caller's.
-        self._build_pipeline(model, {**kwargs, "device": "meta", "device_map": None})
+        self.pipeline = self._build_pipeline(
+            model, {**kwargs, "device": "meta", "device_map": None}
+        )
         self._sync()
         return model
 
@@ -543,7 +545,7 @@ class TransformersModel(HuggingFaceModel):
             auto = check_task(self.task)[1]["pt"][0]
             module = auto.from_pretrained(repo_id, revision=self.revision, **model_kwargs)
             return self._wrap(module, **kwargs)
-        self._build_pipeline(repo_id, kwargs)
+        self.pipeline = self._build_pipeline(repo_id, kwargs)
         return self._finalize_pipeline()
 
     def _wrap(self, module: torch.nn.Module, *args: Any, **kwargs: Any) -> torch.nn.Module:
@@ -557,7 +559,7 @@ class TransformersModel(HuggingFaceModel):
         # deployment. Local inference keeps this path offline.
         if self.task is None:
             self.task = _infer_task(module)
-        self._build_pipeline(module, kwargs)
+        self.pipeline = self._build_pipeline(module, kwargs)
         return self._finalize_pipeline()
 
     def _finalize_pipeline(self) -> torch.nn.Module:
