@@ -5,6 +5,7 @@ over generation, early stop, gradients, caching, sessions, and module aliasing.
 """
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -963,107 +964,191 @@ class TestScan:
 
 
 @pytest.fixture(scope="module")
-def tiny_repo_in_custom_cache(tmp_path_factory):
-    """A tiny checkpoint written into a custom hub cache, built without the Hub.
+def custom_hub_cache(tmp_path_factory):
+    """Tiny checkpoints written into a custom hub cache, built without the Hub.
 
-    ``cache_dir`` only means anything for a repo id, so the checkpoint goes where
+    ``cache_dir`` only means anything for a repo id, so each checkpoint goes where
     a download would have put it: huggingface_hub resolves a repo id to
-    ``<cache_dir>/<repo folder>/snapshots/<revision>``, taking the revision from
-    ``refs/main``. Returns the repo id and the cache directory holding it.
+    ``<cache_dir>/<repo folder>/snapshots/<commit>``, taking the commit from
+    ``refs/<revision>``. The text repo has two revisions whose tokenizers differ
+    in size, so the size of a loaded tokenizer says which revision it was read
+    from. The audio repo is there for a task that loads a feature extractor.
     """
     from huggingface_hub.file_download import repo_folder_name
     from tokenizers import ByteLevelBPETokenizer
-    from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
+    from transformers import (
+        GPT2Config,
+        GPT2LMHeadModel,
+        PreTrainedTokenizerFast,
+        Wav2Vec2Config,
+        Wav2Vec2FeatureExtractor,
+        Wav2Vec2ForSequenceClassification,
+    )
 
-    repo_id, revision = "nnsight-test/tiny-gpt2", "0" * 40
     cache = tmp_path_factory.mktemp("custom_hub_cache")
-    repo = cache / repo_folder_name(repo_id=repo_id, repo_type="model")
-    snapshot = repo / "snapshots" / revision
-    snapshot.mkdir(parents=True)
-    (repo / "refs").mkdir()
-    (repo / "refs" / "main").write_text(revision)
 
-    bpe = ByteLevelBPETokenizer()
-    bpe.train_from_iterator(
-        ["the quick brown fox", "nnsight traces models"],
-        vocab_size=300,
-        min_frequency=1,
-        special_tokens=["<|endoftext|>"],
-    )
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=bpe,
-        unk_token="<|endoftext|>",
-        bos_token="<|endoftext|>",
-        eos_token="<|endoftext|>",
-        pad_token="<|endoftext|>",
-    )
-    tokenizer.save_pretrained(str(snapshot))
-    config = GPT2Config(
-        vocab_size=len(tokenizer),
-        n_positions=16,
-        n_embd=8,
-        n_layer=1,
-        n_head=1,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-    )
-    GPT2LMHeadModel(config).save_pretrained(str(snapshot))
-    return repo_id, str(cache)
+    def snapshot(repo_id, revision, commit):
+        repo = cache / repo_folder_name(repo_id=repo_id, repo_type="model")
+        (repo / "refs").mkdir(parents=True, exist_ok=True)
+        (repo / "refs" / revision).write_text(commit)
+        path = repo / "snapshots" / commit
+        path.mkdir(parents=True)
+        return str(path)
+
+    text, sizes = "nnsight-test/tiny-gpt2", {}
+    for revision, commit, vocab_size in (("main", "0" * 40, 262), ("pinned", "1" * 40, 270)):
+        path = snapshot(text, revision, commit)
+        bpe = ByteLevelBPETokenizer()
+        bpe.train_from_iterator(
+            ["the quick brown fox jumps over the lazy dog", "nnsight traces models"],
+            vocab_size=vocab_size,
+            min_frequency=1,
+            special_tokens=["<|endoftext|>"],
+        )
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=bpe,
+            unk_token="<|endoftext|>",
+            bos_token="<|endoftext|>",
+            eos_token="<|endoftext|>",
+            pad_token="<|endoftext|>",
+        )
+        tokenizer.save_pretrained(path)
+        config = GPT2Config(
+            vocab_size=len(tokenizer),
+            n_positions=16,
+            n_embd=8,
+            n_layer=1,
+            n_head=1,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+        GPT2LMHeadModel(config).save_pretrained(path)
+        sizes[revision] = len(tokenizer)
+    assert sizes["main"] != sizes["pinned"]
+
+    audio = "nnsight-test/tiny-wav2vec2"
+    path = snapshot(audio, "main", "2" * 40)
+    Wav2Vec2ForSequenceClassification(
+        Wav2Vec2Config(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            conv_dim=(8, 8),
+            conv_stride=(5, 2),
+            conv_kernel=(10, 3),
+            num_feat_extract_layers=2,
+            num_conv_pos_embeddings=16,
+            num_conv_pos_embedding_groups=2,
+            classifier_proj_size=8,
+        )
+    ).save_pretrained(path)
+    Wav2Vec2FeatureExtractor().save_pretrained(path)
+
+    return {"cache_dir": str(cache), "text": text, "audio": audio, "sizes": sizes}
 
 
-class TestCacheDir:
-    """``cache_dir`` reaches the preprocessor load, not just the weight load.
+@pytest.fixture(scope="module")
+def loads_from_custom_cache(custom_hub_cache, tmp_path_factory):
+    """What each load path read, given a ``cache_dir`` and a pinned ``revision``.
 
-    The meta build wraps its model in a pipeline that sources preprocessors by
-    repo id, so a tokenizer is fetched there like any other checkpoint file. Given
-    a ``cache_dir`` the caller already populated, that fetch has to look in it;
-    resolving against the default cache instead fails outright offline, which is
-    the only honest way to assert it — a populated default cache would satisfy the
-    lookup either way. ``HF_HUB_CACHE`` is read when huggingface_hub is imported,
-    so the run needs its own interpreter.
+    Run offline against an empty default cache: a preprocessor fetched without
+    the ``cache_dir`` then fails outright, where a populated default cache would
+    satisfy the lookup either way. ``HF_HUB_CACHE`` is read when huggingface_hub
+    is imported, so the loads need their own interpreter; one run covers them all.
     """
-
-    _SCRIPT = textwrap.dedent(
+    script = textwrap.dedent(
         """
+        import json
         import sys
+
+        from transformers import AutoConfig, AutoModelForCausalLM
 
         from nnsight.modeling.transformers import TransformersModel
 
-        repo_id, cache_dir, dispatch = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-        model = TransformersModel(
-            repo_id, cache_dir=cache_dir, task="text-generation", dispatch=dispatch
-        )
-        assert model.dispatched is dispatch
-        assert model.tokenizer is not None
-        assert model.tokenizer("the quick brown fox")["input_ids"]
-        print("OK")
+        text, audio, cache_dir = sys.argv[1:]
+        fetch = dict(cache_dir=cache_dir, revision="pinned")
+        load = dict(task="text-generation", **fetch)
+        builds = {
+            "lazy": lambda: TransformersModel(text, **load),
+            "dispatch": lambda: TransformersModel(text, dispatch=True, **load),
+            "config": lambda: TransformersModel(
+                text, config=AutoConfig.from_pretrained(text, **fetch), dispatch=True, **load
+            ),
+            "module": lambda: TransformersModel(
+                AutoModelForCausalLM.from_pretrained(text, **fetch), **load
+            ),
+            "audio": lambda: TransformersModel(
+                audio, task="audio-classification", cache_dir=cache_dir
+            ),
+        }
+        read = {}
+        for name, build in builds.items():
+            try:
+                model = build()
+                read[name] = (
+                    type(model.feature_extractor).__name__
+                    if name == "audio"
+                    else len(model.tokenizer)
+                )
+            except Exception as error:
+                read[name] = repr(error)
+        print(json.dumps(read))
         """
     )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            custom_hub_cache["text"],
+            custom_hub_cache["audio"],
+            custom_hub_cache["cache_dir"],
+        ],
+        capture_output=True,
+        text=True,
+        timeout=900,
+        env={
+            **os.environ,
+            "CUDA_VISIBLE_DEVICES": "",
+            "HF_HUB_CACHE": str(tmp_path_factory.mktemp("empty_hub_cache")),
+            "HF_HUB_OFFLINE": "1",
+        },
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
 
-    def _run(self, tiny_repo_in_custom_cache, tmp_path, dispatch):
-        repo_id, cache_dir = tiny_repo_in_custom_cache
-        empty_cache = tmp_path / "empty_hub_cache"
-        empty_cache.mkdir()
-        return subprocess.run(
-            [sys.executable, "-c", self._SCRIPT, repo_id, cache_dir, "1" if dispatch else "0"],
-            capture_output=True,
-            text=True,
-            timeout=900,
-            env={
-                **os.environ,
-                "CUDA_VISIBLE_DEVICES": "",
-                "HF_HUB_CACHE": str(empty_cache),
-                "HF_HUB_OFFLINE": "1",
-            },
-        )
 
-    @pytest.mark.parametrize("dispatch", [False, True])
-    def test_cache_dir_resolves_the_preprocessors(
-        self, tiny_repo_in_custom_cache, tmp_path, dispatch
+class TestLoadKwargs:
+    """Every load path fetches the preprocessors the way it fetches the weights.
+
+    Only a repo-id load has the pipeline fetch the model too. The other paths
+    hand it a model that is already built (the meta model, the model loaded for
+    a ``config=``, a module passed in), and it still fetches the tokenizer by
+    repo id, so it needs the caller's ``cache_dir`` and ``revision`` there as
+    well. Without them the tokenizer comes from the default cache and the
+    default branch, next to weights that came from the ones the caller named.
+    """
+
+    @pytest.mark.parametrize("path", ["lazy", "dispatch", "config", "module"])
+    def test_tokenizer_comes_from_the_cache_dir_and_revision(
+        self, custom_hub_cache, loads_from_custom_cache, path
     ):
-        result = self._run(tiny_repo_in_custom_cache, tmp_path, dispatch)
-        assert result.returncode == 0, result.stderr[-3000:]
-        assert "OK" in result.stdout
+        assert loads_from_custom_cache[path] == custom_hub_cache["sizes"]["pinned"]
+
+    def test_lazy_feature_extractor_comes_from_the_cache_dir(self, loads_from_custom_cache):
+        # The one preprocessor the lazy build loads itself rather than through
+        # the pipeline (see `_preprocessor_sources`).
+        assert loads_from_custom_cache["audio"] == "Wav2Vec2FeatureExtractor"
+
+    def test_a_callers_model_kwargs_join_the_split(self):
+        from nnsight.modeling.transformers import _split_pipeline_kwargs
+
+        top_level, model_kwargs = _split_pipeline_kwargs(
+            {"token": "t", "max_memory": {0: "1GiB"}, "model_kwargs": {"cache_dir": "c"}}
+        )
+        assert top_level == {"token": "t"}
+        assert model_kwargs == {"cache_dir": "c", "max_memory": {0: "1GiB"}}
 
 
 def _has_lora(model) -> bool:

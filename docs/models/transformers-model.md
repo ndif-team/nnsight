@@ -99,7 +99,7 @@ TransformersModel(
 | `config` | A config object the model is built from in place of the checkpoint's own, on the meta build and the real load alike. Keyword overrides are not merged into it, as with `from_pretrained`. |
 | `rename` | Module-path aliases (see [rename-modules.md](../usage/rename-modules.md)). |
 
-`kwargs` are split between the `pipeline(...)` factory's own parameters and `model_kwargs` automatically (`transformers.py`, `_split_pipeline_kwargs`), so anything HF accepts works.
+`kwargs` are split between the `pipeline(...)` factory's own parameters and `model_kwargs` automatically (`transformers.py`, `_split_pipeline_kwargs`), so anything HF accepts works. Every load path passes the same split and `revision`, so the tokenizer and other preprocessors are fetched with the `cache_dir`, `token` and `revision` the weights are. The exception is `local_files_only`, which `transformers.pipeline` does not accept; set `HF_HUB_OFFLINE=1` to stay off the network.
 
 ### Preprocessor attributes
 
@@ -372,7 +372,7 @@ A frozen base refuses every backward through the model (a saved adapter's own pa
 
 ## Dispatch behavior
 
-- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device and the Envoy tree is fully usable for writing intervention code. The meta config takes the same load kwargs as the real load (`attn_implementation`, `experts_implementation`, `dtype`, config overrides), so `model.config` is the same before and after dispatch; placement kwargs (`device_map`, `max_memory`, ...) wait for dispatch.
+- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device and the Envoy tree is fully usable for writing intervention code. The meta config takes the same load kwargs as the real load (`attn_implementation`, `experts_implementation`, `dtype`, config overrides), so `model.config` is the same before and after dispatch, and so is `model.tokenizer`, which is fetched with the same `cache_dir`, `token` and `revision`; placement kwargs (`device_map`, `max_memory`, ...) wait for dispatch.
 - `dispatch=True`: real weights load during `__init__`.
 - First `trace`/`generate`/`pipe` auto-dispatches if needed (`mixins/meta.py`, `Meta.interleave`). `scan` does **not** dispatch.
 - Call `model.dispatch()` to force loading.

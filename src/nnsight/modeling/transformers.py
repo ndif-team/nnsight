@@ -13,6 +13,8 @@ this module leans on the pipeline rather than re-deriving any of it:
   needs; the task's pipeline class says which those are through its ``_load_*``
   flags. The lazy meta build is the exception — ``pipeline()`` can't
   ``from_config`` a model, so the meta model is built here and handed to it.
+  Either way it is the same ``pipeline()`` call with the same revision and load
+  kwargs, so the preprocessors are fetched the way the weights are.
 * **Input**: each invoke goes through the task's own ``preprocess`` (with its own
   ``_sanitize_parameters`` splitting preprocess from forward kwargs), and the
   per-invoke encodings are padded together by `processing.collate`.
@@ -95,22 +97,6 @@ _PERSISTENT = {
 # tree) is built, so the client's meta model matches the server's real model.
 _META_MODEL_KWARGS = ("trust_remote_code", "torch_dtype", "dtype", "attn_implementation")
 
-# Kwargs held back from the meta pipeline, which wraps an already-built model and
-# so only loads preprocessors. These describe the build or where its weights land:
-# `config` was consumed by the build above, `device`/`device_map` would fight the
-# `device="meta"` the call passes itself, and the rest would reach a tokenizer or
-# processor from_pretrained that has no use for them. Everything else goes through,
-# because the fetch kwargs (cache_dir, token, local_files_only, subfolder, proxies)
-# decide where that preprocessor load looks for its files.
-_META_PIPELINE_DROPPED = (
-    "config",
-    "device",
-    "device_map",
-    "max_memory",
-    "quantization_config",
-    "model_kwargs",
-)
-
 # Architecture-class suffix -> pipeline task, for inferring a task from a pre-loaded
 # module (the pipeline factory can only infer a task from a repo-id string).
 _ARCH_TASK = {
@@ -153,6 +139,11 @@ def _split_pipeline_kwargs(kwargs: dict) -> tuple[dict, dict]:
     ``model_kwargs``. Passed top-level, an unrecognized name is stashed in the
     pipeline's ``_forward_params`` and forwarded to ``model.generate``, which
     rejects it ("model_kwargs not used by the model: ['max_memory']").
+
+    ``model_kwargs`` is also what the pipeline hands every preprocessor it loads,
+    so a fetch kwarg in it (``cache_dir``, ``subfolder``) decides where the
+    tokenizer is looked for as well as the weights. A caller's own
+    ``model_kwargs=`` is that same bag and is merged into it.
     """
     import inspect
 
@@ -164,7 +155,10 @@ def _split_pipeline_kwargs(kwargs: dict) -> tuple[dict, dict]:
         if parameter.kind not in (parameter.VAR_KEYWORD, parameter.VAR_POSITIONAL)
     }
     top_level = {k: v for k, v in kwargs.items() if k in factory_params}
-    model_kwargs = {k: v for k, v in kwargs.items() if k not in factory_params}
+    model_kwargs = {
+        **(top_level.pop("model_kwargs", None) or {}),
+        **{k: v for k, v in kwargs.items() if k not in factory_params},
+    }
     return top_level, model_kwargs
 
 
@@ -334,9 +328,39 @@ class TransformersModel(HuggingFaceModel):
 
     # -- loading -------------------------------------------------------------
 
-    def _preprocessor_sources(self) -> dict:
+    def _build_pipeline(self, model: Any, kwargs: dict) -> None:
+        # The one `pipeline()` call, whatever `model` is: a repo id for the
+        # pipeline to load, the meta model, or a module handed in. It always
+        # carries the revision and the whole split of the load kwargs, because
+        # the pipeline fetches the preprocessors with them. Passing a subset when
+        # the model is already built would resolve the tokenizer against the
+        # default cache and the default branch while the weights came from the
+        # ones the caller named.
+        from transformers import pipeline
+
+        top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
+        if isinstance(model, str):
+            # The pipeline infers every preprocessor from the repo id; only
+            # forward the ones the user explicitly supplied.
+            preprocessors = {
+                attr: getattr(self, attr)
+                for attr in _PREPROCESSORS
+                if getattr(self, attr) is not None
+            }
+        else:
+            preprocessors = self._preprocessor_sources(kwargs)
+        self.pipeline = pipeline(
+            self.task,
+            model=model,
+            revision=self.revision,
+            **preprocessors,
+            **top_level,
+            model_kwargs=model_kwargs,
+        )
+
+    def _preprocessor_sources(self, kwargs: dict) -> dict:
         # Feed pipeline a source for each preprocessor: the provided object, or
-        # the repo id for it to load (needed for the meta model, which has no
+        # the repo id for it to load (needed for a pre-built model, which has no
         # path to infer from). Only the preprocessors the task's pipeline actually
         # loads are sourced — passing a stray tokenizer source to a processor-based
         # (multimodal) pipeline, for instance, makes it reject the string.
@@ -352,11 +376,13 @@ class TransformersModel(HuggingFaceModel):
         # so they fetch `huggingface.co/None/...` and die. Hand them the object
         # instead; a feature extractor is a JSON config, no weights, so building
         # it costs nothing on the path that exists to avoid loading weights.
+        # Like the config read, it takes every load kwarg and keeps the ones it
+        # owns, so it is fetched the way the pipeline would have fetched it.
         if isinstance(sources.get("feature_extractor"), str):
             from transformers import AutoFeatureExtractor
 
             sources["feature_extractor"] = AutoFeatureExtractor.from_pretrained(
-                sources["feature_extractor"], revision=self.revision
+                sources["feature_extractor"], revision=self.revision, **kwargs
             )
         return sources
 
@@ -426,7 +452,7 @@ class TransformersModel(HuggingFaceModel):
         return bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False))
 
     def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        from transformers import AutoConfig, pipeline
+        from transformers import AutoConfig
         from transformers.pipelines import check_task, get_task
 
         from .quantization import resolve_load_kwargs
@@ -497,29 +523,15 @@ class TransformersModel(HuggingFaceModel):
             # adapted model the server runs. No adapter weights are loaded here.
             peft.attach(model, self.peft, weights=False)
 
-        # The model is pre-built, so the meta pipeline only loads preprocessors.
-        # They are fetched like any checkpoint file, so they take the same split
-        # `_load` makes over the whole load rather than the architecture subset:
-        # a cache_dir or token that reaches the real load has to reach this one
-        # too, or a custom cache resolves here against the default cache and an
-        # offline build fails on files the caller already has.
-        top_level, model_kwargs = _split_pipeline_kwargs(
-            {k: v for k, v in kwargs.items() if k not in _META_PIPELINE_DROPPED}
-        )
-        self.pipeline = pipeline(
-            self.task,
-            model=model,
-            device="meta",
-            **self._preprocessor_sources(),
-            **top_level,
-            model_kwargs=model_kwargs,
-        )
+        # The model is pre-built, so the pipeline only loads preprocessors, and
+        # every weight kwarg in the split is inert. Placement is the exception:
+        # it is a pipeline argument that acts on a model already in hand, so the
+        # caller's gives way to this build's own.
+        self._build_pipeline(model, {**kwargs, "device": "meta", "device_map": None})
         self._sync()
         return model
 
     def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        from transformers import pipeline
-
         from .quantization import resolve_load_kwargs
 
         # Before the split, and before the pipeline fetches anything. This path
@@ -533,40 +545,23 @@ class TransformersModel(HuggingFaceModel):
         # and lands in `model_kwargs`, which is where from_pretrained wants it.
         kwargs = resolve_load_kwargs(kwargs)
 
-        top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
-        if "config" in top_level:
+        if "config" in kwargs:
             # pipeline() reads `config` only to pick the class, never passing it
             # to from_pretrained, so load the model with it here and wrap it.
             from transformers.pipelines import check_task, get_task
 
             self.task = self.task or get_task(repo_id)
+            top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
             for name in ("config", "dtype", "torch_dtype", "device_map", "trust_remote_code", "token"):
                 if name in top_level:
                     model_kwargs[name] = top_level[name]
             auto = check_task(self.task)[1]["pt"][0]
             module = auto.from_pretrained(repo_id, revision=self.revision, **model_kwargs)
-            return self._wrap(module, **top_level)
-        # The pipeline loads the model and infers every preprocessor; only
-        # forward the ones the user explicitly supplied.
-        provided = {
-            attr: getattr(self, attr)
-            for attr in _PREPROCESSORS
-            if getattr(self, attr) is not None
-        }
-        self.pipeline = pipeline(
-            self.task,
-            model=repo_id,
-            revision=self.revision,
-            **provided,
-            **top_level,
-            model_kwargs=model_kwargs,
-        )
+            return self._wrap(module, **kwargs)
+        self._build_pipeline(repo_id, kwargs)
         return self._finalize_pipeline()
 
     def _wrap(self, module: torch.nn.Module, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        from transformers import pipeline
-
-        top_level, _ = _split_pipeline_kwargs(kwargs)
         # The pipeline factory can't infer the task or the preprocessors from a
         # module instance, so infer the task and source the preprocessors from
         # what was passed in or the model's name_or_path (captured as
@@ -577,9 +572,7 @@ class TransformersModel(HuggingFaceModel):
         # deployment. Local inference keeps this path offline.
         if self.task is None:
             self.task = _infer_task(module)
-        self.pipeline = pipeline(
-            self.task, model=module, **self._preprocessor_sources(), **top_level
-        )
+        self._build_pipeline(module, kwargs)
         return self._finalize_pipeline()
 
     def _finalize_pipeline(self) -> torch.nn.Module:
