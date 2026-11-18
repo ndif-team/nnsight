@@ -201,14 +201,10 @@ model.trace(input_ids=ids, attention_mask=mask)         # keyword tensors
 model.trace(**model.tokenizer("hi", return_tensors="pt"))  # unpacked encoding
 ```
 
-A string is tokenized by the task's pipeline with the tokenizer's own defaults,
-with one correction: a Gemma tokenizer that leaves `<bos>` off a plain string
-(Gemma 4's does) is set to prepend it when the model loads
-(`model.tokenizer.add_bos_token = True`), since Gemma is trained with `<bos>`
-first and answers noise without it. Chat input and pre-tokenized ids are taken as
-given, so a template or a caller that supplies `<bos>` never gets a second one. A
-tokenizer the setting does not fix warns; pass ids starting with
-`model.tokenizer.bos_token_id` instead of the string.
+A Gemma tokenizer that leaves `<bos>` off a plain string (several `-it` ones do) is
+set to prepend it when the model loads, as Gemma answers noise without it. A
+string that already starts with `<bos>`, such as a rendered chat template, gets a
+second one; pass the chat itself instead.
 
 An encoding, keywords, and ids with keywords are the same input written three
 ways. Its per-row fields are split by row, padded and batched with whatever the

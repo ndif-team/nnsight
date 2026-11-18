@@ -92,7 +92,7 @@ laid out one file per concept:
 | `tracing/` | `tests/test_tracing.py` |
 | `intervention/batching.py` | `tests/test_batching.py` |
 | `intervention/fragments.py` | `tests/test_fragments.py` |
-| `modeling/transformers.py`, `modeling/huggingface.py` | `tests/test_language.py`, `tests/test_modeling.py`, `tests/test_encoder.py`, `tests/test_encoder_decoder.py`, `tests/test_pretokenized.py`, `tests/test_chunked_tasks.py`, `tests/test_construction_routing.py` |
+| `modeling/transformers.py`, `modeling/huggingface.py` | `tests/test_language.py`, `tests/test_modeling.py`, `tests/test_encoder.py`, `tests/test_encoder_decoder.py`, `tests/test_pretokenized.py`, `tests/test_chunked_tasks.py`, `tests/test_construction_routing.py`, `tests/test_tokenizer_bos.py` |
 | `modeling/diffusion.py` | `tests/test_diffusion.py` |
 | `modeling/vlm.py` | `tests/test_vlm.py` |
 | `modeling/quantization.py` | `tests/test_quantization.py` |
