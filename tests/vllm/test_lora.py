@@ -152,6 +152,31 @@ class TestLoRA:
         assert not torch.allclose(base.float(), adapted.float())
 
     @torch.no_grad()
+    def test_a_trace_level_adapter_covers_the_invokes_that_name_none(
+        self, vllm_lora, lora_path, ET_prompt
+    ):
+        # The trace's adapter is its invokes' default, as its sampling settings
+        # are: an invoke that names its own, `None` included, keeps that one.
+        adapter = request(lora_path)
+        with vllm_lora.trace(ET_prompt, temperature=0.0, top_p=1):
+            base = vllm_lora.logits.save()
+        with vllm_lora.trace(ET_prompt, temperature=0.0, top_p=1, lora_request=adapter):
+            adapted = vllm_lora.logits.save()
+        with vllm_lora.trace(temperature=0.0, top_p=1, lora_request=adapter) as tracer:
+            with tracer.invoke(ET_prompt):
+                inherited = vllm_lora.logits.save()
+            with tracer.invoke(ET_prompt, lora_request=None):
+                opted_out = vllm_lora.logits.save()
+
+        # By distance, not equality: the batch a request shares changes the
+        # reduction order under bf16.
+        def gap(a, b):
+            return (a.float() - b.float()).norm()
+
+        assert gap(inherited, adapted) < gap(inherited, base)
+        assert gap(opted_out, base) < gap(opted_out, adapted)
+
+    @torch.no_grad()
     def test_generation_runs_with_an_adapter(self, vllm_lora, lora_path, MSG_prompt):
         with vllm_lora.trace(
             MSG_prompt,

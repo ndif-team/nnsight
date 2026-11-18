@@ -8,7 +8,6 @@ run in the worker, saved values shipped home.
 """
 
 from collections import namedtuple
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -465,9 +464,7 @@ class TestEarlyStop:
 
     @torch.no_grad()
     def test_stop_finishes_the_request_under_min_tokens(self, vllm_gpt2, MSG_prompt):
-        # min_tokens defers the scheduler's stop check, so a single forced
-        # end-of-sequence would not retire the request. Re-forcing it every step ends
-        # the request once min_tokens is met — still well short of max_tokens.
+        # The forced end-of-sequence ends a request whatever its min_tokens.
         with vllm_gpt2.trace(
             MSG_prompt, temperature=0.0, top_p=1, max_tokens=40, min_tokens=4
         ) as tracer:
@@ -477,8 +474,7 @@ class TestEarlyStop:
                 if it == 0:
                     tracer.stop()
 
-        steps = len(cache["model.transformer.h.0"])
-        assert 4 <= steps < 40
+        assert len(cache["model.transformer.h.0"]) < 4
 
     @torch.no_grad()
     def test_stop_under_ignore_eos_runs_to_max_tokens(self, vllm_gpt2, MSG_prompt):
@@ -667,6 +663,20 @@ class TestDeferredErrors:
         with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
             logits = vllm_gpt2.logits.save()
         assert vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"
+
+    @torch.no_grad()
+    def test_an_error_binds_nothing(self, vllm_gpt2, ET_prompt, MSG_prompt):
+        # The invoke that stopped binds nothing, and its stop does not hide the other's error.
+        token = "unbound"
+        with pytest.raises(RuntimeError, match="ZeroDivisionError"):
+            with vllm_gpt2.trace(temperature=0.0, max_tokens=1) as tracer:
+                with tracer.invoke(ET_prompt):
+                    token = vllm_gpt2.logits.argmax(dim=-1).save()
+                    tracer.stop()
+                with tracer.invoke(MSG_prompt):
+                    _ = 1 / 0
+
+        assert token == "unbound"
 
     @torch.no_grad()
     def test_a_raise_inside_an_iter_loop_spares_the_engine(self, vllm_gpt2,
@@ -984,76 +994,6 @@ class TestPromptForms:
         assert vllm_gpt2.tokenizer.decode(msg.argmax(dim=-1)) == " New"
 
 
-class TestModelRunnerSelection:
-    """nnsight instruments one of vLLM's two GPU model runners, and says so."""
-
-    def test_it_asks_for_the_runner_it_instruments(self):
-        # Set before the engine is built, since the worker processes inherit it.
-        import os
-
-        from nnsight.modeling.vllm import VLLM
-
-        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
-        VLLM._require_v1_model_runner()
-        assert os.environ["VLLM_USE_V2_MODEL_RUNNER"] == "0"
-
-    def test_the_worker_swaps_in_its_runner_and_refuses_any_other(self, monkeypatch):
-        # The worker builds vLLM's runner in init_device; nnsight's subclass is
-        # swapped onto that instance, and anything else is a hard error there
-        # rather than an engine that comes up uninstrumented.
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-        from vllm.v1.worker.gpu_worker import Worker
-
-        from nnsight.modeling.vllm.model_runners.GPUModelRunner import NNsightGPUModelRunner
-        from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
-
-        monkeypatch.setattr(Worker, "init_device", lambda self: None)
-        worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
-        worker.vllm_config = SimpleNamespace(
-            parallel_config=SimpleNamespace(distributed_executor_backend="mp")
-        )
-
-        worker.model_runner = object()
-        with pytest.raises(NotImplementedError, match="instruments vLLM's GPUModelRunner"):
-            worker.init_device()
-
-        worker.model_runner = GPUModelRunner.__new__(GPUModelRunner)
-        worker.init_device()
-        assert type(worker.model_runner) is NNsightGPUModelRunner
-
-    def test_rays_compiled_graph_executor_is_refused(self, monkeypatch):
-        # It runs the forward on a thread of its own, and a suspended block can
-        # only be resumed from its own thread, so a collect could not finish it.
-        from vllm import envs
-        from vllm.v1.worker.gpu_worker import Worker
-
-        from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
-
-        monkeypatch.setattr(Worker, "init_device", lambda self: None)
-        monkeypatch.setattr(envs, "VLLM_USE_RAY_V2_EXECUTOR_BACKEND", False, raising=False)
-        worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
-        worker.vllm_config = SimpleNamespace(
-            parallel_config=SimpleNamespace(distributed_executor_backend="ray")
-        )
-
-        with pytest.raises(NotImplementedError, match="compiled-graph Ray executor"):
-            worker.init_device()
-
-    def test_asking_for_the_other_one_is_refused(self):
-        # Overriding it silently would be worse: the engine comes up with no
-        # instrumentation and the first collect fails with a missing method.
-        import os
-
-        from nnsight.modeling.vllm import VLLM
-
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
-        try:
-            with pytest.raises(NotImplementedError, match="V2 GPU model runner"):
-                VLLM._require_v1_model_runner()
-        finally:
-            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
-
-
 class TestScan:
     """Shapes come from a real request here; a scan says so instead of crashing."""
 
@@ -1091,3 +1031,23 @@ def test_data_parallelism_is_refused_before_anything_is_built():
 
     with pytest.raises(NotImplementedError, match="data_parallel_size"):
         VLLM("gpt2", data_parallel_size=2)
+
+
+def test_batch_sharded_sampling_is_refused_before_anything_is_built():
+    # Each rank's sampler is then handed only the requests it owns, where a
+    # block's logits are scoped to the step's whole batch.
+    from nnsight.modeling.vllm import VLLM
+
+    with pytest.raises(NotImplementedError, match="enable_batch_sharded_sampling"):
+        VLLM("gpt2", tensor_parallel_size=2, enable_batch_sharded_sampling=True)
+
+
+def test_vllms_older_model_runner_is_refused():
+    # vLLM 0.33 can still fall back to it; its scheduler then drives a protocol
+    # nnsight's runner does not speak, and the engine dies on the first resume.
+    from nnsight.modeling.vllm.workers.GPUWorker import NNsightGPUWorker
+
+    worker = NNsightGPUWorker.__new__(NNsightGPUWorker)
+    worker.use_v2_model_runner = False
+    with pytest.raises(NotImplementedError, match="V1 model runner"):
+        worker._make_model_runner()

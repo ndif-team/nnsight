@@ -258,13 +258,13 @@ model = NNsight(
 `TPFragments` stays inert on a model that is not sharded, so this is safe to pass
 unconditionally.
 
-## Requires transformers >= 5.19
+## Requires transformers >= 5.23
 
 Sharding on an earlier release is refused with `UnsupportedTransformersVersion`
-the moment a sharded model is seen, because a backend layout nnsight cannot read
-would otherwise hand intervention code one rank's slice as though it were whole.
-A transformers old enough to lack the DTensor backend stops earlier, at
-`ModuleNotFoundError: No module named 'transformers.distributed.tensor_parallel'`.
+the moment a sharded model is seen. nnsight reads the plan as the model resolves
+it, which 5.23 is the first to do; guessing at an older layout would hand
+intervention code one rank's slice as though it were whole. transformers 5.23
+needs Python 3.11, so tensor parallelism does too.
 
 ## A checkpoint that cannot be split at all
 
@@ -316,11 +316,12 @@ model = TransformersModel(
 
 Traces read the same as any other. The expert plan's wrapper
 (`ep_dispatch_experts`) sends each token to the rank owning its expert and
-combines the answers before returning, so the router's output is replicated and
-`experts.output` is the full combined tensor on every rank. (Inside
-`experts.source`, most steps hold per-rank token batches; only the final output
-is whole.) The degree has to divide the **expert count**, checked before the
-weights are fetched.
+combines the answers before returning — or, without gradients and with
+`ep_size == tp_size`, runs each rank's experts on the whole batch and sums the
+results — so the router's output is replicated and `experts.output` is the full
+combined tensor on every rank. (Inside `experts.source`, the steps hold this
+rank's share of the work; only the final output is whole.) The degree has to
+divide the **expert count**, checked before the weights are fetched.
 
 An EP load also wraps the model with FSDP2 even at `fsdp_size=1`, and the
 pipeline prints a "The model 'FSDP...ForCausalLM' is not supported for
@@ -328,14 +329,12 @@ text-generation" warning on every rank. It is cosmetic.
 
 **Plain tensor parallelism on an MoE is also fine.** Without an EP request the
 experts shard along their feature dimensions like any MLP (`moe_tp_experts`), and
-every read and edit behaves as above. Overriding the plan by hand to the legacy
-`ep_router` + `moe_tp_experts` pair gives correct outputs but leaves
-`experts.inputs` holding each rank's masked, local routing, with no warning.
+every read and edit behaves as above.
 
 ## What is not supported
 
-Four styles are refused: `megamoe_router`, `megamoe_experts`,
-`moe_identity_expert`, and MLA's split kv projection (`mla_kv_a_proj`). A plan
+Two styles are refused: `moe_identity_expert` and MLA's split kv projection
+(`mla_kv_a_proj`). A plan
 containing one supports no degree, so the load is refused with
 `UnshardableCheckpoint` (DeepSeek-V2-Lite: `mla_kv_a_proj` rules out tensor
 parallelism, but expert parallelism is still open). A style added to a plan

@@ -34,6 +34,11 @@ import sys
 import pytest
 import torch
 
+from nnsight.modeling.tp import MINIMUM_TRANSFORMERS
+
+# Below the floor a sharded load is refused, so there is nothing to compare.
+pytest.importorskip("transformers", minversion=MINIMUM_TRANSFORMERS)
+
 WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
 
 
@@ -135,11 +140,6 @@ def runs(request, tmp_path_factory) -> tuple[dict, list[dict]]:
     """``(reference, [per-rank sharded results])`` from two subprocess runs."""
     repo = REPO
     if request.param == "uneven_vocab":
-        import transformers
-        from packaging.version import Version
-
-        if Version(transformers.__version__).release < (5, 21):
-            pytest.skip("transformers < 5.21 refuses a vocabulary tp_size does not divide")
         repo = _uneven_vocab_repo(tmp_path_factory)
 
     reference_dir = tmp_path_factory.mktemp("cpu_tp1")

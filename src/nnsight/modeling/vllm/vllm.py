@@ -130,6 +130,14 @@ class VLLM(Remotable):
                 "per request. Drop speculative_config to trace, or use vLLM "
                 "directly for that run."
             )
+        # Each tensor-parallel rank then samples only the requests it owns, so
+        # the logits its sampler is handed are not this step's rows.
+        if kwargs.get("enable_batch_sharded_sampling"):
+            raise NotImplementedError(
+                "enable_batch_sharded_sampling is not supported on an nnsight "
+                "engine: each rank samples a slice of the batch, and a block's "
+                "logits are scoped to the whole of it. Drop it to trace."
+            )
         # vLLM's data-parallel client sends a utility call to every engine but
         # returns only the first engine's reply, and the collect is one.
         if kwargs.get("data_parallel_size", 1) > 1:
@@ -307,15 +315,6 @@ class VLLM(Remotable):
         # would be handed to the real engine on dispatch.
         _ROPE_DICT.clear()
 
-        # Whether any layer is recurrent rather than attention (a hybrid
-        # gated-delta / Mamba trunk, or an attention-free model). Recorded here —
-        # vLLM's model config is the authority — because a tapped engine must
-        # not replay a full graph over such a model's prefill (see `_load`).
-        mc = vllm_config.model_config
-        self._graph_unsafe_prefill = bool(
-            getattr(mc, "is_hybrid", False) or getattr(mc, "is_attention_free", False)
-        )
-
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -341,8 +340,6 @@ class VLLM(Remotable):
         meta_model = self.__dict__.get("_module")
         if meta_model is None:
             meta_model = self._load_meta(repo_id, **kwargs)
-
-        self._require_v1_model_runner()
 
         # A traced prompt has to be prefilled in one forward: chunked prefill
         # would hand a block a slice of its prompt one step and the rest the
@@ -376,19 +373,11 @@ class VLLM(Remotable):
             self.taps = self._resolve_taps(meta_model)
             # The flag is read by the worker processes, which inherit the environment.
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-            if getattr(self, "_graph_unsafe_prefill", False):
-                # A recurrent layer runs a different computation for a prefill
-                # than for a decode step, chosen per batch — a full graph
-                # captured for one composition replays the wrong one for the
-                # other, and the forward is silently wrong (a hybrid trunk's
-                # greedy generation diverges from eager). The compiled engine
-                # avoids this by splitting its graphs around the recurrent op;
-                # breakable graphs run without the compiler, so pin graphs to
-                # pure-decode steps and run prefill eagerly instead. Decode is
-                # where replay pays anyway. A caller's own setting wins.
-                compilation = kwargs.setdefault("compilation_config", {})
-                if isinstance(compilation, dict):
-                    compilation.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
+            # Breakable graphs are piecewise ones: a full graph is an ordinary
+            # recording that no tap is registered in. A caller's own setting wins.
+            compilation = kwargs.setdefault("compilation_config", {})
+            if isinstance(compilation, dict):
+                compilation.setdefault("cudagraph_mode", "PIECEWISE")
             kwargs["additional_config"] = {
                 **(kwargs.get("additional_config") or {}),
                 "nnsight_taps": list(self.taps),
@@ -417,39 +406,6 @@ class VLLM(Remotable):
             self.vllm_entrypoint = self._load_sync(repo_id, **kwargs)
 
         return meta_model
-
-    @staticmethod
-    def _require_v1_model_runner() -> None:
-        """Ask vLLM for the model runner nnsight instruments.
-
-        vLLM has two GPU model runners. nnsight instruments the original one
-        ([`NNsightGPUWorker`][nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker]
-        swaps in its subclass once the worker has built it, and refuses any other),
-        so the client asks for that one up front rather than letting the engine
-        come up only to be refused in the worker.
-
-        From vLLM 0.27 the second runner is the *default* for every non-MoE model
-        (`use_v2_model_runner` in vLLM's config: ``is_default_v2_architecture or
-        not is_moe``), so this is the ordinary case rather than an exotic one. The
-        switch is vLLM's own environment variable, which it consults ahead of its
-        defaults, and the engine's worker processes inherit it.
-
-        A caller who has asked for the other runner explicitly is told so, rather
-        than silently overridden or silently uninstrumented.
-        """
-        import os
-
-        key = "VLLM_USE_V2_MODEL_RUNNER"
-        asked = os.environ.get(key)
-        if asked not in (None, "", "0"):
-            raise NotImplementedError(
-                f"{key}={asked!r} selects vLLM's V2 GPU model runner, which "
-                "nnsight does not instrument yet — the engine would run with no "
-                "interventions installed. Unset it to trace, or drop nnsight and "
-                "use vLLM directly for that run."
-            )
-        # Older vLLM has no such setting and ignores it.
-        os.environ[key] = "0"
 
     def _resolve_taps(self, module: "Module") -> tuple[str, ...]:
         """Expand the tap patterns into full locations on the module tree.
@@ -544,6 +500,9 @@ class VLLM(Remotable):
         prompts, params, lora_requests = [], [], []
         for inputs, kwargs in invokes:
             kwargs = dict(kwargs)
+            # Noted before it is taken out: an adapter this invoke named, `None`
+            # included, is not the trace's to fill in (see `_attach_mediators`).
+            named_adapter = {"lora_request"} & kwargs.keys()
             lora_requests.append(kwargs.pop("lora_request", None))
             prompts.append(self._prompt(*inputs))
             # Which installed edits this request runs — nnsight's, not a sampling
@@ -554,7 +513,7 @@ class VLLM(Remotable):
             # alone. Recorded rather than inferred: the value a caller passed
             # cannot be told from the one it would have had by default, and half
             # of vLLM's defaults are the obvious thing to type.
-            param.nnsight_named = frozenset(kwargs) | ({"edits"} if edits is not None else set())
+            param.nnsight_named = frozenset(kwargs) | named_adapter | ({"edits"} if edits is not None else set())
             param.nnsight_edits = self._edit_names(edits)
             params.append(param)
 
@@ -959,7 +918,7 @@ class VLLM(Remotable):
         self, prompts: list, params: list, lora_requests: list, **kwargs: Any
     ) -> Any:
         """Run the engine with this trace's workers attached to its requests."""
-        mediators = self._attach_mediators(params, **kwargs)
+        mediators = self._attach_mediators(params, lora_requests, **kwargs)
         try:
             outputs = self.vllm_entrypoint.generate(
                 prompts, sampling_params=params, lora_request=lora_requests
@@ -995,19 +954,15 @@ class VLLM(Remotable):
 
         A name can come back more than once — one invoke per request, and one
         sampled sequence per ``n`` within each — because the block ran once for
-        each. Those are separate values rather than copies of one thing, so they
-        come back as a list, in submission order. A name saved by exactly one run
-        stays that value, which is every trace that does not use several invokes
-        or ``n``; so does one whose runs all saved the same object, as they do for
-        ``tracer.result``, which is the request's single output however many
-        sequences sampled from it.
+        each; [`merge_run_saves`][nnsight.modeling.vllm.collect.merge_run_saves]
+        decides what such a name reads as.
         """
         from ...intervention.errors import raise_deferred
         from ...tracing.tracer import mark
-        from .collect import merge_shared_saves
+        from .collect import merge_run_saves, merge_shared_saves
 
         per_request_saves = []
-        values: dict[str, list] = {}
+        runs = []
         for output in outputs:
             # The trace's own names only. `output.saves` also carries whatever a
             # registered block saved for this request, and those must not be
@@ -1016,10 +971,7 @@ class VLLM(Remotable):
             if not sequences:
                 sequences = [getattr(output, "nnsight_saves", {})]
             per_request_saves.append(sequences[0])
-            for saves in sequences:
-                for name, value in saves.items():
-                    mark(value)  # results marked after the run; no trace to guard
-                    values.setdefault(name, []).append(value)
+            runs.extend(sequences)
 
         # A name bound and saved above the invoke blocks is one object locally,
         # and ships back once per request with that request's writes; merge those
@@ -1029,30 +981,29 @@ class VLLM(Remotable):
         for value in shared.values():
             mark(value)
 
-        for name, found in values.items():
+        # Marked after the run, so there is no trace to guard. A list of several
+        # runs' values is new, and is what gets pushed.
+        for saves in runs:
+            for value in saves.values():
+                mark(value)
+        for name, value in merge_run_saves(runs).items():
             if name in shared:
                 continue
-            value = found[0]
-            # Several runs, but one object: `tracer.result` is the request's one
-            # output, served to every sequence's block, so it is not `n` values
-            # of anything. Identity is preserved across the collect, which pickles
-            # them together.
-            if len(found) > 1 and any(other is not value for other in found):
-                value = found
-                mark(value)  # the list itself is new, and is what gets pushed
+            mark(value)
             for mediator in mediators:
                 mediator.lcls[name] = value
 
         for output in outputs:
             raise_deferred(getattr(output, "nnsight_error", None))
 
-    def _attach_mediators(self, params: list, **kwargs: Any) -> list:
+    def _attach_mediators(self, params: list, lora_requests: list, **kwargs: Any) -> list:
         """Serialize each invoke's worker into its request's ``extra_args``.
 
         ``extra_args`` is a stock ``SamplingParams`` field that vLLM already carries
         through to the worker, so the worker needs no transport of its own. Sampling
         settings given to ``trace`` itself fill in for any request that did not set
-        them on its own invoke.
+        them on its own invoke, and so does its ``lora_request``: vLLM takes adapters
+        beside the params, so that one is filled into ``lora_requests``.
 
         A worker with no batch group is an invoke with no prompt — it has no vLLM
         request to ride, since each invoke *is* one request. An empty ``tracer.invoke()``
@@ -1090,6 +1041,7 @@ class VLLM(Remotable):
         # the check below and rides `extra_args` beside the block.
         kwargs = dict(kwargs)
         trace_edits = self._edit_names(kwargs.pop("edits", None))
+        trace_adapter = kwargs.pop("lora_request", None)
         # Not on an nnsight-serve server: its edits arrive over HTTP, unseen by
         # this list, and the worker checks every request anyway.
         if not getattr(self, "_serving", False):
@@ -1106,9 +1058,11 @@ class VLLM(Remotable):
                     "(temperature, top_p, max_tokens, ...)."
                 )
 
-        for mediator, param in zip(attached, params):
+        for index, (mediator, param) in enumerate(zip(attached, params)):
             param.extra_args = {"nnsight_mediator": dumps(mediator)}
             named = getattr(param, "nnsight_named", frozenset())
+            if "lora_request" not in named:
+                lora_requests[index] = trace_adapter
             edits = getattr(param, "nnsight_edits", None) if "edits" in named else trace_edits
             if edits is not None:
                 param.extra_args["nnsight_edits"] = edits

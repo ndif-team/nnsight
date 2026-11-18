@@ -38,7 +38,7 @@ Pick the model wrapper that matches what you have. All wrappers expose the same 
   - See [docs/models/quantization.md](quantization.md). Still `TransformersModel` — pass `dtype="nf4"` (or `int8`, `fp8`, ...) where you would pass a torch dtype. Module paths and activations are unchanged.
 
 - You have a **PEFT/LoRA adapter** for a HuggingFace checkpoint, or want the base and the adapted model from one loaded model.
-  - See [PEFT adapters](transformers-model.md#peft-adapters).
+  - See [PEFT adapters](transformers-model.md#peft-adapters). On a vLLM engine, see [LoRA adapters](vllm.md#lora-adapters).
 
 ### Deprecated aliases
 

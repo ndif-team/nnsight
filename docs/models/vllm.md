@@ -308,7 +308,8 @@ patched invoke per layer.
 
 `n=k` asks vLLM for k continuations of one prompt, and it fans the request into a
 child per sequence — so your block runs k times, once per sequence, against that
-sequence's own rows. Saved names come back as a list here for the same reason:
+sequence's own rows. Every saved name comes back as a list here for the same reason,
+`tracer.result` included:
 
 ```python
 with model.trace(prompt, max_tokens=5, temperature=1.0, n=3) as tracer:
@@ -316,14 +317,50 @@ with model.trace(prompt, max_tokens=5, temperature=1.0, n=3) as tracer:
     result = tracer.result.save()
 
 hidden[1]                        # sequence 1's
-result.outputs[1].text           # what sequence 1 sampled
+result[1].outputs[0].text        # what sequence 1 sampled
 ```
 
-`tracer.result` is **not** a list: the sequences are its `outputs[i]`. Where you hold outputs
-rather than variables (async, `serve=`, plain `generate` with an edit), sequence *i*'s values are
-`output.outputs[i].saves[...]`; `output.saves` is the primary sequence's. On an **async** engine
-each streamed output carries only the completions that ended that step — accumulate by
-`completion.index`, or read the finished output's `nnsight_sequences`.
+Each `result[i]` is a `RequestOutput` holding sequence *i*'s completion, with whatever an
+installed edit saved for that sequence on `result[i].saves`. With several invokes too, the list
+runs invoke by invoke, then sequence by sequence: `[a0, a1, b0, b1]` for two invokes at `n=2`.
+
+Where you hold outputs rather than variables (async, plain `generate` with an edit), sequence
+*i*'s values are `output.outputs[i].saves[...]`; `output.saves` is the primary sequence's. On an
+**async** engine each streamed output carries only the completions that advanced that step —
+accumulate by `completion.index`, or read the finished output's `nnsight_sequences`.
+
+### LoRA adapters
+
+Build the engine with `enable_lora=True` and name an adapter per request with vLLM's
+`LoRARequest`. The adapter is a PEFT directory (`adapter_config.json` and
+`adapter_model.safetensors`).
+
+```python
+from vllm.lora.request import LoRARequest
+
+model = VLLM("meta-llama/Llama-3.2-1B", dispatch=True, enable_lora=True, max_lora_rank=8)
+adapter = LoRARequest(lora_name="mine", lora_int_id=1, lora_path="/path/to/adapter")
+model.vllm_entrypoint.llm_engine.add_lora(adapter)   # load it now; raises if it cannot
+
+with model.trace(temperature=0.0, max_tokens=1, lora_request=adapter) as tracer:
+    with tracer.invoke(prompt):                       # the trace's adapter
+        adapted = model.logits.save()
+    with tracer.invoke(prompt, lora_request=None):    # opts out: the base model
+        base = model.logits.save()
+```
+
+- `lora_request=` goes on `trace`, `invoke` or a plain `generate`. On `trace` it is the default
+  for its invokes; an invoke that names its own, `None` included, keeps it.
+- `max_lora_rank` (vLLM's default is 16) has to cover the adapter's rank. `max_loras` (default 1)
+  is how many different adapters one step can hold.
+- A LoRA-wrapped layer's `.output` is the adapted value.
+- **Load the adapter with `add_lora` first.** A request naming an adapter the engine cannot load
+  (a missing path, a rank over `max_lora_rank`) kills the engine with `EngineDeadError`, as it
+  does in plain vLLM. `add_lora` raises an ordinary exception carrying the real message, and the
+  engine keeps serving.
+- Without `enable_lora`, a request naming an adapter raises `VLLMValidationError: Got lora_request
+  ... but LoRA is not enabled!`.
+- Over `serve=`, start the server with `--enable-lora True`; `lora_path` is read on the server.
 
 ## Special properties
 
@@ -383,6 +420,7 @@ What changes under graphs, and why:
   replaces — see [Replacing a value](#replacing-a-value-keeps-its-rows).
 - **Clone what you keep — and nothing warns.** The value served at a tap *is* the graph's memory, rewritten next step. Un-cloned decode entries appended under `tracer.iter` all come back holding the last step's values (the prefill entry is a different buffer and survives). See [Serving copies instead of views](#serving-copies-instead-of-views).
 - **`torch.compile` is off.** Breakable graphs keep replay and drop the compiled path; that is most of the throughput, not all of it. The flag is process-wide, so one process holds either graph engines or compiled ones.
+- **The graphs are piecewise.** A tapped engine sets `cudagraph_mode="PIECEWISE"`, since a tap is a break in a piecewise graph and a full graph has none. A `compilation_config` of your own that asks for full graphs is refused while the engine builds.
 
 ## Serving copies instead of views
 
@@ -415,8 +453,8 @@ Your block runs in vLLM's EngineCore subprocess, and that decides where you read
 `RuntimeError` carrying the original type, its message and an "Intervention traceback" pointing at
 your line — `1/0` in a block arrives as `RuntimeError: ZeroDivisionError: division by zero`.
 Because the type is carried in the message rather than in the class, catch `RuntimeError` and match
-on the text. The engine keeps serving afterwards, and requests from other clients in the same batch
-are unaffected.
+on the text. A trace that raises binds none of its saved names, not even another invoke's. The
+engine keeps serving afterwards, and requests from other clients in the same batch are unaffected.
 
 **Warnings do not.** A warning raised while the block runs prints to the EngineCore process's
 output, prefixed `(EngineCore pid=...)`, and a `warnings.catch_warnings()` around the trace
@@ -452,6 +490,7 @@ False ...}`.
 - **`.skip()` is effectively unsupported** — see [`.skip()` needs the whole step](#skip-needs-the-whole-step).
 - **No `tracer.barrier(n)`** — each invoke is its own request and the engine schedules them independently, so the blocks never run against the same forward. Calling it raises rather than hanging.
 - **No speculative decoding** — a speculative step scores several draft tokens per request, and a block is scoped to one logits row and one sampled token per request. `VLLM(..., speculative_config=...)` raises `NotImplementedError` before anything is built.
+- **No batch-sharded sampling** — each tensor-parallel rank then samples only the requests it owns, and a block's logits are scoped to the whole batch. `VLLM(..., enable_batch_sharded_sampling=True)` raises `NotImplementedError` before anything is built.
 - **No data parallelism** — vLLM answers the call that brings a request's saved values back from its first engine only, so `VLLM(..., data_parallel_size=N)` with `N > 1` raises `NotImplementedError` before anything is built. Use `tensor_parallel_size`, or one `VLLM` per GPU.
 - **No backward / gradients, and no source tracing inside a fused CUDA kernel** — the kernel's
   inputs and outputs are locations; its interior is not Python.
@@ -466,22 +505,17 @@ False ...}`.
   Reads and writes are scoped to the right tokens either way. Declaring `taps` on such a model is
   not covered: the graph-replay path still trims padding on dim 0, so a tap can be served the
   step's padding rows.
-- **Not Ray's compiled-graph executor** — with `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0`, Ray runs the
-  forward on a thread of its own, where a block cannot be resumed to finish or report its
-  error, so the engine refuses to start. vLLM's default Ray executor works.
 
 ## vLLM versions
 
-Everything on these vLLM pages was run on **0.27.1**, and the `vllm` extra pins
-`vllm>=0.27.1,<0.28`. nnsight targets vLLM's V1 engine and imports its internals directly
-(`vllm.tokenizers`, `vllm.v1.worker.gpu_model_runner`, `vllm.v1.engine.async_llm`), which move between
-minor releases. A later vLLM installed over the pin is untested and can be wrong without an error: on
-0.32, CUDA-graph taps stop firing after the prefill.
+nnsight is built and tested against vLLM **0.33**, and the `vllm` extra pins
+`vllm>=0.33,<0.34`. nnsight subclasses vLLM's GPU model runner and imports its internals directly
+(`vllm.tokenizers`, `vllm.v1.worker.gpu.model_runner`, `vllm.v1.engine.async_llm`), which move between
+minor releases. A vLLM installed outside the pin is untested and can be wrong without an error.
 
-vLLM 0.27 ships a second GPU model runner and defaults to it for non-MoE models. nnsight's
-interventions subclass the original one, so nnsight builds the engine with
-`VLLM_USE_V2_MODEL_RUNNER=0`; setting it to `1` yourself is refused, since the engine would come up
-with no interventions installed. The V2 runner is not instrumented.
+vLLM 0.33 still carries its older model runner and falls back to it under `VLLM_USE_V2_MODEL_RUNNER=0`,
+or for an option only that runner supports (its log names which). nnsight does not instrument it, so
+such an engine is refused while it builds.
 
 ## Gotchas
 

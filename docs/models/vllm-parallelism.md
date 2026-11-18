@@ -57,8 +57,8 @@ On `TransformersModel` the same router-logit mask is a silent no-op; see
 
 ## Hybrid (linear-attention) trunks
 
-Qwen3-Next / Qwen3.5-style models interleave gated-delta-net layers with full-attention layers. Both are ordinary decoder-layer envoys; tell them apart by the child they carry, `layers[i].linear_attn` or `layers[i].self_attn`. The recurrent state lives in vLLM's state cache, not in any module output. `taps=` works on these models: a tapped engine pins `cudagraph_mode="FULL_DECODE_ONLY"` on any model vLLM reports as hybrid or attention-free (a full graph captured over a recurrent layer silently miscomputes the other batch composition), and tapped generation matches eager exactly. Checkpoints with a vision tower (`Qwen3_5ForConditionalGeneration`) load and trace on text; their decoder layers are at `model.language_model.model.layers`.
+Qwen3-Next / Qwen3.5-style models interleave gated-delta-net layers with full-attention layers. Both are ordinary decoder-layer envoys; tell them apart by the child they carry, `layers[i].linear_attn` or `layers[i].self_attn`. The recurrent state lives in vLLM's state cache, not in any module output. `taps=` works on these models, and tapped generation matches eager exactly. Checkpoints with a vision tower (`Qwen3_5ForConditionalGeneration`) load and trace on text; their decoder layers are at `model.language_model.model.layers`.
 
 ## vLLM versions
 
-Tested versions and the model-runner pin: [vllm.md](vllm.md#vllm-versions). Scripts need an `if __name__ == "__main__":` guard on one card as much as under tensor parallelism; see [vllm.md](vllm.md#gotchas).
+The tested version and the pin: [vllm.md](vllm.md#vllm-versions). Scripts need an `if __name__ == "__main__":` guard on one card as much as under tensor parallelism; see [vllm.md](vllm.md#gotchas).

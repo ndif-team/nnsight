@@ -297,6 +297,10 @@ class TransformersModel(HuggingFaceModel):
         # had. A caller passing `envoys` of their own replaces it wholesale.
         from .tp.envoys import tp_envoys, wants_tensor_parallel
 
+        # A caller's `model_kwargs=` holds load kwargs like any other, so it is
+        # flattened here, before anything reads them.
+        kwargs = {**(kwargs.pop("model_kwargs", None) or {}), **kwargs}
+
         if wants_tensor_parallel(repo_id, kwargs):
             kwargs.setdefault("envoys", tp_envoys())
 
@@ -318,9 +322,37 @@ class TransformersModel(HuggingFaceModel):
 
     # -- loading -------------------------------------------------------------
 
-    def _preprocessor_sources(self) -> dict:
+    def _build_pipeline(self, model: Any, kwargs: dict) -> "Pipeline":
+        # The one `pipeline()` call for every load path: `model` is a repo id for
+        # the pipeline to load, or a model already built. The pipeline fetches
+        # the preprocessors either way, so it always gets the revision and every
+        # load kwarg; without them the tokenizer would come from the default
+        # cache and branch.
+        from transformers import pipeline
+
+        top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
+        if isinstance(model, str):
+            # The pipeline infers every preprocessor from the repo id; only
+            # forward the ones the user explicitly supplied.
+            preprocessors = {
+                attr: getattr(self, attr)
+                for attr in _PREPROCESSORS
+                if getattr(self, attr) is not None
+            }
+        else:
+            preprocessors = self._preprocessor_sources(kwargs)
+        return pipeline(
+            self.task,
+            model=model,
+            revision=self.revision,
+            **preprocessors,
+            **top_level,
+            model_kwargs=model_kwargs,
+        )
+
+    def _preprocessor_sources(self, kwargs: dict) -> dict:
         # Feed pipeline a source for each preprocessor: the provided object, or
-        # the repo id for it to load (needed for the meta model, which has no
+        # the repo id for it to load (needed for a pre-built model, which has no
         # path to infer from). Only the preprocessors the task's pipeline actually
         # loads are sourced — passing a stray tokenizer source to a processor-based
         # (multimodal) pipeline, for instance, makes it reject the string.
@@ -336,11 +368,13 @@ class TransformersModel(HuggingFaceModel):
         # so they fetch `huggingface.co/None/...` and die. Hand them the object
         # instead; a feature extractor is a JSON config, no weights, so building
         # it costs nothing on the path that exists to avoid loading weights.
+        # It takes every load kwarg and keeps the ones it owns, as the config
+        # read does.
         if isinstance(sources.get("feature_extractor"), str):
             from transformers import AutoFeatureExtractor
 
             sources["feature_extractor"] = AutoFeatureExtractor.from_pretrained(
-                sources["feature_extractor"], revision=self.revision
+                sources["feature_extractor"], revision=self.revision, **kwargs
             )
         return sources
 
@@ -348,20 +382,20 @@ class TransformersModel(HuggingFaceModel):
         # Which of tokenizer/image_processor/feature_extractor/processor the task's
         # pipeline class loads, read from its _load_* class flags (e.g. text-
         # generation loads a tokenizer; image-text-to-text loads a processor).
+        # The task registry stores `impl` either as the class or as its dotted
+        # import path.
         from transformers.pipelines import check_task
 
-        flags = {
-            "tokenizer": "_load_tokenizer",
-            "image_processor": "_load_image_processor",
-            "feature_extractor": "_load_feature_extractor",
-            "processor": "_load_processor",
-        }
+        from ..util import from_import_path
+
         try:
             _, targeted, _ = check_task(self.task)
             impl = targeted["impl"]
+            if isinstance(impl, str):
+                impl = from_import_path(impl)
         except Exception:  # noqa: BLE001 - unknown/unset task: source them all
             return set(_PREPROCESSORS)
-        return {attr for attr, flag in flags.items() if getattr(impl, flag, False)}
+        return {attr for attr in _PREPROCESSORS if getattr(impl, f"_load_{attr}", False)}
 
     def _sync(self) -> None:
         # Adopt the pipeline's task and preprocessors. Slots the task didn't
@@ -387,6 +421,13 @@ class TransformersModel(HuggingFaceModel):
             self.tokenizer.padding_side = "left"
         elif self._is_encoder_decoder():
             self.tokenizer.padding_side = "right"
+        # Gemma answers noise without a leading <bos>, which some of its tokenizers
+        # leave off a plain string. The top-level model_type leaves out PaliGemma,
+        # whose processor puts <bos> after the image tokens. Setting the flag
+        # rebuilds the post-processor, so only a tokenizer missing <bos> gets it.
+        gemma = self.pipeline.model.config.model_type.startswith("gemma")
+        if gemma and self.tokenizer("a").input_ids[:1] != [self.tokenizer.bos_token_id]:
+            self.tokenizer.add_bos_token = True
 
     def _is_causal(self) -> bool:
         # A decoder-only generative model (GPT-2, Llava, ...) — as opposed to an
@@ -404,7 +445,7 @@ class TransformersModel(HuggingFaceModel):
         return bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False))
 
     def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        from transformers import AutoConfig, pipeline
+        from transformers import AutoConfig
         from transformers.pipelines import check_task, get_task
 
         from .quantization import resolve_load_kwargs
@@ -436,7 +477,7 @@ class TransformersModel(HuggingFaceModel):
 
         # pipeline can't from_config, so resolve the task's model classes and
         # build the meta model ourselves, then wrap it in a meta pipeline.
-        self.task = self.task or get_task(repo_id)
+        self.task = self.task or get_task(repo_id, kwargs.get("token"))
         _, targeted, _ = check_task(self.task)
 
         # The config takes every kwarg, and keeps the ones it owns, the same split
@@ -475,23 +516,15 @@ class TransformersModel(HuggingFaceModel):
             # adapted model the server runs. No adapter weights are loaded here.
             peft.attach(model, self.peft, weights=False)
 
-        # The model is pre-built, so the meta pipeline only loads preprocessors;
-        # pass the pipeline-recognized arch kwargs (e.g. trust_remote_code) so a
-        # custom tokenizer loads correctly.
-        top_level, _ = _split_pipeline_kwargs(arch)
-        self.pipeline = pipeline(
-            self.task,
-            model=model,
-            device="meta",
-            **self._preprocessor_sources(),
-            **top_level,
+        # The model is pre-built, so the pipeline only loads preprocessors.
+        # Placement is this build's own, not the caller's.
+        self.pipeline = self._build_pipeline(
+            model, {**kwargs, "device": "meta", "device_map": None}
         )
         self._sync()
         return model
 
     def _load(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        from transformers import pipeline
-
         from .quantization import resolve_load_kwargs
 
         # Before the split, and before the pipeline fetches anything. This path
@@ -505,40 +538,24 @@ class TransformersModel(HuggingFaceModel):
         # and lands in `model_kwargs`, which is where from_pretrained wants it.
         kwargs = resolve_load_kwargs(kwargs)
 
-        top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
-        if "config" in top_level:
+        if "config" in kwargs:
             # pipeline() reads `config` only to pick the class, never passing it
             # to from_pretrained, so load the model with it here and wrap it.
             from transformers.pipelines import check_task, get_task
 
-            self.task = self.task or get_task(repo_id)
-            for name in ("config", "dtype", "torch_dtype", "device_map", "trust_remote_code", "token"):
+            self.task = self.task or get_task(repo_id, kwargs.get("token"))
+            top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
+            # The factory arguments pipeline() itself forwards to from_pretrained.
+            for name in ("config", "dtype", "device_map", "trust_remote_code", "token"):
                 if name in top_level:
                     model_kwargs[name] = top_level[name]
             auto = check_task(self.task)[1]["pt"][0]
             module = auto.from_pretrained(repo_id, revision=self.revision, **model_kwargs)
-            return self._wrap(module, **top_level)
-        # The pipeline loads the model and infers every preprocessor; only
-        # forward the ones the user explicitly supplied.
-        provided = {
-            attr: getattr(self, attr)
-            for attr in _PREPROCESSORS
-            if getattr(self, attr) is not None
-        }
-        self.pipeline = pipeline(
-            self.task,
-            model=repo_id,
-            revision=self.revision,
-            **provided,
-            **top_level,
-            model_kwargs=model_kwargs,
-        )
+            return self._wrap(module, **kwargs)
+        self.pipeline = self._build_pipeline(repo_id, kwargs)
         return self._finalize_pipeline()
 
     def _wrap(self, module: torch.nn.Module, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        from transformers import pipeline
-
-        top_level, _ = _split_pipeline_kwargs(kwargs)
         # The pipeline factory can't infer the task or the preprocessors from a
         # module instance, so infer the task and source the preprocessors from
         # what was passed in or the model's name_or_path (captured as
@@ -549,9 +566,7 @@ class TransformersModel(HuggingFaceModel):
         # deployment. Local inference keeps this path offline.
         if self.task is None:
             self.task = _infer_task(module)
-        self.pipeline = pipeline(
-            self.task, model=module, **self._preprocessor_sources(), **top_level
-        )
+        self.pipeline = self._build_pipeline(module, kwargs)
         return self._finalize_pipeline()
 
     def _finalize_pipeline(self) -> torch.nn.Module:

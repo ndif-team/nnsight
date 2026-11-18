@@ -78,8 +78,8 @@ Run the offline suite on CPU (details in [testing.md](./testing.md)):
 CUDA_VISIBLE_DEVICES="" python -m pytest tests/ --ignore=tests/vllm --ignore=tests/tp
 ```
 
-Drop `--ignore=tests/tp` on transformers >= 5.19; below it the tensor-parallel
-tests fail for reasons unrelated to your change.
+Drop `--ignore=tests/tp` on transformers >= 5.23; below it the tensor-parallel
+tests skip.
 
 Then, depending on what you touched, run the mirroring test file(s) — the suite is
 laid out one file per concept:
@@ -92,11 +92,11 @@ laid out one file per concept:
 | `tracing/` | `tests/test_tracing.py` |
 | `intervention/batching.py` | `tests/test_batching.py` |
 | `intervention/fragments.py` | `tests/test_fragments.py` |
-| `modeling/transformers.py`, `modeling/huggingface.py` | `tests/test_language.py`, `tests/test_modeling.py`, `tests/test_encoder.py`, `tests/test_encoder_decoder.py`, `tests/test_pretokenized.py`, `tests/test_chunked_tasks.py`, `tests/test_construction_routing.py` |
+| `modeling/transformers.py`, `modeling/huggingface.py` | `tests/test_language.py`, `tests/test_modeling.py`, `tests/test_encoder.py`, `tests/test_encoder_decoder.py`, `tests/test_pretokenized.py`, `tests/test_chunked_tasks.py`, `tests/test_construction_routing.py`, `tests/test_tokenizer_bos.py` |
 | `modeling/diffusion.py` | `tests/test_diffusion.py` |
 | `modeling/vlm.py` | `tests/test_vlm.py` |
 | `modeling/quantization.py` | `tests/test_quantization.py` |
-| `modeling/tp/` | `tests/test_tensor_parallel_rules.py`, `python -m pytest tests/tp/` (needs transformers >= 5.19) |
+| `modeling/tp/` | `tests/test_tensor_parallel_rules.py`, `python -m pytest tests/tp/` (needs transformers >= 5.23) |
 | anything you deprecate | `tests/test_deprecations.py` |
 | `intervention/backends/remote.py` | `tests/test_remote_backend.py`, `tests/test_serialization.py` (`remote="local"`) |
 | `modeling/vllm/` | `python -m pytest tests/vllm/` (needs GPU + `vllm`) |

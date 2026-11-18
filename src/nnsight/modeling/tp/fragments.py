@@ -8,15 +8,15 @@ worker sees them and re-split before the model's own forward carries on.
 
 Two facts make this cheap to arrange.
 
-**transformers labels the shards for us.** The plan lives on the *model* — glob
-patterns over module paths in ``tp_plan``/``ep_plan``, with the mesh at
-``_device_mesh`` — and each module is resolved against it by transformers' own
-matcher, so which side of which module carries a shard is read off the model,
-not guessed. These rules are handed every envoy through ``instrument`` as the
-tree is built, so they record themselves — and learn whether there is anything
-to do at all — right there. (A transformers old enough to stamp each module
-with ``_hf_tp_plan`` instead, or newer than the floor's shapes in other ways,
-is refused — see `MINIMUM_TRANSFORMERS` below.)
+**transformers labels the shards for us.** The *model* resolves its own plan —
+``_resolve_parallel_plans`` returns the tensor- and expert-parallel plans as
+they were applied, each module path mapped to its style, with the mesh at
+``_device_mesh`` — so which side of which module carries a shard is read off
+the model, not guessed. These rules are handed every envoy through
+``instrument`` as the tree is built, so they record themselves — and learn
+whether there is anything to do at all — right there. (A transformers that
+does not resolve its plan this way is refused — see `MINIMUM_TRANSFORMERS`
+below.)
 
 **nnsight sees the pre-collective value.** The interleaver's handoff runs inside
 a module's forward — after the style's input transform, before its output one —
@@ -102,13 +102,12 @@ SIDES: Dict[str, Dict[str, str]] = {
     "all_reduce": {"output": "partial"},
     "replicated_with_grad_allreduce": {},                 #   params replicated; activations whole
     "replicate": {},                                      #   params replicated, transforms are the identity
-    "ep_router": {},                                      # * router is replicated; its post-transform
-                                                          #   masks non-local experts, after us
+    "local_params": {},                                   #   owner of a sharded bare parameter (attention
+                                                          #   sinks); its transforms are the identity
     "grouped_gemm": {},                                   # * shards expert parameters only; the
                                                           #   wrapper it installs is the identity
     "moe_tp_experts": {"output": "partial"},              # + output transform all-reduces (see below)
-    "ep_dispatch_experts": {},                            # * 5.19's token-dispatching expert parallelism;
-                                                          #   see the note below
+    "ep_dispatch_experts": {},                            # * expert parallelism; see the note below
 }
 
 # Entries marked + follow from reading transformers' style classes rather than
@@ -116,9 +115,10 @@ SIDES: Dict[str, Dict[str, str]] = {
 # a partial, not the shard its name suggests), and ``sequence_parallel``
 # reduce-scatters on the last dim (a whole-width partial at the handoff).
 #
-# ``ep_dispatch_experts`` (transformers 5.19) replaces the ``ep_router`` +
-# ``moe_tp_experts`` pair in expert-parallel plans: its wrapper all-to-alls each
-# token to its expert's owner rank and combines the answers before returning.
+# ``ep_dispatch_experts`` is the experts module's style in an expert-parallel
+# plan: its wrapper all-to-alls each token to its expert's owner rank and
+# combines the answers before returning (or, at inference on a batch the ranks
+# share, runs each rank's experts on all of it and all-reduces).
 # Uniquely, that wrapper is *kept as the controller's body* rather than stripped
 # and rebuilt around it (`TPFragments.instrument` flags it with ``BODY_FORWARD``
 # from ``nnsight.intervention.source``), because the tap must sit where the
@@ -131,26 +131,20 @@ SIDES: Dict[str, Dict[str, str]] = {
 # single-process run.
 
 # Styles refused rather than guessed at, with the reason a user is shown: these
-# slice something other than the last dim — by expert, or into a fused kv
-# projection — so neither the gather nor the re-split above means anything for
-# them. Read the style's ``transform_inputs_pre_forward``/
+# do something other than slice the last dim — rescale an expert's input, or
+# split a fused kv projection — so neither the gather nor the re-split above
+# means anything for them. Read the style's ``transform_inputs_pre_forward``/
 # ``transform_output_post_forward`` before adding one; the name alone misled on
 # ``moe_tp_experts``.
 UNSUPPORTED: Dict[str, str] = {
-    "megamoe_router": "expert-parallel (MoE)",
-    "megamoe_experts": "expert-parallel (MoE)",
     "moe_identity_expert": "expert-parallel (MoE)",
     "mla_kv_a_proj": "MLA split kv projection",
 }
 
-# The oldest transformers this supports. This module reads exactly the shapes
-# 5.19's distributed rework produces — named (pp, fsdp, tp) hybrid meshes, the
-# EP plan on its own ``model.ep_plan``, ``ep_dispatch_experts``,
-# ``_get_parameter_plan`` — and earlier releases differ in every one of them.
-# Tracking those differences meant per-version branches in the mesh handling,
-# the plan merge and the test workers; one backend, described once, and the
-# rest refused here rather than half-supported.
-MINIMUM_TRANSFORMERS = "5.19.0"
+# The oldest transformers this supports: the first whose model resolves its own
+# plan (``_resolve_parallel_plans``), the only spelling read here. One backend,
+# described once, and the rest refused rather than half-supported.
+MINIMUM_TRANSFORMERS = "5.23.0"
 
 
 class UnsupportedTransformersVersion(RuntimeError):
@@ -172,8 +166,8 @@ def _check_transformers_version() -> None:
     from packaging.version import Version
 
     installed = transformers.__version__
-    # Compared on the release numbers alone, so a `5.19.0.dev0` — which a plain
-    # `>=` sorts *below* 5.19.0, pre-releases coming first — counts as 5.19. A
+    # Compared on the release numbers alone, so a `5.23.0.dev0` — which a plain
+    # `>=` sorts *below* 5.23.0, pre-releases coming first — counts as 5.23. A
     # dev build of the fixed series is the normal way to be running it early;
     # refusing those would make an editable transformers checkout unusable.
     if Version(installed).release >= Version(MINIMUM_TRANSFORMERS).release:
@@ -400,21 +394,6 @@ def _tensors(value: Any) -> list:
     return found
 
 
-def _is_tp_wrapped(module: Any) -> bool:
-    """Whether transformers put its TP transforms around this module's forward.
-
-    It installs them by replacing ``forward`` with a closure defined inside an
-    ``install_forward``, so the qualified name of whatever sits in the instance
-    ``__dict__`` is the record of what it did. Matched on the method rather than
-    on one class: several styles override ``install_forward`` and still wrap
-    (``MoeExpertsParallel`` does), so keying on ``TensorParallelLayer.`` alone
-    would read those modules as unwrapped. Asked before nnsight's controller goes
-    into that same slot.
-    """
-    forward = module.__dict__.get("forward")
-    return ".install_forward.<locals>." in getattr(forward, "__qualname__", "")
-
-
 def _keep_tp_forward(envoy: Any, style: Any, mesh: Any) -> None:
     """Put transformers' TP transforms back around nnsight's controller.
 
@@ -460,9 +439,9 @@ def device_mesh(model: Any) -> Any:
     """
     module = getattr(model, "_module", model)
     mesh = getattr(module, "_device_mesh", None)
-    # 5.19 keeps the model-level mesh as a named (pp, fsdp, tp) hybrid; a
-    # collective placed on it with one placement lands on the wrong dim. The
-    # tp submesh is the one gather/shard mean.
+    # The model-level mesh is a named (pp, fsdp, tp) hybrid; a collective
+    # placed on it with one placement lands on the wrong dim. The tp submesh
+    # is the one gather/shard mean.
     if mesh is not None and getattr(mesh, "mesh_dim_names", None) and "tp" in mesh.mesh_dim_names:
         mesh = mesh["tp"]
     return mesh if mesh is not None and mesh.size() > 1 else None
@@ -558,11 +537,10 @@ class TPFragments(Fragments):
         #: an envoy cannot read it back off one.
         self.tp_styles: Dict[str, Any] = {}
         #: (root envoy path, the applied plan, the tp submesh collectives run
-        #: on) on a DTensor-backend transformers, recorded when the root envoy
-        #: comes past — `device_mesh` slices the model-level mesh, which on
-        #: 5.19 is a named (pp, fsdp, tp) hybrid, down to its tp dim. The
-        #: style wrappers, FSDP2's unsharded weights, and nnsight's gathers
-        #: all live on that submesh. The root is
+        #: on), recorded when the root envoy comes past — `device_mesh` slices
+        #: the model-level mesh, a named (pp, fsdp, tp) hybrid, down to its tp
+        #: dim. The style wrappers, FSDP2's unsharded weights, and nnsight's
+        #: gathers all live on that submesh. The root is
         #: instrumented before its children — `Envoy.__init__` instruments, then
         #: walks `named_children` — so every module that needs it has it by then.
         self._plan: tuple[str, dict, Any] | None = None
@@ -581,51 +559,34 @@ class TPFragments(Fragments):
 
         module = envoy._module
 
-        # A DTensor-backend transformers keeps the plan on the model rather than
-        # stamping each module, so the root's copy is what the descendants are
-        # resolved against. `_tp_plan` alone means nothing — every model declares
-        # one whether or not it was loaded across ranks; `_device_mesh` is what
-        # says it actually was.
+        # transformers keeps the plan on the model rather than stamping each
+        # module, so the root's copy is what the descendants are looked up in.
+        # A plan alone means nothing — every model declares one whether or not
+        # it was loaded across ranks; `_device_mesh` is what says it actually
+        # was.
         if self._plan is None:
             mesh = device_mesh(module)
-            plan = getattr(module, "tp_plan", None)
-            # Expert-parallel entries live in their own ``ep_plan`` (empty on
-            # a dense model, where ``tp_plan`` is the whole story). Both are
-            # the *raw* plans, set at init whether or not expert parallelism
-            # is on,
-            # and they can name the same module with different styles —
-            # Qwen3-MoE's experts are ``moe_tp_experts`` in one and
-            # ``ep_dispatch_experts`` in the other. transformers applies
-            # ``ep_plan`` only when ``ep_size > 1``, so merge it only then;
-            # merged unconditionally, a TP-only run resolves the experts to a
-            # style transformers never installed, the real wrapper is stripped,
-            # and the forward dies on mixed tensors. On a collision the EP
-            # entry wins, which is what upstream's resolved plans do too.
-            distributed = getattr(getattr(module, "config", None), "distributed_config", None)
-            ep_plan = getattr(module, "ep_plan", None)
-            if ep_plan and getattr(distributed, "ep_size", 1) > 1:
-                plan = {**(plan or {}), **ep_plan}
-            if mesh is not None and plan:
+            if mesh is not None:
                 # The first sharded model seen is the moment to refuse a
-                # transformers below the floor: 5.16-5.18 carry a plan and a
-                # mesh too, but in shapes this module no longer reads.
-                # (On <= 5.15 there is no model-level plan at all; those are
-                # caught off the per-module stamp in `_style_of`.)
+                # transformers below the floor, which has no plan to resolve.
+                # (One old enough to carry no model-level mesh either is caught
+                # off the per-module stamp in `_style_of`.)
                 _check_transformers_version()
-                self._plan = (envoy.path, plan, mesh)
+                # The plans as transformers applied them: one entry per module
+                # it wrapped and per parameter it sharded, each empty unless
+                # its degree is above 1, and no tensor-parallel rule left on a
+                # module the expert-parallel plan owns. A parameter's entry is
+                # keyed by the parameter, so looking a module up finds only the
+                # style whose transforms are around its forward.
+                tp_plan, ep_plan, _ = module._resolve_parallel_plans(
+                    module.config.distributed_config
+                )
+                self._plan = (envoy.path, {**tp_plan, **ep_plan}, mesh)
 
         found = self._style_of(envoy)
         if found is None:
             return
-        style, mesh, style_object = found
-
-        # Only a module transformers actually wrapped has transforms around its
-        # forward, and so a boundary worth describing. A plan can name one it did
-        # not wrap — an expert-parallel plan keys entries by parameter as well as
-        # by module — and such an entry is neither a rule to record nor a reason
-        # to refuse the model.
-        if not _is_tp_wrapped(envoy._module):
-            return
+        style, mesh = found
 
         if style not in SIDES:
             why = UNSUPPORTED.get(style, "not a parallel style this version of nnsight recognizes")
@@ -641,7 +602,9 @@ class TPFragments(Fragments):
         if style == "ep_dispatch_experts":
             envoy._module.__dict__[BODY_FORWARD] = True
         else:
-            _keep_tp_forward(envoy, style_object, mesh)
+            from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+
+            _keep_tp_forward(envoy, ALL_PARALLEL_STYLES[style], mesh)
 
         self.enabled = True
         self.tp_styles[envoy.path] = (style, mesh)
@@ -649,8 +612,8 @@ class TPFragments(Fragments):
             width = _width(envoy._module, side) if kind == "shard" else None
             self.tp_rules[f"{envoy.path}.{side}"] = (mesh, _placement(kind), width)
 
-    def _style_of(self, envoy: Any) -> "tuple[str, Any, Any] | None":
-        """``(style name, mesh, style object)`` for this envoy's module, or None.
+    def _style_of(self, envoy: Any) -> "tuple[str, Any] | None":
+        """``(style name, mesh)`` for this envoy's module, or None.
 
         The model-level plan is the only spelling read. A transformers old enough
         to stamp ``_hf_tp_plan`` on each module instead is refused here rather
@@ -658,32 +621,16 @@ class TPFragments(Fragments):
         does not fail — it hands intervention code one rank's slice as though it
         were the whole tensor.
         """
-        module = envoy._module
-
-        if getattr(module, "_hf_tp_plan", None) is not None:
+        if getattr(envoy._module, "_hf_tp_plan", None) is not None:
             _check_transformers_version()
 
         if self._plan is None:
             return None
         root, plan, mesh = self._plan
-        if envoy.path == root:
-            return None
         # The path transformers knows this module by: nnsight's, minus the root
         # envoy's own prefix. Both spell a module the way `named_modules` does.
-        name = envoy.path[len(root) + 1 :]
-
-        from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
-
-        # transformers' own matcher, not a reimplementation of its globbing: the
-        # plan's keys wildcard layer numbers, and a private copy of that rule is
-        # exactly the kind of drift this module keeps being broken by.
-        from transformers.distributed.tensor_parallel import _get_parameter_plan
-
-        style = _get_parameter_plan(name, plan, is_weight=False)
-        if style is None:
-            return None
-
-        return style, mesh, ALL_PARALLEL_STYLES._global_mapping.get(style)
+        style = plan.get(envoy.path[len(root) + 1 :])
+        return None if style is None else (style, mesh)
 
     def style_at(self, path: str) -> "tuple[str | None, Any]":
         """The parallel style and mesh recorded for the module at ``path``.

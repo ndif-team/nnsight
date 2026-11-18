@@ -99,7 +99,7 @@ TransformersModel(
 | `config` | A config object the model is built from in place of the checkpoint's own, on the meta build and the real load alike. Keyword overrides are not merged into it, as with `from_pretrained`. |
 | `rename` | Module-path aliases (see [rename-modules.md](../usage/rename-modules.md)). |
 
-`kwargs` are split between the `pipeline(...)` factory's own parameters and `model_kwargs` automatically (`transformers.py`, `_split_pipeline_kwargs`), so anything HF accepts works.
+`kwargs` are split between the `pipeline(...)` factory's own parameters and `model_kwargs` automatically (`transformers.py`, `_split_pipeline_kwargs`), so anything HF accepts works. A `cache_dir`, `token` or `revision` applies to the tokenizer and other preprocessors as well as the weights. `local_files_only` is the exception: `transformers.pipeline` does not accept it, so set `HF_HUB_OFFLINE=1` instead.
 
 ### Preprocessor attributes
 
@@ -372,7 +372,7 @@ A frozen base refuses every backward through the model (a saved adapter's own pa
 
 ## Dispatch behavior
 
-- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device and the Envoy tree is fully usable for writing intervention code. The meta config takes the same load kwargs as the real load (`attn_implementation`, `experts_implementation`, `dtype`, config overrides), so `model.config` is the same before and after dispatch; placement kwargs (`device_map`, `max_memory`, ...) wait for dispatch.
+- `dispatch=False` (default): only configs download; the architecture is built on the `meta` device and the Envoy tree is fully usable for writing intervention code. The meta config takes the same load kwargs as the real load (`attn_implementation`, `experts_implementation`, `dtype`, config overrides), so `model.config` and `model.tokenizer` are the same before and after dispatch; placement kwargs (`device_map`, `max_memory`, ...) wait for dispatch.
 - `dispatch=True`: real weights load during `__init__`.
 - First `trace`/`generate`/`pipe` auto-dispatches if needed (`mixins/meta.py`, `Meta.interleave`). `scan` does **not** dispatch.
 - Call `model.dispatch()` to force loading.

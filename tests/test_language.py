@@ -5,6 +5,11 @@ over generation, early stop, gradients, caching, sessions, and module aliasing.
 """
 
 import importlib.util
+import json
+import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 import torch
@@ -958,6 +963,186 @@ class TestScan:
         assert torch.equal(logits, expected)
 
 
+@pytest.fixture(scope="module")
+def custom_hub_cache(tmp_path_factory):
+    """Tiny checkpoints in a custom hub cache, laid out as a download would.
+
+    The text repo has two revisions whose tokenizers differ in size, so a loaded
+    tokenizer's size says which revision it came from. The audio repo is for a
+    task that loads a feature extractor.
+    """
+    from huggingface_hub.file_download import repo_folder_name
+    from tokenizers import ByteLevelBPETokenizer
+    from transformers import (
+        GPT2Config,
+        GPT2LMHeadModel,
+        PreTrainedTokenizerFast,
+        Wav2Vec2Config,
+        Wav2Vec2FeatureExtractor,
+        Wav2Vec2ForSequenceClassification,
+    )
+
+    cache = tmp_path_factory.mktemp("custom_hub_cache")
+
+    def snapshot(repo_id, revision, commit):
+        repo = cache / repo_folder_name(repo_id=repo_id, repo_type="model")
+        (repo / "refs").mkdir(parents=True, exist_ok=True)
+        (repo / "refs" / revision).write_text(commit)
+        path = repo / "snapshots" / commit
+        path.mkdir(parents=True)
+        return str(path)
+
+    text, sizes = "nnsight-test/tiny-gpt2", {}
+    for revision, commit, vocab_size in (("main", "0" * 40, 262), ("pinned", "1" * 40, 270)):
+        path = snapshot(text, revision, commit)
+        bpe = ByteLevelBPETokenizer()
+        bpe.train_from_iterator(
+            ["the quick brown fox jumps over the lazy dog", "nnsight traces models"],
+            vocab_size=vocab_size,
+            min_frequency=1,
+            special_tokens=["<|endoftext|>"],
+        )
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=bpe,
+            unk_token="<|endoftext|>",
+            bos_token="<|endoftext|>",
+            eos_token="<|endoftext|>",
+            pad_token="<|endoftext|>",
+        )
+        tokenizer.save_pretrained(path)
+        config = GPT2Config(
+            vocab_size=len(tokenizer),
+            n_positions=16,
+            n_embd=8,
+            n_layer=1,
+            n_head=1,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+        GPT2LMHeadModel(config).save_pretrained(path)
+        sizes[revision] = len(tokenizer)
+    assert sizes["main"] != sizes["pinned"]
+
+    audio = "nnsight-test/tiny-wav2vec2"
+    path = snapshot(audio, "main", "2" * 40)
+    Wav2Vec2ForSequenceClassification(
+        Wav2Vec2Config(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            conv_dim=(8, 8),
+            conv_stride=(5, 2),
+            conv_kernel=(10, 3),
+            num_feat_extract_layers=2,
+            num_conv_pos_embeddings=16,
+            num_conv_pos_embedding_groups=2,
+            classifier_proj_size=8,
+        )
+    ).save_pretrained(path)
+    Wav2Vec2FeatureExtractor().save_pretrained(path)
+
+    return {"cache_dir": str(cache), "text": text, "audio": audio, "sizes": sizes}
+
+
+@pytest.fixture(scope="module")
+def loads_from_custom_cache(custom_hub_cache, tmp_path_factory):
+    """What each load path read, given a ``cache_dir`` and a pinned ``revision``.
+
+    Offline with an empty default cache, so a load that ignores the ``cache_dir``
+    fails. ``HF_HUB_CACHE`` is read at import, hence the subprocess.
+    """
+    script = textwrap.dedent(
+        """
+        import json
+        import sys
+
+        from transformers import AutoConfig, AutoModelForCausalLM
+
+        from nnsight.modeling.transformers import TransformersModel
+
+        text, audio, cache_dir = sys.argv[1:]
+        fetch = dict(cache_dir=cache_dir, revision="pinned")
+        load = dict(task="text-generation", **fetch)
+        builds = {
+            "lazy": lambda: TransformersModel(text, **load),
+            "dispatch": lambda: TransformersModel(text, dispatch=True, **load),
+            "config": lambda: TransformersModel(
+                text, config=AutoConfig.from_pretrained(text, **fetch), dispatch=True, **load
+            ),
+            "module": lambda: TransformersModel(
+                AutoModelForCausalLM.from_pretrained(text, **fetch), **load
+            ),
+            "audio": lambda: TransformersModel(
+                audio, task="audio-classification", cache_dir=cache_dir
+            ),
+            "model_kwargs lazy": lambda: TransformersModel(
+                text, task="text-generation", model_kwargs=fetch
+            ),
+            "model_kwargs dispatch": lambda: TransformersModel(
+                text, task="text-generation", model_kwargs=fetch, dispatch=True
+            ),
+        }
+        read = {}
+        for name, build in builds.items():
+            try:
+                model = build()
+                read[name] = (
+                    type(model.feature_extractor).__name__
+                    if name == "audio"
+                    else len(model.tokenizer)
+                )
+            except Exception as error:
+                read[name] = repr(error)
+        print(json.dumps(read))
+        """
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            custom_hub_cache["text"],
+            custom_hub_cache["audio"],
+            custom_hub_cache["cache_dir"],
+        ],
+        capture_output=True,
+        text=True,
+        timeout=900,
+        env={
+            **os.environ,
+            "CUDA_VISIBLE_DEVICES": "",
+            "HF_HUB_CACHE": str(tmp_path_factory.mktemp("empty_hub_cache")),
+            "HF_HUB_OFFLINE": "1",
+        },
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+class TestLoadKwargs:
+    """Every load path fetches the preprocessors with the kwargs the weights get.
+
+    The lazy build, a ``config=`` load and a module passed in hand the pipeline a
+    model that is already built, and it still fetches the tokenizer by repo id.
+    """
+
+    @pytest.mark.parametrize("path", ["lazy", "dispatch", "config", "module"])
+    def test_tokenizer_comes_from_the_cache_dir_and_revision(
+        self, custom_hub_cache, loads_from_custom_cache, path
+    ):
+        assert loads_from_custom_cache[path] == custom_hub_cache["sizes"]["pinned"]
+
+    def test_lazy_feature_extractor_comes_from_the_cache_dir(self, loads_from_custom_cache):
+        # The one preprocessor the lazy build loads itself.
+        assert loads_from_custom_cache["audio"] == "Wav2Vec2FeatureExtractor"
+
+    @pytest.mark.parametrize("path", ["lazy", "dispatch"])
+    def test_model_kwargs_are_load_kwargs(self, custom_hub_cache, loads_from_custom_cache, path):
+        read = loads_from_custom_cache[f"model_kwargs {path}"]
+        assert read == custom_hub_cache["sizes"]["pinned"]
+
+
 def _has_lora(model) -> bool:
     return any("lora" in name.lower() for name, _ in model._module.named_modules())
 
@@ -1612,6 +1797,8 @@ class TestPeft:
         base_path, adapter_a, _ = tiny_peft_bundle
         model = TransformersModel(base_path, task="text-generation", dispatch=True)
         model._module._device_mesh = Mesh()
+        model._module.config.distributed_config = None
+        model._module._resolve_parallel_plans = lambda distributed_config: ({}, {}, {})
         with pytest.raises(ValueError, match="not supported on a tensor-parallel load"):
             model.load_adapter(adapter_a)
         assert model.peft is None and not _has_lora(model)

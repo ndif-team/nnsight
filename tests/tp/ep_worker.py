@@ -7,8 +7,8 @@ reference and once across N ranks, then compares.
 Expert parallelism is a different axis from tensor parallelism. It is asked for
 with ``ep_size=N``, and transformers answers by applying the model's *expert*
 plan — ``base_model_ep_plan``, which distributes whole experts across ranks —
-instead of its tensor-parallel one. ``model.tp_plan`` resolves to whichever is
-in force, which is the only thing nnsight has to read.
+to the modules it names, ahead of the tensor-parallel one. nnsight reads both as
+transformers resolved them.
 
 Every rank runs the identical block, so nothing here may branch on rank.
 """
@@ -22,9 +22,9 @@ import torch
 
 import nnsight
 
-# Tiny, MoE, and its plan uses the three expert-parallel styles: `ep_router` on
-# the router, `grouped_gemm` on the expert parameters, `moe_tp_experts` on the
-# experts module.
+# Tiny, MoE, and its expert plan uses both expert-parallel styles:
+# `grouped_gemm` on the expert parameters, `ep_dispatch_experts` on the experts
+# module.
 REPO = "hf-internal-testing/tiny-random-GptOssForCausalLM"
 
 # Below the tiny model's vocabulary, so no tokenizer is needed and the ids are
@@ -85,17 +85,23 @@ def main() -> None:
     ids = torch.tensor(INPUT_IDS)
     with model.trace({"input_ids": ids}):
         if args.mode == "ep":
-            # The router is replicated: every rank computes the same thing, and
-            # the masking that makes it rank-specific happens in its own
-            # post-transform, after the handoff. So this must match the
-            # single-process run exactly. (The tp-mode model names this module
-            # differently, so it is recorded in ep mode only.)
+            # The router is replicated: every rank computes the same thing, so
+            # this must match the single-process run exactly. (The tp-mode
+            # model names this module differently, so it is recorded in ep mode
+            # only.)
             record("router_logits", layer.mlp.router.output[0].save())
-        # The experts module holds only this rank's experts and produces its term
-        # of the sum; a worker must be shown the sum.
+        # The experts module holds only this rank's experts (or, in tp mode,
+        # this rank's slice of every expert); a worker must be shown the whole
+        # output.
         record("experts_out", layer.mlp.experts.output.save())
         record("mlp_out", layer.mlp.output[0].save())
         record("logits", model.lm_head.output.save())
+
+    # Without gradients, expert parallelism runs each rank's experts on the
+    # whole batch and all-reduces instead of exchanging tokens. Either way the
+    # collective is inside the module's wrapper, so the output arrives whole.
+    with torch.no_grad(), model.trace({"input_ids": ids}):
+        record("nograd_experts_out", layer.mlp.experts.output.save())
 
     # An edit on the summed expert output has to survive the way back.
     with model.trace({"input_ids": ids}):
