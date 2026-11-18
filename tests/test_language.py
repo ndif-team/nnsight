@@ -965,14 +965,11 @@ class TestScan:
 
 @pytest.fixture(scope="module")
 def custom_hub_cache(tmp_path_factory):
-    """Tiny checkpoints written into a custom hub cache, built without the Hub.
+    """Tiny checkpoints in a custom hub cache, laid out as a download would.
 
-    ``cache_dir`` only means anything for a repo id, so each checkpoint goes where
-    a download would have put it: huggingface_hub resolves a repo id to
-    ``<cache_dir>/<repo folder>/snapshots/<commit>``, taking the commit from
-    ``refs/<revision>``. The text repo has two revisions whose tokenizers differ
-    in size, so the size of a loaded tokenizer says which revision it was read
-    from. The audio repo is there for a task that loads a feature extractor.
+    The text repo has two revisions whose tokenizers differ in size, so a loaded
+    tokenizer's size says which revision it came from. The audio repo is for a
+    task that loads a feature extractor.
     """
     from huggingface_hub.file_download import repo_folder_name
     from tokenizers import ByteLevelBPETokenizer
@@ -1052,10 +1049,8 @@ def custom_hub_cache(tmp_path_factory):
 def loads_from_custom_cache(custom_hub_cache, tmp_path_factory):
     """What each load path read, given a ``cache_dir`` and a pinned ``revision``.
 
-    Run offline against an empty default cache: a preprocessor fetched without
-    the ``cache_dir`` then fails outright, where a populated default cache would
-    satisfy the lookup either way. ``HF_HUB_CACHE`` is read when huggingface_hub
-    is imported, so the loads need their own interpreter; one run covers them all.
+    Offline with an empty default cache, so a load that ignores the ``cache_dir``
+    fails. ``HF_HUB_CACHE`` is read at import, hence the subprocess.
     """
     script = textwrap.dedent(
         """
@@ -1080,6 +1075,12 @@ def loads_from_custom_cache(custom_hub_cache, tmp_path_factory):
             ),
             "audio": lambda: TransformersModel(
                 audio, task="audio-classification", cache_dir=cache_dir
+            ),
+            "model_kwargs lazy": lambda: TransformersModel(
+                text, task="text-generation", model_kwargs=fetch
+            ),
+            "model_kwargs dispatch": lambda: TransformersModel(
+                text, task="text-generation", model_kwargs=fetch, dispatch=True
             ),
         }
         read = {}
@@ -1120,14 +1121,10 @@ def loads_from_custom_cache(custom_hub_cache, tmp_path_factory):
 
 
 class TestLoadKwargs:
-    """Every load path fetches the preprocessors the way it fetches the weights.
+    """Every load path fetches the preprocessors with the kwargs the weights get.
 
-    Only a repo-id load has the pipeline fetch the model too. The other paths
-    hand it a model that is already built (the meta model, the model loaded for
-    a ``config=``, a module passed in), and it still fetches the tokenizer by
-    repo id, so it needs the caller's ``cache_dir`` and ``revision`` there as
-    well. Without them the tokenizer comes from the default cache and the
-    default branch, next to weights that came from the ones the caller named.
+    The lazy build, a ``config=`` load and a module passed in hand the pipeline a
+    model that is already built, and it still fetches the tokenizer by repo id.
     """
 
     @pytest.mark.parametrize("path", ["lazy", "dispatch", "config", "module"])
@@ -1137,18 +1134,13 @@ class TestLoadKwargs:
         assert loads_from_custom_cache[path] == custom_hub_cache["sizes"]["pinned"]
 
     def test_lazy_feature_extractor_comes_from_the_cache_dir(self, loads_from_custom_cache):
-        # The one preprocessor the lazy build loads itself rather than through
-        # the pipeline (see `_preprocessor_sources`).
+        # The one preprocessor the lazy build loads itself.
         assert loads_from_custom_cache["audio"] == "Wav2Vec2FeatureExtractor"
 
-    def test_a_callers_model_kwargs_join_the_split(self):
-        from nnsight.modeling.transformers import _split_pipeline_kwargs
-
-        top_level, model_kwargs = _split_pipeline_kwargs(
-            {"token": "t", "max_memory": {0: "1GiB"}, "model_kwargs": {"cache_dir": "c"}}
-        )
-        assert top_level == {"token": "t"}
-        assert model_kwargs == {"cache_dir": "c", "max_memory": {0: "1GiB"}}
+    @pytest.mark.parametrize("path", ["lazy", "dispatch"])
+    def test_model_kwargs_are_load_kwargs(self, custom_hub_cache, loads_from_custom_cache, path):
+        read = loads_from_custom_cache[f"model_kwargs {path}"]
+        assert read == custom_hub_cache["sizes"]["pinned"]
 
 
 def _has_lora(model) -> bool:
