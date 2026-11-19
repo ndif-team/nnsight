@@ -12,7 +12,8 @@ registered as one of those callables — the same handoff a hook makes, replayed
 Two things follow from replay that an eager hook never meets. The value at a
 location lives at a fixed address the graph rewrites every step, so a kept
 reference — ``.save()``, a list appended under ``tracer.iter`` — aliases memory
-the next step overwrites: clone what you keep. And the callable's return is
+the next step overwrites: clone what you keep, or set `CLONE_READS` (see
+`VLLMInterleaver.handle`). And the callable's return is
 discarded, so an edit has to land *in place*; in-place edits already do, and a
 replacement swap is copied back into the live tensor, shape-checked.
 
@@ -23,12 +24,32 @@ on one is told so when its request ends (see ``Requests.finish_dangling``).
 
 from __future__ import annotations
 
+import os
 from typing import Any, Iterable
 
 import torch
 
 from ...intervention.interleaver import Interleaver
 from ...util import apply
+
+#: Env var: serve each read location from one private copy per visit.
+CLONE_READS = "NNSIGHT_VLLM_CLONE_READS"
+
+# The falsy spellings `NNSIGHT_DISABLE_CPP_BACKTRACE` accepts, so the two agree.
+_FALSY = {"", "0", "false", "no", "off"}
+
+
+def clone_reads_enabled() -> bool:
+    """Whether `CLONE_READS` is set to anything but a falsy spelling.
+
+    Read from the environment rather than `CONFIG` because the interleaver that
+    makes the copy lives in the engine's *worker* process, built when the engine
+    loads the model. A `CONFIG.APP` field set in the client process would never
+    reach it; an env var set before `VLLM(...)` is inherited when the worker is
+    spawned.
+    """
+    value = os.environ.get(CLONE_READS)
+    return value is not None and value.strip().lower() not in _FALSY
 
 
 def _capture() -> Any:
@@ -78,11 +99,14 @@ class VLLMInterleaver(Interleaver):
         taps: Full locations (``"model.model.layers.3.output"``) a replayed step
             serves. Empty on an ``enforce_eager`` engine, where this class behaves
             exactly as its base.
+        clone_reads: Whether `CLONE_READS` was set when the worker built this
+            interleaver, which it does once, when the engine loads the model.
     """
 
     def __init__(self, taps: Iterable[str] = (), **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.taps = frozenset(taps)
+        self.clone_reads = clone_reads_enabled()
 
     def instrument(self, envoy: Any) -> None:
         """Route the module through this interleaver, and open its forward if a tap reaches inside.
@@ -123,6 +147,23 @@ class VLLMInterleaver(Interleaver):
             # it — but a prompt too long for any graph runs eagerly through here,
             # and would be served on that step and not the next. Skipped either
             # way, so what a tapped engine serves does not depend on prompt length.
+            return value
+        # Under `CLONE_READS` a visit that a worker or cache reads is served from
+        # one copy, so a kept read holds what was computed rather than what vLLM's
+        # in-place kernels later write over the live buffer. One copy per visit,
+        # not per read, and in-place edits to it are copied back. A fragment is
+        # left alone: vLLM's collectives are out-of-place, so the gathered tensor
+        # the workers read is already private.
+        if (
+            self.clone_reads
+            and (provider in self.observers or (provider in self.parked and self._ready(provider)))
+            and not (self.fragments is not None and self.fragments.fragmented(provider))
+        ):
+            private = apply(value, lambda t: t.clone(), torch.Tensor)
+            edited = super().handle(provider, private)
+            if edited is not private:
+                return edited  # a swap, built from the copy and so carrying its edits
+            _copy_into(value, private)
             return value
         return super().handle(provider, value)
 
