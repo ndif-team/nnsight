@@ -48,6 +48,10 @@ module wrapped by several envoys routes to whichever interleaver is running
 
 An [`Envoy`][nnsight.intervention.envoy.Envoy] exposes operations as ``envoy.source.{name}_{n}``, whose
 ``.input``/``.inputs``/``.output``/``.skip`` mirror an Envoy's own, one level finer.
+``envoy.kernel.{site}(...)`` is served by a shim installed on each registered fused
+kernel function (see intervention/kernel.py): `Controller.__call__` pushes the
+running module onto a per-thread stack around its body, and the shim serves the
+module at the top of that stack using the kernel's inputs and exported statistics.
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple
 
 import torch
 
+from . import kernel
 from .eproperty import eproperty
 from .interleaver import Mediator
 from .util import first_input, replace_first_input
@@ -422,7 +427,10 @@ def decorator_chain(func: Callable) -> tuple[Callable, list[tuple[Callable, int]
         if func in seen:  # a closure that calls itself
             break
         seen.add(func)
-    return func, chain
+    # When `func` is a kernel shim (intervention/kernel.py) wrapping a C++ builtin,
+    # `peel_index` stops at the shim because the builtin is not a Python function.
+    # Unwrapping the shim here hands the builtin to `compiled`, which raises `SourceNotAvailable`.
+    return kernel.unshimmed(func), chain
 
 
 def rewrap(chain: list[tuple[Callable, int]], innermost: Callable) -> Callable:
@@ -445,6 +453,8 @@ def function_like(fn: Callable, code: CodeType, closure: tuple | None, **globals
     new = FunctionType(code, {**fn.__globals__, **globals_}, fn.__name__, fn.__defaults__, closure)
     new.__kwdefaults__ = fn.__kwdefaults__
     new.__qualname__ = fn.__qualname__
+    # Track the copied globals dict so bare-global kernel calls inside `new` reach their shims.
+    kernel.adopt(new)
     return new
 
 
@@ -507,6 +517,41 @@ def run_op(interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict)
             fn = entry[0]
     value = fn(*args, **kwargs)
     return interleaver.handle(f"{base}.output", value)
+
+
+def record(fn: Callable, args: tuple, kwargs: dict, prefixes: tuple[str, ...]) -> tuple[Any, dict[str, list[torch.Tensor]]]:
+    """Run ``fn`` under AST instrumentation and collect tensors bound to variable names matching ``prefixes``.
+
+    Used by kernel serve functions to capture local variables from Python kernel
+    implementations without changing their operations or execution order. A
+    prefix matches both ``"{prefix}"`` and indexed binding names ``"{prefix}_{n}"``,
+    so passing ``"state"`` collects all rebindings of ``state`` while ``"state_2"``
+    collects only that specific binding. Subscript assignments (``x[i] = v``)
+    record the assigned value ``v`` under ``x``'s binding name while mutating the
+    tensor previously bound to ``x`` in place. Consecutive bindings of the same
+    tensor object (such as ``x = None if ... else x``) are deduplicated so each
+    list records distinct tensor objects in order.
+    """
+    bound: dict[str, list[torch.Tensor]] = {prefix: [] for prefix in prefixes}
+
+    def op(location: str, callee: Callable, *op_args: Any, **op_kwargs: Any) -> Any:
+        value = callee(*op_args, **op_kwargs)
+        if callee is bind and isinstance(value, torch.Tensor):
+            name = location.removeprefix("source.")
+            for prefix, values in bound.items():
+                if (name == prefix or name.rsplit("_", 1)[0] == prefix) and (not values or value is not values[-1]):
+                    values.append(value)
+        return value
+
+    instrumented, _ = instrument(fn, op)
+    return instrumented(*args, **kwargs), bound
+
+
+def arguments(fn: Callable, args: tuple, kwargs: dict) -> dict[str, Any]:
+    """Bind ``args`` and ``kwargs`` to ``fn``'s signature with default values applied."""
+    signature = inspect.signature(fn).bind(*args, **kwargs)
+    signature.apply_defaults()
+    return signature.arguments
 
 
 def make_op(locate: Callable[[], tuple]) -> Callable:
@@ -607,14 +652,23 @@ class Controller:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         state = self.state
         module = self.module_ref()
-        interleaver, _, locations = state.active()
+        interleaver, path, locations = state.active()
         if interleaver is None:
             return run_body(state, module, args, kwargs)
         handle = interleaver.handle
         args, kwargs = handle(locations[0], (args, kwargs))
         output = handle(locations[1], NO_SKIP)  # the skip gate
         if output is NO_SKIP:
-            return handle(locations[2], run_body(state, module, args, kwargs))
+            # Push the module onto the kernel stack only while `run_body` executes:
+            # fused kernels called inside the body attribute their `.kernel` handoff
+            # to this module, and workers resumed at `.output` below run after the
+            # module has been popped from the stack.
+            frame = kernel.push(interleaver, path)
+            try:
+                output = run_body(state, module, args, kwargs)
+            finally:
+                kernel.pop(frame)
+            return handle(locations[2], output)
         # A skipped module's output is the replacement the worker supplied.
         return handle(locations[2], _as_fragment(interleaver, locations[2], output))
 

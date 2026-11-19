@@ -1,6 +1,6 @@
 ---
 title: Envoy
-one_liner: An Envoy wraps a torch.nn.Module and mirrors its submodule tree; inside a trace each one names its module's live values — .input / .inputs / .output — plus .skip() and .source.
+one_liner: An Envoy wraps a torch.nn.Module and mirrors its submodule tree; inside a trace each one names its module's live values — .input / .inputs / .output — plus .skip(), .source and .kernel.
 tags: [concept, mental-model, envoy]
 related: [docs/concepts/interleaver-and-controller.md, docs/concepts/source-tracing.md, docs/usage/access-and-modify.md, docs/developing/extending-envoy.md]
 sources: [src/nnsight/intervention/envoy.py, src/nnsight/modeling/base.py]
@@ -21,6 +21,7 @@ forward pass runs:
 - `.inputs` — the full `(args, kwargs)` pair
 - `.skip(value)` — don't run this module's forward; use `value` as its output
 - `.source` — the operations inside the forward ([source-tracing.md](source-tracing.md))
+- `.kernel`: intermediate sites inside the fused kernel called by the forward ([usage/kernel.md](../usage/kernel.md))
 
 Each property names a location (`{path}.output`, …). **Reading** it parks the worker
 until the model gets there and returns the real object; **assigning** it replaces the

@@ -493,7 +493,10 @@ False ...}`.
 - **No batch-sharded sampling** — each tensor-parallel rank then samples only the requests it owns, and a block's logits are scoped to the whole batch. `VLLM(..., enable_batch_sharded_sampling=True)` raises `NotImplementedError` before anything is built.
 - **No data parallelism** — vLLM answers the call that brings a request's saved values back from its first engine only, so `VLLM(..., data_parallel_size=N)` with `N > 1` raises `NotImplementedError` before anything is built. Use `tensor_parallel_size`, or one `VLLM` per GPU.
 - **No backward / gradients, and no source tracing inside a fused CUDA kernel** — the kernel's
-  inputs and outputs are locations; its interior is not Python.
+  inputs and outputs are locations; its interior is not Python. Kernel sites ([kernel sites](../usage/kernel.md))
+  such as `attn.kernel.probs(...)` and `mixer.kernel.states(...)` are also unavailable on vLLM:
+  vLLM's attention, Mamba, and gated-delta layers execute through vLLM's own custom ops and state
+  caches, so requesting `.kernel` ends in `OutOfOrderError` because the location is never reached.
 - **No `.scan()`.** It propagates shapes by running the model's own forward under a fake-tensor
   mode, and there is no forward on this side to run. `model.scan(...)` raises
   `NotImplementedError: scan is unavailable on vLLM: ... Trace a prompt and read the shapes off the
