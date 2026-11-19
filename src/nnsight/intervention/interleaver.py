@@ -234,6 +234,10 @@ class Mediator:
         # this worker (see __getstate__); a receiving driver unions them into
         # its own saved-name collection.
         self.presaved: set[str] = set()
+        # The ids the trace body marked above this block, when the tracer that
+        # serializes it recorded them; None reads the thread's whole set (see
+        # __getstate__). Ids are local to this process, so this never travels.
+        self.saved_above: set[int] | None = None
         # The ids this worker's `.save()` calls marked, for a driver that keeps
         # them per worker; None leaves them in the thread's set, which a local
         # trace reads as it exits (see `nnsight.tracing.tracer._saves`).
@@ -261,10 +265,12 @@ class Mediator:
         # Saved-ness travels by NAME: `.save()` marks object ids, which are
         # local to this process, so the receiving driver gets the names of the
         # captured variables that were saved (e.g. a container bound and saved
-        # above the invoke blocks).
-        presaved = {
-            name for name, value in reduced[2].items() if id(value) in _saves()
-        }
+        # above the invoke blocks). When the tracer recorded the ids its body
+        # marked (`saved_above`), only those count: inside a session the thread's
+        # set holds every id the session has marked, freed values' among them,
+        # and a name that travels as saved is pickled home from the worker.
+        marked = _saves() if self.saved_above is None else self.saved_above
+        presaved = {name for name, value in reduced[2].items() if id(value) in marked}
         # Kept on this side too: it is the only record of which names were bound
         # (and saved) *above* the block, which is what tells a value shared by
         # every request apart from one each request computed for itself.
