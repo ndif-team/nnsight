@@ -68,6 +68,10 @@ module never fired.
 | `GuardOnDataDependentSymNode` | ``Could not guard on data-dependent expression …`` — branching on, or converting, a fake value under `scan` | [scan.md](../usage/scan.md#what-a-scan-cannot-tell-you) |
 | `ValueError` | ``A barrier was never reached by every block it waits for; check the count it was created with`` | [barrier.md](../usage/barrier.md) |
 | `ValueError` | ``A batched `.skip()` has to cover every row …`` | [skip.md](../usage/skip.md) |
+| `AttributeError` | ``Cannot set '<name>' on '<path>'; a child envoy takes no new attributes …`` | [envoy.md](../concepts/envoy.md#changing-the-tree) |
+| `AttributeError` | ``Cannot attach '<name>' to '<path>'; this envoy tree is shared by every request this engine serves`` | [vllm.md](../models/vllm.md) |
+| `pickle.PicklingError` | ``Cannot write envoy '<path>' with no model to name it from …`` / ``Envoy '<path>' belongs to a different model …`` | [serialization.md](../developing/serialization.md#envoys-by-reference) |
+| `UnknownPersistentIdError` | ``'<id>': the receiver has no object under this id …`` | [serialization.md](../developing/serialization.md#envoys-by-reference) |
 | `AttributeError` | ``module 'nnsight' has no attribute 'list'`` (or `apply`, `session`, …); ``'Tensor' object has no attribute 'value'`` | [migrating-to-0.8.md](../reference/migrating-to-0.8.md) |
 | `NNsightDeprecationWarning` | ``<name> is deprecated; use <replacement> instead.`` | [migrating-to-0.8.md](../reference/migrating-to-0.8.md#deprecated--warn-under-nnsightdeprecationwarning) |
 

@@ -368,6 +368,9 @@ class Tracer:
         self.info: Tracer.Info | None = None
         self.node: ast.With | ast.AsyncWith | None = None
         self.backend = backend if backend is not None else Backend()
+        # The envoy this trace or session block runs against. Passed as `tree=`
+        # when serializing the block so the model's objects are pickled by name.
+        self.envoy: Any = None
 
     def __getstate__(self) -> dict:
         """Serialize the tracer, minus what can't or shouldn't travel.
@@ -625,5 +628,9 @@ class Tracer:
                 # caller returns, with no cyclic GC pass.
                 if self.info is not None:
                     self.info.frame = None
+                # Clear the envoy reference too: `with model.session() as s:` leaves `s`
+                # bound in the caller's scope after the block exits, which would otherwise
+                # keep the model alive.
+                self.envoy = None
             return True
         return False

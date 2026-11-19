@@ -48,7 +48,10 @@ class RequestModel(BaseModel):
         glbls = tracer.info.frame.f_globals
         interventions = reduce_block(tracer.node, glbls, variables)
 
-        data = dumps((tracer, interventions))
+        # Pass `tree=tracer.envoy` so the model's envoys and attachments serialize
+        # as persistent IDs that the receiver resolves against its own model tree
+        # (see `intervention/serialization.py`).
+        data = dumps((tracer, interventions), tree=tracer.envoy)
         if compress:
             import zstandard as zstd
 

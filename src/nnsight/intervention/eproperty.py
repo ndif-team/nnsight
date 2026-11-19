@@ -204,6 +204,13 @@ class eproperty(property):
         self._transform = func
         return self
 
+    def __reduce__(self) -> tuple:
+        # When a custom `Envoy` subclass defined in a user script is pickled by
+        # value, cloudpickle serializes its class dict, including any `eproperty`
+        # descriptors on the class. `property` cannot be pickled by default, so
+        # reconstruct the `eproperty` instance from its `vars` dict.
+        return (type(self), (), vars(self).copy())
+
     def __str__(self) -> str:
         """The line an envoy's repr shows for this value: ``(name) -> ReturnType: description``.
 

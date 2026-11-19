@@ -124,19 +124,23 @@ If the runtime should run on NDIF, extend `Remotable` and implement:
 - `_remoteable_model_key() -> str` (`remotable.py`) and classmethod
   `_remoteable_from_model_key(cls, key, **kwargs)` — the server-side identity.
   `to_model_key()` combines them with the class import path.
-- `_remoteable_persistent_objects() -> dict` — the `{id: object}` map the
-  server resolves persistent IDs against (base: `{"Interleaver": ...}` plus a
-  `Module:<path>` per envoy). Add your tokenizer/preprocessors here and tag them with
-  `obj._persistent_id = name` in `__getstate__` so they're referenced, not pickled
-  (`TransformersModel`, `transformers.py`; `VLLM`, `vllm.py`).
+- `_persistent_attachments() -> dict[str, Any]`: extend
+  `super()._persistent_attachments()`, which names the interleaver, with your
+  tokenizer/preprocessors as `{name: object}`. One definition serves both sides: the client writes each
+  as its name instead of pickling it, and the server resolves the name from
+  `_remoteable_persistent_objects()` (these plus a `Module:<path>` and an
+  `Envoy:<path>` per envoy; `TransformersModel`, `transformers.py`; `VLLM`,
+  `vllm.py`).
 - `_remoteable_get_env()` / `_remoteable_set_env(env)` — per-request
   environment applied server-side (e.g. `TransformersModel` transports a PEFT adapter).
 - `_remoteable_class()` — return the canonical class if yours is a deprecated
   alias, so it shares one server key (`LanguageModel` returns `TransformersModel`).
 
-`__getstate__` on `Envoy` (`envoy.py`) already tags the interleaver and modules;
-runtimes with a live engine handle null it out (`VLLM.__getstate__` nulls
-`vllm_entrypoint`; `DiffusionModel.__getstate__` pops `pipeline`). See
+The pickler already writes the interleaver, the tree's modules and its envoys as
+names. A runtime with a live engine handle nulls it out in `__getstate__`
+(`VLLM.__getstate__` nulls `vllm_entrypoint`). If your runtime sets an `envoys` class
+map on both sides, wrap it in `RuntimeEnvoys` so its classes do not count as state. A
+root class in your own package goes by value unless it lives under `nnsight`. See
 [serialization.md](./serialization.md).
 
 ### Custom backend / tracer
