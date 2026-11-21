@@ -50,8 +50,7 @@ from __future__ import annotations
 
 import copy
 import json
-from functools import partial
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import warnings
 
@@ -129,21 +128,20 @@ def _infer_task(module: torch.nn.Module) -> str:
     )
 
 
-def _checkpoint_classes(config: Any) -> list[type]:
-    """The model classes a checkpoint names for itself (``config.architectures``).
-
-    ``pipeline()`` tries these after the task's Auto classes, which is how a
-    checkpoint the task does not list still loads: ``AutoModelForCausalLM`` has
-    no entry for a Llava config, so ``text-generation`` on a Llava checkpoint
-    loads the whole ``LlavaForConditionalGeneration``. Every load here walks the
-    same candidates in that order, so the lazy meta build ends on the class the
-    real load does and the two have one module tree.
-    """
+def _first_class(task: str, config: Any, build: Callable) -> torch.nn.Module:
+    """Build with the first class that takes it, of the ones ``pipeline()`` tries:
+    the task's Auto classes, then the classes ``config.architectures`` names."""
     import transformers
+    from transformers.pipelines import check_task
 
-    names = getattr(config, "architectures", None) or ()
-    classes = (getattr(transformers, name, None) for name in names)
-    return [cls for cls in classes if cls is not None]
+    named = (getattr(transformers, name, None) for name in config.architectures or ())
+    error = None
+    for cls in (*check_task(task)[1]["pt"], *filter(None, named)):
+        try:
+            return build(cls)
+        except Exception as exception:  # noqa: BLE001 - try next candidate
+            error = exception
+    raise error
 
 
 def _split_pipeline_kwargs(kwargs: dict) -> tuple[dict, dict]:
@@ -464,7 +462,7 @@ class TransformersModel(HuggingFaceModel):
 
     def _load_meta(self, repo_id: str, *args: Any, **kwargs: Any) -> torch.nn.Module:
         from transformers import AutoConfig
-        from transformers.pipelines import check_task, get_task
+        from transformers.pipelines import get_task
 
         from .quantization import resolve_load_kwargs
 
@@ -496,7 +494,6 @@ class TransformersModel(HuggingFaceModel):
         # pipeline can't from_config, so resolve the task's model classes and
         # build the meta model ourselves, then wrap it in a meta pipeline.
         self.task = self.task or get_task(repo_id, kwargs.get("token"))
-        _, targeted, _ = check_task(self.task)
 
         # The config takes every kwarg, and keeps the ones it owns, the same split
         # from_pretrained makes (`return_unused_kwargs=True`): the implementation
@@ -517,25 +514,16 @@ class TransformersModel(HuggingFaceModel):
                 **{k: v for k, v in kwargs.items() if k != "quantization_config"},
             )
 
-        # `trust_remote_code` is the Auto classes' to act on. A class the
-        # checkpoint names is one transformers ships, built by the classmethod
-        # an Auto class's `from_config` ends in.
+        # A class the checkpoint names is built by the classmethod an Auto
+        # class's `from_config` ends in, which takes no `trust_remote_code`.
         shipped = {k: v for k, v in arch.items() if k != "trust_remote_code"}
-        builds = [partial(auto.from_config, config, **arch) for auto in targeted["pt"]]
-        builds += [
-            partial(cls._from_config, config, **shipped)
-            for cls in _checkpoint_classes(config)
-        ]
 
-        error = None
-        for build in builds:
-            try:
-                model = build()
-                break
-            except Exception as exception:  # noqa: BLE001 - try next candidate
-                error = exception
-        else:
-            raise error
+        def build(cls):
+            if hasattr(cls, "from_config"):
+                return cls.from_config(config, **arch)
+            return cls._from_config(config, **shipped)
+
+        model = _first_class(self.task, config, build)
 
         if self.peft is not None:
             # Read only the adapter's config (adapter_config.json) and graft the
@@ -569,7 +557,7 @@ class TransformersModel(HuggingFaceModel):
         if "config" in kwargs:
             # pipeline() reads `config` only to pick the class, never passing it
             # to from_pretrained, so load the model with it here and wrap it.
-            from transformers.pipelines import check_task, get_task
+            from transformers.pipelines import get_task
 
             self.task = self.task or get_task(repo_id, kwargs.get("token"))
             top_level, model_kwargs = _split_pipeline_kwargs(kwargs)
@@ -577,19 +565,13 @@ class TransformersModel(HuggingFaceModel):
             for name in ("config", "dtype", "device_map", "trust_remote_code", "token"):
                 if name in top_level:
                     model_kwargs[name] = top_level[name]
-            # The candidates pipeline() walks, and the errors it moves on from.
-            autos = check_task(self.task)[1]["pt"]
-            error = None
-            for cls in (*autos, *_checkpoint_classes(kwargs["config"])):
-                try:
-                    module = cls.from_pretrained(
-                        repo_id, revision=self.revision, **model_kwargs
-                    )
-                    break
-                except (OSError, ValueError, TypeError, RuntimeError) as exception:
-                    error = exception
-            else:
-                raise error
+            module = _first_class(
+                self.task,
+                kwargs["config"],
+                lambda cls: cls.from_pretrained(
+                    repo_id, revision=self.revision, **model_kwargs
+                ),
+            )
             return self._wrap(module, **kwargs)
         self.pipeline = self._build_pipeline(repo_id, kwargs)
         return self._finalize_pipeline()

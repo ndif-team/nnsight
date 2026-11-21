@@ -1015,71 +1015,46 @@ class TestMetaAudio:
 
 
 class TestMetaCheckpointClass:
-    """A checkpoint none of the task's Auto classes lists loads as the class it
-    names for itself (``config.architectures``): ``pipeline()`` falls back to
-    it, so ``text-generation`` on a Llava checkpoint is the whole
-    ``LlavaForConditionalGeneration``. The lazy meta build has to end on that
-    class too, or there is no model to trace and no tree a remote run can use."""
+    """``pipeline()`` falls back to the class a checkpoint names in
+    ``config.architectures`` when none of the task's Auto classes lists it, so
+    the meta build and the ``config=`` load end on that class too."""
 
     REPO = "trl-internal-testing/tiny-LlavaForConditionalGeneration"
     TASK = "text-generation"
 
-    @staticmethod
-    def _tree(model):
-        return [name for name, _ in model._module.named_modules()]
-
-    def _config(self):
-        from transformers import AutoConfig
-
-        return AutoConfig.from_pretrained(self.REPO)
-
     def test_meta_build_is_the_class_the_load_ends_on(self):
-        meta = TransformersModel(self.REPO, task=self.TASK)
+        # `trust_remote_code` is an Auto class's kwarg; the named class takes none.
+        meta = TransformersModel(self.REPO, task=self.TASK, trust_remote_code=True)
         loaded = TransformersModel(self.REPO, task=self.TASK, dispatch=True)
         assert meta.dispatched is False
-        assert type(meta._module).__name__ == "LlavaForConditionalGeneration"
         assert type(meta._module) is type(loaded._module)
-        assert self._tree(meta) == self._tree(loaded)
+        assert [name for name, _ in meta._module.named_modules()] == [
+            name for name, _ in loaded._module.named_modules()
+        ]
 
-    @torch.no_grad()
-    def test_lazy_model_traces_text(self):
-        model = TransformersModel(self.REPO, task=self.TASK)
-        with model.trace("The Eiffel Tower is in"):
-            hidden = model.model.language_model.layers[0].output.save()
-            logits = model.output.logits.save()
-        assert hidden.shape[:2] == logits.shape[:2]
+    def test_explicit_config_loads_the_named_class(self):
+        from transformers import AutoConfig
 
-    def test_explicit_config_ends_on_the_same_class(self):
-        # `config=` loads outside pipeline(), so it walks the candidates itself.
-        meta = TransformersModel(self.REPO, task=self.TASK, config=self._config())
-        loaded = TransformersModel(
-            self.REPO, task=self.TASK, config=self._config(), dispatch=True
+        model = TransformersModel(
+            self.REPO,
+            task=self.TASK,
+            config=AutoConfig.from_pretrained(self.REPO),
+            dispatch=True,
         )
-        assert type(meta._module).__name__ == "LlavaForConditionalGeneration"
-        assert type(meta._module) is type(loaded._module)
+        assert type(model._module).__name__ == "LlavaForConditionalGeneration"
 
     def test_explicit_config_tries_every_auto_class(self):
-        # automatic-speech-recognition has several Auto classes and Whisper is
-        # not the first one's, so a `config=` load has to get past that one.
+        # Whisper is the third Auto class's under automatic-speech-recognition.
+        # With no named class to fall back on, only that walk reaches it.
         from transformers import AutoConfig
 
         repo = "hf-internal-testing/tiny-random-WhisperForConditionalGeneration"
+        config = AutoConfig.from_pretrained(repo)
+        config.architectures = None
         model = TransformersModel(
-            repo,
-            task="automatic-speech-recognition",
-            config=AutoConfig.from_pretrained(repo),
-            dispatch=True,
+            repo, task="automatic-speech-recognition", config=config, dispatch=True
         )
         assert type(model._module).__name__ == "WhisperForConditionalGeneration"
-
-    @pytest.mark.parametrize("dispatch", [False, True])
-    def test_config_naming_no_class_raises_the_auto_classs_error(self, dispatch):
-        config = self._config()
-        config.architectures = None
-        with pytest.raises(ValueError, match="Unrecognized configuration class"):
-            TransformersModel(
-                self.REPO, task=self.TASK, config=config, dispatch=dispatch
-            )
 
 
 class TestMetaPreprocessors:

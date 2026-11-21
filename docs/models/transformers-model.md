@@ -64,8 +64,6 @@ model = TransformersModel(
 
 `pipe` on such a model echoes the prompt rather than the completion, so measure interventions through `generate` / `tracer.result`.
 
-**A task that does not list the checkpoint (a vision-language model under `text-generation`).** A load builds the class `pipeline()` resolves: the task's Auto class when it lists the checkpoint, otherwise the class the checkpoint names for itself (`config.architectures`). `AutoModelForCausalLM` has no entry for Llava, so `task="text-generation"` on a Llava checkpoint loads the whole `LlavaForConditionalGeneration` — vision tower included, with a tokenizer and no processor — and transformers logs that the class is not supported for the task. Module paths follow the class, not the task: the layers are at `model.model.language_model.layers` here, so read them off `print(model)`.
-
 ### Constructor
 
 ```python
