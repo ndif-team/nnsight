@@ -414,4 +414,8 @@ class RegisteringTracer(VLLMTracer):
             dict(self.info.frame.f_locals),
             node=self.node,
         )
+        # None of the block runs here, so nothing above it was saved: a name the
+        # enclosing session saved is the session's, and travelling as saved it
+        # would be pickled home on every request the block rides.
+        template.saved_above = set()
         self._payload = dumps(template)
