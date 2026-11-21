@@ -90,6 +90,104 @@ correctly without it. Clone only when you will also modify the source tensor.
 
 ## Variations
 
+### Find named tokens and align shifted prompts
+
+For a fast tokenizer, use character offsets from the same encoding you pass to
+the model. A substring can cross token boundaries or start inside a token.
+Select every token that overlaps the character span, excluding special tokens
+and empty offsets. Occurrences are counted from zero, from left to right,
+without overlap.
+
+```python
+def positions_for(tokenizer, prompt, substring, occurrence=0):
+    if not tokenizer.is_fast:
+        raise ValueError("positions_for requires a fast tokenizer with offsets")
+    if not substring or occurrence < 0:
+        raise ValueError("provide a nonempty substring and a nonnegative occurrence")
+
+    end = 0
+    for _ in range(occurrence + 1):
+        start = prompt.find(substring, end)
+        if start == -1:
+            raise ValueError(f"occurrence {occurrence} of {substring!r} is missing")
+        end = start + len(substring)
+
+    encoding = tokenizer(
+        prompt, return_offsets_mapping=True, return_special_tokens_mask=True
+    )
+    positions = [
+        index
+        for index, ((left, right), special) in enumerate(
+            zip(encoding.offset_mapping, encoding.special_tokens_mask, strict=True)
+        )
+        if not special and left < right and left < end and start < right
+    ]
+    if not positions:
+        raise ValueError(f"no tokens overlap occurrence {occurrence} of {substring!r}")
+    return encoding.input_ids, positions
+
+
+def align_prompt_ids(clean_ids, corrupt_ids):
+    """Return (clean, corrupt) pairs and the two skipped half-open ranges."""
+    prefix = 0
+    for clean_id, corrupt_id in zip(clean_ids, corrupt_ids):
+        if clean_id != corrupt_id:
+            break
+        prefix += 1
+
+    clean_end, corrupt_end = len(clean_ids), len(corrupt_ids)
+    while (
+        clean_end > prefix
+        and corrupt_end > prefix
+        and clean_ids[clean_end - 1] == corrupt_ids[corrupt_end - 1]
+    ):
+        clean_end -= 1
+        corrupt_end -= 1
+
+    pairs = [(index, index) for index in range(prefix)]
+    pairs.extend(
+        zip(range(clean_end, len(clean_ids)), range(corrupt_end, len(corrupt_ids)))
+    )
+    return pairs, (prefix, clean_end), (prefix, corrupt_end)
+```
+
+Prefix and suffix alignment pairs unchanged token IDs after a replacement,
+insertion, or deletion. The skipped ranges describe the remaining middle,
+including any shared tokens inside it. To patch the changed subjects
+themselves, use their separately resolved positions and an explicit pairing.
+
+This example swaps one aligned token in the suffix after a changed subject.
+The traces each take one unpadded sequence, so the token indices also index
+the activation tensors. In a padded batch, use each row's attention mask to
+translate prompt-relative indices to tensor positions.
+
+```python
+from nnsight import save
+
+clean = "The capital of Germany is"
+corrupt = "The capital of the United States is"
+clean_ids, clean_subject = positions_for(model.tokenizer, clean, "Germany")
+corrupt_ids, corrupt_subject = positions_for(
+    model.tokenizer, corrupt, "the United States"
+)
+pairs, clean_skipped, corrupt_skipped = align_prompt_ids(clean_ids, corrupt_ids)
+print("skipped token ranges", clean_skipped, corrupt_skipped)
+
+suffix_pairs = [
+    (source, dest)
+    for source, dest in pairs
+    if source > clean_subject[-1] and dest > corrupt_subject[-1]
+]
+if not suffix_pairs:
+    raise ValueError("the prompts have no aligned tokens after the subjects")
+source, dest = suffix_pairs[0]
+with model.trace(clean_ids):
+    donor = save(model.transformer.h[LAYER].output[:, source, :].detach())
+with model.trace(corrupt_ids):
+    model.transformer.h[LAYER].output[:, dest, :] = donor
+    patched_logits = save(model.lm_head.output[:, -1, :])
+```
+
 ### Sweep over layers
 
 ```python
