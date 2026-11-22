@@ -36,6 +36,7 @@ from typing import Any, Callable
 import torch
 
 from ..tracing.tracer import Tracer, WithBlockNotFoundError, push_result
+from .devices import origin
 from .interleaver import Interleaver, Mediator
 
 
@@ -63,8 +64,18 @@ def _grad_property(
         property: A ``getter``/``setter`` property to bind to ``torch.Tensor.grad``.
     """
 
+    def place(tensor: torch.Tensor) -> int:
+        # Return the id used as the interleaver location prefix for `tensor.grad`.
+        # A non-batched copy created by `Devices` maps to the id of its original
+        # tensor (`origin`), so copies of the same tensor read at two locations
+        # share one gradient location.
+        if getattr(tensor, "_nnsight_batch", False):
+            return id(tensor)
+        source = origin(tensor)
+        return id(tensor) if source is None else id(source)
+
     def wrap(tensor: torch.Tensor) -> None:
-        location = id(tensor)
+        location = place(tensor)
         if location in seen:
             return
         seen.add(location)
@@ -76,46 +87,63 @@ def _grad_property(
         # in the graph), recover exactly this view's elements from the base gradient
         # by its own strided geometry, and splice any edit back. Using the base (not a
         # stored parent tensor) keeps the marked view cheap to serialize.
+        base, geometry = tensor, None
         if getattr(tensor, "_nnsight_batch", False) and tensor._base is not None:
             base = tensor._base
             geometry = (tensor.shape, tensor.stride(), tensor.storage_offset())
 
+        # When `base` is a copy created on the run's serving device (see
+        # intervention/devices.py), autograd computes gradients on the original
+        # tensor `source`. Register the hook on `source` and move the gradient
+        # to `base.device` before serving it.
+        source = origin(base)
+        target = base if source is None else source
+
+        if target is tensor:
+
             def hook(grad: torch.Tensor) -> torch.Tensor:
+                # Serve (and maybe replace) the gradient, then stop intercepting this
+                # tensor; one gradient flows per backward.
                 try:
-                    sliced = grad.as_strided(*geometry)
-                    served = interleaver.handle(f"{location}.grad", sliced)
-                    # A pure read returns the slice unchanged; an edit (swap) returns
-                    # a new tensor to write back into the base gradient.
-                    if served is sliced:
-                        return grad
-                    updated = grad.clone()
-                    updated.as_strided(*geometry).copy_(served)
-                    return updated
+                    return interleaver.handle(f"{location}.grad", grad)
                 finally:
                     handle.remove()
 
-            handle = base.register_hook(hook)
-            hooks.append(handle)
-            return
+        else:
 
-        def hook(grad: torch.Tensor) -> torch.Tensor:
-            # Serve (and maybe replace) the gradient, then stop intercepting this
-            # tensor — one gradient flows per backward.
-            try:
-                return interleaver.handle(f"{location}.grad", grad)
-            finally:
-                handle.remove()
+            def hook(grad: torch.Tensor) -> torch.Tensor:
+                try:
+                    whole = grad if source is None else grad.to(base.device)
+                    version = whole._version
+                    piece = whole if geometry is None else whole.as_strided(*geometry)
+                    served = interleaver.handle(f"{location}.grad", piece)
+                    # A pure read returns `piece` unchanged; a swap returns a
+                    # replacement tensor to copy into the full gradient.
+                    if served is piece:
+                        # If `whole` was copied to `base.device` and edited in
+                        # place, copy the edited gradient back to `grad.device`.
+                        if whole is not grad and whole._version != version:
+                            return whole.to(grad.device)
+                        return grad
+                    if geometry is None:
+                        updated = served
+                    else:
+                        updated = whole.clone()
+                        updated.as_strided(*geometry).copy_(served)
+                    return updated.to(grad.device)
+                finally:
+                    handle.remove()
 
-        handle = tensor.register_hook(hook)
+        handle = target.register_hook(hook)
         hooks.append(handle)
 
     def getter(tensor: torch.Tensor) -> Any:
         wrap(tensor)
-        return Mediator.value(f"{id(tensor)}.grad")
+        return Mediator.value(f"{place(tensor)}.grad")
 
     def setter(tensor: torch.Tensor, value: Any) -> None:
         wrap(tensor)
-        Mediator.swap(f"{id(tensor)}.grad", value)
+        Mediator.swap(f"{place(tensor)}.grad", value)
 
     return property(getter, setter)
 
