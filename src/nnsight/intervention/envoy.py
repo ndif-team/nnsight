@@ -152,6 +152,11 @@ class Envoy:
         self._module = module
         self.path = path
         self.interleaver = interleaver if interleaver is not None else Interleaver()
+        # Weak reference to the root envoy, used by `Interleaver.__enter__` to
+        # check the model's parameter devices at the start of a run
+        # (see intervention/devices.py).
+        if parent is None:
+            self.interleaver.root = weakref.ref(self)
         # This tree's envoy for the module, so a later path to it aliases this one.
         self.interleaver.envoys[id(module)] = self
         # instrument installs the module's controller — the input/output handoffs and
@@ -801,6 +806,13 @@ class Envoy:
         if isinstance(value, torch.nn.Module):
             return self._wrap_envoy(name, value)
 
+        # During a multi-device run, copy a weight or buffer attribute onto the
+        # run's serving device.
+        if isinstance(value, torch.Tensor):
+            devices = self.interleaver.devices
+            if devices is not None and self.interleaver.interleaving:
+                return devices.weight(value)
+
         return value
 
     def __call__(self, *args: Any, hook: bool = False, **kwargs: Any) -> Any:
@@ -878,12 +890,24 @@ class Envoy:
             # Restores the previous value rather than True, so this composes if
             # anything ever calls it while already stood down.
             interleaving = self.interleaver.interleaving
+            # On a multi-device model, move the call's inputs to this module's
+            # device and move the returned tensors back to the serving device.
+            devices = self.interleaver.devices
+            if devices is not None:
+                args, kwargs = devices.call(self._module, (args, kwargs))
             self.interleaver.interleaving = False
             try:
-                return self._module(*args, **kwargs)
+                result = self._module(*args, **kwargs)
             finally:
                 self.interleaver.interleaving = interleaving
-        return self._module(*args, **kwargs)
+            return result if devices is None else devices.result(result)
+        devices = self.interleaver.devices if self.interleaver.interleaving else None
+        if devices is None:
+            return self._module(*args, **kwargs)
+        # When `hook=True` during a multi-device run, move inputs to this
+        # module's device and move the output back to the serving device.
+        args, kwargs = devices.call(self._module, (args, kwargs))
+        return devices.result(self._module(*args, **kwargs))
 
     def __setattr__(self, name: str, value: Any) -> None:
         if isinstance(value, torch.nn.Module) and not name.startswith("_"):

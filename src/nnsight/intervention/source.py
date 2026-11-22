@@ -495,6 +495,8 @@ def run_op(interleaver: Any, base: str, fn: Callable, args: tuple, kwargs: dict)
     skipped = interleaver.handle(f"{base}.skip", NO_SKIP)
     if skipped is not NO_SKIP:
         # Skip: don't call fn; report the replacement as this op's output too.
+        if interleaver.devices is not None:
+            skipped = interleaver.devices.skipped(skipped, (args, kwargs))
         return interleaver.handle(f"{base}.output", skipped)
     if base in interleaver.sourced:
         # First fire: the entry is still None (requested, not built) — serve the
@@ -616,6 +618,8 @@ class Controller:
         if output is NO_SKIP:
             return handle(locations[2], run_body(state, module, args, kwargs))
         # A skipped module's output is the replacement the worker supplied.
+        if interleaver.devices is not None:
+            output = interleaver.devices.skipped(output, (args, kwargs))
         return handle(locations[2], _as_fragment(interleaver, locations[2], output))
 
     def __deepcopy__(self, memo: dict) -> "Controller":

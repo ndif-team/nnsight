@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
 from greenlet import GreenletExit, getcurrent, greenlet
 
 from ..tracing.util import Scope
+from .devices import Devices
 
 if TYPE_CHECKING:
     from .eproperty import WriteBack
@@ -648,6 +649,13 @@ class Interleaver:
         # rather than a subclass because *when* to gather is a property of this
         # class and *what* to gather is a property of the runtime.
         self.fragments: Optional["Fragments"] = fragments
+        # Weak reference to the root envoy of the model tree, set by `Envoy.__init__`.
+        # None when this interleaver is not attached to a model tree (e.g. backward).
+        self.root: Any = None
+        # Device view for the current run when the root model's parameters span
+        # multiple devices (see intervention/devices.py), or None on a single
+        # device. Created in `__enter__` and cleared on exit.
+        self.devices: Optional[Devices] = None
         # The batcher for the current run (combined-input assembly + narrow/widen),
         # or None when not batching. Owned by the tracer and registered here for the
         # run by `Envoy.interleave` (see intervention/envoy.py); each mediator reads
@@ -718,14 +726,27 @@ class Interleaver:
         self.interleaving = True
         self.sourced.clear()
         try:
+            # Set up `devices` before starting workers so weight reads before
+            # the first park are copied to the serving device. If `mediators` is
+            # empty on entry (e.g. when a driver adds workers mid-run),
+            # `self.devices` remains None.
+            root = self.root() if self.root is not None else None
+            self.devices = (
+                Devices.of(root) if root is not None and self.mediators else None
+            )
             for mediator in self.mediators:
                 if mediator.worker is not None:
                     continue
                 mediator.start(self)
+            # Write back any weight copies edited in place before the workers'
+            # first park, before the model forward starts.
+            if self.devices is not None:
+                self.devices.settle()
         except BaseException:
             # A worker that errors on start (e.g. invoking mid-run) means __exit__
             # won't run to clear the flag, so reset it here or it leaks to the next run.
             self.interleaving = False
+            self.devices = None
             raise
         # After the workers have parked, so this run's index describes this run's
         # workers — including any registered by appending to the list rather than
@@ -741,6 +762,7 @@ class Interleaver:
         it is not an error. Any other exception propagates.
         """
         self.interleaving = False
+        self.devices = None
         # An EarlyStopException means an intervention asked to halt the run; it
         # has done its job unwinding the model, so swallow it here.
         return exc_type is EarlyStopException
@@ -808,6 +830,13 @@ class Interleaver:
         if self.fragments is not None and self.fragments.enabled and self.fragments.fragmented(provider) and (observers or self._ready(provider)):
             value, undo = self.fragments.whole(provider, value)
 
+        # On a multi-device model, move tensors in `value` to the serving device
+        # before serving workers or caches. `restore` copies in-place edits back
+        # and returns tensors on the devices expected by the forward pass.
+        restore = None
+        if self.devices is not None and (observers or self._ready(provider)):
+            value, restore = self.devices.serve(provider, value)
+
         # Serving one worker can release another into parking here (a barrier),
         # so keep serving until nobody is parked on this visit.
         served = False
@@ -848,6 +877,13 @@ class Interleaver:
                 else self.batcher.narrow(value, mediator.batch_group)
             )
             cache.observe_selected(selected, served)
+
+        # Restore tensors to their original devices (copying back any in-place
+        # edits), then write back any weight copies edited during this visit.
+        if restore is not None:
+            value = restore(value)
+        if self.devices is not None:
+            self.devices.settle()
 
         # Back to the piece the model's own forward expects, carrying whatever the
         # workers left behind — so an edit to the assembled tensor reaches the
@@ -926,4 +962,5 @@ class Interleaver:
         # place they would tie the model to its own interleaver in a cycle.
         self.observers = {}
         self.batcher = None
+        self.devices = None
 

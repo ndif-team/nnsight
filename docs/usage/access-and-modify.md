@@ -150,7 +150,30 @@ Save and restore around a weight edit (`saved = w[100].clone()` ... `w.data[100]
 
 Before dispatch, parameters are **meta** tensors — right shape and dtype, no storage. Shape-preserving arithmetic on them succeeds and fails later, in torch's words rather than nnsight's. Pass `dispatch=True` (or run a trace) before reading weights.
 
+## Models spread over several devices
+
+A model loaded with a device map (`device_map="auto"`) keeps each module's parameters and activations on that module's device. During a trace on a model whose parameters span two or more devices, nnsight places tensors from location reads (inside tuples, named tuples, lists, and dicts, excluding tensors that share storage with model parameters or buffers), weight and buffer attributes read from module envoys (`model.lm_head.weight`), and tensors returned by ad-hoc module calls onto one serving device: the device of the model's first parameter. Arithmetic combining those tensors runs on that device.
+
+```python
+with model.trace("The Eiffel Tower is in the city of"):
+    early = model.model.layers[2].output[0]          # produced on cuda:0
+    late = model.model.layers[78].output[0]          # produced on cuda:3
+    direction = model.lm_head.weight[token_id]       # stored on cuda:3
+    mixed = (early + late + direction).save()        # all three are on cuda:0 here
+```
+
+Changes made during a location's visit are applied back to the model's tensors on their original devices:
+
+- An in-place edit (`hidden += d`, `hidden[:] = x`) on a moved copy is copied into the original tensor when the visit ends, so later operations in the forward pass that use that tensor read the updated values.
+- An assigned tensor (`layer.output = x`) is moved to the device of the original tensor at that position (or the device of the first moved tensor if the container structure changed).
+- A gradient read in a backward trace (`hidden.grad`) reads the gradient computed for the original tensor and moves it to the copy's device.
+
+Two constraints apply to moved copies:
+
+- In-place edits to a moved copy are copied back only when the visit to the location where it was read ends. An in-place edit made after the forward pass has moved past that location is not copied to the original tensor.
+- In-place edits are detected from `tensor._version`. Writes through `tensor.data` do not increment `tensor._version`, so an edit through `tensor.data` on a moved copy is not copied back to the original tensor.
+
 ## Gotchas
 
-- A tensor you build inside the block (`torch.randn(768)`) is on CPU; only the inputs passed to `trace` are moved for you. Derive it from the activation it combines with — `torch.randn(hs.shape[-1], device=hs.device, dtype=hs.dtype)` — or you get `Expected all tensors to be on the same device`. Under `device_map="auto"` each layer can be on a different device.
+- A tensor you build inside the block (`torch.randn(768)`) is on CPU; only the inputs passed to `trace` are moved for you. Derive it from the activation it combines with, such as `torch.randn(hs.shape[-1], device=hs.device, dtype=hs.dtype)`, or PyTorch raises `Expected all tensors to be on the same device`. On a model spread across devices, `hs.device` is the device of the model's first parameter (see above).
 - Bypassing a module's compute: [skip](skip.md). Operations inside a module's forward: [source](source.md).
