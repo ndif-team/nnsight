@@ -233,14 +233,16 @@ class Remotable(Meta):
         return
 
     def _remoteable_persistent_objects(self) -> dict:
-        # The server-side map used to resolve persistent ids when deserializing a
-        # request. Keys must match the ids tagged in __getstate__ (Envoy tags the
-        # interleaver and each module; subclasses add their own, e.g. tokenizers).
-        objects = {"Interleaver": self.interleaver}
-        # Every module in the tree (modules() is the recursive walk; __iter__ is
-        # only direct children), so each Module:<path> id resolves server-side.
+        # Build the receiver's lookup table mapping persistent IDs back to live
+        # objects when unpickling a request (see `intervention/serialization.py`).
+        objects = self._persistent_attachments()
+        # Register every module (`Module:<path>`) and every envoy (`Envoy:<path>`)
+        # in the tree (`modules()` walks the full tree recursively). During
+        # unpickling, `CustomCloudUnpickler` wraps each resolved `Envoy` in a
+        # per-payload copy.
         for envoy in self.modules():
             objects[f"Module:{envoy.path}"] = envoy._module
+            objects[f"Envoy:{envoy.path}"] = envoy
         return objects
 
     def _remoteable_model_key(self) -> str:

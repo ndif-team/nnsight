@@ -25,12 +25,9 @@ def timeout() -> Any:
     return httpx.Timeout(CONNECT_TIMEOUT, read=READ_TIMEOUT)
 
 
-def headers(api_key: Optional[str] = None, compress: bool = False) -> dict:
+def headers(api_key: Optional[str] = None) -> dict:
     """The headers every nnsight-serve request carries."""
-    sending = {
-        "Content-Type": "application/octet-stream",
-        "nnsight-compress": str(compress),
-    }
+    sending = {"Content-Type": "application/octet-stream"}
     if api_key:
         sending["ndif-api-key"] = api_key
     return sending

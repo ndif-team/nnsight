@@ -1,4 +1,6 @@
 
+import abc
+import typing
 import weakref
 
 import pytest
@@ -31,6 +33,9 @@ class Model(nn.Module):
         self.embed = nn.Linear(8, 8)
         self.layers = nn.ModuleList([Block() for _ in range(n_layers)])
         self.head = nn.Linear(8, 8)
+
+
+_SCALE = 3
 
 
 def module_paths(module):
@@ -195,9 +200,58 @@ class TestSetattr:
         paths = {node.path for node in envoy.modules()}
         assert "model.extra.mlp.fc" in paths
 
-    def test_non_module_assignment_passthrough(self, envoy):
+    def test_a_child_refuses_a_new_attribute(self, envoy):
+        # A payload names a child by path on a receiver whose envoy has no such
+        # attribute.
+        child = envoy.head
+        with pytest.raises(AttributeError, match="takes no new attributes"):
+            child.label = "tag"
+        assert "label" not in child.__dict__
+        # A private name and a name it was built with are accepted, and a root
+        # stays open for its wrapper's own attributes.
+        child._note = "tag"
+        child.path = child.path
         envoy.label = "tag"
         assert envoy.label == "tag"
+
+    def test_a_subclass_can_combine_with_a_metaclass(self, module):
+        class Described(typing.Protocol):
+            def describe(self) -> str: ...
+
+        class Abstract(Envoy, abc.ABC):
+            pass
+
+        class Typed(Envoy, Described):
+            pass
+
+        class Registered(type):
+            pass
+
+        class Mixin(metaclass=Registered):
+            pass
+
+        class Combined(Registered, type(Envoy)):
+            pass
+
+        class Mixed(Envoy, Mixin, metaclass=Combined):
+            pass
+
+        for cls in (Abstract, Typed, Mixed):
+            assert cls(module).path == "model"
+
+    def test_a_subclass_defined_in_a_script_pickles_by_source(self, module):
+        # A subclass the receiver cannot import travels by source, and its
+        # __init__ keeps this module's globals, so the name below resolves there.
+        from nnsight.intervention.serialization import dumps, loads
+
+        class Scaled(Envoy):
+            def __init__(self, module, **kwargs):
+                Envoy.__init__(self, module, **kwargs)
+                self.scale = _SCALE
+
+        received = loads(dumps(Scaled))
+        envoy = received(module)
+        assert envoy.scale == _SCALE
 
     def test_replace_dedupes_children(self, envoy, module):
         before = len(list(envoy))

@@ -60,6 +60,10 @@ Mutate the tree **through the envoy**: `model.layers = nn.ModuleList(...)` or
 module that no longer runs, and reading it raises `OutOfOrderError`. Aliases for
 module names: [usage/rename-modules.md](../usage/rename-modules.md).
 
+A child envoy takes no new public attribute that is not a module: `model.block.note = 1`
+raises `AttributeError`, because a remote run names that envoy by path on a server
+whose envoy has no such attribute. Keep the value in a variable of the block.
+
 ## Calling a module inside a trace
 
 Calling an envoy runs its module ad hoc, outside its place in the forward — the

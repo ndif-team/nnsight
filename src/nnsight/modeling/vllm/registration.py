@@ -414,4 +414,4 @@ class RegisteringTracer(VLLMTracer):
             dict(self.info.frame.f_locals),
             node=self.node,
         )
-        self._payload = dumps(template)
+        self._payload = dumps(template, tree=model)

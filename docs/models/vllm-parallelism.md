@@ -31,7 +31,7 @@ logits = model.logits_processor(model.lm_head, model.model.norm(h))   # [1, voca
 top1 = logits.argmax(-1).item()
 ```
 
-`pipeline_parallel_size > 1` is a different split and is not supported. Each stage holds part of the trunk while the block is written against the whole tree and sent to every worker, so a stage that does not hold a module cannot resolve it: the engine builds, and every trace on it ends in `RuntimeError: UnknownPersistentIdError: Module:model.model.layers.12.self_attn`, naming a layer on the other stage. Shard with `tensor_parallel_size`.
+`pipeline_parallel_size > 1` is a different split and is not supported. Each stage holds part of the trunk while the block is written against the whole tree and sent to every worker, and a stage's tree has a `PPMissingLayer` at each layer it does not run: the engine builds, and a read inside a layer held by the second stage ends in `RuntimeError` wrapping `AttributeError: 'Envoy' object (nor its module) has attribute 'self_attn'`. Shard with `tensor_parallel_size`.
 
 ## Mixture-of-experts models and expert parallelism
 
