@@ -17,7 +17,7 @@ laptop. API reference: [usage/index.md](../usage/index.md); something breaking:
 ## Read what the model computes
 
 - [logit-lens](logit-lens.md) — Decode each layer's residual through the final norm and unembedding to see where in depth an answer emerges.
-- [attention-patterns](attention-patterns.md) — Read attention probabilities (`attn.output[1]`, or `.source` for the raw softmax) to see what each head attends to.
+- [attention-patterns](attention-patterns.md): Read attention probabilities from the fused kernel (`attn.kernel.probs(...)`) or from `attn.output[1]` under eager execution to see what each head attends to.
 - [probing](probing.md) — Train a linear classifier on activations to test what is decodable, where in depth it appears, and whether the model uses it.
 - [sae-and-auxiliary-modules](sae-and-auxiliary-modules.md) — Run an SAE, transcoder, adapter or probe on a layer: read its features, splice in its reconstruction, or make a parameter-only SAE observable with `WrapperModule`.
 
