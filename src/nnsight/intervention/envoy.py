@@ -863,6 +863,21 @@ class Envoy:
         Returns:
             The module's output for these inputs.
         """
+        if (
+            not hook
+            and self.interleaver.interleaving
+            and self.interleaver.coalescer is not None
+            and (running := Mediator.running()) is not None
+            and running.interleaver is self.interleaver
+        ):
+            # A worker's call, on a run whose workers share a forward: hand it
+            # to the interleaver, which runs it once for every worker making the
+            # same call (see intervention/coalesce.py).
+            return Mediator.call(self, args, kwargs)
+        return self._run(*args, hook=hook, **kwargs)
+
+    def _run(self, *args: Any, hook: bool = False, **kwargs: Any) -> Any:
+        """Run the module on these inputs, in the calling greenlet."""
         if self.interleaver.interleaving and not hook:
             # Run the module the ordinary way — its own hooks included — with
             # only *this* interleaver stood down, so nothing the call touches is

@@ -63,7 +63,7 @@ class ParallelEnvoy(Envoy):
     nothing to do on one rank.
     """
 
-    def __call__(self, *args: Any, hook: bool = False, **kwargs: Any) -> Any:
+    def _run(self, *args: Any, hook: bool = False, **kwargs: Any) -> Any:
         """Run this module's forward ad hoc, on whole tensors either side.
 
         A parallel layer's forward expects this rank's piece and returns this
@@ -82,7 +82,7 @@ class ParallelEnvoy(Envoy):
         fragments = self.interleaver.fragments
 
         if fragments is None or not fragments.enabled:
-            return super().__call__(*args, hook=hook, **kwargs)
+            return super()._run(*args, hook=hook, **kwargs)
 
         into, outof = f"{self.path}.input", f"{self.path}.output"
 
@@ -93,7 +93,7 @@ class ParallelEnvoy(Envoy):
             # handoff, whose record must stay untouched.
             args, kwargs = fragments.split(into, (args, kwargs))
 
-        result = super().__call__(*args, hook=hook, **kwargs)
+        result = super()._run(*args, hook=hook, **kwargs)
 
         if fragments.fragmented(outof):
             # `whole` hands back ``(whole, undo)``. The undo exists to carry an

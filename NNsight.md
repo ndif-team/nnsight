@@ -566,8 +566,9 @@ The scoping is two mirror operations, driven from the worker's `handle`:
   `output.shape[0] == 1` even though the real forward ran a batch of three. A tensor
   counts as batched only when its leading dim equals the combined batch size, so
   activations whose dim 0 is sequence length or hidden size pass through untouched.
-- **On a write**, `Batcher.widen(full, group, edited)` splices the worker's edited
-  rows back into the full batch — via `torch.cat` rather than in-place assignment, to
+- **On a write**, the worker's edited rows are gathered
+  (`Batcher.gather_swap`) and, when the visit ends, written back into the full
+  batch (`Batcher.assemble_swap`; `Batcher.widen` is the two together) — via `torch.cat` rather than in-place assignment, to
   keep autograd correct for leaf and view tensors and to avoid aliasing when the
   edit is itself a narrowed view of the full tensor.
 
@@ -994,6 +995,11 @@ with model.trace("The Eiffel Tower is in the city of"):
     tok = logits[0, -1].argmax(-1).save()
 # model.tokenizer.decode(tok) -> ' Paris'
 ```
+
+On vLLM, where the requests of an engine step share one forward, the same call
+made by several requests runs once on all their rows when the module computes
+each output row from its own input row
+([docs/models/vllm.md](docs/models/vllm.md#module-calls-of-several-requests-run-as-one)).
 
 By default, while interleaving, `envoy(...)` calls `module.forward(...)` **directly**,
 skipping PyTorch's hook dispatch. That is deliberate: it keeps the ad-hoc call from

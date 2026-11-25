@@ -147,16 +147,24 @@ class VLLMBatcher(Batcher):
         start, size = group
         return tensor.narrow(dim, start, size)
 
-    def _widen_tensor(
-        self, full: torch.Tensor, group: list, edited: torch.Tensor
-    ) -> torch.Tensor:
-        """Splice ``edited`` back over ``group``'s span of ``full``."""
+    def _assemble_tensor(self, full: torch.Tensor, parts: list) -> torch.Tensor:
+        """Write every worker's replacement into ``full`` with one concatenation.
+
+        Spans are disjoint ranges of the token axis, so the result is the
+        replacements in span order with the model's own tokens between them. The
+        base would copy the whole slab once per replacing worker.
+        """
         dim = self._token_dim(full)
         if dim is None:
             return full
-        start, size = group
-        # cat rather than an in-place write: `edited` is often a narrowed view of
-        # `full`, and writing a tensor into a slice of itself aliases.
-        pre = full.narrow(dim, 0, start)
-        post = full.narrow(dim, start + size, self.total - start - size)
-        return torch.cat([pre, edited, post], dim=dim)
+        # Concatenated because a replacement is often a view of ``full``, and
+        # writing a tensor into a slice of itself aliases.
+        pieces, covered = [], 0
+        for (start, size), edited in parts:
+            if start > covered:
+                pieces.append(full.narrow(dim, covered, start - covered))
+            pieces.append(edited)
+            covered = start + size
+        if covered < self.total:
+            pieces.append(full.narrow(dim, covered, self.total - covered))
+        return torch.cat(pieces, dim=dim)

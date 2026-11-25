@@ -129,6 +129,24 @@ recomputed every step:
   tokens]`, `mediator.start(interleaver)` on first schedule, and keeps finished
   workers scheduled only if they still hold caches. It orders by the step's
   `InputBatch.req_ids` — **batch order, not scheduler order**.
+- `scope(model)` ends with `interleaver.settle(scheduled)`, and `serve_result`
+  with `settle([mediator])`: a worker the runner started or resumed itself may
+  be parked on a module call (see
+  [interleaver-internals.md](interleaver-internals.md#interleaversettle--module-calls-made-by-workers)).
+  The worker's interleaver holds a `Coalescer` built with the predicate
+  `tokenwise()` of `modeling/vllm/coalesce.py` unless `NNSIGHT_VLLM_COALESCE`
+  is falsy. The predicate names the token-wise classes the way
+  `parallel_envoys` names the parallel ones: the torch and vLLM linear, norm and
+  embedding classes and `LogitsProcessor`, with vLLM's `RMSNorm` only when
+  called without a residual. Under tensor parallelism every rank runs every
+  block and must make the same module calls, since a shared call of a parallel
+  layer runs a collective. Every rank holds the same classes and sees the same
+  arguments, so every rank shares the same calls with no message between them.
+  A result of `None` (the logits processor returns nothing off rank 0) is each
+  caller's `None`. A shared call that raises on one rank only
+  leaves that rank making per-request calls while the others made one, and the
+  ranks' collectives stop matching; a per-request call that raises on one rank
+  only does the same without coalescing.
 - `unflatten(model)` re-points each scheduled worker to `[row, 1]` for the
   per-request logits/samples tensors.
 - `match(request_ids)` reconciles engine ids with worker ids — vLLM appends
@@ -174,7 +192,7 @@ them; the `Interleaver` brackets the gather (see the module docstring of
   (`GPUModelRunner.load_model`), so a client-side `CONFIG` field would never reach
   it. Taps go through the same handoff and are covered. Nothing then aliases
   engine memory, so `_copy_into` writes back the unchanged value and only a swap
-  (through `widen`) lands; the user-facing trade is in
+  (through `gather_swap` / `assemble_swap`) lands; the user-facing trade is in
   [models/vllm.md](../models/vllm.md#serving-copies-instead-of-views).
 
 The gather lives on the interleaver, not the batcher, because `Batcher.narrow` runs

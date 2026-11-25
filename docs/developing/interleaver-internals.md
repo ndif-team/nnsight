@@ -116,11 +116,36 @@ section of its docstring in `src/nnsight/intervention/interleaver.py`.
 Given a visit of `provider`, `Mediator.handle` returns immediately unless the
 worker is parked on this provider at this occurrence. Otherwise it loops: a
 `VALUE` is served the value (narrowed to the worker's rows when batching); a
-`SWAP` replaces the value with the worker's (widened back into the batch); a
+`SWAP` gathers the worker's replacement (written into the batch when the visit
+ends; with no batcher it replaces the value outright); a
 `SKIP` gathers the worker's replacement. Each `switch` returns the worker's next
 `Pending`; the loop continues while it is still this visit — a worker may read a
 location and then assign it before parking elsewhere or finishing. See
 [batching-internals.md](batching-internals.md) for `narrow`/`widen`.
+
+### Interleaver.settle — module calls made by workers
+
+A runtime whose workers share a forward sets `interleaver.coalescer`
+(`intervention/coalesce.py`); vLLM does, a local model does not. With one set, a
+module call made inside a worker (`Envoy.__call__` without `hook=True`) parks the
+worker on `Event.CALL` instead of running the module there. `Interleaver.settle`
+collects the parked calls, hands them to `Coalescer.run`, and resumes each worker
+with its result or its error, repeating until no worker is parked on a call.
+`Coalescer.run` runs calls of one module with matching arguments as one call on
+the callers' concatenated rows when the call is token-wise, and each remaining
+call on its caller's arguments alone. The coalescer runs nothing to find that
+out. The runtime passes a predicate over the `Call` when it builds the coalescer
+(`Coalescer(tokenwise)`), which has to answer from what every process running
+the block sees alike, such as the module's class and the number of arguments.
+`Coalescer.register(module)` adds one module whatever its class. It applies to
+modules reached through an envoy, and nothing on a vLLM client reaches it yet.
+
+Whoever switches into workers calls `settle` afterwards: `Interleaver.handle`
+after serving a visit, `__enter__` after starting workers, and the vLLM runner
+after it starts or resumes workers itself. With no coalescer `settle` returns at
+once. Workers parked on calls take turns, so a runtime whose workers share one
+scope and depend on running in the order they were written must not set a
+coalescer.
 
 ## The Interleaver class
 
