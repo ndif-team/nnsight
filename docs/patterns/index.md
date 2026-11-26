@@ -38,4 +38,4 @@ laptop. API reference: [usage/index.md](../usage/index.md); something breaking:
 - [remote-dataset-sweep](remote-dataset-sweep.md) — Run a model over a dataset remotely: load the data on the server, loop in one session, bring back only the reduction.
 - [remote-training](remote-training.md) — Train a LoRA, steering vector or probe remotely, with the whole optimizer loop server-side.
 
-Notebook versions of these recipes: [nnsight.net tutorials](https://nnsight.net/tutorials.html).
+Notebook versions of these recipes: [nnsight.net tutorials](https://nnsight.net/tutorials/).
