@@ -140,7 +140,8 @@ Zero each neuron's firings that fall inside the central band of its own
 distribution and keep only its tails — for a 3/97 band, everything between the
 neuron's 3rd and 97th percentiles. Both tails are kept, since a gated-MLP neuron
 fires in either sign. Pass 1 collects every token's neuron activations over a reference
-corpus; pass 2 writes the band to zero:
+corpus; pass 2 writes the band to zero. See Goodfire (2026),
+["Neurons as an Interpretable Basis"](https://www.goodfire.com/research/neurons-as-an-interpretable-basis).
 
 ```python
 import torch
