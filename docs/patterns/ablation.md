@@ -134,6 +134,55 @@ with model.trace(prompt):
 # mean-ablated P(Paris) = 0.078
 ```
 
+### Percentile-band ablation
+
+Zero each neuron's firings that fall inside the central band of its own
+distribution and keep only its tails — for a 3/97 band, everything between the
+neuron's 3rd and 97th percentiles. Both tails are kept, since a gated-MLP neuron
+fires in either sign. Pass 1 collects every token's neuron activations over a reference
+corpus; pass 2 writes the band to zero:
+
+```python
+import torch
+
+corpus = [
+    "The capital of France is Paris.",
+    "Berlin is the largest city in Germany.",
+    "The river Thames flows through London.",
+    "Tokyo is the capital of Japan and its largest city.",
+    "Rome was not built in a day.",
+    "Madrid lies at the centre of Spain.",
+]
+
+# Pass 1: one trace per text, so no pad positions enter the statistics.
+acts = []
+for text in corpus:
+    with model.trace(text):
+        acts.append(model.transformer.h[LAYER].mlp.act.output[0].save())    # [S, 3072]
+
+acts = torch.cat(acts).float()                                           # [tokens, 3072]
+low, high = torch.quantile(acts, acts.new_tensor([0.03, 0.97]), dim=0)   # each [3072]
+
+# Pass 2: zero the in-band firings, keep the tails.
+with model.trace(prompt):
+    act = model.transformer.h[LAYER].mlp.act.output
+    in_band = (act >= low) & (act <= high)
+    model.transformer.h[LAYER].mlp.act.output = act.masked_fill(in_band, 0)
+    zeroed = in_band.float().mean().save()
+    logits = model.lm_head.output[:, -1, :].save()
+
+# band-ablated P(Paris) = 0.053, with 89% of the prompt's firings zeroed (baseline 0.070)
+```
+
+The quantiles are only as good as the reference set: these 53 tokens leave about
+two tokens in each tail, so nearly every firing lands in-band. Use thousands of
+tokens, and for a large corpus move each saved tensor to CPU and bring `low`/`high`
+back with `.to(act.device)` in pass 2. `torch.quantile` refuses fp16 and bf16,
+hence `.float()`, and wants its quantile tensor on the input's device, hence
+`new_tensor`. On gated MLPs (SwiGLU or GeGLU: Llama, Qwen, Gemma) the neuron is
+the input to the down projection, `act_fn(gate_proj(x)) * up_proj(x)`: read and
+write `model.model.layers[LAYER].mlp.down_proj.input` instead of `mlp.act.output`.
+
 ### Noise / resampling ablation
 
 Replace with the activation from an unrelated prompt. Both invokes touch the same
