@@ -96,14 +96,22 @@ return torch.cat([pre, edited, post], dim=0)
 
 `cat` (rather than in-place assignment) keeps autograd correct for leaf/view
 tensors and avoids aliasing when `edited` is itself a narrowed view of `full`.
-Called from `Mediator.handle` for every `Event.SWAP` (`interleaver.py`).
 
-**A replacement has to keep the group's row count.** `_widen_tensor` does not
-check it: a `cat` of the wrong height succeeds — it just builds a batch that is
-no longer the model's, and the mismatch surfaces, if at all, inside some later
-module. On vLLM that can land as a device-side assert, which poisons the CUDA
-context and takes the engine and every other request with it. Keeping the height
-is the block author's obligation; every dim is the `cat`'s to check.
+`widen` is two steps, and the interleaver calls them apart. For every
+`Event.SWAP`, `Mediator.handle` calls `gather_swap(running, group, edited)`,
+which keeps the replacement in a `SwapParts` beside the value the model produced.
+When the visit ends, `Interleaver.handle` calls `assemble_swap`, which walks the
+value once and hands each tensor with every worker's replacement of it to
+`_assemble_tensor`. The base `_assemble_tensor` applies `_widen_tensor` once per
+replacement; `VLLMBatcher` overrides it to build the slab with one `cat`. Until
+the visit ends, `narrow` serves a worker its own replacement from the `SwapParts`
+and every other worker the model's rows.
+
+**A replacement has to fit the rows it replaces.** `gather_swap` checks it
+(`_check_fit`): the same containers as the value, and for each batched tensor a
+tensor of the rows' shape on their device. A mismatch raises `ValueError` while
+the assigning worker is being served, and `Mediator.handle` raises it inside that
+worker, so it is that invoke's error and no other's.
 
 ### gather_skip / assemble_skip — batched skips
 
@@ -147,7 +155,8 @@ fold in as `extra_kwargs` — so there is no separate merge step.
 ### Subclassing the Batcher
 
 `Batcher` is meant to be subclassed for a model whose batch layout isn't a plain
-dim-0 stack. Override the per-tensor `_narrow_tensor`/`_widen_tensor` (and
+dim-0 stack. Override the per-tensor `_narrow_tensor`/`_widen_tensor` (or
+`_assemble_tensor`, to write every worker's replacement in one pass, and
 `gather_skip`/`assemble_skip` if skips need it) and name the subclass on the model
 class as `_batcher_class` — the tracer builds the run's batcher from it, so that
 line is the whole installation. The diffusion and vLLM runtimes do this:
@@ -172,8 +181,9 @@ The batcher's part of the [trace lifecycle](./architecture-overview.md#lifecycle
    and appends a worker.
 3. `Envoy.interleave(fn, batcher=...)` sets `interleaver.batcher` and calls
    `batcher.assemble(fn)` to build the combined `(args, kwargs)`.
-4. During the forward, each `Event.VALUE` narrows to the worker's rows and each
-   `Event.SWAP` widens back.
+4. During the forward, each `Event.VALUE` narrows to the worker's rows, each
+   `Event.SWAP` is gathered, and the end of the visit writes the gathered
+   replacements back.
 5. `cancel` clears the interleaver's batcher.
 
 For example, invokes of `"a b c"` and `"x"` both see

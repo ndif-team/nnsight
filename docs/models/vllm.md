@@ -109,12 +109,46 @@ sequence). Greedy decoding is `temperature=0.0`; vLLM's default is `1.0`.
 
 ### Replacing a value keeps its rows
 
-An in-place write (`out[0][-1] += v`, `mlp.output[:] = 0`) always fits. A *replacement* —
-`layer.output = t` — is spliced back into the running batch as given, so it must carry the same
-rows the block owns; nothing checks. A wrong leading dimension can surface as a device-side assert,
-which poisons the CUDA context and takes the engine and every request in it. In a patching sweep
-with a donor from a different prompt length, slice to the rows you write
-(`served[POS] = donor[POS]`) rather than handing back a shorter tensor.
+An in-place write (`out[0][-1] += v`, `mlp.output[:] = 0`) always fits. A *replacement*,
+`layer.output = t`, is written over the rows the block owns, so it must have their shape, sit on
+their device, and keep the containers of the value it replaces (a tuple of the same length, a
+dict with the same keys). One that does not raises `ValueError` at the assignment, in that
+request only. In a patching sweep with a donor from a different prompt length, slice to the rows
+you write (`served[POS] = donor[POS]`) rather than handing back a shorter tensor.
+
+### Module calls of several requests run as one
+
+A block can call a module itself, as a logit lens does with `model.model.norm(...)` and
+`model.logits_processor(model.lm_head, ...)`. When several requests of one engine step call the
+same module, nnsight runs one call on all their rows and gives each request its rows of the
+result. Replacements several requests assign at one layer are likewise written in one pass.
+
+A call is shared only between requests that pass the same kinds of arguments (tensors of the
+same dtype, device and row shape; equal plain values), and only when the call is token-wise:
+each output row computed from its own input row, the arguments left as they were. Which calls
+are is fixed by the module's class (`modeling/vllm/coalesce.py`), subclasses included:
+
+| Class | Shared |
+|---|---|
+| `torch.nn.Linear`, `LayerNorm`, `RMSNorm`, `Embedding` | every call |
+| vLLM `ColumnParallelLinear`, `RowParallelLinear`, `VocabParallelEmbedding` (so `qkv_proj`, `gate_up_proj`, `lm_head`), and a LoRA-wrapped linear | every call |
+| vLLM `LogitsProcessor` | every call |
+| vLLM `RMSNorm` | `norm(x)` only; `norm(x, residual)` adds and normalizes in place, so it runs for each request alone |
+
+A module of any other class runs for each request alone: attention, an MLP called as a whole,
+a decoder layer, a pooler, Gemma's `GemmaRMSNorm`. So does a shared call that raises or returns
+something that is not one row per input row, and any call with an argument that is neither a
+tensor, a module, nor a plain value.
+
+- Do not call attention or a whole decoder layer from a block. They read the engine's state
+  for the whole step, and with several requests in the step the call ends the engine with a
+  CUDA illegal memory access. This is the same with coalescing off.
+- A module you bring with the block (a probe, an SAE) is a plain module, not part of the
+  model's tree, so its calls are never parked or shared. Give it every row you have in one call.
+- A shared call runs a larger batch than each request's own call would, so bf16 results can
+  differ in the last bits, the same way a request's numbers depend on the batch it ran in.
+- `NNSIGHT_VLLM_COALESCE=0` in the environment before `VLLM(...)` runs every call for its
+  request alone.
 
 ### `.skip()` needs the whole step
 

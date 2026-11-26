@@ -50,6 +50,24 @@ class SkipParts:
         self.parts: list[tuple[list, Any]] = []
 
 
+class SwapParts:
+    """Replacements of one value collected across the workers of one visit.
+
+    A worker that assigns a location replaces its own rows of the value. The
+    replacements are kept here beside the value the model produced, ``base``,
+    and written into it once, when the visit ends
+    (see [`Batcher.gather_swap`][nnsight.intervention.batching.Batcher.gather_swap] /
+    [`Batcher.assemble_swap`][nnsight.intervention.batching.Batcher.assemble_swap]),
+    which lets a layout write every worker's rows in one pass. ``parts`` maps a
+    group to its ``(group, replacement)`` pair; a worker that assigns twice keeps
+    its last.
+    """
+
+    def __init__(self, base: Any) -> None:
+        self.base = base
+        self.parts: dict[tuple, tuple[list, Any]] = {}
+
+
 def concat(structures: list) -> Any:
     """Concatenate a list of like-shaped structures along dim 0, leaf by leaf.
 
@@ -112,6 +130,12 @@ class Batcher:
         combined batch size), so non-batched tensors pass through untouched. Returns
         the whole value when not actually batching or for a groupless (empty) invoke.
         """
+        if isinstance(value, SwapParts):
+            # A worker that replaced its rows earlier in this visit reads its own
+            # replacement; any other worker's rows are still the model's.
+            if group is not None and tuple(group) in value.parts:
+                return value.parts[tuple(group)][1]
+            value = value.base
         if not self.batching or group is None:
             return value
         return apply(value, lambda tensor: self._narrow_tensor(tensor, group), torch.Tensor)
@@ -138,19 +162,87 @@ class Batcher:
     def widen(self, full: Any, group: BatchGroup, edited: Any) -> Any:
         """Splice ``edited`` (a block's rows) back into ``full`` (the whole batch).
 
-        Walks ``full`` and ``edited`` in parallel; for each batched tensor in
-        ``full`` writes the corresponding ``edited`` tensor into the group's rows via
-        `_widen_tensor`. Returns ``edited`` unchanged when not batching or for
-        a groupless invoke.
+        One replacement gathered and assembled on the spot. The interleaver calls
+        `gather_swap` and `assemble_swap` apart, so that every worker's
+        replacement at a visit is written in one pass.
+        """
+        return self.assemble_swap(self.gather_swap(full, group, edited))
+
+    def gather_swap(self, running: Any, group: BatchGroup, edited: Any) -> Any:
+        """Collect one worker's replacement, ``edited``, for its ``group``'s rows.
+
+        ``running`` is the value at the location: what the model produced, or the
+        [`SwapParts`][nnsight.intervention.batching.SwapParts] earlier workers of
+        this visit left. A groupless worker, or a lone invoke, holds the whole
+        value, so its replacement is the value outright.
+
+        Raises:
+            ValueError: ``edited`` cannot be written over the group's rows (see
+                `_check_fit`). Raised here, while the worker that made the
+                replacement is being served, so it is that worker's error.
         """
         if not self.batching or group is None:
             return edited
+        if not isinstance(running, SwapParts):
+            running = SwapParts(running)
+        self._check_fit(running.base, group, edited)
+        running.parts[tuple(group)] = (group, edited)
+        return running
 
-        def merge(full_value: Any, edited_value: Any) -> Any:
+    def _check_fit(self, full: Any, group: list, edited: Any) -> None:
+        """Raise ``ValueError`` unless ``edited`` can be written over ``group``'s
+        rows of ``full``: the same containers, and for each batched tensor a
+        tensor of the rows' shape on the same device."""
+
+        def refuse(expected: str, found: Any) -> None:
+            raise ValueError(
+                f"A replacement has to keep the shape of the rows it replaces: "
+                f"expected {expected}, got {found}"
+            )
+
+        if isinstance(full, torch.Tensor):
+            rows = self._narrow_tensor(full, group)
+            # A tensor that is not batched is served whole and replaced whole.
+            if rows is full:
+                return
+            if not isinstance(edited, torch.Tensor):
+                refuse("a tensor", type(edited).__name__)
+            if edited.shape != rows.shape or edited.device != rows.device:
+                refuse(
+                    f"shape {tuple(rows.shape)} on {rows.device}",
+                    f"shape {tuple(edited.shape)} on {edited.device}",
+                )
+        elif isinstance(full, (list, tuple)):
+            if not isinstance(edited, (list, tuple)) or len(edited) != len(full):
+                refuse(f"a sequence of {len(full)}", type(edited).__name__ if not isinstance(edited, (list, tuple)) else f"one of {len(edited)}")
+            for full_value, edited_value in zip(full, edited):
+                self._check_fit(full_value, group, edited_value)
+        elif isinstance(full, dict):
+            if not isinstance(edited, dict) or full.keys() - edited.keys():
+                refuse(f"a dict with keys {sorted(full)}", type(edited).__name__ if not isinstance(edited, dict) else f"keys {sorted(edited)}")
+            for key in full:
+                self._check_fit(full[key], group, edited[key])
+
+    def assemble_swap(self, running: Any) -> Any:
+        """Write the collected replacements into the value they replace.
+
+        A no-op unless ``running`` is a [`SwapParts`][nnsight.intervention.batching.SwapParts].
+        Walks the value and the replacements in parallel and hands each tensor,
+        with every worker's replacement of it, to `_assemble_tensor`. A leaf
+        that is not a tensor takes the last replacement.
+        """
+        if not isinstance(running, SwapParts):
+            return running
+        parts = sorted(running.parts.values(), key=lambda part: part[0][0])
+
+        def merge(full_value: Any, edits: list) -> Any:
             if isinstance(full_value, torch.Tensor):
-                return self._widen_tensor(full_value, group, edited_value)
+                return self._assemble_tensor(full_value, edits)
             if isinstance(full_value, (list, tuple)):
-                merged = [merge(f, e) for f, e in zip(full_value, edited_value)]
+                merged = [
+                    merge(f, [(group, edited[i]) for group, edited in edits])
+                    for i, f in enumerate(full_value)
+                ]
                 # namedtuples take positional fields, not a single iterable.
                 if isinstance(full_value, tuple) and hasattr(full_value, "_fields"):
                     return type(full_value)(*merged)
@@ -161,11 +253,24 @@ class Batcher:
                 # how apply/narrow keep the container type.
                 merged = full_value.copy()
                 for key in full_value:
-                    merged[key] = merge(full_value[key], edited_value[key])
+                    merged[key] = merge(
+                        full_value[key], [(group, edited[key]) for group, edited in edits]
+                    )
                 return merged
-            return edited_value
+            return edits[-1][1]
 
-        return merge(full, edited)
+        return merge(running.base, parts)
+
+    def _assemble_tensor(self, full: torch.Tensor, parts: list) -> torch.Tensor:
+        """Write each ``(group, edited)`` of ``parts`` into ``full``, in group order.
+
+        The base writes them one at a time through `_widen_tensor`, which is the
+        method a layout overrides. A layout whose groups are plain ranges of one
+        axis can override this to build the result in one pass.
+        """
+        for group, edited in parts:
+            full = self._widen_tensor(full, group, edited)
+        return full
 
     def _widen_tensor(self, full: torch.Tensor, group: list, edited: torch.Tensor) -> torch.Tensor:
         """Write ``edited`` into ``full``'s ``group`` rows (base dim-0-stack layout).

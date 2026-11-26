@@ -48,6 +48,7 @@ from greenlet import GreenletExit, getcurrent, greenlet
 from ..tracing.util import Scope
 
 if TYPE_CHECKING:
+    from .coalesce import Coalescer
     from .eproperty import WriteBack
     from .envoy import Envoy
     from .fragments import Fragments
@@ -63,12 +64,17 @@ class Event(enum.Enum):
 
     ``BARRIER`` is the odd one: it names no location, so the model side never
     serves it — another worker does, on its way past the same barrier.
+
+    ``CALL`` names no location either: the worker is waiting for the result of
+    a module call, which [`Interleaver.settle`][nnsight.intervention.interleaver.Interleaver.settle]
+    runs once the workers served alongside it have parked too.
     """
 
     VALUE = "VALUE"  # read a location:  (Event.VALUE, location)
     SWAP = "SWAP"  # replace a location: (Event.SWAP, location, value)
     SKIP = "SKIP"  # skip a computation: (Event.SKIP, location, value)
     BARRIER = "BARRIER"  # wait for the other blocks: (Event.BARRIER, None)
+    CALL = "CALL"  # call a module: (Event.CALL, None, None, Call)
 
 
 class Pending(NamedTuple):
@@ -95,6 +101,14 @@ class Pending(NamedTuple):
 
     def __str__(self) -> str:
         return f"{self.provider}.i{self.iteration}"
+
+
+class Call(NamedTuple):
+    """A module call a worker is parked on: the callee envoy and its arguments."""
+
+    envoy: Any
+    args: tuple
+    kwargs: dict
 
 
 class EarlyStopException(Exception):
@@ -290,6 +304,13 @@ class Mediator:
         self.presaved = state["presaved"]
 
     @classmethod
+    def running(cls) -> Optional["Mediator"]:
+        """The mediator whose worker is running now, or ``None`` on the model's
+        side of a run or outside one."""
+        mediator = getattr(getcurrent(), "mediator", None)
+        return None if mediator is None else mediator()
+
+    @classmethod
     def current(cls, what: str) -> "Mediator":
         """The mediator whose worker is running now.
 
@@ -303,10 +324,10 @@ class Mediator:
         taken for "no such attribute" and comes back out of ``__getattr__`` as one,
         naming the property instead of the reason.
         """
-        mediator = getattr(getcurrent(), "mediator", None)
+        mediator = cls.running()
         if mediator is None:
             raise ValueError(f"Cannot access `{what}` outside of interleaving")
-        return mediator()
+        return mediator
 
     @classmethod
     def event(cls, event: Event, location: str, *rest: Any) -> Any:
@@ -398,6 +419,17 @@ class Mediator:
         """
         getcurrent().parent.switch(Pending(Event.BARRIER, None))
 
+    @classmethod
+    def call(cls, envoy: Any, args: tuple, kwargs: dict) -> Any:
+        """Call ``envoy``'s module from inside a worker, through the interleaver.
+
+        Parks until [`Interleaver.settle`][nnsight.intervention.interleaver.Interleaver.settle]
+        has run the call, alone or as one call shared with the other workers
+        parked on the same module, and returns this worker's result. An error the
+        call raised for this worker is raised here.
+        """
+        return getcurrent().parent.switch(Pending(Event.CALL, None, None, Call(envoy, args, kwargs)))
+
     @property
     def alive(self) -> bool:
         """Whether the worker exists and still has intervention code left to run.
@@ -449,9 +481,17 @@ class Mediator:
         another worker's greenlet, e.g. an ``Envoy.__call__(hook=True)`` adapter
         run whose submodule controllers serve a second worker mid-call.
         """
+        return self._resume(self.worker.switch, *args)
+
+    def throw(self, error: BaseException) -> Any:
+        """Resume the worker by raising ``error`` where it is parked; return the
+        next event it parks on. `switch` for a park that failed."""
+        return self._resume(self.worker.throw, error)
+
+    def _resume(self, enter: Callable, *args: Any) -> Any:
         self.worker.parent = getcurrent()
         try:
-            return self.worker.switch(*args)
+            return enter(*args)
         except BaseException as exception:
             # The worker raised. Its traceback right now holds only the
             # intervention frames; stash it before the re-raise unwinds the
@@ -502,14 +542,27 @@ class Mediator:
             if self.iteration:
                 self.iteration = None
             if pending.event is Event.VALUE:  # serve this worker only its rows
-                served = value if batcher is None else batcher.narrow(value, self.batch_group)
+                if batcher is None:
+                    served = value
+                else:
+                    if self.batch_group is None:
+                        # A worker over the whole batch reads what the workers
+                        # before it left, their replacements included.
+                        value = batcher.assemble_swap(value)
+                    served = batcher.narrow(value, self.batch_group)
                 self.pending = self.switch(served)
             elif pending.event is Event.SWAP:  # splice its edit back into the batch
+                refused = None
                 if batcher is None:
                     value = pending.value
                 else:
-                    value = batcher.widen(value, self.batch_group, pending.value)
-                self.pending = self.switch()
+                    try:
+                        value = batcher.gather_swap(value, self.batch_group, pending.value)
+                    except ValueError as error:
+                        # A replacement that does not fit its rows is the
+                        # block's mistake: raise it at the line that assigned.
+                        refused = error
+                self.pending = self.switch() if refused is None else self.throw(refused)
             elif pending.event is Event.SKIP:  # gather per-invoke replacements
                 if batcher is None:
                     value = pending.value
@@ -672,6 +725,10 @@ class Interleaver:
         # of a run shared by several workers sets this so one worker's error ends
         # only its own run instead of tearing down the others'.
         self.defer_exceptions = False
+        # What runs the module calls workers park on (see intervention/coalesce.py),
+        # or None, in which case a worker runs its own module calls where it
+        # makes them. Set by a runtime whose workers share a forward.
+        self.coalescer: Optional["Coalescer"] = None
 
     def reindex(self) -> None:
         """Rebuild the parked set, cache routes and `busy` from `mediators`.
@@ -722,6 +779,10 @@ class Interleaver:
                 if mediator.worker is not None:
                     continue
                 mediator.start(self)
+            # A block can call a module before its first read.
+            stopped = self.settle(self.mediators)
+            if stopped is not None:
+                raise stopped
         except BaseException:
             # A worker that errors on start (e.g. invoking mid-run) means __exit__
             # won't run to clear the flag, so reset it here or it leaks to the next run.
@@ -818,18 +879,16 @@ class Interleaver:
                 try:
                     value = mediator.handle(provider, value)
                 except Exception as exception:
-                    if self.defer_exceptions:
-                        mediator.exception = exception
-                    elif isinstance(exception, EarlyStopException):
-                        # An early stop is control flow, not an error: the worker
-                        # asked to halt what comes *after* this location, not to
-                        # abandon it. Hold the stop until the visit is finished —
-                        # counted, assembled, cached, and served to the workers
-                        # parked here alongside — and raise it at the end.
-                        stopped = exception
-                    else:
-                        raise
-                    mediator.pending = None
+                    # An early stop is control flow, not an error: the worker
+                    # asked to halt what comes *after* this location, not to
+                    # abandon it. Hold the stop until the visit is finished:
+                    # counted, assembled, cached, and served to the workers
+                    # parked here alongside. Raise it at the end.
+                    stopped = self._failed(mediator, exception) or stopped
+            # The workers just served may have parked on module calls. Run those
+            # now, shared where they can be; a worker resumed from one can park
+            # on this visit again, which the loop then serves.
+            stopped = self.settle(self.mediators) or stopped
         if served:
             self._reindex_parked()
         self.counts[provider] = occurrence + 1
@@ -838,8 +897,10 @@ class Interleaver:
         # value; concatenate them into the combined output (see
         # Batcher.gather_skip). A future-iteration waiter has no gathered skip,
         # but retaining this gate preserves the previous provider-level behaviour.
+        # Likewise the replacements the workers assigned: each one's rows are
+        # written into the value here, in one pass (see Batcher.gather_swap).
         if self.batcher is not None:
-            value = self.batcher.assemble_skip(value)
+            value = self.batcher.assemble_swap(self.batcher.assemble_skip(value))
 
         for mediator, cache, selected in observers:
             served = (
@@ -864,6 +925,61 @@ class Interleaver:
                 # unwound, and their activations, alive until a gc collection.
                 del stopped
         return value
+
+    def _failed(self, mediator: Mediator, exception: Exception) -> Optional[EarlyStopException]:
+        """A worker raised while it was being run. Apply this run's policy.
+
+        Under ``defer_exceptions`` it is recorded on the worker. Otherwise an early stop is returned for the
+        caller to raise once it has finished what it was doing, and anything else
+        is raised again from here.
+        """
+        if self.defer_exceptions:
+            mediator.exception = exception
+        elif not isinstance(exception, EarlyStopException):
+            raise exception
+        mediator.pending = None
+        return None if self.defer_exceptions else exception
+
+    def settle(self, mediators: list) -> Optional[EarlyStopException]:
+        """Run the module calls ``mediators`` are parked on, until none is.
+
+        Each round hands every parked call to the coalescer, which runs calls of
+        one module as one call where it can, and resumes each caller with its
+        result or its error. A resumed worker may park on another call, which the
+        next round runs, so workers that make the same chain of calls stay
+        together through it.
+
+        Whoever switches into workers calls this afterwards: `handle` for a
+        visit, `__enter__` for workers that call a module before their first
+        read, and a driver that starts or resumes workers itself. Returns an
+        early stop a worker raised, for the caller to raise when it is done.
+        Does nothing on a run with no coalescer, where no worker parks on a call.
+        """
+        stopped = None
+        if self.coalescer is None:
+            return stopped
+        while calls := [
+            (mediator, pending.value)
+            for mediator in mediators
+            if (pending := mediator.pending) is not None and pending.event is Event.CALL
+        ]:
+            outcomes = self.coalescer.run(calls)
+            # No caller is parked on its call from here on: a module that one
+            # resumed worker runs can visit a location another is yet to be
+            # resumed at, and must not find that worker's finished call there.
+            for mediator, _ in calls:
+                mediator.pending = None
+            for mediator, outcome in outcomes:
+                try:
+                    if outcome.error is None:
+                        mediator.pending = mediator.switch(outcome.value)
+                    else:
+                        mediator.pending = mediator.throw(outcome.error)
+                except Exception as exception:
+                    stopped = self._failed(mediator, exception) or stopped
+            # The resumed workers are parked somewhere new.
+            self._reindex_parked()
+        return stopped
 
     def check_dangling_mediators(self) -> None:
         """Surface any worker still parked after the run.

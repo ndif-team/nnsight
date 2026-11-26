@@ -41,6 +41,8 @@ from ....intervention.interleaver import Mediator, OutOfOrderError, dangling_unw
 from ....intervention.serialization import loads
 from ....tracing.tracer import _local, inc
 from ..batching import VLLMBatcher
+from ....intervention.coalesce import Coalescer
+from ..coalesce import coalesce_enabled, tokenwise
 from ..collect import dumps_compact
 from ..fragments import VLLMFragments
 from ..interleaver import VLLMInterleaver
@@ -352,6 +354,9 @@ class Requests:
         interleaver.mediators = scheduled
         interleaver.reindex()  # swapped mid-run: the indexes and `busy` follow the new list
         self.nrows = len(spans)
+        # A block can call a module before its first read, so the workers
+        # started above may be parked on calls.
+        interleaver.settle(scheduled)
 
     def unflatten(self, model: "VLLM") -> None:
         """Re-point each worker from its tokens to its row.
@@ -412,6 +417,8 @@ class Requests:
             # Raised by the block after its read: this request's error, deferred
             # like any other, not the collect's, which every request in it shares.
             mediator.exception = exception
+        # The block may go on to call a module with what it read.
+        mediator.interleaver.settle([mediator])
 
     def finish_dangling(self, mediator: Any, taps: frozenset = frozenset(), quiet: bool = False) -> None:
         """Surface a worker still parked when its request has finished.
@@ -522,6 +529,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # No envoy: the spans come from the scheduler rather than from an invoke,
         # so the row math never looks at a tree — and there is none to hand it yet.
         interleaver.batcher = VLLMBatcher(None)
+        # The requests of a step share its forward: run the module calls their
+        # blocks make once for all of them where the call is token-wise.
+        if coalesce_enabled():
+            interleaver.coalescer = Coalescer(tokenwise())
         # A worker's error must end only its own request, not tear down the engine
         # every other request shares.
         interleaver.defer_exceptions = True

@@ -150,7 +150,8 @@ in real weights): they keep their own module and their own place in the tree.
 
 The `Batcher` owns the row math: it slices a full batched activation down to an
 invoke's rows on the way to that block (`_narrow_tensor`) and splices an edit back
-into the whole batch on the way out (`_widen_tensor`). The base layout is a plain
+into the whole batch on the way out (`_widen_tensor`, or `_assemble_tensor` to
+write every invoke's edit of one tensor in one pass). The base layout is a plain
 dim-0 stack. If your model's batch axis isn't that — diffusion's
 classifier-free-guidance doubling, vLLM's flat token axis — subclass `Batcher`,
 override those two, and name your subclass on the model class:
