@@ -198,6 +198,51 @@ two counts must agree, count against `len(result.outputs[0].token_ids)`, or buil
 `VLLM(..., async_scheduling=False)`, which makes a stop token exact at a cost in throughput; a
 `stop` string can still overrun, since it is matched on the decoded text after the step.
 
+### Writing activations to disk from the worker
+
+A block runs in the worker, so it can write a file itself instead of saving. A saved value stays on
+the worker until the request ends, and is then pickled home with the output. On a long generation
+or an every-layer capture, that grows worker memory for the life of the request and sends
+everything across at the end. A write per step keeps the activations on the worker's disk:
+
+```python
+import numpy as np
+
+model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True)
+OUT = "/data/acts"                                   # existing dir on the worker's local disk
+
+with model.trace(prompt, temperature=0.0, max_tokens=8) as tracer:
+    for step in tracer.iter[:8]:
+        from vllm.distributed import get_tensor_model_parallel_rank
+        out = model.model.layers[16].output          # read on every TP rank
+        h = out[0] + out[1]                          # (hidden, residual): residual after layer 16
+        if get_tensor_model_parallel_rank() == 0:    # write on one
+            np.save(f"{OUT}/layer16_step{step}.npy", h.float().cpu().numpy())
+```
+
+This writes one file per step: the prompt's rows at step 0, shape `(prompt_len, hidden)`, and one
+row of shape `(1, hidden)` for each decode step after it. The activations never travel back with
+the output. Use `.save()` when you want the values in your variables; write from the worker when
+you are harvesting. The path above has no per-prompt key, so put one in it when you trace more
+than one prompt. Three rules:
+
+- **Guard the write on TP rank 0, and only the write.** Every rank runs the block, so an unguarded
+  write happens once per rank, to the same path. Keep the read outside the guard: block code must
+  take the same path on every rank (see
+  [Parallelism and architectures](vllm-parallelism.md)).
+- **Clone before anything asynchronous.** A value read in a block is the engine's live buffer, and
+  under taps it is graph memory, rewritten next step (see
+  [CUDA graphs with taps](#cuda-graphs-with-taps)). Above, the sum is already a new tensor and
+  `.cpu()` copies it off the device before the step ends; a value handed to a queue or a thread
+  needs its own `.clone()` first.
+- **Write synchronously, and only to local disk.** The write runs on the step thread, so the whole
+  batch waits on the disk at every step and every layer you capture. Local NVMe keeps that small;
+  a network mount such as NFS can be much slower. Under `nnsight-serve` or a sandbox the block may
+  not be allowed to touch the filesystem at all.
+
+An asynchronous writer needs a thread and a queue that outlive the block. A sink that provides
+one is proposed in [#789](https://github.com/ndif-team/nnsight/issues/789).
+
 ### `generate` traces, or just runs
 
 vLLM generation is driven by `max_tokens`, so there is no forward/generate split. Used as a `with` block, `model.generate(...)` is `trace` (and rewrites `max_new_tokens` → `max_tokens`; `trace` accepts either).
